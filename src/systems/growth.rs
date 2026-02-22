@@ -1,0 +1,170 @@
+use rand::Rng;
+use crate::types::*;
+use crate::neuron::Neuron;
+use std::collections::{HashMap, HashSet};
+
+/// System 2: Dynamic Synapse Growth
+pub fn grow_synapses(
+    neurons: &mut HashMap<NeuronId, Neuron>,
+    config: &EnvironmentConfig,
+    rng: &mut impl Rng,
+    layer_of: &HashMap<NeuronId, usize>,
+) -> usize {
+    let ids: Vec<NeuronId> = neurons.keys().cloned().collect();
+    let positions: HashMap<NeuronId, Vec3> = neurons
+        .iter().map(|(id, n)| (*id, n.geometry)).collect();
+
+    let mut formed = 0;
+
+    for &id in &ids {
+        let synapse_count = neurons[&id].synapses.len();
+        let over_budget   = neurons[&id].over_budget();
+        let src_layer     = *layer_of.get(&id).unwrap_or(&usize::MAX);
+
+        if synapse_count >= config.max_synapses_per_neuron || over_budget { continue; }
+
+        let pos = positions[&id];
+
+        let mut candidates: Vec<(NeuronId, f32)> = ids.iter()
+            .filter(|&&other| {
+                let tgt_layer = *layer_of.get(&other).unwrap_or(&usize::MAX);
+                other != id && tgt_layer == src_layer + 1
+            })
+            .map(|&other| (other, pos.distance(&positions[&other])))
+            .filter(|(_, dist)| *dist < config.growth_radius)
+            .collect();
+
+        candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+        for (target, dist) in candidates.iter().take(3) {
+            if neurons[&id].has_synapse_to(*target) { continue; }
+            let base = (1.0 - dist / config.growth_radius).max(0.1);
+            let noise: f32 = rng.gen_range(-0.05..0.05);
+            let w = (base + noise).clamp(0.05, 0.5);
+            let n = neurons.get_mut(&id).unwrap();
+            if n.add_synapse(*target, w, config.max_synapses_per_neuron) {
+                formed += 1;
+                break;
+            }
+        }
+    }
+    formed
+}
+
+/// Three-phase pruning — mirrors LTP consolidation windows.
+/// output_protected: synapses targeting these neurons are never pruned.
+pub fn prune_three_phase(
+    neurons: &mut HashMap<NeuronId, Neuron>,
+    config: &EnvironmentConfig,
+    current_tick: u64,
+    output_protected: &HashSet<NeuronId>,
+    input_protected: &HashSet<NeuronId>,
+) -> (usize, usize, usize) {
+    let mut p1 = 0usize;
+    let mut p2 = 0usize;
+    let mut p3 = 0usize;
+
+    // Collect input neuron IDs to avoid borrowing issue inside values_mut
+    let input_ids: Vec<NeuronId> = input_protected.iter().cloned().collect();
+
+    for neuron in neurons.values_mut() {
+        // Input neurons' synapses carry raw signal to every hidden neuron.
+        // Pruning them means hidden neurons become blind to one input coordinate.
+        // Structurally protect all outgoing synapses from input layer neurons.
+        if input_ids.contains(&neuron.id) { continue; }
+
+        neuron.synapses.retain(|s| {
+            // Output-adjacent synapses are structurally protected — never pruned
+            if output_protected.contains(&s.target) { return true; }
+
+            let cost = s.metabolic_cost();
+            let dormancy = current_tick.saturating_sub(s.last_active as u64);
+
+            if s.age < config.prune_early_age {
+                let keep = cost >= config.prune_early_threshold;
+                if !keep { p1 += 1; }
+                keep
+            } else if s.age < config.prune_long_age {
+                let consolidated = s.facilitation > config.prune_mid_facilitation_floor;
+                let strong = cost >= config.prune_mid_threshold;
+                let keep = strong || consolidated;
+                if !keep { p2 += 1; }
+                keep
+            } else {
+                let recently_active = dormancy < config.prune_long_dormancy as u64;
+                let structurally_strong = cost >= config.prune_long_threshold;
+                let keep = recently_active || structurally_strong;
+                if !keep { p3 += 1; }
+                keep
+            }
+        });
+    }
+
+    (p1, p2, p3)
+}
+
+/// Activity-dependent potentiation — the positive half of synaptic plasticity.
+///
+/// Pruning removes unused connections. This function strengthens frequently-used ones.
+/// Synapses that survived phase-2 pruning because of high facilitation receive
+/// a small strength bonus, completing the Hebbian plasticity loop:
+///
+///   "Neurons that fire together wire together — and those wires get thicker."
+///
+/// Biological analog: LTP consolidation. Synapses with high activity grow
+/// larger dendritic spines and insert more AMPA receptors, increasing their
+/// influence on postsynaptic firing.
+///
+/// Effect on layer-2 collapse: active layer1→layer2 synapses get stronger
+/// over time, increasing the signal layer-2 neurons receive, which stabilises
+/// their gradient and prevents the death spiral into large negative bias.
+///
+/// Called after prune_three_phase, same prune_interval cadence.
+pub fn potentiate_active_synapses(
+    neurons: &mut HashMap<NeuronId, Neuron>,
+    config: &EnvironmentConfig,
+    output_protected: &HashSet<NeuronId>,
+) {
+    if config.facilitation_bonus <= 0.0 { return; }
+
+    // Consolidation threshold: 50% above the mid-phase floor
+    // Synapses that merely survived pruning aren't boosted — only those
+    // with genuinely high activity history (facilitation well above baseline)
+    let high_facilitation = config.prune_mid_facilitation_floor * 1.5;
+
+    for neuron in neurons.values_mut() {
+        for syn in neuron.synapses.iter_mut() {
+            // Only potentiate mature synapses (past phase-1 window)
+            // and only those with strong activity history
+            if syn.age >= config.prune_early_age
+                && syn.facilitation > high_facilitation
+            {
+                // Bonus is proportional to facilitation above threshold
+                // so more active synapses grow faster — not a flat bump
+                let excess = (syn.facilitation - high_facilitation).min(1.0);
+                let bonus = config.facilitation_bonus * excess;
+
+                // Output-protected synapses get the bonus too — they're
+                // structurally important and should be able to strengthen
+                syn.strength = (syn.strength.abs() + bonus)
+                    .min(5.0)
+                    * syn.strength.signum();
+            }
+        }
+    }
+}
+pub fn prune_dormant_synapses(
+    neurons: &mut HashMap<NeuronId, Neuron>,
+    min_age: u32,
+    min_strength: f32,
+) -> usize {
+    let mut pruned = 0;
+    for neuron in neurons.values_mut() {
+        let before = neuron.synapses.len();
+        neuron.synapses.retain(|s| {
+            !(s.age >= min_age && s.metabolic_cost() < min_strength)
+        });
+        pruned += before - neuron.synapses.len();
+    }
+    pruned
+}

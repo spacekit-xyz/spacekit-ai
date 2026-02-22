@@ -1,0 +1,19 @@
+[package]
+name = "spacekit-neuro"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "spacekit-neuro"
+path = "src/lib.rs"
+
+[[bin]]
+name = "spacekit-neuro"
+path = "src/main.rs"
+
+[dependencies]
+kiddo = "5.2.4"
+rand = "0.8"
+rayon = "1.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
