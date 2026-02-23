@@ -227,17 +227,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
-name = "neuro"
-version = "0.1.0"
-dependencies = [
- "kiddo",
- "rand",
- "rayon",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -428,6 +417,17 @@ name = "sorted-vec"
 version = "0.8.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f58d7b0190c7f12df7e8be6b79767a0836059159811b869d5ab55721fe14d0"
+
+[[package]]
+name = "spacekit-neuro"
+version = "0.1.0"
+dependencies = [
+ "kiddo",
+ "rand",
+ "rayon",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "syn"

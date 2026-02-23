@@ -130,6 +130,7 @@ fn demo_spiral() {
         debye_length: 1.5,
         // Mass-competition: lower win threshold to match actual activation range
         mass_win_threshold: 0.15, // lowered: strong inhibition means winners fire ~0.3-0.5 post-suppression
+        mass_decay: 0.00009,          // all neurons lose this fraction per sample
         // Homeostasis: gentle bias regulation to prevent runaway negative drift
         homeostasis_target: 0.30, // target slightly sparse
         homeostasis_lr: 0.0,      // disabled — equalizes all neurons to same bias, kills diversity
@@ -151,7 +152,7 @@ fn demo_spiral() {
     let group_b = env.create_group(g_b.to_vec());
     env.pair_mirror_groups(group_a, group_b);
 
-    let mut spiral_data = generate_spiral_data(200, &mut rng);
+    let mut spiral_data = generate_spiral_data(400, &mut rng);
     println!("Training on {} samples, architecture [2→16→16→1], 8000 epochs...", spiral_data.len());
 
     for epoch in 0..8000 {
