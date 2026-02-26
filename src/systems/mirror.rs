@@ -116,7 +116,7 @@ pub fn apply_ifs_mirror_coupling(
                 let target = reflect_across_midplane(partner, centroid_b, centroid_a);
                 let delta = target - neuron.geometry;
                 neuron.geometry = neuron.geometry
-                    + delta * (config.mirror_coupling_strength * 0.01);
+                    + delta * (config.mirror_coupling_strength);
             }
         }
     }

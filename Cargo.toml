@@ -12,6 +12,7 @@ name = "neuro"
 path = "src/main.rs"
 
 [dependencies]
+clap = { version = "4.5.60", features = ["derive"] }
 kiddo = "5.2.4"
 rand = "0.8"
 rayon = "1.8"

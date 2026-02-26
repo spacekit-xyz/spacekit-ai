@@ -5,15 +5,36 @@ use neuro::types::EnvironmentConfig;
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rand::rngs::StdRng;
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(name = "spacekit-neuro", version, about, long_about = None)]
+struct Args {
+    #[arg(short, long)]
+    xor: bool,
+    #[arg(short, long)]
+    spiral: bool,
+}
 
 fn main() {
     println!("=============================================================");
     println!("  Multidimensional Neural Environment — Training Demo");
     println!("=============================================================\n");
 
-    demo_xor();
-    println!();
-    demo_spiral();
+    let args = Args::parse();
+    if args.xor == true {
+        demo_xor();
+    } else if args.spiral == true {
+        demo_spiral();
+    } else {
+        println!("Please specify either --xor or --spiral");
+        std::process::exit(1);
+    }
+
+
+    // demo_xor();
+    // println!();
+    // demo_spiral();
 }
 
 // =============================================================================
@@ -34,7 +55,7 @@ fn demo_xor() {
         max_synapses_per_neuron: 32,
         energy_budget_per_neuron: 100.0,
         pruning_threshold: 0.001,
-        mirror_coupling_strength: 0.001,
+        mirror_coupling_strength: 3.14,//0.001,
         growth_radius: 0.0,
         geometry_interval: 500,
         stdp_enabled: false,
@@ -103,10 +124,10 @@ fn demo_spiral() {
     println!("--- Demo 2: Spiral Classification ---\n");
 
     let config = EnvironmentConfig {
-        learning_rate: 0.15,
+        learning_rate: 0.22,
         weight_decay: 0.0000025,   // scaled: 0.001/400 samples
         bias_decay: 0.0,           // disabled — any useful value annihilates over 3.2M steps
-        dropout_rate: 0.1,    // reduced: 32 neurons each carry more weight than in 16-neuron layer
+        dropout_rate: 0.01,    // reduced: 32 neurons each carry more weight than in 16-neuron layer
         geometry_noise: 0.0,        // replaced by thermal_noise in physics
         competitive_k: 4,            // KWTA top-4 of 16: hard competition regardless of synapse strength
         lateral_inhibition: 0.12,    // active from epoch 0: no warmup, moderate selectivity
@@ -114,7 +135,7 @@ fn demo_spiral() {
         lr_decay: 0.00008,    // slowed 5×: previous decay killed lr by epoch 1000, no learning late
         max_synapses_per_neuron: 64,
         energy_budget_per_neuron: 100.0,
-        pruning_threshold: 0.001,
+        pruning_threshold: 0.0001,
         mirror_coupling_strength: 0.001,
         growth_radius: 0.0,
         geometry_interval: 500,
@@ -129,12 +150,13 @@ fn demo_spiral() {
         // Debye: screening length replaces hard repulsion_radius
         debye_length: 1.5,
         // Mass-competition: lower win threshold to match actual activation range
-        mass_win_threshold: 0.15, // lowered: strong inhibition means winners fire ~0.3-0.5 post-suppression
-        mass_decay: 0.00009,          // all neurons lose this fraction per sample
+        mass_win_threshold: 0.14, // lowered: strong inhibition means winners fire ~0.3-0.5 post-suppression
+        mass_decay: 0.0000009,          // all neurons lose this fraction per sample, 0.00009 -> 0.000009
         // Homeostasis: gentle bias regulation to prevent runaway negative drift
         homeostasis_target: 0.30, // target slightly sparse
         homeostasis_lr: 0.0,      // disabled — equalizes all neurons to same bias, kills diversity
-        prune_interval: 500,
+        // homeostasis_tau: 0.0001,  // 10000 sample window   
+        prune_interval: 1500,     // changed from 500 to 1000 to reduce pruning frequency
         ..EnvironmentConfig::default()
     };
 
@@ -144,7 +166,14 @@ fn demo_spiral() {
     // Larger architecture — spiral needs more representational capacity
     // 2 → 16 → 16 → 1  scaled layer-2: 8 neurons insufficient to integrate spiral boundary
     //                     warmup removed — created always-on neurons, killed specialisation
-    env.build_layers(&[2, 16, 16, 1], &mut rng);
+    
+    //  2 → 16 → 16 → 1 
+    // (300 = Spiral accuracy: 389/600 (64.8%))
+    // (800 = Spiral accuracy: 991/1600 (61.9%))
+
+    //  2 → 24 → 24 → 1 
+    // (300 = Spiral accuracy: 389/600 (75.4%))
+    env.build_layers(&[2, 8, 8, 1], &mut rng);
 
     let hidden_ids = env.layers[1].clone();
     let (g_a, g_b) = hidden_ids.split_at(hidden_ids.len() / 2);
@@ -152,10 +181,17 @@ fn demo_spiral() {
     let group_b = env.create_group(g_b.to_vec());
     env.pair_mirror_groups(group_a, group_b);
 
-    let mut spiral_data = generate_spiral_data(400, &mut rng);
-    println!("Training on {} samples, architecture [2→16→16→1], 8000 epochs...", spiral_data.len());
+    let samples = 400; // becomes 200 ->400, 400 -> 800
+    let epochs = 8000;
+    // change from 400 -> 
+    // (200 = Spiral accuracy: 267/400 (66.8%))
+    // (200 = Spiral accuracy: 264/400 (66.0%))
+    // (300 = Spiral accuracy: 389/600 (64.8%))
+    // (800 = Spiral accuracy: 991/1600 (61.9%))
+    let mut spiral_data = generate_spiral_data(samples, &mut rng);
+    println!("Training on {} samples, architecture [2→24→24→1], {} epochs...", samples, epochs);
 
-    for epoch in 0..8000 {
+    for epoch in 0..epochs {
         env.set_epoch(epoch);
         spiral_data.shuffle(&mut rng);
         let mut epoch_loss = 0.0f32;
