@@ -134,13 +134,19 @@ All six systems compose in a fixed order each tick:
 
 ```rust
 pub fn train_tick(&mut self, input: &[f32], target: &[f32], rng: &mut impl Rng) -> TickResult {
-    let output = self.forward(input);            // temporal-gated forward pass
-    let loss   = self.backprop(&output, target); // dim 1: weight update
-    update_stdp_layer(...);                      // dim 3: timing-dependent update
-    apply_metabolic_pressure(...);               // dim 4: prune over-budget synapses
-    update_geometry(...);                        // dim 2: spatial drift
-    grow_synapses(...);                          // dim 5: form new connections
-    apply_mirror_coupling(...);                  // dim 6: structural symmetry
+    let output = self.forward_pass(input, true, rng);  // temporal-gated forward (dropout on)
+    let loss   = self.backprop(&output, target);       // dim 1: weight update
+    record_firing(...);
+    if self.config.stdp_enabled { update_stdp_layer(...); }  // dim 3
+    apply_metabolic_pressure(...);                     // dim 4: prune over-budget synapses
+    if tick_count % prune_interval == 0 {
+        prune_three_phase(...);                        // age/dormancy-based structural pruning
+        potentiate_active_synapses(...);               // strengthen well-used synapses
+    }
+    if tick_count % geometry_interval == 0 { update_geometry(...); }  // dim 2
+    grow_synapses(...);                                // dim 5: form new connections
+    update_group_centroids(...);
+    apply_ifs_mirror_coupling(...);                    // dim 6: structural symmetry
     self.time += 1.0;
 }
 ```
@@ -151,16 +157,17 @@ The forward pass itself is non‑standard: signal strength is gated by a tempora
 
 ## **Running the Examples**
 
+Run one demo at a time via CLI:
+
 ```bash
-cargo run
+cargo run -- --xor
+cargo run -- --spiral
 ```
 
-Two demos run in sequence:
-
-### **Demo 1: XOR**  
+### **Demo 1: XOR** (`--xor`)  
 2 inputs → 4 hidden → 1 output, 3000 ticks. Hidden layer split into mirror groups. Structural report prints synapse distribution, energy cost, geometric spread, symmetry score, whorl count, and per‑neuron state.
 
-### **Demo 2: Spiral Classification**  
+### **Demo 2: Spiral Classification** (`--spiral`)  
 Two interleaved spirals, 200 samples per class.  
 2 inputs → 8 hidden → 4 hidden → 1 output, 5000 ticks.  
 A harder nonlinear boundary that exercises geometry, growth, and timing systems.
@@ -169,11 +176,11 @@ A harder nonlinear boundary that exercises geometry, growth, and timing systems.
 
 ## **Configuration**
 
-All behavior is controlled through `EnvironmentConfig`:
+All behavior is controlled through `EnvironmentConfig` in `types.rs`. A subset of the main knobs:
 
 ```rust
 pub struct EnvironmentConfig {
-pub max_synapses_per_neuron: usize,
+    pub max_synapses_per_neuron: usize,
     pub energy_budget_per_neuron: f32,
     pub pruning_threshold: f32,
     pub mirror_coupling_strength: f32,
@@ -199,6 +206,9 @@ pub max_synapses_per_neuron: usize,
     pub prune_long_dormancy: u32,
     pub prune_long_threshold: f32,
     pub prune_interval: u32,
+    // ... plus physics (thermal_noise, gravity_g, k_repel, damping, etc.),
+    // homeostasis (homeostasis_target, homeostasis_lr), lateral_inhibition,
+    // mass–competition coupling, and more — see types.rs for the full struct.
 }
 ```
 
@@ -208,6 +218,7 @@ pub max_synapses_per_neuron: usize,
 
 ```toml
 [dependencies]
+clap = { version = "4", features = ["derive"] }
 kiddo = "5.2.4"
 rand = "0.8"
 rayon = "1.8"
@@ -237,4 +248,18 @@ The network’s structure is an **output** of training, not just its weights.
 
 The next step in the biological record is a mouse hippocampus: 10 cubic millimeters over five years.  
 The next step here is a reverse adjacency index and a recurrent layer.
+
+---
+
+## **Philosophical framing**
+
+Simulation theory (Bostrom's formulation) claims our reality is itself a computation running inside some external substrate. This project doesn't claim that.
+
+What this project actually is: **substrate-independent emergence**. It demonstrates that the behaviors we associate with life — specialization, competition, death, territory, growth — emerge from any sufficiently rich set of local rules, regardless of whether the substrate is carbon or Rust running on silicon. The spiral network isn't simulating biology. It is biology, instantiated differently.
+
+The philosophically sharper framing is **computational equivalence** — the Wolfram/Turing claim that a system exhibiting the same functional dynamics as another system *is* that system at the relevant level of description. The neurons here aren't pretending to have mass and territory. They have mass and territory, defined entirely by the rules governing their interactions.
+
+Where it gets genuinely strange: thermal noise in this system isn't *analogous* to electron agitation — it plays the identical functional role: mandatory irreducible randomness that prevents the system from freezing into a low-entropy locked state. The physics doesn't care whether the charge carriers are electrons or activation values. The thermodynamic necessity is the same.
+
+The more provocative question this project raises isn't "is reality a simulation" — it's **at what point does a self-organizing system with birth, death, specialization, and competitive dynamics become alive**. By the project's own framing, it's already past the bacterium stage. The answer to that question matters a lot more than Bostrom's, and this project is closer to actually probing it.
 

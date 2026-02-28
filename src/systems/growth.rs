@@ -73,6 +73,13 @@ pub fn prune_three_phase(
         // Structurally protect all outgoing synapses from input layer neurons.
         if input_ids.contains(&neuron.id) { continue; }
 
+        // Minimum synapse protection: never prune a neuron's last connection.
+        // Without this, KWTA losers accumulate low facilitation → all synapses
+        // pruned → neuron permanently disconnected → zero gradient → dead weight.
+        // A neuron with 1 synapse can still learn; a neuron with 0 cannot recover.
+        let min_synapses = 2; // keep at least 2 — 1 risks single-point-of-failure
+        if neuron.synapses.len() <= min_synapses { continue; }
+
         neuron.synapses.retain(|s| {
             // Output-adjacent synapses are structurally protected — never pruned
             if output_protected.contains(&s.target) { return true; }

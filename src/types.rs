@@ -19,19 +19,19 @@ impl Vec3 {
         Self { x: 0.0, y: 0.0, z: 0.0 }
     }
 
-    pub fn magnitude_sq(&self) -> f32 {
-        self.x * self.x + self.y * self.y + self.z * self.z
-    }
-
-    pub fn magnitude(&self) -> f32 {
-        self.magnitude_sq().sqrt()
-    }
-
     pub fn distance(&self, other: &Vec3) -> f32 {
         let dx = self.x - other.x;
         let dy = self.y - other.y;
         let dz = self.z - other.z;
         (dx * dx + dy * dy + dz * dz).sqrt()
+    }
+
+    pub fn magnitude(&self) -> f32 {
+        (self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
+    }
+
+    pub fn magnitude_sq(&self) -> f32 {
+        self.x * self.x + self.y * self.y + self.z * self.z
     }
 }
 
@@ -73,7 +73,14 @@ pub struct Synapse {
     pub facilitation: f32,  // strengthens with repeated use
     pub depression: f32,    // weakens under sustained load
     pub age: u32,           // ticks since formation
-    pub last_active: u32,   // ticks since last non-zero gradient
+
+    /// Tick of last meaningful signal transmission.
+    /// Used by three-phase pruning to distinguish dormant synapses
+    /// from active ones regardless of absolute age.
+    /// A synapse at age 5000 that fired last tick is structurally
+    /// stable; one at age 5000 that last fired 3000 ticks ago is
+    /// a candidate for long-term structural pruning.
+    pub last_active: u32,
 }
 
 impl Synapse {
@@ -136,6 +143,7 @@ pub struct EnvironmentConfig {
     /// neurons in the selective mid-range of sigmoid rather than always-on/always-off.
     /// Rule: set to 3-10x weight_decay. Prevents the 0.147-convergence collapse.
     pub bias_decay: f32,
+    pub weight_decay: f32,
     pub a_plus: f32,
     pub a_minus: f32,
     pub tau_plus: f32,
@@ -149,6 +157,7 @@ pub struct EnvironmentConfig {
     /// break the perfect positional symmetry of same-layer neurons, allowing gradient
     /// descent to differentiate them over time.
     pub geometry_noise: f32,
+
     /// Lateral inhibition strength (Option A competition).
     /// Each neuron's activation is reduced by this fraction of the layer mean.
     /// 0.0 = disabled. 0.1–0.3 is a good range.
@@ -192,7 +201,6 @@ pub struct EnvironmentConfig {
     /// Replaces repulsion_radius hard cutoff with physically smooth decay.
     pub debye_length: f32,
 
-
     /// Strength bonus applied to synapses that survive phase-2 pruning with
     /// high facilitation. Completes the activity-dependent plasticity loop:
     /// pruning removes unused connections, this strengthens frequently-used ones.
@@ -200,6 +208,20 @@ pub struct EnvironmentConfig {
     /// dendritic spines and more AMPA receptors.
     /// Typical: 0.001–0.005. Applied every prune_interval ticks.
     pub facilitation_bonus: f32,
+
+    // -------------------------------------------------------------------------
+    // Local KWTA — neighborhood competition
+    // -------------------------------------------------------------------------
+    /// Radius within which neurons compete for territory.
+    /// A neuron survives iff no neighbor within this radius has higher activation.
+    /// This produces local maxima as winners — non-overlapping spatial territories.
+    /// Set to 0.0 to use global competitive_k instead.
+    /// Typical: 1.0–2.0 (relative to geometric spread of ~3.0).
+    pub kwta_radius: f32,
+    /// Activation multiplier for local KWTA losers. 0.0 = hard zero (original),
+    /// 0.2 = soft suppression — losers keep 20% signal and gradient.
+    /// Soft suppression allows losers to still learn toward winning on other samples.
+    pub kwta_suppression: f32,
 
     // -------------------------------------------------------------------------
     // Mass–competition coupling (Pass 2 geometry)
@@ -225,7 +247,7 @@ pub struct EnvironmentConfig {
     /// Maximum neuron mass — winners become hubs but don't dominate gravity unboundedly.
     pub mass_max: f32,
 
-// -------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // Homeostatic plasticity
     // -------------------------------------------------------------------------
     /// Target mean activation for hidden neurons. Homeostatic adjustment
@@ -245,25 +267,10 @@ pub struct EnvironmentConfig {
     /// Separates fast gradient learning from slow homeostatic correction.
     pub homeostasis_tau: f32,
 
-    /// Winner-takes-more: after computing activations in a hidden layer,
-    /// the top-k neurons are boosted and the rest are suppressed toward zero.
+
     /// 0 = disabled. 4–8 is a good starting point for a 16-neuron hidden layer.
     /// Forces specialisation by preventing all neurons from firing identically.
     pub competitive_k: usize,
-    /// Dropout rate applied to hidden neurons during training (0.0 = disabled).
-    /// This is the primary symmetry-breaking mechanism: different neurons are
-    /// knocked out on different samples, forcing each neuron to specialise
-    /// rather than all learning the same feature. Typical: 0.1–0.3.
-    pub dropout_rate: f32,
-    /// L2 weight decay applied each backprop step: weight *= (1 - decay).
-    /// Prevents bias explosion — without it, biases drift to ±clamp_limit
-    /// and saturate sigmoid, killing gradients in all hidden neurons.
-    /// Typical values: 0.0001–0.001.
-    pub weight_decay: f32,
-    /// Whether STDP is enabled.
-    /// When neurons fire on nearly every tick, STDP pushes all synapses positive,
-    /// destroying inhibitory connections. Enable only after verifying backprop convergence.
-    pub stdp_enabled: bool,
 
     // -------------------------------------------------------------------------
     // Three-phase pruning — maps to LTP consolidation windows
@@ -291,13 +298,27 @@ pub struct EnvironmentConfig {
     pub prune_mid_threshold: f32,
     pub prune_mid_facilitation_floor: f32,
 
-    /// Phase 3 minimum age. Only synapses older than this are candidates for structural pruning.
-    pub prune_long_age: u32,
+    /// How often (in ticks) to run three-phase pruning.
+    /// Running every tick is too aggressive — a synapse at age 50 hasn't
+    /// had enough samples to develop signal. Schedule: every 200–500 ticks.
+    /// XOR with no growth: set very high (50000) to effectively disable it.
+    pub prune_interval: u32,
     /// Phase 3 dormancy window. Prune if (current_tick - last_active) > this AND strength < long_threshold.
+    /// Stop all pruning after this tick count. The network has found its structure
+    /// by epoch ~3000-4000 (tick ~1.2M-1.6M). Continued pruning after that destroys
+    /// learned connectivity rather than cleaning dead weight.
+    /// Set to 0 to disable (prune always). At 400 samples × 500 prune_interval = 200k ticks/epoch,
+    /// stopping at epoch 3000 = tick 1,200,000.
+    pub prune_stop_tick: u64,
+    /// Maximum absolute value for weight/bias clamps during backprop.
+    /// Default 5.0 (validated for spiral). XOR needs 15.0+ to push past 0.36/0.64 plateau.
+    pub weight_clamp: f32,
     pub prune_long_dormancy: u32,
     pub prune_long_threshold: f32,
-    pub prune_interval: u32,
-    
+    pub prune_long_age: u32,
+    pub stdp_enabled: bool,
+    pub dropout_rate: f32,
+    // pub homeostasis_tau: f32,
 }
 
 impl Default for EnvironmentConfig {
@@ -317,11 +338,12 @@ impl Default for EnvironmentConfig {
             tau_minus: 20.0,
             geometry_interval: 100,
             stdp_enabled: false,
-            weight_decay: 0.0000025,  // scaled default — override per task
+            weight_decay: 0.0000025,  // scaled: 0.001 epoch-decay / 400 samples
             bias_decay: 0.000025,    // scaled: 0.01/400 — 10× weight_decay at epoch level
             dropout_rate: 0.1,
             geometry_noise: 0.005,
-            competitive_k: 0, // disabled by default — set to ~n/2 of hidden layer size
+            competitive_k: 0,
+
             // Three-phase pruning defaults
             prune_early_age: 100,
             prune_early_threshold: 0.003,   // very low — only cull truly silent trial connections
@@ -330,36 +352,44 @@ impl Default for EnvironmentConfig {
             prune_mid_facilitation_floor: 1.02, // facilitation > 1.02 = synapse was used at least once
 
             prune_long_age: 2000,
-            prune_long_dormancy: 1000,          // inactive for 1000+ ticks → structural candidate
+            prune_stop_tick: 0,
+            weight_clamp: 5.0,   // spiral validated at 5.0 — XOR config overrides to 15.0         // disabled by default — set per task
+            prune_long_dormancy: 1000,
             prune_long_threshold: 0.005,
-            prune_interval: 500,
+            // prune_long_age: 2000,
             
+            homeostasis_tau: 0.001,
+            prune_interval: 500,
+
             // Physics-based geometry (Pass 1: constant mass)
             physics_dt: 0.05,
             gravity_g: 0.02,
             k_repel: 0.5,
             repulsion_radius: 3.0,
             damping: 0.15,
-            thermal_noise: 0.02, // ~7× current — real symmetry breaking force
+            thermal_noise: 0.002,
             hebbian_attraction: 0.001,
+
             // Reaction-diffusion inhibition
             sigma_inhib: 1.5,     // inhibition decay length — tune to geometry spread / sqrt(n)
+
             // Debye-screened repulsion
             debye_length: 2.0,    // screening length — replaces hard repulsion_radius cutoff
             facilitation_bonus: 0.002, // LTP consolidation bonus for highly-used synapses
+            kwta_radius: 0.0,
+            kwta_suppression: 0.2,  // soft suppression default — 20% signal preserved for losers              // disabled by default — set in spiral config
 
             // Mass–competition coupling
             mass_growth: 0.0005,          // winners gain this much mass per sample
             mass_decay: 0.00015,          // all neurons lose this fraction per sample
-            mass_win_threshold: 0.15,       // act=0.17-0.29, threshold needs to match
+            mass_win_threshold: 0.4,      // activation above this = winner this sample
             mass_min: 0.3,                // losers stay as light exploratory drifters
             mass_max: 3.0,                // winners cap — prevents single hub monopoly
 
             // Homeostatic plasticity
             homeostasis_target: 0.35,     // target mean activation per neuron
-            homeostasis_lr: 0.0,       // disabled: gentle bias nudge — weaker than gradient lr
-            homeostasis_tau: 0.001,       // 1000-sample window — must be << 1
-            lateral_inhibition: 0.35, // strong enough to create discrete winners
+            homeostasis_lr: 0.0003,       // gentle bias nudge — weaker than gradient lr
+            lateral_inhibition: 0.0, // disabled by default — set 0.1–0.2 for hidden layers
             lr_decay: 0.0,
         }
     }

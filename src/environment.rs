@@ -140,7 +140,7 @@ impl NeuralEnvironment {
             self.input_ids = input_layer.iter().cloned().collect();
         }
     }
-    
+
     pub fn create_group(&mut self, member_ids: Vec<NeuronId>) -> GroupId {
         let id = self.next_group_id;
         self.next_group_id += 1;
@@ -294,27 +294,76 @@ impl NeuralEnvironment {
                 }
             }
 
-            // --- Winner-takes-more (Option B) ---
-            // Zeros activation of losing neurons but does NOT mark them as dropped.
-            // Critical distinction from dropout: losing neurons still receive gradient
-            // on this sample. Without gradient, losers accumulate no signal, decay
-            // dominates, and they permanently collapse — the "0.147 convergence" pattern.
-            // With gradient preserved, losers can update weights to win in future samples.
-            // Competition shapes specialisation; it doesn't eliminate neurons from learning.
+            // --- Local KWTA — Neighborhood Competition ---
+            // Each neuron competes only with geometric neighbors within kwta_radius.
+            // A neuron survives iff it is the local maximum — no neighbor within
+            // kwta_radius has higher activation.
+            //
+            // This produces non-overlapping territorial winners:
+            // - neurons in different spatial regions don't suppress each other
+            // - each region of input space gets its own champion
+            // - sharp tilings emerge instead of soft global clusters
+            //
+            // Gradient is preserved for all losers (dropout_mask unchanged).
+            // Losers can still win on different samples → specialisation via competition.
+            //
+            // Falls back to global competitive_k when kwta_radius == 0.0.
+            let kwta_r = self.config.kwta_radius;
             let k = self.config.competitive_k;
-            if k > 0 && !is_output {
+
+            if kwta_r > 0.0 && !is_output {
+                // Soft local KWTA — neighborhood-based suppression with partial signal preserved.
+                //
+                // Hard zero (previous): losers contribute nothing, gradient starved.
+                // Soft suppression (×0.2): losers still carry 20% signal and gradient,
+                // allowing them to learn toward winning on different input regions.
+                //
+                // For each neuron: count how many neighbors within kwta_radius beat it.
+                // Winners (beaten_count == 0): activation unchanged — full signal.
+                // Losers (beaten_count > 0): activation *= kwta_suppression — partial signal.
+                //
+                // This creates graded territorial competition:
+                // - neurons far from any competitor fire freely
+                // - neurons with one stronger neighbor are attenuated but not silenced
+                // - only neurons surrounded by stronger neighbors are heavily suppressed
+                let suppression = self.config.kwta_suppression;
+
+                let snap: Vec<(NeuronId, f32, [f32; 3])> = layer_ids.iter()
+                    .filter(|id| self.dropout_mask.get(id) != Some(&true))
+                    .filter_map(|id| self.neurons.get(id).map(|n| (
+                        *id,
+                        n.activation,
+                        [n.geometry.x, n.geometry.y, n.geometry.z],
+                    )))
+                    .collect();
+
+                for &(nid, act, pos) in &snap {
+                    let beaten = snap.iter().any(|&(other_id, other_act, other_pos)| {
+                        if other_id == nid { return false; }
+                        let dx = pos[0] - other_pos[0];
+                        let dy = pos[1] - other_pos[1];
+                        let dz = pos[2] - other_pos[2];
+                        let dist = (dx*dx + dy*dy + dz*dz).sqrt();
+                        dist < kwta_r && other_act > act
+                    });
+                    if beaten {
+                        if let Some(n) = self.neurons.get_mut(&nid) {
+                            n.activation *= suppression;  // soft: partial signal preserved
+                        }
+                    }
+                }
+            } else if k > 0 && !is_output {
+                // Global KWTA fallback
                 let mut acts: Vec<(NeuronId, f32)> = layer_ids.iter()
                     .filter(|id| self.dropout_mask.get(id) != Some(&true))
                     .filter_map(|id| self.neurons.get(id).map(|n| (*id, n.activation)))
                     .collect();
-
                 acts.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
                 for (i, (nid, _)) in acts.iter().enumerate() {
                     if i >= k {
-                        // Zero the activation (no signal propagates forward)
-                        // but leave dropout_mask unchanged — gradient still flows back
-                        if let Some(n) = self.neurons.get_mut(nid) { n.activation = 0.0; }
+                        if let Some(n) = self.neurons.get_mut(nid) {
+                            n.activation *= 0.02; // losers keep 2% — enough for gradient, not enough to win
+                        }
                     }
                 }
             }
@@ -346,7 +395,7 @@ impl NeuralEnvironment {
             deltas.insert(nid, delta);
             if let Some(n) = self.neurons.get_mut(&nid) {
                 let upd = (self.current_lr * delta).clamp(-1.0, 1.0);
-                n.weight = (n.weight * (1.0 - self.config.bias_decay) - upd).clamp(-5.0, 5.0);
+                n.weight = (n.weight * (1.0 - self.config.bias_decay) - upd).clamp(-self.config.weight_clamp, self.config.weight_clamp);
             }
         }
 
@@ -380,9 +429,13 @@ impl NeuralEnvironment {
                     if let Some(n) = self.neurons.get_mut(&src_id) {
                         for syn in n.synapses.iter_mut() {
                             if syn.target == *tgt_id {
+                                // Uniform weight clamp for all synapses.
+                                // Input cap (0.5) was a failed experiment — starved gradient,
+                                // caused neuron death at 54.4% accuracy. Removed.
+                                let strength_cap = self.config.weight_clamp;
                                 syn.strength = (syn.strength * (1.0 - self.config.weight_decay)
                                     - self.current_lr * clipped)
-                                    .clamp(-5.0, 5.0);
+                                    .clamp(-strength_cap, strength_cap);
                                 // Mark as active if it carried a non-trivial gradient.
                                 // Used by phase-3 pruning to distinguish dormant from active.
                                 if clipped.abs() > 0.001 {
@@ -399,7 +452,7 @@ impl NeuralEnvironment {
                     if let Some(n) = self.neurons.get_mut(&src_id) {
                         n.weight = (n.weight * (1.0 - self.config.bias_decay)
                             - self.current_lr * delta)
-                            .clamp(-5.0, 5.0);
+                            .clamp(-self.config.weight_clamp, self.config.weight_clamp);
                     }
                 } else {
                     prev_deltas.insert(src_id, grad_sum.clamp(-1.0, 1.0));
@@ -436,7 +489,9 @@ impl NeuralEnvironment {
         let pruned = apply_metabolic_pressure(&mut self.neurons, &self.config, &self.output_ids, &self.input_ids);
 
         let prune_interval = self.config.prune_interval.max(1) as u64;
-        if self.tick_count % prune_interval == 0 {
+        let prune_stop = self.config.prune_stop_tick;
+        let pruning_active = prune_stop == 0 || self.tick_count < prune_stop;
+        if pruning_active && self.tick_count % prune_interval == 0 {
             let (p1, p2, p3) = prune_three_phase(
                 &mut self.neurons, &self.config, self.tick_count, &self.output_ids, &self.input_ids
             );
