@@ -170,6 +170,8 @@ pub struct EnvironmentConfig {
     /// Allows aggressive early exploration with fine-grained late convergence.
     pub lr_decay: f32,
 
+    pub tick_count: u64,
+
     // -------------------------------------------------------------------------
     // Physics-based geometry (N-body particle system)
     // Pass 1: stable dynamics with constant mass
@@ -343,6 +345,7 @@ impl Default for EnvironmentConfig {
             dropout_rate: 0.1,
             geometry_noise: 0.005,
             competitive_k: 0,
+            tick_count: 0,
 
             // Three-phase pruning defaults
             prune_early_age: 100,

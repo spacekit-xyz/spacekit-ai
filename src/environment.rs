@@ -52,6 +52,26 @@ impl NeuralEnvironment {
         }
     }
 
+    /// Current simulation tick (number of steps run).
+    pub fn tick_count(&self) -> u64 {
+        self.tick_count
+    }
+
+    /// Set the current tick (e.g. when restoring from snapshot).
+    pub fn set_tick_count(&mut self, v: u64) {
+        self.tick_count = v;
+    }
+
+    /// Neuron ids in the input layer (read-only).
+    pub fn input_ids(&self) -> &HashSet<NeuronId> {
+        &self.input_ids
+    }
+
+    /// Neuron ids in the output layer (read-only).
+    pub fn output_ids(&self) -> &HashSet<NeuronId> {
+        &self.output_ids
+    }
+
     pub fn build_layers(&mut self, layer_sizes: &[usize], rng: &mut impl Rng) {
         self.layers.clear();
         self.layer_of.clear();

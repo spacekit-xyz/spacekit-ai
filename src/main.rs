@@ -1,7 +1,7 @@
-use neuro::environment::NeuralEnvironment;
-use neuro::systems::mirror::mirror_symmetry_score;
-use neuro::systems::whorls::print_whorl_summary;
-use neuro::types::EnvironmentConfig;
+use growformer::environment::NeuralEnvironment;
+use growformer::systems::mirror::mirror_symmetry_score;
+use growformer::systems::whorls::print_whorl_summary;
+use growformer::types::EnvironmentConfig;
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rand::rngs::StdRng;
@@ -14,6 +14,10 @@ struct Args {
     xor: bool,
     #[arg(short, long)]
     spiral: bool,
+    #[arg(short, long)]
+    concentric_circles: bool,
+    #[arg(short, long)]
+    mlp: bool,
 }
 
 fn main() {
@@ -26,6 +30,10 @@ fn main() {
         demo_xor();
     } else if args.spiral == true {
         demo_spiral();
+    } else if args.concentric_circles == true {
+        demo_concentric_circles();
+    } else if args.mlp == true {
+        demo_mlp_baseline();
     } else {
         println!("Please specify either --xor or --spiral");
         std::process::exit(1);
@@ -161,7 +169,7 @@ fn demo_spiral() {
     };
 
     let mut env = NeuralEnvironment::new(config);
-    // seeds 42, 7, 99, 314, 271.
+    // seeds 42(90.4,92.6,90.1), 7(92.2,91.8), 99, 314, 271.
     let mut rng = StdRng::seed_from_u64(42);
 
     // Larger architecture — spiral needs more representational capacity
@@ -232,6 +240,168 @@ fn demo_spiral() {
 }
 
 // =============================================================================
+// Demo 3: Concentric Circles
+// =============================================================================
+
+fn demo_concentric_circles() {
+    println!("--- Demo 3: Concentric Circles ---\n");
+    let config = EnvironmentConfig {
+        learning_rate: 0.15,
+        weight_decay: 0.0000025,   // scaled: 0.001/400 samples
+        bias_decay: 0.0,           // disabled — any useful value annihilates over 3.2M steps
+        dropout_rate: 0.1,    // reduced: 32 neurons each carry more weight than in 16-neuron layer
+        geometry_noise: 0.0,        // replaced by thermal_noise in physics
+        competitive_k: 4,            // KWTA top-4 of 16: hard competition regardless of synapse strength
+        lateral_inhibition: 0.12,    // active from epoch 0: no warmup, moderate selectivity
+                                   // targets act=0.25-0.40 with sigma_inhib=2.0
+        lr_decay: 0.00008,    // slowed 5×: previous decay killed lr by epoch 1000, no learning late
+        max_synapses_per_neuron: 64,
+        energy_budget_per_neuron: 100.0,
+        pruning_threshold: 0.001,
+        mirror_coupling_strength: 0.001,
+        growth_radius: 2.0,
+        geometry_interval: 500,
+        stdp_enabled: false,
+        k_repel: 0.2,
+        gravity_g: 0.05,
+        damping: 0.2,
+        thermal_noise: 0.02,     //
+        // Reaction-diffusion: sigma_inhib tuned for 32-neuron single layer
+        // spread ~2.8, 40% = 1.1 — slightly tighter for more diverse receptive fields
+        sigma_inhib: 2.0,            // widened: spread=2.4, need sigma > spread/2 for truly local inhibition
+        // Debye: screening length replaces hard repulsion_radius
+        debye_length: 1.5,
+        // Mass-competition: lower win threshold to match actual activation range
+        mass_win_threshold: 0.14, // lowered: strong inhibition means winners fire ~0.3-0.5 post-suppression
+        mass_decay: 0.00009,          // all neurons lose this fraction per sample, 0.00009 -> 0.000009
+        // Homeostasis: gentle bias regulation to prevent runaway negative drift
+        homeostasis_target: 0.30, // target slightly sparse
+        homeostasis_lr: 0.0,      // disabled — equalizes all neurons to same bias, kills diversity
+        // homeostasis_tau: 0.0001,  // 10000 sample window   
+        prune_interval: 500,     // changed from 500 to 1000 to reduce pruning frequency
+        ..EnvironmentConfig::default()
+    };
+
+    let mut env = NeuralEnvironment::new(config);
+    // seeds 42(90.4,92.6,90.1), 7(92.2,91.8), 99, 314, 271.
+    let mut rng = StdRng::seed_from_u64(7);
+    // 2 → 16 → 16 → 1
+    env.build_layers(&[2, 16, 16, 1], &mut rng);
+
+    let hidden_ids = env.layers[1].clone();
+    let (g_a, g_b) = hidden_ids.split_at(hidden_ids.len() / 2);
+    let group_a = env.create_group(g_a.to_vec());
+    let group_b = env.create_group(g_b.to_vec());
+    env.pair_mirror_groups(group_a, group_b);
+
+    let samples = 400; // becomes 200 ->400, 400 -> 800
+    let epochs = 8000;
+    
+    let mut concentric_data = generate_concentric_circles_data(samples, &mut rng);
+    println!("Training on {} samples, architecture [2→16→16→1], {} epochs...", samples, epochs);
+
+    for epoch in 0..epochs {
+        env.set_epoch(epoch);
+        concentric_data.shuffle(&mut rng);
+        let mut epoch_loss = 0.0f32;
+        for (input, target) in &concentric_data {
+            epoch_loss += env.train_tick(input, target, &mut rng).loss;
+        }
+        epoch_loss /= concentric_data.len() as f32;
+        if epoch % 500 == 0 {
+            println!("  epoch {:>4} | loss={:.5} | syn={} | sparse={:.2} | act={:.3} | spread={:.2} | mass={:.2} | lr={:.5}",
+                epoch, epoch_loss,
+                env.total_synapses(),
+                env.firing_sparsity(),
+                env.mean_hidden_activation(),
+                env.geometric_spread(),
+                env.mean_hidden_mass(),
+                env.current_lr);
+        }
+    }
+
+    let mut correct = 0;
+    for (input, target) in &concentric_data {
+        let out = env.predict(input);
+        if (if out[0] > 0.5 { 1.0_f32 } else { 0.0 } - target[0]).abs() < 0.01 { correct += 1; }
+    }
+    println!("\nConcentric Circles accuracy: {}/{} ({:.1}%)",
+        correct, concentric_data.len(), 100.0 * correct as f32 / concentric_data.len() as f32);
+
+    println!("\nSample predictions:");
+    println!("  X        Y        Expected  Predicted");
+    println!("  ----------------------------------------");
+    for (input, target) in concentric_data.iter().take(8) {
+        let out = env.predict(input);
+        println!("  {:+.4}  {:+.4}    {:.1}       {:.4}", input[0], input[1], target[0], out[0]);
+    }
+
+    print_structural_report(&env, group_a, group_b);
+    
+}
+
+// =============================================================================
+// Demo 4: MLP Baseline Comparison
+// =============================================================================
+
+fn demo_mlp_baseline() {
+    println!("--- Demo 4: MLP Baseline Comparison ---\n");
+
+    let mut mlp = NeuralEnvironment::new(EnvironmentConfig {
+        learning_rate: 0.15,
+        weight_decay: 0.0000025,
+        bias_decay: 0.0,           // no Rivera bias pressure
+        lr_decay: 0.00008,
+        competitive_k: 0,          // no KWTA
+        lateral_inhibition: 0.0,   // no inhibition
+        dropout_rate: 0.0,         // no dropout
+        thermal_noise: 0.0,        // no physics
+        gravity_g: 0.0,
+        k_repel: 0.0,
+        mass_decay: 0.0,
+        mass_growth: 0.0,
+        homeostasis_lr: 0.0,       // no homeostasis
+        mirror_coupling_strength: 0.0,
+        prune_interval: 9_999_999,
+        geometry_interval: 9_999_999,
+        ..EnvironmentConfig::default()
+    });
+
+    let mut rng = StdRng::seed_from_u64(7); // same seed as Rivera run
+    mlp.build_layers(&[2, 16, 16, 1], &mut rng);
+    // NO groups, NO mirror coupling
+
+    let mut spiral_data = generate_spiral_data(400, &mut rng); // same 800 samples
+    println!("Training on 400 samples, architecture [2→16→16→1], 8000 epochs...");
+
+    for epoch in 0..8000 {
+        mlp.set_epoch(epoch);
+        spiral_data.shuffle(&mut rng);
+        let mut epoch_loss = 0.0f32;
+        for (input, target) in &spiral_data {
+            epoch_loss += mlp.train_tick(input, target, &mut rng).loss;
+        }
+        epoch_loss /= spiral_data.len() as f32;
+        if epoch % 500 == 0 {
+            println!("  epoch {:>4} | loss={:.5} | lr={:.5}",
+                epoch, epoch_loss, mlp.current_lr);
+        }
+    }
+
+    let mut correct = 0;
+    for (input, target) in &spiral_data {
+        let out = mlp.predict(input);
+        if (if out[0] > 0.5 { 1.0_f32 } else { 0.0 } - target[0]).abs() < 0.01 {
+            correct += 1;
+        }
+    }
+    println!("\nMLP accuracy: {}/{} ({:.1}%)",
+        correct, spiral_data.len(),
+        100.0 * correct as f32 / spiral_data.len() as f32);
+}
+
+
+// =============================================================================
 // Structural report
 // =============================================================================
 
@@ -245,7 +415,7 @@ fn print_structural_report(env: &NeuralEnvironment, group_a: u32, group_b: u32) 
     println!("  Synapses — total: {}, max: {}, min: {}", total, max, min);
     println!("  Total energy cost: {:.3}", snapshots.iter().map(|s| s.energy_used).sum::<f32>());
 
-    let spread = neuro::systems::geometry::compute_geometric_spread(&env.neurons);
+    let spread = growformer::systems::geometry::compute_geometric_spread(&env.neurons);
     println!("  Geometric spread (stddev): {:.4}", spread);
 
     let symmetry = mirror_symmetry_score(&env.neurons, &env.groups, group_a, group_b);
@@ -283,6 +453,51 @@ fn generate_spiral_data(n_per_class: usize, rng: &mut impl rand::Rng) -> Vec<([f
             data.push(([x, y], [class as f32]));
         }
     }
+    data.shuffle(rng);
+    data
+}
+
+fn generate_concentric_circles_data(
+    n_per_class: usize,
+    rng: &mut impl rand::Rng,
+) -> Vec<([f32; 2], [f32; 1])> {
+
+    use std::f32::consts::PI;
+
+    let mut data = Vec::with_capacity(n_per_class * 2);
+
+    // Radii for the two rings
+    let inner_r = 0.5;
+    let outer_r = 1.0;
+
+    // Noise level (adjust to taste)
+    // 0.05 = 5% noise; easy to learn
+    // 0.25 = 25% noise; harder to learn
+    let noise = 0.25;
+
+    // Class 0: inner ring
+    for _ in 0..n_per_class {
+        let theta = rng.gen::<f32>() * 2.0 * PI;
+        let r = inner_r + rng.gen_range(-noise..noise);
+
+        let x = r * theta.cos();
+        let y = r * theta.sin();
+
+        data.push(([x, y], [0.0]));
+    }
+
+    // Class 1: outer ring
+    for _ in 0..n_per_class {
+        let theta = rng.gen::<f32>() * 2.0 * PI;
+        let r = outer_r + rng.gen_range(-noise..noise);
+
+        let x = r * theta.cos();
+        let y = r * theta.sin();
+
+        data.push(([x, y], [1.0]));
+    }
+
+    // Shuffle for training
     data.shuffle(rng);
     data
 }
