@@ -97,6 +97,7 @@ pub fn apply_ifs_mirror_coupling(
             let partner_pos = neurons.get(&id_b).map(|n| n.geometry);
 
             if let (Some(partner), Some(neuron)) = (partner_pos, neurons.get_mut(&id_a)) {
+                if neuron.frozen { continue; }
                 // Target: the reflection of the partner across the midplane
                 let target = reflect_across_midplane(partner, centroid_a, centroid_b);
                 let delta = target - neuron.geometry;
@@ -113,6 +114,7 @@ pub fn apply_ifs_mirror_coupling(
             let partner_pos = neurons.get(&id_a).map(|n| n.geometry);
 
             if let (Some(partner), Some(neuron)) = (partner_pos, neurons.get_mut(&id_b)) {
+                if neuron.frozen { continue; }
                 let target = reflect_across_midplane(partner, centroid_b, centroid_a);
                 let delta = target - neuron.geometry;
                 neuron.geometry = neuron.geometry

@@ -142,6 +142,7 @@ pub fn update_geometry(
     let dt = config.physics_dt;
     for (id, force) in forces {
         if let Some(neuron) = neurons.get_mut(&id) {
+            if neuron.frozen { continue; }
             let noise = Vec3::new(
                 gaussian_sample(rng) * config.thermal_noise,
                 gaussian_sample(rng) * config.thermal_noise,

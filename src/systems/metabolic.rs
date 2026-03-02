@@ -18,6 +18,7 @@ pub fn apply_metabolic_pressure(
     let pruned_per: Vec<(NeuronId, Vec<usize>)> = neurons
         .par_iter()
         .filter_map(|(&id, neuron)| {
+            if neuron.frozen { return None; }
             if !neuron.over_budget() { return None; }
             // Never prune synapses from input neurons — they carry raw signal.
             // Without both input coordinates, hidden neurons are geometrically blind.
@@ -27,7 +28,7 @@ pub fn apply_metabolic_pressure(
                 .iter()
                 .enumerate()
                 // Never prune synapses targeting the output layer
-                .filter(|(_, s)| !output_protected.contains(&s.target))
+                .filter(|(_, s)| !output_protected.contains(&s.target) && !s.frozen)
                 .map(|(i, s)| (i, s.metabolic_cost()))
                 .collect();
 
@@ -59,9 +60,11 @@ pub fn apply_metabolic_pressure(
         }
     }
 
-    // Age all synapses each tick
+    // Age all synapses each tick (skip frozen — they are not updated)
     for neuron in neurons.values_mut() {
+        if neuron.frozen { continue; }
         for s in neuron.synapses.iter_mut() {
+            if s.frozen { continue; }
             s.age += 1;
             if s.age > 1000 && s.facilitation > 1.5 {
                 s.depression *= 0.999;

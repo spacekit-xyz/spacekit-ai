@@ -194,6 +194,35 @@ impl NeuralEnvironment {
         }
     }
 
+    /// Freeze the consolidated pathway so no gradient or plasticity can modify it.
+    /// Sets frozen=true on: all neurons in group_a_ids (Group A layer1+layer2), output_0,
+    /// and every synapse from input layer that targets group_a_layer1_ids.
+    /// Backprop and all plasticity systems check frozen and skip updates. No restore needed.
+    pub fn freeze_consolidated_pathway(
+        &mut self,
+        group_a_ids: &[NeuronId],
+        output_0: NeuronId,
+        group_a_layer1_ids: &[NeuronId],
+    ) {
+        for &nid in group_a_ids {
+            if let Some(n) = self.neurons.get_mut(&nid) {
+                n.frozen = true;
+            }
+        }
+        if let Some(n) = self.neurons.get_mut(&output_0) {
+            n.frozen = true;
+        }
+        for &input_nid in &self.input_ids {
+            if let Some(n) = self.neurons.get_mut(&input_nid) {
+                for syn in n.synapses.iter_mut() {
+                    if group_a_layer1_ids.contains(&syn.target) {
+                        syn.frozen = true;
+                    }
+                }
+            }
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Forward pass
     // -------------------------------------------------------------------------
@@ -295,6 +324,7 @@ impl NeuralEnvironment {
                 for &nid in &layer_ids {
                     if self.dropout_mask.get(&nid) == Some(&true) { continue; }
                     if let Some(n) = self.neurons.get_mut(&nid) {
+                        if n.frozen { continue; }
                         // --- Mass update ---
                         if self.config.mass_growth > 0.0 {
                             n.mass *= 1.0 - self.config.mass_decay;
@@ -425,8 +455,12 @@ impl NeuralEnvironment {
             let delta = (o - t) * o * (1.0 - o);
             deltas.insert(nid, delta);
             if let Some(n) = self.neurons.get_mut(&nid) {
+                if n.frozen { continue; }
                 let is_consolidated = n.group_id.map_or(false, |gid| self.consolidated_group_ids.contains(&gid));
-                let eff_lr = if is_consolidated { 0.0 } else { self.current_lr };
+                let mut eff_lr = if is_consolidated { 0.0 } else { self.current_lr };
+                if eff_lr > 0.0 && self.config.mass_consolidation_k > 0.0 {
+                    eff_lr /= 1.0 + self.config.mass_consolidation_k * n.mass;
+                }
                 let upd = (eff_lr * delta).clamp(-1.0, 1.0);
                 n.weight = (n.weight * (1.0 - self.config.bias_decay) - upd).clamp(-self.config.weight_clamp, self.config.weight_clamp);
             }
@@ -460,9 +494,14 @@ impl NeuralEnvironment {
 
                     let clipped = (tgt_delta * src_act).clamp(-1.0, 1.0);
                     if let Some(n) = self.neurons.get_mut(&src_id) {
+                        if n.frozen { continue; }
                         let is_consolidated = n.group_id.map_or(false, |gid| self.consolidated_group_ids.contains(&gid));
-                        let eff_lr = if is_consolidated { 0.0 } else { self.current_lr };
+                        let mut eff_lr = if is_consolidated { 0.0 } else { self.current_lr };
+                        if eff_lr > 0.0 && self.config.mass_consolidation_k > 0.0 {
+                            eff_lr /= 1.0 + self.config.mass_consolidation_k * n.mass;
+                        }
                         for syn in n.synapses.iter_mut() {
+                            if syn.frozen { continue; }
                             if syn.target == *tgt_id {
                                 // Uniform weight clamp for all synapses.
                                 // Input cap (0.5) was a failed experiment — starved gradient,
@@ -485,8 +524,12 @@ impl NeuralEnvironment {
                     let delta = (grad_sum * src_act * (1.0 - src_act)).clamp(-1.0, 1.0);
                     prev_deltas.insert(src_id, delta);
                     if let Some(n) = self.neurons.get_mut(&src_id) {
+                        if n.frozen { continue; }
                         let is_consolidated = n.group_id.map_or(false, |gid| self.consolidated_group_ids.contains(&gid));
-                        let eff_lr = if is_consolidated { 0.0 } else { self.current_lr };
+                        let mut eff_lr = if is_consolidated { 0.0 } else { self.current_lr };
+                        if eff_lr > 0.0 && self.config.mass_consolidation_k > 0.0 {
+                            eff_lr /= 1.0 + self.config.mass_consolidation_k * n.mass;
+                        }
                         n.weight = (n.weight * (1.0 - self.config.bias_decay)
                             - eff_lr * delta)
                             .clamp(-self.config.weight_clamp, self.config.weight_clamp);

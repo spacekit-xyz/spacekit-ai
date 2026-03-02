@@ -83,6 +83,9 @@ pub struct Synapse {
     /// stable; one at age 5000 that last fired 3000 ticks ago is
     /// a candidate for long-term structural pruning.
     pub last_active: u32,
+
+    /// If true, backprop and plasticity never update this synapse (e.g. input→consolidated pathway).
+    pub frozen: bool,
 }
 
 impl Synapse {
@@ -95,6 +98,7 @@ impl Synapse {
             depression: 1.0,
             age: 0,
             last_active: 0,
+            frozen: false,
         }
     }
 
@@ -251,6 +255,11 @@ pub struct EnvironmentConfig {
     /// Maximum neuron mass — winners become hubs but don't dominate gravity unboundedly.
     pub mass_max: f32,
 
+    /// Mass-based consolidation: scale effective learning rate by 1/(1 + k*mass).
+    /// High-mass neurons (spiral hubs) get smaller LR during Task B; low-mass stay plastic.
+    /// 0.0 = disabled. Typical: 2.0–5.0 for continual learning.
+    pub mass_consolidation_k: f32,
+
     // -------------------------------------------------------------------------
     // Homeostatic plasticity
     // -------------------------------------------------------------------------
@@ -390,6 +399,7 @@ impl Default for EnvironmentConfig {
             mass_win_threshold: 0.4,      // activation above this = winner this sample
             mass_min: 0.3,                // losers stay as light exploratory drifters
             mass_max: 3.0,                // winners cap — prevents single hub monopoly
+            mass_consolidation_k: 0.0,    // 0 = disabled; set 2–5 for continual learning
 
             // Homeostatic plasticity
             homeostasis_target: 0.35,     // target mean activation per neuron

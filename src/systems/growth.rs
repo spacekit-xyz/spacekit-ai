@@ -37,6 +37,7 @@ pub fn grow_synapses(
         let src_layer     = *layer_of.get(&id).unwrap_or(&usize::MAX);
         let src_group     = group_ids[&id];
 
+        if neurons[&id].frozen { continue; }
         if synapse_count >= config.max_synapses_per_neuron || over_budget { continue; }
 
         let pos = positions[&id];
@@ -95,6 +96,7 @@ pub fn prune_three_phase(
     let input_ids: Vec<NeuronId> = input_protected.iter().cloned().collect();
 
     for neuron in neurons.values_mut() {
+        if neuron.frozen { continue; }
         // Input neurons' synapses carry raw signal to every hidden neuron.
         // Pruning them means hidden neurons become blind to one input coordinate.
         // Structurally protect all outgoing synapses from input layer neurons.
@@ -108,6 +110,7 @@ pub fn prune_three_phase(
         if neuron.synapses.len() <= min_synapses { continue; }
 
         neuron.synapses.retain(|s| {
+            if s.frozen { return true; }
             // Output-adjacent synapses are structurally protected — never pruned
             if output_protected.contains(&s.target) { return true; }
 
@@ -158,7 +161,9 @@ pub fn potentiate_active_synapses(
     let high_facilitation = config.prune_mid_facilitation_floor * 1.5;
 
     for neuron in neurons.values_mut() {
+        if neuron.frozen { continue; }
         for syn in neuron.synapses.iter_mut() {
+            if syn.frozen { continue; }
             if syn.age >= config.prune_early_age
                 && syn.facilitation > high_facilitation
             {
@@ -179,9 +184,10 @@ pub fn prune_dormant_synapses(
 ) -> usize {
     let mut pruned = 0;
     for neuron in neurons.values_mut() {
+        if neuron.frozen { continue; }
         let before = neuron.synapses.len();
         neuron.synapses.retain(|s| {
-            !(s.age >= min_age && s.metabolic_cost() < min_strength)
+            s.frozen || !(s.age >= min_age && s.metabolic_cost() < min_strength)
         });
         pruned += before - neuron.synapses.len();
     }

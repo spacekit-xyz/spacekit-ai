@@ -45,6 +45,10 @@ pub struct Neuron {
     // Dimension 6: Structural group membership
     pub group_id: Option<GroupId>,
     pub mirror_partner: Option<NeuronId>,
+
+    /// If true, no plasticity or gradient update may modify this neuron (bias, geometry, mass, synapses).
+    /// Set by freeze_consolidated_pathway(); backprop and all plasticity systems skip frozen neurons.
+    pub frozen: bool,
 }
 
 impl Neuron {
@@ -64,6 +68,7 @@ impl Neuron {
             synapses: Vec::new(),
             group_id: None,
             mirror_partner: None,
+            frozen: false,
         }
     }
 

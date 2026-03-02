@@ -1,6 +1,5 @@
 use growformer::environment::NeuralEnvironment;
-use growformer::neuron::Neuron;
-use growformer::types::{NeuronId, Synapse};
+use growformer::types::NeuronId;
 use growformer::systems::checkpoint::{save_phase2_checkpoint, load_phase2_checkpoint};
 use growformer::systems::mirror::mirror_symmetry_score;
 use growformer::systems::whorls::print_whorl_summary;
@@ -443,6 +442,9 @@ fn phase2_base_config() -> EnvironmentConfig {
         mirror_coupling_strength: 0.001,
         geometry_interval: 500,
         stdp_enabled: false,
+        // High-mass neurons (spiral hubs) get smaller LR during Task B. If Task B convergence slows or
+        // circles accuracy drops below ~85%, try mass_consolidation_k: 1.5 (softer scaling).
+        mass_consolidation_k: 3.0,
         ..EnvironmentConfig::default()
     }
 }
@@ -508,24 +510,10 @@ fn demo_phase2_train_a() {
         task_a_result.0, task_a_result.1,
         100.0 * task_a_result.0 as f32 / task_a_result.1 as f32);
 
-    println!("\n>>> Consolidating Task A...");
+    println!("\n>>> Consolidating Task A (frozen flag gate)...");
 
-    let consolidated_neurons: Vec<Neuron> = group_a_ids.iter()
-        .filter_map(|&nid| env.neurons.get(&nid).cloned())
-        .collect();
-    let output_0_neuron: Neuron = env.neurons[&output_0].clone();
-    let output_0_incoming_synapses: Vec<(NeuronId, Synapse)> = env.neurons.iter()
-        .filter_map(|(&nid, n)| {
-            n.synapses.iter()
-                .find(|s| s.target == output_0)
-                .map(|s| (nid, s.clone()))
-        })
-        .collect();
-
-    println!("  Snapshotted {} Group A neurons and output[0] (full structs)",
-        consolidated_neurons.len());
-    let total_syns: usize = consolidated_neurons.iter().map(|n| n.synapses.len()).sum();
-    println!("  Group A total synapses: {}; {} synapses target output[0]", total_syns, output_0_incoming_synapses.len());
+    env.freeze_consolidated_pathway(&group_a_ids, output_0, l1_a);
+    println!("  Frozen: Group A neurons, output[0], input→Group A layer1 synapses");
 
     save_phase2_checkpoint(
         &env,
@@ -533,9 +521,6 @@ fn demo_phase2_train_a() {
         &group_b_ids,
         group_a,
         group_b,
-        &consolidated_neurons,
-        &output_0_neuron,
-        &output_0_incoming_synapses,
         output_0,
         output_1,
         task_a_result.0,
@@ -566,16 +551,12 @@ fn demo_phase2_train_b() {
         _group_b_ids,
         group_a,
         _group_b,
-        consolidated_neurons,
-        output_0_neuron,
-        output_0_incoming_synapses,
-        output_0,
+        _output_0,
         _output_1,
         data_seed,
     ) = load_phase2_checkpoint(TASK_A_CHECKPOINT_PATH, &base_config);
 
     env.current_lr = base_config.learning_rate;
-    // Freeze Group A in backprop so gradients don't update consolidated neurons.
     env.set_consolidated_groups(&[group_a]);
 
     let mut data_rng = StdRng::seed_from_u64(data_seed);
@@ -591,7 +572,7 @@ fn demo_phase2_train_b() {
 
     println!("=== TASK B: Concentric Circles ===");
     println!("Training on 400 samples, 4000 epochs...");
-    println!("(Group A frozen — triple gradient gate active)\n");
+    println!("(Consolidated pathway frozen — no restore loop)\n");
 
     for epoch in 0..4000 {
         env.set_epoch(epoch);
@@ -602,12 +583,6 @@ fn demo_phase2_train_b() {
             let current_out = env.predict(input);
             let target_both = [current_out[0], target[0]];
             epoch_loss += env.train_tick(input, &target_both, &mut weight_rng).loss;
-
-            restore_consolidated_full(&mut env, &consolidated_neurons);
-            if let Some(n) = env.neurons.get_mut(&output_0) {
-                *n = output_0_neuron.clone();
-            }
-            restore_output0_incoming_synapses(&mut env, &output_0_incoming_synapses, output_0);
         }
 
         epoch_loss /= circles_data.len() as f32;
@@ -649,22 +624,9 @@ fn demo_phase2_train_b() {
 // =============================================================================
 // Demo 5: Continual Learning (Phase 2 Gate)
 //
-// Proves the Growformer retains Task A knowledge while learning Task B.
-// Standard MLPs catastrophically forget. The Growformer should not.
-//
-// Architecture: [2 → 16 → 16 → 2]
-//   Group A owns layer1[0..8] + layer2[0..8] → output[0]  (Task A: spiral)
-//   Group B owns layer1[8..16] + layer2[8..16] → output[1] (Task B: circles)
-//
-// Each task has a fully dedicated end-to-end pathway.
-// Shared substrate: input layer (neurons 0,1) and physics geometry only.
-//
-// Gradient gate (two-part):
-//   restore_consolidated_full — full Neuron clone replace (Group A + output[0])
-//      This prevents Group B neurons from corrupting Task A's output head.
-//
-// Both restores run after every Task B backprop tick.
-// Success criterion: Task A retention >85% after full Task B training.
+// Gradient gate is implemented inside backprop via frozen flag on neurons/synapses.
+// freeze_consolidated_pathway() sets frozen=true on Group A, output[0], and
+// input→Group A layer1 synapses. No restore loop — damage is prevented, not repaired.
 // =============================================================================
 
 fn demo_continual_learning() {
@@ -752,43 +714,20 @@ fn demo_continual_learning() {
         100.0 * task_a_before.0 as f32 / task_a_before.1 as f32);
 
     // =========================================================================
-    // CONSOLIDATION — snapshot entire Task A pathway
-    //
-    // Part 1: Group A neuron biases + their synapses (excluding → output[1])
-    // Part 2: ALL neurons' synapses to output[0] — freeze the full input
-    //         vector of output[0] from both Group A and Group B sides.
-    //
-    // Both snapshots taken here, after Task A training, before Task B begins.
+    // CONSOLIDATION — set frozen flag on consolidated pathway (no snapshots)
     // =========================================================================
 
-    println!("\n>>> Consolidating Task A (Group A frozen)...");
-
-    let consolidated_neurons: Vec<Neuron> = group_a_ids.iter()
-        .filter_map(|&nid| env.neurons.get(&nid).cloned())
-        .collect();
-    let output_0_neuron: Neuron = env.neurons[&output_0].clone();
-    let output_0_incoming_synapses: Vec<(NeuronId, Synapse)> = env.neurons.iter()
-        .filter_map(|(&nid, n)| {
-            n.synapses.iter()
-                .find(|s| s.target == output_0)
-                .map(|s| (nid, s.clone()))
-        })
-        .collect();
-
-    println!("  Snapshotted {} Group A neurons and output[0] (full structs)", consolidated_neurons.len());
-    let total_syns: usize = consolidated_neurons.iter().map(|n| n.synapses.len()).sum();
-    println!("  Group A total synapses: {}; {} synapses target output[0]", total_syns, output_0_incoming_synapses.len());
+    println!("\n>>> Consolidating Task A (frozen flag gate)...");
+    env.freeze_consolidated_pathway(&group_a_ids, output_0, l1_a);
+    println!("  Frozen: Group A neurons, output[0], input→Group A layer1 synapses");
 
     // =========================================================================
-    // TASK B — Concentric Circles → output[1]
-    //
-    // Group B trains freely through output[1].
-    // Full-neuron restore after every tick (Group A + output[0]).
+    // TASK B — Concentric Circles → output[1]; no restore loop
     // =========================================================================
 
     println!("\n=== TASK B: Concentric Circles ===");
     println!("Training on 400 samples, 4000 epochs...");
-    println!("(Group A frozen — dual gradient gate active)\n");
+    println!("(Consolidated pathway frozen — no restore loop)\n");
 
     env.current_lr = base_config.learning_rate;
 
@@ -803,12 +742,6 @@ fn demo_continual_learning() {
             let current_out = env.predict(input);
             let target_both = [current_out[0], target[0]];
             epoch_loss += env.train_tick(input, &target_both, &mut weight_rng).loss;
-
-            restore_consolidated_full(&mut env, &consolidated_neurons);
-            if let Some(n) = env.neurons.get_mut(&output_0) {
-                *n = output_0_neuron.clone();
-            }
-            restore_output0_incoming_synapses(&mut env, &output_0_incoming_synapses, output_0);
         }
 
         epoch_loss /= circles_data.len() as f32;
@@ -917,41 +850,6 @@ fn evaluate_accuracy_head(
         if (predicted - target[0]).abs() < 0.01 { correct += 1; }
     }
     (correct, data.len())
-}
-
-// =============================================================================
-// restore_consolidated_full — gradient gate (full-neuron replace)
-//
-// Overwrites Group A neurons with saved clones. Every field is restored —
-// weight, geometry, velocity, mass, all synapse fields (strength, facilitation,
-// depression, age, last_active), running_activation, etc. Nothing can drift.
-// =============================================================================
-
-fn restore_consolidated_full(
-    env: &mut NeuralEnvironment,
-    snapshot: &[Neuron],
-) {
-    for saved in snapshot {
-        if let Some(n) = env.neurons.get_mut(&saved.id) {
-            *n = saved.clone();
-        }
-    }
-}
-
-/// Restores every synapse that targets output_0 to its saved state (strength, facilitation, depression, etc.).
-/// Group A neurons are already restored by restore_consolidated_full; this fixes Group B → output_0 and any other sources.
-fn restore_output0_incoming_synapses(
-    env: &mut NeuralEnvironment,
-    snapshot: &[(NeuronId, Synapse)],
-    output_0: NeuronId,
-) {
-    for (src_id, saved_syn) in snapshot {
-        if let Some(n) = env.neurons.get_mut(src_id) {
-            if let Some(s) = n.synapses.iter_mut().find(|s| s.target == output_0) {
-                *s = saved_syn.clone();
-            }
-        }
-    }
 }
 
 // =============================================================================

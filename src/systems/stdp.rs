@@ -38,8 +38,10 @@ pub fn update_stdp(
     };
 
     if let Some(pre_neuron) = neurons.get_mut(&pre_id) {
+        if pre_neuron.frozen { return; }
         for synapse in pre_neuron.synapses.iter_mut() {
             if synapse.target == post_id {
+                if synapse.frozen { break; }
                 // Clamp preserves sign: inhibitory synapses stay inhibitory
                 synapse.strength = (synapse.strength + delta_w).clamp(-1.5, 1.5);
 
