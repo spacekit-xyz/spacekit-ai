@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
+use crate::neuron::Neuron;
 pub type NeuronId = u32;
 pub type GroupId = u32;
 
@@ -409,4 +411,21 @@ pub struct NeuronSnapshot {
     pub group_id: Option<GroupId>,
     pub last_fired: f64,
     pub whorled: bool,
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Phase2Checkpoint {
+    pub neurons: HashMap<NeuronId, Neuron>,
+    pub groups: HashMap<GroupId, NeuronGroup>,
+    pub layers: Vec<Vec<NeuronId>>,
+    pub layer_of: HashMap<NeuronId, usize>,
+    pub current_lr: f32,
+    pub config: EnvironmentConfig,
+    pub group_a_ids: Vec<NeuronId>,
+    pub group_b_ids: Vec<NeuronId>,
+    pub consolidated_snapshot: Vec<(NeuronId, f32, Vec<(NeuronId, f32)>)>,
+    pub output_0_incoming: Vec<(NeuronId, f32)>,
+    pub task_a_accuracy: f32,
+    pub seed: u64,
 }

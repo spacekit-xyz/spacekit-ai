@@ -4,6 +4,17 @@ use crate::neuron::Neuron;
 use std::collections::{HashMap, HashSet};
 
 /// System 2: Dynamic Synapse Growth
+///
+/// Grows new synapses between neurons in adjacent layers based on geometric
+/// proximity. Only neurons within growth_radius of each other are candidates.
+///
+/// GROUP BOUNDARY GATE: synapses are never grown between neurons belonging
+/// to different task groups. This keeps each task group a closed subgraph
+/// internally — cross-task interference can only occur through the shared
+/// output layer, which is intentional and controlled.
+///
+/// Neurons with group_id=None (input layer, output layer, ungrouped hidden)
+/// are exempt from the gate and can form synapses freely.
 pub fn grow_synapses(
     neurons: &mut HashMap<NeuronId, Neuron>,
     config: &EnvironmentConfig,
@@ -14,12 +25,17 @@ pub fn grow_synapses(
     let positions: HashMap<NeuronId, Vec3> = neurons
         .iter().map(|(id, n)| (*id, n.geometry)).collect();
 
+    // Snapshot group_ids for gate check — avoids borrow conflict inside loop
+    let group_ids: HashMap<NeuronId, Option<GroupId>> = neurons
+        .iter().map(|(&id, n)| (id, n.group_id)).collect();
+
     let mut formed = 0;
 
     for &id in &ids {
         let synapse_count = neurons[&id].synapses.len();
         let over_budget   = neurons[&id].over_budget();
         let src_layer     = *layer_of.get(&id).unwrap_or(&usize::MAX);
+        let src_group     = group_ids[&id];
 
         if synapse_count >= config.max_synapses_per_neuron || over_budget { continue; }
 
@@ -28,7 +44,18 @@ pub fn grow_synapses(
         let mut candidates: Vec<(NeuronId, f32)> = ids.iter()
             .filter(|&&other| {
                 let tgt_layer = *layer_of.get(&other).unwrap_or(&usize::MAX);
-                other != id && tgt_layer == src_layer + 1
+                if other == id || tgt_layer != src_layer + 1 { return false; }
+
+                // GROUP BOUNDARY GATE
+                // Block cross-group connections when both neurons have an assigned group.
+                // Neurons without a group (input/output) can connect freely.
+                let tgt_group = group_ids[&other];
+                match (src_group, tgt_group) {
+                    (Some(g1), Some(g2)) if g1 != g2 => return false,
+                    _ => {}
+                }
+
+                true
             })
             .map(|&other| (other, pos.distance(&positions[&other])))
             .filter(|(_, dist)| *dist < config.growth_radius)
@@ -77,7 +104,7 @@ pub fn prune_three_phase(
         // Without this, KWTA losers accumulate low facilitation → all synapses
         // pruned → neuron permanently disconnected → zero gradient → dead weight.
         // A neuron with 1 synapse can still learn; a neuron with 0 cannot recover.
-        let min_synapses = 2; // keep at least 2 — 1 risks single-point-of-failure
+        let min_synapses = 2;
         if neuron.synapses.len() <= min_synapses { continue; }
 
         neuron.synapses.retain(|s| {
@@ -121,38 +148,22 @@ pub fn prune_three_phase(
 /// Biological analog: LTP consolidation. Synapses with high activity grow
 /// larger dendritic spines and insert more AMPA receptors, increasing their
 /// influence on postsynaptic firing.
-///
-/// Effect on layer-2 collapse: active layer1→layer2 synapses get stronger
-/// over time, increasing the signal layer-2 neurons receive, which stabilises
-/// their gradient and prevents the death spiral into large negative bias.
-///
-/// Called after prune_three_phase, same prune_interval cadence.
 pub fn potentiate_active_synapses(
     neurons: &mut HashMap<NeuronId, Neuron>,
     config: &EnvironmentConfig,
-    output_protected: &HashSet<NeuronId>,
+    _output_protected: &HashSet<NeuronId>,
 ) {
     if config.facilitation_bonus <= 0.0 { return; }
 
-    // Consolidation threshold: 50% above the mid-phase floor
-    // Synapses that merely survived pruning aren't boosted — only those
-    // with genuinely high activity history (facilitation well above baseline)
     let high_facilitation = config.prune_mid_facilitation_floor * 1.5;
 
     for neuron in neurons.values_mut() {
         for syn in neuron.synapses.iter_mut() {
-            // Only potentiate mature synapses (past phase-1 window)
-            // and only those with strong activity history
             if syn.age >= config.prune_early_age
                 && syn.facilitation > high_facilitation
             {
-                // Bonus is proportional to facilitation above threshold
-                // so more active synapses grow faster — not a flat bump
                 let excess = (syn.facilitation - high_facilitation).min(1.0);
                 let bonus = config.facilitation_bonus * excess;
-
-                // Output-protected synapses get the bonus too — they're
-                // structurally important and should be able to strengthen
                 syn.strength = (syn.strength.abs() + bonus)
                     .min(5.0)
                     * syn.strength.signum();
@@ -160,6 +171,7 @@ pub fn potentiate_active_synapses(
         }
     }
 }
+
 pub fn prune_dormant_synapses(
     neurons: &mut HashMap<NeuronId, Neuron>,
     min_age: u32,

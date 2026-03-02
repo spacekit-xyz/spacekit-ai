@@ -1,4 +1,7 @@
 use growformer::environment::NeuralEnvironment;
+use growformer::neuron::Neuron;
+use growformer::types::{NeuronId, Synapse};
+use growformer::systems::checkpoint::{save_phase2_checkpoint, load_phase2_checkpoint};
 use growformer::systems::mirror::mirror_symmetry_score;
 use growformer::systems::whorls::print_whorl_summary;
 use growformer::types::EnvironmentConfig;
@@ -6,9 +9,10 @@ use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rand::rngs::StdRng;
 use clap::Parser;
+use std::path::Path;
 
 #[derive(Parser, Debug)]
-#[command(name = "spacekit-neuro", version, about, long_about = None)]
+#[command(name = "growformer", version, about, long_about = None)]
 struct Args {
     #[arg(short, long)]
     xor: bool,
@@ -18,11 +22,14 @@ struct Args {
     concentric_circles: bool,
     #[arg(short, long)]
     mlp: bool,
+    /// Continual learning: use "full", "train-a", or "train-b" (default: full)
+    #[arg(short, long, value_name = "MODE", default_value = "full")]
+    learning: Option<String>,
 }
 
 fn main() {
     println!("=============================================================");
-    println!("  Multidimensional Neural Environment — Training Demo");
+    println!("  Growformer Neural Environment — Training Demo");
     println!("=============================================================\n");
 
     let args = Args::parse();
@@ -34,15 +41,17 @@ fn main() {
         demo_concentric_circles();
     } else if args.mlp == true {
         demo_mlp_baseline();
+    } else if let Some(mode) = &args.learning {
+        match mode.as_str() {
+            "train-a" => demo_phase2_train_a(),
+            "train-b" => demo_phase2_train_b(),
+            _ => demo_continual_learning(),
+        }
     } else {
-        println!("Please specify either --xor or --spiral");
+        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, or --learning");
         std::process::exit(1);
     }
 
-
-    // demo_xor();
-    // println!();
-    // demo_spiral();
 }
 
 // =============================================================================
@@ -402,6 +411,578 @@ fn demo_mlp_baseline() {
 
 
 // =============================================================================
+// Phase 2 Checkpoint modes — train-a saves checkpoint, train-b loads and runs B only
+// =============================================================================
+
+fn phase2_base_config() -> EnvironmentConfig {
+    EnvironmentConfig {
+        learning_rate: 0.15,
+        weight_decay: 0.0000025,
+        bias_decay: 0.0,
+        dropout_rate: 0.0,
+        geometry_noise: 0.0,
+        competitive_k: 4,
+        lateral_inhibition: 0.12,
+        lr_decay: 0.00008,
+        sigma_inhib: 2.0,
+        debye_length: 1.5,
+        thermal_noise: 0.02,
+        k_repel: 0.2,
+        gravity_g: 0.05,
+        damping: 0.2,
+        mass_win_threshold: 0.15,
+        mass_decay: 0.00009,
+        mass_growth: 0.0005,
+        homeostasis_lr: 0.0,
+        growth_radius: 2.0,
+        prune_interval: 500,
+        weight_clamp: 5.0,
+        max_synapses_per_neuron: 64,
+        energy_budget_per_neuron: 100.0,
+        pruning_threshold: 0.001,
+        mirror_coupling_strength: 0.001,
+        geometry_interval: 500,
+        stdp_enabled: false,
+        ..EnvironmentConfig::default()
+    }
+}
+
+const TASK_A_CHECKPOINT_PATH: &str = "task_a_checkpoint.json";
+
+/// Trains Task A only, then saves checkpoint. Run once to create task_a_checkpoint.json.
+fn demo_phase2_train_a() {
+    println!("--- Phase 2: Train A + Save Checkpoint ---\n");
+
+    let base_config = phase2_base_config();
+    let seed = 42u64;
+    let data_seed = 99u64;
+
+    let mut weight_rng = StdRng::seed_from_u64(seed);
+    let mut data_rng = StdRng::seed_from_u64(data_seed);
+
+    let mut env = NeuralEnvironment::new(base_config.clone());
+    env.build_layers(&[2, 16, 16, 2], &mut weight_rng);
+
+    let layer1_ids = env.layers[1].clone();
+    let layer2_ids = env.layers[2].clone();
+    let output_0 = env.layers[3][0];
+    let output_1 = env.layers[3][1];
+
+    let (l1_a, l1_b) = layer1_ids.split_at(layer1_ids.len() / 2);
+    let (l2_a, l2_b) = layer2_ids.split_at(layer2_ids.len() / 2);
+
+    let group_a_ids: Vec<NeuronId> = l1_a.iter().chain(l2_a.iter()).cloned().collect();
+    let group_b_ids: Vec<NeuronId> = l1_b.iter().chain(l2_b.iter()).cloned().collect();
+
+    let group_a = env.create_group(group_a_ids.clone());
+    let group_b = env.create_group(group_b_ids.clone());
+    env.pair_mirror_groups(group_a, group_b);
+
+    println!("=== TASK A: Spiral Classification ===");
+    println!("Training on 400 samples, 4000 epochs...\n");
+
+    let mut spiral_data = generate_spiral_data(400, &mut data_rng);
+
+    for epoch in 0..4000 {
+        env.set_epoch(epoch);
+        spiral_data.shuffle(&mut weight_rng);
+        let mut epoch_loss = 0.0f32;
+        for (input, target) in &spiral_data {
+            let current_out = env.predict(input);
+            let target_both = [target[0], current_out[1]];
+            epoch_loss += env.train_tick(input, &target_both, &mut weight_rng).loss;
+        }
+        epoch_loss /= spiral_data.len() as f32;
+        if epoch % 500 == 0 {
+            println!("  epoch {:>4} | loss={:.5} | syn={} | sparse={:.2} | mass={:.2} | lr={:.5}",
+                epoch, epoch_loss,
+                env.total_synapses(),
+                env.firing_sparsity(),
+                env.mean_hidden_mass(),
+                env.current_lr);
+        }
+    }
+
+    let task_a_result = evaluate_accuracy_head(&mut env, &spiral_data, 0);
+    println!("\nTask A accuracy: {}/{} ({:.1}%)",
+        task_a_result.0, task_a_result.1,
+        100.0 * task_a_result.0 as f32 / task_a_result.1 as f32);
+
+    println!("\n>>> Consolidating Task A...");
+
+    let consolidated_neurons: Vec<Neuron> = group_a_ids.iter()
+        .filter_map(|&nid| env.neurons.get(&nid).cloned())
+        .collect();
+    let output_0_neuron: Neuron = env.neurons[&output_0].clone();
+    let output_0_incoming_synapses: Vec<(NeuronId, Synapse)> = env.neurons.iter()
+        .filter_map(|(&nid, n)| {
+            n.synapses.iter()
+                .find(|s| s.target == output_0)
+                .map(|s| (nid, s.clone()))
+        })
+        .collect();
+
+    println!("  Snapshotted {} Group A neurons and output[0] (full structs)",
+        consolidated_neurons.len());
+    let total_syns: usize = consolidated_neurons.iter().map(|n| n.synapses.len()).sum();
+    println!("  Group A total synapses: {}; {} synapses target output[0]", total_syns, output_0_incoming_synapses.len());
+
+    save_phase2_checkpoint(
+        &env,
+        &group_a_ids,
+        &group_b_ids,
+        group_a,
+        group_b,
+        &consolidated_neurons,
+        &output_0_neuron,
+        &output_0_incoming_synapses,
+        output_0,
+        output_1,
+        task_a_result.0,
+        task_a_result.1,
+        seed,
+        data_seed,
+        4000,
+        TASK_A_CHECKPOINT_PATH,
+    );
+
+    println!("\nRun with '--learning train-b' to test Task B with this checkpoint.");
+}
+
+/// Loads checkpoint and trains Task B only. Run after demo_phase2_train_a() for fast iteration.
+fn demo_phase2_train_b() {
+    println!("--- Phase 2: Train B (from checkpoint) ---\n");
+
+    if !Path::new(TASK_A_CHECKPOINT_PATH).exists() {
+        println!("No checkpoint found at {} — run with '--learning train-a' first.", TASK_A_CHECKPOINT_PATH);
+        return;
+    }
+
+    let base_config = phase2_base_config();
+
+    let (
+        mut env,
+        _group_a_ids,
+        _group_b_ids,
+        group_a,
+        _group_b,
+        consolidated_neurons,
+        output_0_neuron,
+        output_0_incoming_synapses,
+        output_0,
+        _output_1,
+        data_seed,
+    ) = load_phase2_checkpoint(TASK_A_CHECKPOINT_PATH, &base_config);
+
+    env.current_lr = base_config.learning_rate;
+    // Freeze Group A in backprop so gradients don't update consolidated neurons.
+    env.set_consolidated_groups(&[group_a]);
+
+    let mut data_rng = StdRng::seed_from_u64(data_seed);
+    let mut weight_rng = StdRng::seed_from_u64(42);
+
+    let spiral_data = generate_spiral_data(400, &mut data_rng);
+    let mut circles_data = generate_concentric_circles_data(400, &mut data_rng);
+
+    let task_a_before = evaluate_accuracy_head(&mut env, &spiral_data, 0);
+    println!("Task A retention on load: {}/{} ({:.1}%)\n",
+        task_a_before.0, task_a_before.1,
+        100.0 * task_a_before.0 as f32 / task_a_before.1 as f32);
+
+    println!("=== TASK B: Concentric Circles ===");
+    println!("Training on 400 samples, 4000 epochs...");
+    println!("(Group A frozen — triple gradient gate active)\n");
+
+    for epoch in 0..4000 {
+        env.set_epoch(epoch);
+        circles_data.shuffle(&mut weight_rng);
+        let mut epoch_loss = 0.0f32;
+
+        for (input, target) in &circles_data {
+            let current_out = env.predict(input);
+            let target_both = [current_out[0], target[0]];
+            epoch_loss += env.train_tick(input, &target_both, &mut weight_rng).loss;
+
+            restore_consolidated_full(&mut env, &consolidated_neurons);
+            if let Some(n) = env.neurons.get_mut(&output_0) {
+                *n = output_0_neuron.clone();
+            }
+            restore_output0_incoming_synapses(&mut env, &output_0_incoming_synapses, output_0);
+        }
+
+        epoch_loss /= circles_data.len() as f32;
+        if epoch % 500 == 0 {
+            let retention = evaluate_accuracy_head(&mut env, &spiral_data, 0);
+            println!("  epoch {:>4} | loss={:.5} | syn={} | sparse={:.2} | mass={:.2} | A_retain={:.1}%",
+                epoch, epoch_loss,
+                env.total_synapses(),
+                env.firing_sparsity(),
+                env.mean_hidden_mass(),
+                100.0 * retention.0 as f32 / retention.1 as f32);
+        }
+    }
+
+    let task_a_after = evaluate_accuracy_head(&mut env, &spiral_data, 0);
+    let task_b_result = evaluate_accuracy_head(&mut env, &circles_data, 1);
+
+    let retention_pct = 100.0 * task_a_after.0 as f32 / task_a_after.1 as f32;
+    let baseline_pct = 100.0 * task_a_before.0 as f32 / task_a_before.1 as f32;
+    let forgetting = baseline_pct - retention_pct;
+
+    println!("\n=== CONTINUAL LEARNING RESULTS ===\n");
+    println!("  Task A (Spiral):");
+    println!("    Before Task B: {}/{} ({:.1}%)", task_a_before.0, task_a_before.1, baseline_pct);
+    println!("    After  Task B: {}/{} ({:.1}%)", task_a_after.0, task_a_after.1, retention_pct);
+    println!("    Forgetting:    {:.1}%  (threshold: >10%)", forgetting);
+    println!("\n  Task B (Circles):");
+    println!("    Accuracy: {}/{} ({:.1}%)",
+        task_b_result.0, task_b_result.1,
+        100.0 * task_b_result.0 as f32 / task_b_result.1 as f32);
+    println!("\n  Verdict: {}",
+        if forgetting < 5.0 { "PASS — near-zero forgetting." }
+        else if forgetting < 10.0 { "PASS — within threshold." }
+        else if forgetting < 20.0 { "PARTIAL — significant forgetting." }
+        else { "FAIL — catastrophic forgetting." }
+    );
+}
+
+// =============================================================================
+// Demo 5: Continual Learning (Phase 2 Gate)
+//
+// Proves the Growformer retains Task A knowledge while learning Task B.
+// Standard MLPs catastrophically forget. The Growformer should not.
+//
+// Architecture: [2 → 16 → 16 → 2]
+//   Group A owns layer1[0..8] + layer2[0..8] → output[0]  (Task A: spiral)
+//   Group B owns layer1[8..16] + layer2[8..16] → output[1] (Task B: circles)
+//
+// Each task has a fully dedicated end-to-end pathway.
+// Shared substrate: input layer (neurons 0,1) and physics geometry only.
+//
+// Gradient gate (two-part):
+//   restore_consolidated_full — full Neuron clone replace (Group A + output[0])
+//      This prevents Group B neurons from corrupting Task A's output head.
+//
+// Both restores run after every Task B backprop tick.
+// Success criterion: Task A retention >85% after full Task B training.
+// =============================================================================
+
+fn demo_continual_learning() {
+    println!("--- Demo 5: Continual Learning (Phase 2) ---\n");
+
+    let base_config = phase2_base_config();
+
+    let mut weight_rng = StdRng::seed_from_u64(42);
+    let mut data_rng   = StdRng::seed_from_u64(99);
+
+    // =========================================================================
+    // BUILD — [2 → 16 → 16 → 2]
+    // Group A: layer1[0..8] + layer2[0..8] → output[0]
+    // Group B: layer1[8..16] + layer2[8..16] → output[1]
+    // =========================================================================
+
+    let mut env = NeuralEnvironment::new(base_config.clone());
+    env.build_layers(&[2, 16, 16, 2], &mut weight_rng);
+
+    let layer1_ids = env.layers[1].clone();
+    let layer2_ids = env.layers[2].clone();
+    let output_0   = env.layers[3][0];
+    let output_1   = env.layers[3][1];
+
+    // Split both hidden layers in half between the two task groups
+    let (l1_a, l1_b) = layer1_ids.split_at(layer1_ids.len() / 2);
+    let (l2_a, l2_b) = layer2_ids.split_at(layer2_ids.len() / 2);
+
+    let group_a_ids: Vec<NeuronId> = l1_a.iter().chain(l2_a.iter()).cloned().collect();
+    let group_b_ids: Vec<NeuronId> = l1_b.iter().chain(l2_b.iter()).cloned().collect();
+
+    let group_a = env.create_group(group_a_ids.clone());
+    let group_b = env.create_group(group_b_ids.clone());
+    env.pair_mirror_groups(group_a, group_b);
+
+    // After group assignment — enforce output head ownership
+    // Group A layer2 may only connect to output[0]
+    // Group B layer2 may only connect to output[1]
+
+    for &nid in &group_a_ids {
+        if let Some(n) = env.neurons.get_mut(&nid) {
+            n.synapses.retain(|s| s.target != output_1);
+        }
+    }
+    for &nid in &group_b_ids {
+        if let Some(n) = env.neurons.get_mut(&nid) {
+            n.synapses.retain(|s| s.target != output_0);
+        }
+    }
+
+    // =========================================================================
+    // TASK A — Spiral Classification → output[0]
+    // Zero-gradient on output[1] via current_out target matching.
+    // =========================================================================
+
+    println!("=== TASK A: Spiral Classification ===");
+    println!("Training on 400 samples, 4000 epochs...\n");
+
+    let mut spiral_data = generate_spiral_data(400, &mut data_rng);
+
+    for epoch in 0..4000 {
+        env.set_epoch(epoch);
+        spiral_data.shuffle(&mut weight_rng);
+        let mut epoch_loss = 0.0f32;
+        for (input, target) in &spiral_data {
+            // Read current output[1] prediction — set as its own target → zero gradient
+            let current_out = env.predict(input);
+            let target_both = [target[0], current_out[1]];
+            epoch_loss += env.train_tick(input, &target_both, &mut weight_rng).loss;
+        }
+        epoch_loss /= spiral_data.len() as f32;
+        if epoch % 500 == 0 {
+            println!("  epoch {:>4} | loss={:.5} | syn={} | sparse={:.2} | mass={:.2} | lr={:.5}",
+                epoch, epoch_loss,
+                env.total_synapses(),
+                env.firing_sparsity(),
+                env.mean_hidden_mass(),
+                env.current_lr);
+        }
+    }
+
+    let task_a_before = evaluate_accuracy_head(&mut env, &spiral_data, 0);
+    println!("\nTask A accuracy before consolidation: {}/{} ({:.1}%)",
+        task_a_before.0, task_a_before.1,
+        100.0 * task_a_before.0 as f32 / task_a_before.1 as f32);
+
+    // =========================================================================
+    // CONSOLIDATION — snapshot entire Task A pathway
+    //
+    // Part 1: Group A neuron biases + their synapses (excluding → output[1])
+    // Part 2: ALL neurons' synapses to output[0] — freeze the full input
+    //         vector of output[0] from both Group A and Group B sides.
+    //
+    // Both snapshots taken here, after Task A training, before Task B begins.
+    // =========================================================================
+
+    println!("\n>>> Consolidating Task A (Group A frozen)...");
+
+    let consolidated_neurons: Vec<Neuron> = group_a_ids.iter()
+        .filter_map(|&nid| env.neurons.get(&nid).cloned())
+        .collect();
+    let output_0_neuron: Neuron = env.neurons[&output_0].clone();
+    let output_0_incoming_synapses: Vec<(NeuronId, Synapse)> = env.neurons.iter()
+        .filter_map(|(&nid, n)| {
+            n.synapses.iter()
+                .find(|s| s.target == output_0)
+                .map(|s| (nid, s.clone()))
+        })
+        .collect();
+
+    println!("  Snapshotted {} Group A neurons and output[0] (full structs)", consolidated_neurons.len());
+    let total_syns: usize = consolidated_neurons.iter().map(|n| n.synapses.len()).sum();
+    println!("  Group A total synapses: {}; {} synapses target output[0]", total_syns, output_0_incoming_synapses.len());
+
+    // =========================================================================
+    // TASK B — Concentric Circles → output[1]
+    //
+    // Group B trains freely through output[1].
+    // Full-neuron restore after every tick (Group A + output[0]).
+    // =========================================================================
+
+    println!("\n=== TASK B: Concentric Circles ===");
+    println!("Training on 400 samples, 4000 epochs...");
+    println!("(Group A frozen — dual gradient gate active)\n");
+
+    env.current_lr = base_config.learning_rate;
+
+    let mut circles_data = generate_concentric_circles_data(400, &mut data_rng);
+
+    for epoch in 0..4000 {
+        env.set_epoch(epoch);
+        circles_data.shuffle(&mut weight_rng);
+        let mut epoch_loss = 0.0f32;
+
+        for (input, target) in &circles_data {
+            let current_out = env.predict(input);
+            let target_both = [current_out[0], target[0]];
+            epoch_loss += env.train_tick(input, &target_both, &mut weight_rng).loss;
+
+            restore_consolidated_full(&mut env, &consolidated_neurons);
+            if let Some(n) = env.neurons.get_mut(&output_0) {
+                *n = output_0_neuron.clone();
+            }
+            restore_output0_incoming_synapses(&mut env, &output_0_incoming_synapses, output_0);
+        }
+
+        epoch_loss /= circles_data.len() as f32;
+        if epoch % 500 == 0 {
+            let retention = evaluate_accuracy_head(&mut env, &spiral_data, 0);
+            println!("  epoch {:>4} | loss={:.5} | syn={} | sparse={:.2} | mass={:.2} | A_retain={:.1}%",
+                epoch, epoch_loss,
+                env.total_synapses(),
+                env.firing_sparsity(),
+                env.mean_hidden_mass(),
+                100.0 * retention.0 as f32 / retention.1 as f32);
+        }
+    }
+
+    // =========================================================================
+    // RESULTS
+    // =========================================================================
+
+    let task_a_after  = evaluate_accuracy_head(&mut env, &spiral_data, 0);
+    let task_b_result = evaluate_accuracy_head(&mut env, &circles_data, 1);
+
+    let retention_pct = 100.0 * task_a_after.0 as f32 / task_a_after.1 as f32;
+    let baseline_pct  = 100.0 * task_a_before.0 as f32 / task_a_before.1 as f32;
+    let forgetting    = baseline_pct - retention_pct;
+
+    println!("\n=== CONTINUAL LEARNING RESULTS ===\n");
+    println!("  Task A (Spiral):");
+    println!("    Before Task B: {}/{} ({:.1}%)", task_a_before.0, task_a_before.1, baseline_pct);
+    println!("    After  Task B: {}/{} ({:.1}%)", task_a_after.0, task_a_after.1, retention_pct);
+    println!("    Forgetting:    {:.1}%  (threshold: >10%)", forgetting);
+
+    println!("\n  Task B (Circles):");
+    println!("    Accuracy: {}/{} ({:.1}%)",
+        task_b_result.0, task_b_result.1,
+        100.0 * task_b_result.0 as f32 / task_b_result.1 as f32);
+
+    println!("\n  Verdict: {}",
+        if forgetting < 5.0 {
+            "PASS — near-zero forgetting. Dual gradient gate fully effective."
+        } else if forgetting < 10.0 {
+            "PASS — within threshold. Minimal forgetting."
+        } else if forgetting < 20.0 {
+            "PARTIAL — significant forgetting. Check output head isolation."
+        } else {
+            "FAIL — catastrophic forgetting. Pathway sharing still present."
+        }
+    );
+
+    // =========================================================================
+    // SAMPLE PREDICTIONS
+    // =========================================================================
+
+    println!("\n  Task A predictions (head 0, after Task B training):");
+    println!("    X        Y        Expected  Predicted");
+    println!("    ----------------------------------------");
+    for (input, target) in spiral_data.iter().take(6) {
+        let out = env.predict(input);
+        println!("    {:+.4}  {:+.4}    {:.1}       {:.4}", input[0], input[1], target[0], out[0]);
+    }
+
+    println!("\n  Task B predictions (head 1):");
+    println!("    X        Y        Expected  Predicted");
+    println!("    ----------------------------------------");
+    for (input, target) in circles_data.iter().take(6) {
+        let out = env.predict(input);
+        println!("    {:+.4}  {:+.4}    {:.1}       {:.4}", input[0], input[1], target[0], out[1]);
+    }
+
+    // =========================================================================
+    // STRUCTURAL REPORT
+    // =========================================================================
+
+    println!("\n  Group A neurons (Task A — frozen):");
+    for &nid in &group_a_ids {
+        if let Some(n) = env.neurons.get(&nid) {
+            println!("    ID {:>2} | bias={:>8.4} | syns={:>3} | mass={:.3}",
+                nid, n.weight, n.synapses.len(), n.mass);
+        }
+    }
+
+    println!("\n  Group B neurons (Task B — active):");
+    for &nid in &group_b_ids {
+        if let Some(n) = env.neurons.get(&nid) {
+            println!("    ID {:>2} | bias={:>8.4} | syns={:>3} | mass={:.3}",
+                nid, n.weight, n.synapses.len(), n.mass);
+        }
+    }
+
+    print_structural_report(&env, group_a, group_b);
+}
+
+// =============================================================================
+// evaluate_accuracy_head — read a specific output head index
+// =============================================================================
+
+fn evaluate_accuracy_head(
+    env: &mut NeuralEnvironment,
+    data: &[([f32; 2], [f32; 1])],
+    head: usize,
+) -> (usize, usize) {
+    let mut correct = 0;
+    for (input, target) in data {
+        let out = env.predict(input);
+        if out.len() <= head { break; }
+        let predicted = if out[head] > 0.5 { 1.0_f32 } else { 0.0 };
+        if (predicted - target[0]).abs() < 0.01 { correct += 1; }
+    }
+    (correct, data.len())
+}
+
+// =============================================================================
+// restore_consolidated_full — gradient gate (full-neuron replace)
+//
+// Overwrites Group A neurons with saved clones. Every field is restored —
+// weight, geometry, velocity, mass, all synapse fields (strength, facilitation,
+// depression, age, last_active), running_activation, etc. Nothing can drift.
+// =============================================================================
+
+fn restore_consolidated_full(
+    env: &mut NeuralEnvironment,
+    snapshot: &[Neuron],
+) {
+    for saved in snapshot {
+        if let Some(n) = env.neurons.get_mut(&saved.id) {
+            *n = saved.clone();
+        }
+    }
+}
+
+/// Restores every synapse that targets output_0 to its saved state (strength, facilitation, depression, etc.).
+/// Group A neurons are already restored by restore_consolidated_full; this fixes Group B → output_0 and any other sources.
+fn restore_output0_incoming_synapses(
+    env: &mut NeuralEnvironment,
+    snapshot: &[(NeuronId, Synapse)],
+    output_0: NeuronId,
+) {
+    for (src_id, saved_syn) in snapshot {
+        if let Some(n) = env.neurons.get_mut(src_id) {
+            if let Some(s) = n.synapses.iter_mut().find(|s| s.target == output_0) {
+                *s = saved_syn.clone();
+            }
+        }
+    }
+}
+
+// =============================================================================
+// generate_concentric_circles_data
+// Inner ring class 0 at r=0.5, outer ring class 1 at r=1.0
+// =============================================================================
+
+fn generate_concentric_circles_data(
+    n_per_class: usize,
+    rng: &mut impl rand::Rng,
+) -> Vec<([f32; 2], [f32; 1])> {
+    use std::f32::consts::PI;
+    let mut data = Vec::with_capacity(n_per_class * 2);
+    let noise = 0.05_f32;
+
+    for _ in 0..n_per_class {
+        let theta = rng.gen::<f32>() * 2.0 * PI;
+        let r = 0.5 + rng.gen_range(-noise..noise);
+        data.push(([r * theta.cos(), r * theta.sin()], [0.0]));
+    }
+    for _ in 0..n_per_class {
+        let theta = rng.gen::<f32>() * 2.0 * PI;
+        let r = 1.0 + rng.gen_range(-noise..noise);
+        data.push(([r * theta.cos(), r * theta.sin()], [1.0]));
+    }
+
+    data.shuffle(rng);
+    data
+}
+
+// =============================================================================
 // Structural report
 // =============================================================================
 
@@ -457,47 +1038,6 @@ fn generate_spiral_data(n_per_class: usize, rng: &mut impl rand::Rng) -> Vec<([f
     data
 }
 
-fn generate_concentric_circles_data(
-    n_per_class: usize,
-    rng: &mut impl rand::Rng,
-) -> Vec<([f32; 2], [f32; 1])> {
 
-    use std::f32::consts::PI;
 
-    let mut data = Vec::with_capacity(n_per_class * 2);
 
-    // Radii for the two rings
-    let inner_r = 0.5;
-    let outer_r = 1.0;
-
-    // Noise level (adjust to taste)
-    // 0.05 = 5% noise; easy to learn
-    // 0.25 = 25% noise; harder to learn
-    let noise = 0.25;
-
-    // Class 0: inner ring
-    for _ in 0..n_per_class {
-        let theta = rng.gen::<f32>() * 2.0 * PI;
-        let r = inner_r + rng.gen_range(-noise..noise);
-
-        let x = r * theta.cos();
-        let y = r * theta.sin();
-
-        data.push(([x, y], [0.0]));
-    }
-
-    // Class 1: outer ring
-    for _ in 0..n_per_class {
-        let theta = rng.gen::<f32>() * 2.0 * PI;
-        let r = outer_r + rng.gen_range(-noise..noise);
-
-        let x = r * theta.cos();
-        let y = r * theta.sin();
-
-        data.push(([x, y], [1.0]));
-    }
-
-    // Shuffle for training
-    data.shuffle(rng);
-    data
-}

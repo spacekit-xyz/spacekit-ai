@@ -27,6 +27,10 @@ pub struct NeuralEnvironment {
     output_ids: HashSet<NeuronId>,
     input_ids: HashSet<NeuronId>,   // neurons in input layer — their outgoing synapses are protected
 
+    /// Group IDs that must receive zero gradient (continual learning: consolidated tasks).
+    /// Set by Brain before each train_tick so backprop does not update these neurons' weights/synapses.
+    consolidated_group_ids: HashSet<GroupId>,
+
     /// Current effective learning rate — starts at config.learning_rate,
     /// annealed each epoch via set_epoch() when lr_decay > 0.
     pub current_lr: f32,
@@ -48,8 +52,15 @@ impl NeuralEnvironment {
             dropout_mask: HashMap::new(),
             output_ids: HashSet::new(),
             input_ids: HashSet::new(),
+            consolidated_group_ids: HashSet::new(),
             current_lr: lr,
         }
+    }
+
+    /// Set which groups receive zero gradient in backprop (consolidated / frozen tasks).
+    /// Call before each train_tick when using continual learning.
+    pub fn set_consolidated_groups(&mut self, ids: &[GroupId]) {
+        self.consolidated_group_ids = ids.iter().copied().collect();
     }
 
     /// Current simulation tick (number of steps run).
@@ -414,7 +425,9 @@ impl NeuralEnvironment {
             let delta = (o - t) * o * (1.0 - o);
             deltas.insert(nid, delta);
             if let Some(n) = self.neurons.get_mut(&nid) {
-                let upd = (self.current_lr * delta).clamp(-1.0, 1.0);
+                let is_consolidated = n.group_id.map_or(false, |gid| self.consolidated_group_ids.contains(&gid));
+                let eff_lr = if is_consolidated { 0.0 } else { self.current_lr };
+                let upd = (eff_lr * delta).clamp(-1.0, 1.0);
                 n.weight = (n.weight * (1.0 - self.config.bias_decay) - upd).clamp(-self.config.weight_clamp, self.config.weight_clamp);
             }
         }
@@ -447,6 +460,8 @@ impl NeuralEnvironment {
 
                     let clipped = (tgt_delta * src_act).clamp(-1.0, 1.0);
                     if let Some(n) = self.neurons.get_mut(&src_id) {
+                        let is_consolidated = n.group_id.map_or(false, |gid| self.consolidated_group_ids.contains(&gid));
+                        let eff_lr = if is_consolidated { 0.0 } else { self.current_lr };
                         for syn in n.synapses.iter_mut() {
                             if syn.target == *tgt_id {
                                 // Uniform weight clamp for all synapses.
@@ -454,7 +469,7 @@ impl NeuralEnvironment {
                                 // caused neuron death at 54.4% accuracy. Removed.
                                 let strength_cap = self.config.weight_clamp;
                                 syn.strength = (syn.strength * (1.0 - self.config.weight_decay)
-                                    - self.current_lr * clipped)
+                                    - eff_lr * clipped)
                                     .clamp(-strength_cap, strength_cap);
                                 // Mark as active if it carried a non-trivial gradient.
                                 // Used by phase-3 pruning to distinguish dormant from active.
@@ -470,8 +485,10 @@ impl NeuralEnvironment {
                     let delta = (grad_sum * src_act * (1.0 - src_act)).clamp(-1.0, 1.0);
                     prev_deltas.insert(src_id, delta);
                     if let Some(n) = self.neurons.get_mut(&src_id) {
+                        let is_consolidated = n.group_id.map_or(false, |gid| self.consolidated_group_ids.contains(&gid));
+                        let eff_lr = if is_consolidated { 0.0 } else { self.current_lr };
                         n.weight = (n.weight * (1.0 - self.config.bias_decay)
-                            - self.current_lr * delta)
+                            - eff_lr * delta)
                             .clamp(-self.config.weight_clamp, self.config.weight_clamp);
                     }
                 } else {

@@ -28,7 +28,7 @@ pub fn detect_whorls(
 ) -> Vec<WhorlReport> {
     let mut reports = Vec::new();
 
-    for (&start_id, start_neuron) in neurons {
+    for (&start_id, _start_neuron) in neurons {
         let cycles = find_cycles_from(neurons, start_id, 8); // max depth 8
 
         for cycle in cycles {

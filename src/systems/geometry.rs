@@ -27,6 +27,12 @@ use std::collections::HashMap;
 /// 4. VELOCITY DAMPING + THERMAL NOISE — semi-implicit Euler integration.
 ///    v *= (1 - damping), then v += a * dt + noise
 ///
+/// 5. GROUP BOUNDARY REPULSION — neurons belonging to different task groups
+///    receive extra repulsion (3× multiplier), causing task groups to drift
+///    into spatially separated clusters. This prevents cross-task interference
+///    in synapse growth and lateral inhibition.
+///    Neurons with group_id=None are unaffected (input/output layers).
+///
 /// ## Reaction-Diffusion Lateral Inhibition (activation update, called from environment)
 ///
 /// Replaces uniform layer-mean inhibition with spatially-local inhibition:
@@ -63,11 +69,12 @@ pub fn update_geometry(
         }
     }
 
-    // Snapshot: (pos, activation, mass, layer)
-    let snapshot: HashMap<NeuronId, (Vec3, f32, f32, usize)> = neurons.iter()
+    // Snapshot: (pos, activation, mass, layer, group_id)
+    // group_id included so force computation can apply group boundary penalty
+    let snapshot: HashMap<NeuronId, (Vec3, f32, f32, usize, Option<GroupId>)> = neurons.iter()
         .map(|(&id, n)| {
             let layer = *layer_of.get(&id).unwrap_or(&0);
-            (id, (n.geometry, n.activation, n.mass, layer))
+            (id, (n.geometry, n.activation, n.mass, layer, n.group_id))
         })
         .collect();
 
@@ -77,7 +84,7 @@ pub fn update_geometry(
 
     // Parallel force computation
     let forces: Vec<(NeuronId, Vec3)> = snapshot.par_iter()
-        .map(|(&id, &(pos, act, mass, layer))| {
+        .map(|(&id, &(pos, act, mass, layer, group_id))| {
             let centroid = layer_centroids.get(layer).copied().unwrap_or(Vec3::zero());
             let mut f = Vec3::zero();
 
@@ -87,18 +94,27 @@ pub fn update_geometry(
             f = f + to_centroid * (config.gravity_g * mass / dist_to_centroid);
 
             // --- Force 2: Debye-screened same-layer repulsion ---
-            // No hard cutoff — force decays exponentially beyond debye_length.
-            // Only skip neurons farther than 4× debye_length (negligible contribution).
+            // Group boundary: neurons from different task groups repel 3× harder,
+            // causing task groups to self-organise into spatially separate clusters.
+            // Only applies when both neurons have an assigned group (not input/output).
             let max_repulsion_dist = config.debye_length * 4.0;
-            for (&other_id, &(other_pos, _, other_mass, other_layer)) in snapshot.iter() {
+            for (&other_id, &(other_pos, _, other_mass, other_layer, other_group)) in snapshot.iter() {
                 if other_id == id || other_layer != layer { continue; }
                 let diff = pos - other_pos;
                 let dist_sq = diff.magnitude_sq();
                 let dist = dist_sq.sqrt();
                 if dist > max_repulsion_dist { continue; }
+
+                // Group boundary penalty: 3× repulsion between different task groups.
+                // Neurons with no group (input/output, ungrouped hidden) are unaffected.
+                let group_penalty = match (group_id, other_group) {
+                    (Some(g1), Some(g2)) if g1 != g2 => 3.0,
+                    _ => 1.0,
+                };
+
                 // Debye screening: repulsion decays as exp(-dist/lambda_D)
                 let screening = (-dist / config.debye_length).exp();
-                let magnitude = (config.k_repel * mass * other_mass * screening
+                let magnitude = (config.k_repel * mass * other_mass * group_penalty * screening
                     / (dist_sq + 0.01)).min(5.0);
                 f = f + diff * (magnitude / dist.max(0.001));
             }
@@ -106,7 +122,7 @@ pub fn update_geometry(
             // --- Force 3: Hebbian attraction to correlated partners ---
             if let Some(syns) = synapse_snapshot.get(&id) {
                 for &(target_id, syn_cost) in syns {
-                    if let Some(&(target_pos, target_act, _, _)) = snapshot.get(&target_id) {
+                    if let Some(&(target_pos, target_act, _, _, _)) = snapshot.get(&target_id) {
                         let correlation = (act * target_act).max(0.0);
                         if correlation > 0.0 && syn_cost > 0.0 {
                             let diff = target_pos - pos;

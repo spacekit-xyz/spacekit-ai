@@ -1,3 +1,4 @@
+pub mod checkpoint;
 pub mod metabolic;
 pub mod growth;
 pub mod stdp;

@@ -14,7 +14,7 @@ pub fn update_stdp(
     neurons: &mut HashMap<NeuronId, Neuron>,
     pre_id: NeuronId,
     post_id: NeuronId,
-    current_time: f64,
+    _current_time: f64,
     config: &EnvironmentConfig,
 ) {
     let pre_fired = neurons.get(&pre_id).map(|n| n.last_fired).unwrap_or(0.0);
