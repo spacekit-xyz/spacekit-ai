@@ -1,4 +1,5 @@
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 use crate::neuron::Neuron;
@@ -12,6 +13,7 @@ use crate::systems::{
     whorls::{detect_whorls, WhorlReport},
 };
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NeuralEnvironment {
     pub neurons: HashMap<NeuronId, Neuron>,
     pub groups: HashMap<GroupId, NeuronGroup>,
@@ -244,6 +246,16 @@ impl NeuralEnvironment {
                 if syn.target == output_0 {
                     syn.frozen = true;
                 }
+            }
+        }
+    }
+
+    /// Freeze every neuron and synapse (e.g. when promoting a Mirror env to Main).
+    pub fn freeze_all(&mut self) {
+        for n in self.neurons.values_mut() {
+            n.frozen = true;
+            for syn in &mut n.synapses {
+                syn.frozen = true;
             }
         }
     }

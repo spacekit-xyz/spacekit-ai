@@ -1,0 +1,17 @@
+//! Fractal Topology — Main Dimension, Mirror Dimension, Promotion Gate, GlobalObserver.
+//! Phase 3: isolated env per task; no shared substrate.
+
+pub mod embedding;
+pub mod main_dim;
+pub mod mirror_dim;
+pub mod promotion;
+pub mod router;
+pub mod observer;
+pub mod manager;
+
+pub use embedding::{GroupEmbedding, compute_group_embedding, cosine_similarity, retrieve_relevant_groups};
+pub use main_dim::{MainDimension, FrozenGroupEnv};
+pub use mirror_dim::{MirrorDimension, EpochResult};
+pub use promotion::{PromotionGateConfig, PromotionDecision, evaluate_promotion, promote};
+pub use observer::GlobalObserver;
+pub use manager::{DimensionManager, DimensionManagerConfig, GroupSummary, MirrorSummary};

@@ -1,5 +1,6 @@
 use growformer::environment::NeuralEnvironment;
 use growformer::types::NeuronId;
+use growformer::dimension::{DimensionManager, DimensionManagerConfig};
 use growformer::systems::checkpoint::{save_phase2_checkpoint, load_phase2_checkpoint};
 use growformer::systems::mirror::mirror_symmetry_score;
 use growformer::systems::whorls::print_whorl_summary;
@@ -24,6 +25,9 @@ struct Args {
     /// Continual learning: use "full", "train-a", or "train-b" (default: full)
     #[arg(short, long, value_name = "MODE", default_value = "full")]
     learning: Option<String>,
+    /// Phase 3: Fractal Topology — Main + Mirror dimensions, promotion gate
+    #[arg(long)]
+    fractal: bool,
 }
 
 fn main() {
@@ -40,6 +44,8 @@ fn main() {
         demo_concentric_circles();
     } else if args.mlp == true {
         demo_mlp_baseline();
+    } else if args.fractal {
+        demo_fractal_continual_learning();
     } else if let Some(mode) = &args.learning {
         match mode.as_str() {
             "train-a" => demo_phase2_train_a(),
@@ -47,7 +53,7 @@ fn main() {
             _ => demo_continual_learning(),
         }
     } else {
-        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, or --learning");
+        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, or --fractal");
         std::process::exit(1);
     }
 
@@ -619,6 +625,123 @@ fn demo_phase2_train_b() {
         else if forgetting < 20.0 { "PARTIAL — significant forgetting." }
         else { "FAIL — catastrophic forgetting." }
     );
+}
+
+// =============================================================================
+// Demo 6: Fractal Continual Learning (Phase 3)
+// Main Dimension = frozen store only. Mirror Dimension = isolated env per task.
+// =============================================================================
+
+fn demo_fractal_continual_learning() {
+    println!("--- Demo 6: Fractal Continual Learning (Phase 3) ---\n");
+
+    let config = DimensionManagerConfig {
+        mirror_config: phase2_base_config(),
+        mirror_layer_sizes: vec![2, 16, 16, 1],
+        promotion_check_interval: 500,
+        max_concurrent_mirrors: 2,
+        calibration_samples: 100,
+    };
+
+    let mut dm = DimensionManager::new(config);
+    let mut rng = StdRng::seed_from_u64(42);
+    let mut data_rng = StdRng::seed_from_u64(99);
+
+    let spiral_data = generate_spiral_data(400, &mut data_rng);
+    let circles_data = generate_concentric_circles_data(400, &mut data_rng);
+    let calibration_spiral: Vec<_> = spiral_data.iter().take(100).cloned().collect();
+    let calibration_circles: Vec<_> = circles_data.iter().take(100).cloned().collect();
+
+    // === TASK A: Spiral in isolated Mirror ===
+    dm.spawn_mirror("spiral", 42).expect("spawn spiral mirror");
+    println!("=== TASK A: Spiral (Mirror) ===\n");
+
+    for epoch in 0..4000 {
+        let Some(result) = dm.train_mirror_epoch("spiral", &spiral_data, &mut rng) else {
+            break; // mirror was auto-promoted and removed
+        };
+        if epoch % 500 == 0 {
+            println!("  [spiral] epoch {:>4} | loss={:.4} | acc={:.1}%",
+                epoch, result.loss, result.accuracy * 100.0);
+        }
+        if epoch % 500 == 0 {
+            dm.evaluate_promotions(&calibration_spiral);
+            if !dm.mirrors.contains_key("spiral") {
+                break; // auto-promoted
+            }
+        }
+    }
+
+    let spiral_group = if dm.mirrors.contains_key("spiral") {
+        dm.force_promote("spiral", &calibration_spiral).unwrap()
+    } else {
+        *dm.main.group_order.last().unwrap() // already promoted
+    };
+    println!("\nTask A promoted as Group {}\n", spiral_group);
+
+    // === TASK B: Circles in fresh Mirror ===
+    dm.spawn_mirror("circles", 43).expect("spawn circles mirror");
+    println!("=== TASK B: Circles (Mirror) ===\n");
+
+    for epoch in 0..4000 {
+        let Some(result) = dm.train_mirror_epoch("circles", &circles_data, &mut rng) else {
+            break;
+        };
+        if epoch % 500 == 0 {
+            let spiral_retain = dm.evaluate_main_group(spiral_group, &spiral_data);
+            println!("  [circles] epoch {:>4} | loss={:.4} | acc={:.1}% | A_retain={:.1}%",
+                epoch, result.loss, result.accuracy * 100.0, spiral_retain * 100.0);
+        }
+        if epoch % 500 == 0 {
+            dm.evaluate_promotions(&calibration_circles);
+            if !dm.mirrors.contains_key("circles") {
+                break;
+            }
+        }
+    }
+
+    let circles_group = if dm.mirrors.contains_key("circles") {
+        dm.force_promote("circles", &calibration_circles).unwrap()
+    } else {
+        *dm.main.group_order.last().unwrap()
+    };
+    println!("\nTask B promoted as Group {}\n", circles_group);
+
+    // === RESULTS ===
+    let final_spiral = dm.evaluate_main_group(spiral_group, &spiral_data);
+    let final_circles = dm.evaluate_main_group(circles_group, &circles_data);
+    println!("=== RESULTS ===\n");
+    println!("  Task A (Spiral):  {:.1}%", final_spiral * 100.0);
+    println!("  Task B (Circles): {:.1}%", final_circles * 100.0);
+
+    // === INFERENCE (no task label) ===
+    let out_spiral = dm.infer(&[0.3_f32, 0.4]);
+    print_routing("Routed spiral input ", &dm, &out_spiral);
+    let out_circles = dm.infer(&[0.0_f32, 0.9]);
+    print_routing("Routed circles input", &dm, &out_circles);
+}
+
+/// Print chosen group, output, top groups by score, and winner−runner-up gap (scales to 1..N groups).
+fn print_routing(label: &str, dm: &DimensionManager, out: &[f32]) {
+    let g = dm.last_chosen_group_id().map(|g| g.to_string()).unwrap_or_else(|| "?".into());
+    println!("\n  {} → group {} → output: {:?}", label, g, out);
+    if let Some(scores) = dm.last_routing_scores() {
+        let mut by_score: Vec<_> = scores.iter().map(|&(gid, a, b, m, s)| (gid, a, b, m, s)).collect();
+        by_score.sort_by(|a, b| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal));
+        let top = 5.min(by_score.len());
+        for (gid, self_sim, cross_sim, margin, score) in by_score.into_iter().take(top) {
+            println!("    group {}: self={:.3} cross={:.3} margin={:.3} score={:.3}",
+                gid, self_sim, cross_sim, margin, score);
+        }
+        if scores.len() >= 2 {
+            let mut s: Vec<f32> = scores.iter().map(|(_, _, _, _, x)| *x).collect();
+            s.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+            let margin_gap = s[0] - s[1];
+            println!("    score gap (winner - runner-up): {:.3}  {}",
+                margin_gap,
+                if margin_gap >= 0.3 { "← wide (robust)" } else if margin_gap >= 0.1 { "← moderate" } else { "← narrow (fragile)" });
+        }
+    }
 }
 
 // =============================================================================
