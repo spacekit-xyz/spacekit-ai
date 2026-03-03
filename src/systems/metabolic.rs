@@ -5,6 +5,8 @@ use std::collections::{HashMap, HashSet};
 
 /// System 1: Metabolic Pruning (parallelised with rayon)
 ///
+/// Frozen neurons are excluded from over-budget pruning and from the synapse
+/// aging/depression pass — no strength or structure changes touch frozen state.
 /// output_protected: set of neuron IDs in the output layer.
 /// Synapses targeting these neurons are never pruned metabolically —
 /// the output neuron's fan-in is architecturally critical and must

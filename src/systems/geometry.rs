@@ -6,6 +6,11 @@ use std::collections::HashMap;
 
 /// System 4: Physics-Based Geometry — N-body Particle Integrator
 ///
+/// Frozen neurons are skipped in the integration step (pinned in space).
+/// Their activations still participate in lateral inhibition via exp(-dist/sigma);
+/// as Group B geometry drifts and Group A stays fixed, inhibition geometry
+/// between groups diverges — expected and desirable (natural separation).
+///
 /// Three physics mechanisms, each solving a distinct problem:
 ///
 /// ## Force Model (geometry update)

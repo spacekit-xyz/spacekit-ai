@@ -224,7 +224,11 @@ impl NeuralEnvironment {
     }
 
     // -------------------------------------------------------------------------
-    // Forward pass
+    // Forward pass — frozen blocks writes only, not reads
+    // -------------------------------------------------------------------------
+    // Activations are always computed for every neuron (including frozen) so that
+    // Group A's signal flows to output[0] and Group B can read from shared input.
+    // Frozen only skips plasticity writes: mass/homeostasis below, and backprop.
     // -------------------------------------------------------------------------
 
     /// Full forward pass. `training` enables dropout for symmetry breaking.
