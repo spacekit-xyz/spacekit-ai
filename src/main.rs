@@ -442,9 +442,9 @@ fn phase2_base_config() -> EnvironmentConfig {
         mirror_coupling_strength: 0.001,
         geometry_interval: 500,
         stdp_enabled: false,
-        // High-mass neurons (spiral hubs) get smaller LR during Task B. If Task B convergence slows or
-        // circles accuracy drops below ~85%, try mass_consolidation_k: 1.5 (softer scaling).
-        mass_consolidation_k: 3.0,
+        // Mass consolidation: high-mass neurons get smaller LR. Set to 0.0 to isolate Task B learning;
+        // if Task B then reaches 85%+ while retention holds, reintroduce k (e.g. 1.0–1.5) for balance.
+        mass_consolidation_k: 0.0,
         ..EnvironmentConfig::default()
     }
 }

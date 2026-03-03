@@ -223,9 +223,10 @@ pub fn reaction_diffusion_inhibition(
         })
         .collect();
 
-    // Apply inhibition, floor at 0
+    // Apply inhibition, floor at 0 (skip frozen — consolidated pathway keeps pre-inhibition activation)
     for (id, inhib) in inhibitions {
         if let Some(n) = neurons.get_mut(&id) {
+            if n.frozen { continue; }
             n.activation = (n.activation - lateral_inhibition * inhib).max(0.0);
         }
     }

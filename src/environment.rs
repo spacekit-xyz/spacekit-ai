@@ -83,6 +83,23 @@ impl NeuralEnvironment {
         &self.output_ids
     }
 
+    /// After loading a checkpoint, sync input/output sets from the restored layers
+    /// so they match the checkpoint topology (required for correct forward and freeze logic).
+    pub fn sync_input_output_ids_from_layers(&mut self) {
+        if let Some(first) = self.layers.first() {
+            self.input_ids = first.iter().copied().collect();
+        }
+        if let Some(last) = self.layers.last() {
+            self.output_ids = last.iter().copied().collect();
+        }
+    }
+
+    /// After loading a checkpoint, set next_neuron_id to max(ids)+1 so new growth
+    /// does not reuse existing IDs.
+    pub fn sync_next_neuron_id_from_neurons(&mut self) {
+        self.next_neuron_id = self.neurons.keys().max().copied().unwrap_or(0).wrapping_add(1);
+    }
+
     pub fn build_layers(&mut self, layer_sizes: &[usize], rng: &mut impl Rng) {
         self.layers.clear();
         self.layer_of.clear();
@@ -196,8 +213,8 @@ impl NeuralEnvironment {
 
     /// Freeze the consolidated pathway so no gradient or plasticity can modify it.
     /// Sets frozen=true on: all neurons in group_a_ids (Group A layer1+layer2), output_0,
-    /// and every synapse from input layer that targets group_a_layer1_ids.
-    /// Backprop and all plasticity systems check frozen and skip updates. No restore needed.
+    /// every synapse from input layer that targets group_a_layer1_ids, and every synapse
+    /// that targets output_0 (so Group B cannot rewrite Task A's readout).
     pub fn freeze_consolidated_pathway(
         &mut self,
         group_a_ids: &[NeuronId],
@@ -218,6 +235,14 @@ impl NeuralEnvironment {
                     if group_a_layer1_ids.contains(&syn.target) {
                         syn.frozen = true;
                     }
+                }
+            }
+        }
+        // Freeze every synapse that targets output_0 (incl. from Group B) so Task B cannot corrupt Task A's readout.
+        for n in self.neurons.values_mut() {
+            for syn in n.synapses.iter_mut() {
+                if syn.target == output_0 {
+                    syn.frozen = true;
                 }
             }
         }
@@ -258,10 +283,12 @@ impl NeuralEnvironment {
                 } else {
                     self.config.dropout_rate * 0.5  // half rate on deeper layers
                 };
-                let dropped = training
+                let would_drop = training
                     && !is_output
                     && dropout_rate > 0.0
                     && rng.gen::<f32>() < dropout_rate;
+                let frozen = self.neurons.get(&nid).map_or(false, |n| n.frozen);
+                let dropped = would_drop && !frozen;  // never drop frozen — Task A signal must flow
 
                 self.dropout_mask.insert(nid, dropped);
 
