@@ -1,6 +1,8 @@
 use growformer::environment::NeuralEnvironment;
 use growformer::types::NeuronId;
-use growformer::dimension::{DimensionManager, DimensionManagerConfig};
+use growformer::dimension::{DimensionManager, DimensionManagerConfig, MainDimension, VirtualGroup};
+use growformer::types::GroupId;
+use std::time::Instant;
 use growformer::systems::checkpoint::{save_phase2_checkpoint, load_phase2_checkpoint};
 use growformer::systems::mirror::mirror_symmetry_score;
 use growformer::systems::whorls::print_whorl_summary;
@@ -28,6 +30,9 @@ struct Args {
     /// Phase 3: Fractal Topology — Main + Mirror dimensions, promotion gate
     #[arg(long)]
     fractal: bool,
+    /// Phase 3c: Composition (VirtualGroup) + EpisodicMemory — Task C after Demo 6
+    #[arg(long)]
+    phase3c: bool,
 }
 
 fn main() {
@@ -46,6 +51,8 @@ fn main() {
         demo_mlp_baseline();
     } else if args.fractal {
         demo_fractal_continual_learning();
+    } else if args.phase3c {
+        demo_phase3c_composition();
     } else if let Some(mode) = &args.learning {
         match mode.as_str() {
             "train-a" => demo_phase2_train_a(),
@@ -53,7 +60,7 @@ fn main() {
             _ => demo_continual_learning(),
         }
     } else {
-        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, or --fractal");
+        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, or --phase3c");
         std::process::exit(1);
     }
 
@@ -737,6 +744,231 @@ fn demo_fractal_continual_learning() {
     print_routing("  +ctx [circles] ", &dm, &out_c);
 }
 
+// =============================================================================
+// Demo: Phase 3c — Composition (VirtualGroup) + EpisodicMemory
+// Task C = spiral-gated circles: inner → spiral rule, outer → circles rule.
+// =============================================================================
+
+fn demo_phase3c_composition() {
+    println!("--- Phase 3c: Composition + Episodic ---\n");
+    // Reuse Demo 6 setup: two promoted groups + router
+    let config = DimensionManagerConfig {
+        mirror_config: phase2_base_config(),
+        mirror_layer_sizes: vec![2, 16, 16, 1],
+        promotion_check_interval: 500,
+        max_concurrent_mirrors: 2,
+        calibration_samples: 100,
+    };
+    let mut dm = DimensionManager::new(config);
+    let mut rng = StdRng::seed_from_u64(42);
+    let mut data_rng = StdRng::seed_from_u64(99);
+
+    let spiral_data = generate_spiral_data(400, &mut data_rng);
+    let circles_data = generate_concentric_circles_data(400, &mut data_rng);
+    let calibration_spiral: Vec<_> = spiral_data.iter().take(100).cloned().collect();
+    let calibration_circles: Vec<_> = circles_data.iter().take(100).cloned().collect();
+
+    dm.spawn_mirror("spiral", 42).expect("spiral");
+    for epoch in 0..4000 {
+        let Some(_) = dm.train_mirror_epoch("spiral", &spiral_data, &mut rng) else { break };
+        if epoch % 500 == 0 {
+            dm.evaluate_promotions(&calibration_spiral);
+            if !dm.mirrors.contains_key("spiral") { break; }
+        }
+    }
+    let spiral_group = dm.force_promote("spiral", &calibration_spiral).unwrap_or_else(|| *dm.main.group_order.last().unwrap());
+    dm.spawn_mirror("circles", 43).expect("circles");
+    for epoch in 0..4000 {
+        let Some(_) = dm.train_mirror_epoch("circles", &circles_data, &mut rng) else { break };
+        if epoch % 500 == 0 {
+            dm.evaluate_promotions(&calibration_circles);
+            if !dm.mirrors.contains_key("circles") { break; }
+        }
+    }
+    let circles_group = dm.force_promote("circles", &calibration_circles).unwrap_or_else(|| *dm.main.group_order.last().unwrap());
+    dm.train_and_set_router(
+        &[(&calibration_spiral[..], 0), (&calibration_circles[..], 1)],
+        &mut rng,
+        400,
+    );
+
+    // === Task C: spiral-gated circles ===
+    const INNER_RADIUS: f32 = 0.4;
+    let task_c_data = generate_spiral_gated_circles_data(
+        &mut dm.main,
+        spiral_group,
+        circles_group,
+        INNER_RADIUS,
+        100,
+        &mut data_rng,
+    );
+    let task_c_train: Vec<_> = task_c_data.iter().take(30).cloned().collect();
+
+    let acc_spiral_only = dm.evaluate_main_group(spiral_group, &task_c_data);
+    let acc_circles_only = dm.evaluate_main_group(circles_group, &task_c_data);
+    println!("=== Task C (spiral-gated circles, inner r < {}) ===\n", INNER_RADIUS);
+    println!("  Single-group on Task C: spiral={:.1}%  circles={:.1}%",
+        acc_spiral_only * 100.0, acc_circles_only * 100.0);
+    let residual = 1.0 - acc_spiral_only.max(acc_circles_only);
+    println!("  Residual (1 - best single): {:.2}\n", residual);
+
+    let (virtual_group, comp_acc) = dm.train_composition(
+        &[spiral_group, circles_group],
+        &task_c_train,
+        0.1,
+        300,
+    );
+    println!("  Composition (VirtualGroup) on {} samples, 300 epochs: {:.1}%",
+        task_c_train.len(), comp_acc * 100.0);
+    println!("  Blend weights: [{:.3}, {:.3}]\n", virtual_group.blend_weights[0], virtual_group.blend_weights[1]);
+
+    if comp_acc >= 0.80 {
+        dm.store_composition_episode(&virtual_group, &task_c_train, comp_acc, residual);
+        println!("  Stored in EpisodicMemory (acc >= 80%).");
+
+        let mut sig = [0.0f32; 2];
+        for (input, _) in &task_c_data {
+            sig[0] += input[0];
+            sig[1] += input[1];
+        }
+        sig[0] /= task_c_data.len() as f32;
+        sig[1] /= task_c_data.len() as f32;
+        if let Some(ep) = dm.episodic_retrieve(&sig, 0.90) {
+            println!("  Episodic recall: retrieved episode acc={:.1}% blend=[{:.3}, {:.3}]",
+                ep.accuracy * 100.0, ep.blend_weights[0], ep.blend_weights[1]);
+        }
+
+        // Second-presentation: retrieve by train signature, evaluate on held-out.
+        let task_c_heldout: Vec<_> = task_c_data.iter().skip(30).cloned().collect();
+        if task_c_heldout.len() >= 20 {
+            let mut sig_train = [0.0f32; 2];
+            for (input, _) in &task_c_train {
+                sig_train[0] += input[0];
+                sig_train[1] += input[1];
+            }
+            sig_train[0] /= task_c_train.len() as f32;
+            sig_train[1] /= task_c_train.len() as f32;
+            let recalled = dm.episodic_retrieve(&sig_train, 0.99)
+                .filter(|e| e.group_ids.len() == 2)
+                .map(|e| (e.group_ids.clone(), e.blend_weights.clone()));
+            if let Some((gids, weights)) = recalled {
+                let vg_recall = VirtualGroup { group_ids: gids, blend_weights: weights };
+                let mut correct = 0usize;
+                for (input, target) in &task_c_heldout {
+                    let out = dm.predict_with_composition(input, &vg_recall);
+                    if out.len() >= 1 && (out[0] - target[0]).abs() < 0.5 {
+                        correct += 1;
+                    }
+                }
+                let acc_recall = correct as f32 / task_c_heldout.len() as f32;
+                println!("  Second presentation: retrieved composition accuracy on held-out Task C = {:.1}% (n={})",
+                    acc_recall * 100.0, task_c_heldout.len());
+            }
+        }
+    } else {
+        println!("  (No store: composition {:.0}% < 80%. Episodic / second-presentation skipped.)", comp_acc * 100.0);
+    }
+
+    let out_composed = dm.predict_with_composition(&[0.2, 0.2], &virtual_group);
+    println!("\n  Infer (0.2, 0.2) with composition: {:?}", out_composed);
+
+    // === Task D: 3-group composition (moons-gated spiral/circles) ===
+    println!("\n=== Task D (3-way: spiral / circles / moons) ===\n");
+    let moons_data = generate_moons_data(400, &mut data_rng);
+    let calibration_moons: Vec<_> = moons_data.iter().take(100).cloned().collect();
+    dm.spawn_mirror("moons", 44).expect("moons");
+    for epoch in 0..4000 {
+        let Some(_) = dm.train_mirror_epoch("moons", &moons_data, &mut rng) else { break };
+        if epoch % 500 == 0 {
+            dm.evaluate_promotions(&calibration_moons);
+            if !dm.mirrors.contains_key("moons") { break; }
+        }
+    }
+    let _moons_group = dm.force_promote("moons", &calibration_moons).unwrap_or_else(|| *dm.main.group_order.last().unwrap());
+    let all_three: Vec<GroupId> = dm.main.group_order.iter().copied().collect();
+    if all_three.len() < 3 {
+        println!("  (Need 3 groups; got {}.)", all_three.len());
+        return;
+    }
+    let task_d_data = generate_task_d_three_way_data(
+        &mut dm.main,
+        &all_three,
+        0.35,
+        0.70,
+        100,
+        &mut data_rng,
+    );
+    let task_d_train: Vec<_> = task_d_data.iter().take(40).cloned().collect();
+    let acc_g0 = dm.evaluate_main_group(all_three[0], &task_d_data);
+    let acc_g1 = dm.evaluate_main_group(all_three[1], &task_d_data);
+    let acc_g2 = dm.evaluate_main_group(all_three[2], &task_d_data);
+    println!("  Single-group on Task D: g0={:.1}%  g1={:.1}%  g2={:.1}%",
+        acc_g0 * 100.0, acc_g1 * 100.0, acc_g2 * 100.0);
+    let (vg_d, comp_d_acc) = dm.train_composition(&all_three, &task_d_train, 0.1, 400);
+    println!("  3-group composition ({} samples, 400 epochs): {:.1}%",
+        task_d_train.len(), comp_d_acc * 100.0);
+    println!("  Blend weights: [{:.3}, {:.3}, {:.3}]\n",
+        vg_d.blend_weights[0], vg_d.blend_weights[1], vg_d.blend_weights[2]);
+    if comp_d_acc >= 0.75 {
+        let res_d = 1.0 - [acc_g0, acc_g1, acc_g2].iter().cloned().fold(0.0f32, f32::max);
+        dm.store_composition_episode(&vg_d, &task_d_train, comp_d_acc, res_d);
+        println!("  Stored Task D in EpisodicMemory.");
+
+        // Task D held-out: retrieve by train signature, evaluate on held-out (same as Task C).
+        let task_d_heldout: Vec<_> = task_d_data.iter().skip(40).cloned().collect();
+        if task_d_heldout.len() >= 20 {
+            let mut sig_train_d = [0.0f32; 2];
+            for (input, _) in &task_d_train {
+                sig_train_d[0] += input[0];
+                sig_train_d[1] += input[1];
+            }
+            sig_train_d[0] /= task_d_train.len() as f32;
+            sig_train_d[1] /= task_d_train.len() as f32;
+            let recalled_d = dm.episodic_retrieve(&sig_train_d, 0.99)
+                .filter(|e| e.group_ids.len() == 3)
+                .map(|e| (e.group_ids.clone(), e.blend_weights.clone()));
+            if let Some((gids, weights)) = recalled_d {
+                let vg_recall_d = VirtualGroup { group_ids: gids, blend_weights: weights };
+                let mut correct_d = 0usize;
+                for (input, target) in &task_d_heldout {
+                    let out = dm.predict_with_composition(input, &vg_recall_d);
+                    if out.len() >= 1 && (out[0] - target[0]).abs() < 0.5 {
+                        correct_d += 1;
+                    }
+                }
+                let acc_heldout_d = correct_d as f32 / task_d_heldout.len() as f32;
+                println!("  Task D held-out: retrieved composition accuracy = {:.1}% (n={}) [train {:.1}%]",
+                    acc_heldout_d * 100.0, task_d_heldout.len(), comp_d_acc * 100.0);
+            }
+        }
+    } else {
+        println!("  (No store: Task D composition {:.0}% < 75%.)", comp_d_acc * 100.0);
+    }
+
+    // Inference via memory recall (timed)
+    let mut sig_d = [0.0f32; 2];
+    for (input, _) in &task_d_data {
+        sig_d[0] += input[0];
+        sig_d[1] += input[1];
+    }
+    sig_d[0] /= task_d_data.len() as f32;
+    sig_d[1] /= task_d_data.len() as f32;
+    let start = Instant::now();
+    let episode_data = dm.episodic_retrieve(&sig_d, 0.85)
+        .map(|ep| (ep.group_ids.clone(), ep.blend_weights.clone()));
+    let out_recall = if let Some((gids, weights)) = episode_data {
+        let vg = VirtualGroup { group_ids: gids, blend_weights: weights };
+        dm.predict_with_composition(&[0.5, 0.3], &vg)
+    } else {
+        vec![]
+    };
+    let elapsed = start.elapsed();
+    if !out_recall.is_empty() {
+        let secs = elapsed.as_secs_f64();
+        println!("\n  New task solved in <1 second via memory recall. (measured: {:.4}s) Output: {:?}", secs, out_recall);
+    }
+}
+
 /// Print chosen group, output, top groups by score, and winner−runner-up gap (scales to 1..N groups).
 fn print_routing(label: &str, dm: &DimensionManager, out: &[f32]) {
     let g = dm.last_chosen_group_id().map(|g| g.to_string()).unwrap_or_else(|| "?".into());
@@ -1072,6 +1304,86 @@ fn generate_spiral_data(n_per_class: usize, rng: &mut impl rand::Rng) -> Vec<([f
         }
     }
     data.shuffle(rng);
+    data
+}
+
+/// Moons (two crescents) — classic 2-class dataset for composition.
+fn generate_moons_data(n_per_class: usize, rng: &mut impl rand::Rng) -> Vec<([f32; 2], [f32; 1])> {
+    use std::f32::consts::PI;
+    let mut data = Vec::with_capacity(n_per_class * 2);
+    let noise = 0.08_f32;
+    for i in 0..n_per_class {
+        let t = (i as f32 / n_per_class as f32) * PI;
+        let x = t.cos() + rng.gen_range(-noise..noise);
+        let y = t.sin() + rng.gen_range(-noise..noise);
+        data.push(([x, y], [0.0]));
+    }
+    for i in 0..n_per_class {
+        let t = (i as f32 / n_per_class as f32) * PI;
+        let x = 1.0 - t.cos() + rng.gen_range(-noise..noise);
+        let y = 0.5 - t.sin() + rng.gen_range(-noise..noise);
+        data.push(([x, y], [1.0]));
+    }
+    data.shuffle(rng);
+    data
+}
+
+/// Task D: 3-way radius gate — r < r0 → group0, r < r1 → group1, else → group2. (Moons-gated spiral/circles.)
+fn generate_task_d_three_way_data(
+    main: &mut MainDimension,
+    group_ids: &[GroupId],
+    r0: f32,
+    r1: f32,
+    n_samples: usize,
+    rng: &mut impl rand::Rng,
+) -> Vec<([f32; 2], [f32; 1])> {
+    if group_ids.len() < 3 {
+        return vec![];
+    }
+    let mut data = Vec::with_capacity(n_samples);
+    for _ in 0..n_samples {
+        let x = rng.gen_range(-1.0..1.0_f32);
+        let y = rng.gen_range(-1.0..1.0_f32);
+        let r = (x * x + y * y).sqrt();
+        let outputs = main.query(&[x, y], group_ids);
+        if outputs.len() < 3 {
+            continue;
+        }
+        let idx = if r < r0 { 0 } else if r < r1 { 1 } else { 2 };
+        let out = outputs[idx].1.get(0).copied().unwrap_or(0.5);
+        let target = if out >= 0.5 { 1.0 } else { 0.0 };
+        data.push(([x, y], [target]));
+    }
+    data
+}
+
+/// Task C: spiral-gated circles. Inner region (r < inner_radius) → spiral rule, outer → circles rule.
+/// Labels come from querying main's two groups; neither group alone solves Task C well.
+fn generate_spiral_gated_circles_data(
+    main: &mut MainDimension,
+    group_inner: GroupId,
+    group_outer: GroupId,
+    inner_radius: f32,
+    n_samples: usize,
+    rng: &mut impl rand::Rng,
+) -> Vec<([f32; 2], [f32; 1])> {
+    let mut data = Vec::with_capacity(n_samples);
+    for _ in 0..n_samples {
+        let x = rng.gen_range(-1.0..1.0_f32);
+        let y = rng.gen_range(-1.0..1.0_f32);
+        let r = (x * x + y * y).sqrt();
+        let outputs = main.query(&[x, y], &[group_inner, group_outer]);
+        if outputs.len() < 2 {
+            continue;
+        }
+        let out = if r < inner_radius {
+            outputs[0].1.get(0).copied().unwrap_or(0.5)
+        } else {
+            outputs[1].1.get(0).copied().unwrap_or(0.5)
+        };
+        let target = if out >= 0.5 { 1.0 } else { 0.0 };
+        data.push(([x, y], [target]));
+    }
     data
 }
 

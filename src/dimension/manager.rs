@@ -12,6 +12,7 @@ use crate::environment::NeuralEnvironment;
 use crate::types::EnvironmentConfig;
 use crate::types::GroupId;
 
+use super::composition::{EpisodicMemory, Episode, VirtualGroup};
 use super::embedding::{compute_group_embedding, build_tag_vector, GroupEmbedding, TAG_VECTOR_DIM};
 use super::main_dim::MainDimension;
 use super::mirror_dim::{MirrorDimension, EpochResult};
@@ -44,6 +45,7 @@ pub struct DimensionManager {
     pub main: MainDimension,
     pub mirrors: HashMap<String, MirrorDimension>,
     pub observer: GlobalObserver,
+    pub episodic_memory: EpisodicMemory,
     pub config: DimensionManagerConfig,
     next_group_id: GroupId,
 }
@@ -54,6 +56,7 @@ impl DimensionManager {
             main: MainDimension::new(),
             mirrors: HashMap::new(),
             observer: GlobalObserver::new(PromotionGateConfig::default()),
+            episodic_memory: EpisodicMemory::new(),
             config,
             next_group_id: 0,
         }
@@ -229,6 +232,90 @@ impl DimensionManager {
             }
         }
         self.observer.learned_router = Some(router);
+    }
+
+    /// Set the learned router directly (e.g. after adding a new group: train a router with
+    /// num_groups = main.group_order.len() elsewhere and pass it in, or load from checkpoint).
+    /// Replaces any existing router. No retraining of existing main groups.
+    pub fn set_router(&mut self, router: LearnedRouter) {
+        self.observer.learned_router = Some(router);
+    }
+
+    /// Create a VirtualGroup for the given group IDs and train blend weights on data.
+    /// Returns (trained VirtualGroup, accuracy on data). Use small data (e.g. 20–50 samples).
+    pub fn train_composition(
+        &mut self,
+        group_ids: &[GroupId],
+        data: &[([f32; 2], [f32; 1])],
+        lr: f32,
+        epochs: usize,
+    ) -> (VirtualGroup, f32) {
+        let mut vg = VirtualGroup::new(group_ids.to_vec());
+        for _ in 0..epochs {
+            for (input, target) in data {
+                vg.train_step(&mut self.main, input, target, lr);
+            }
+        }
+        let mut correct = 0usize;
+        for (input, target) in data {
+            let out = vg.predict(&mut self.main, input);
+            if out.len() >= 1 && (out[0] - target[0]).abs() < 0.5 {
+                correct += 1;
+            }
+        }
+        let acc = if data.is_empty() {
+            0.0
+        } else {
+            correct as f32 / data.len() as f32
+        };
+        (vg, acc)
+    }
+
+    /// Store a successful composition in episodic memory. Signature = mean of input coords.
+    pub fn store_composition_episode(
+        &mut self,
+        virtual_group: &VirtualGroup,
+        data: &[([f32; 2], [f32; 1])],
+        accuracy: f32,
+        residual: f32,
+    ) {
+        if data.is_empty() {
+            return;
+        }
+        let mut sx = 0.0f32;
+        let mut sy = 0.0f32;
+        for (input, _) in data {
+            sx += input[0];
+            sy += input[1];
+        }
+        let n = data.len() as f32;
+        let input_signature = vec![sx / n, sy / n];
+        self.episodic_memory.store(Episode {
+            input_signature,
+            group_ids: virtual_group.group_ids.clone(),
+            blend_weights: virtual_group.blend_weights.clone(),
+            accuracy,
+            residual,
+        });
+    }
+
+    /// Infer using a VirtualGroup (blend of frozen groups). For Phase 3c demo.
+    pub fn predict_with_composition(&mut self, input: &[f32], virtual_group: &VirtualGroup) -> Vec<f32> {
+        virtual_group.predict(&mut self.main, input)
+    }
+
+    /// Retrieve a stored composition by signature similarity (e.g. [x, y] or mean of batch).
+    pub fn episodic_retrieve(&self, signature: &[f32], threshold: f32) -> Option<&Episode> {
+        self.episodic_memory.retrieve(signature, threshold)
+    }
+
+    /// Infer using a retrieved episode (blend weights from episodic memory). For memory-recall path.
+    pub fn predict_with_episode(&mut self, input: &[f32], episode: &Episode) -> Vec<f32> {
+        let vg = VirtualGroup {
+            group_ids: episode.group_ids.clone(),
+            blend_weights: episode.blend_weights.clone(),
+        };
+        vg.predict(&mut self.main, input)
     }
 }
 
