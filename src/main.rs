@@ -708,7 +708,7 @@ fn demo_fractal_continual_learning() {
     println!("\nTask B promoted as Group {}\n", circles_group);
 
     // Train learned router so no-context infer uses single forward → logits → argmax.
-    // 400 epochs is a sweet spot; 800+ can drift and send spiral → group 1 (seed-dependent).
+    // 400 epochs: spiral → group 0, circles → group 1 (correct). Margin target or 450+ can flip spiral to group 1.
     dm.train_and_set_router(
         &[(&calibration_spiral[..], 0), (&calibration_circles[..], 1)],
         &mut rng,
