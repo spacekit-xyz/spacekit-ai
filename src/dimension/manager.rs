@@ -27,6 +27,8 @@ pub struct DimensionManagerConfig {
     pub promotion_check_interval: u32,
     pub max_concurrent_mirrors: usize,
     pub calibration_samples: usize,
+    /// If > 0, mirrors spawn with a reserve pool of this many neurons for neurogenesis (promote from pool).
+    pub reserve_pool_size: usize,
 }
 
 impl Default for DimensionManagerConfig {
@@ -37,6 +39,7 @@ impl Default for DimensionManagerConfig {
             promotion_check_interval: 500,
             max_concurrent_mirrors: 2,
             calibration_samples: 100,
+            reserve_pool_size: 0,
         }
     }
 }
@@ -83,11 +86,20 @@ impl DimensionManager {
         let mut rng = StdRng::seed_from_u64(seed);
         let mut env = NeuralEnvironment::new(self.config.mirror_config.clone());
         env.build_layers(&self.config.mirror_layer_sizes, &mut rng);
-        let mirror = MirrorDimension::new(
-            task_name.to_string(),
-            env,
-            self.config.mirror_config.clone(),
-        );
+        let mirror = if self.config.reserve_pool_size > 0 {
+            MirrorDimension::new_with_reserve_pool(
+                task_name.to_string(),
+                env,
+                self.config.mirror_config.clone(),
+                self.config.reserve_pool_size,
+            )
+        } else {
+            MirrorDimension::new(
+                task_name.to_string(),
+                env,
+                self.config.mirror_config.clone(),
+            )
+        };
         self.mirrors.insert(task_name.to_string(), mirror);
         self.mirrors.get_mut(task_name)
     }
@@ -100,6 +112,36 @@ impl DimensionManager {
         rng: &mut impl Rng,
     ) -> Option<EpochResult> {
         self.mirrors.get_mut(task_name).map(|m| m.train_epoch(data, rng))
+    }
+
+    /// If mirror has reached epoch_trigger and current_loss > loss_threshold and not yet triggered,
+    /// insert one neuron into its last hidden layer (neurogenesis). Returns true if a neuron was added.
+    pub fn try_mirror_neurogenesis(
+        &mut self,
+        task_name: &str,
+        epoch_trigger: u32,
+        loss_threshold: f32,
+        current_loss: f32,
+        rng: &mut impl Rng,
+    ) -> bool {
+        self.mirrors
+            .get_mut(task_name)
+            .map_or(false, |m| m.try_neurogenesis_trigger(epoch_trigger, loss_threshold, current_loss, rng))
+    }
+
+    /// Residual-based neurogenesis: add one neuron if loss has been above threshold for at least
+    /// min_epochs_high consecutive epochs. Returns true if a neuron was added.
+    pub fn try_mirror_neurogenesis_residual(
+        &mut self,
+        task_name: &str,
+        residual_threshold: f32,
+        min_epochs_high: u32,
+        current_loss: f32,
+        rng: &mut impl Rng,
+    ) -> bool {
+        self.mirrors.get_mut(task_name).map_or(false, |m| {
+            m.try_neurogenesis_trigger_residual(residual_threshold, min_epochs_high, current_loss, rng)
+        })
     }
 
     /// Check all mirrors for promotion; promote those that pass.

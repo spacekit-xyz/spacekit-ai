@@ -5,6 +5,7 @@ pub mod composition;
 pub mod embedding;
 pub mod main_dim;
 pub mod mirror_dim;
+pub mod policy;
 pub mod promotion;
 pub mod router;
 pub mod observer;
@@ -15,6 +16,7 @@ pub use embedding::{GroupEmbedding, compute_group_embedding, cosine_similarity, 
 pub use main_dim::{MainDimension, FrozenGroupEnv};
 pub use mirror_dim::{MirrorDimension, EpochResult};
 pub use promotion::{PromotionGateConfig, PromotionDecision, evaluate_promotion, promote};
+pub use policy::{ContinuousPolicy, Policy};
 pub use router::{LearnedRouter, attend_heuristic, attend_by_query};
 pub use observer::{GlobalObserver, RoutingConfig};
 pub use manager::{DimensionManager, DimensionManagerConfig, GroupSummary, MirrorSummary};

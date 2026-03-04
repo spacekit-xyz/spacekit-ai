@@ -191,6 +191,82 @@ impl NeuralEnvironment {
         }
     }
 
+    /// Neurogenesis: insert one neuron into the given hidden layer. Creates the neuron (or promotes
+    /// from `reserve_pool` if provided and non-empty), appends to that layer, adds synapses
+    /// to/from adjacent layers with Xavier-style init. Returns the new neuron id, or None if
+    /// layer_idx is invalid (not a hidden layer).
+    pub fn insert_neuron_at_layer(
+        &mut self,
+        layer_idx: usize,
+        rng: &mut impl Rng,
+        reserve_pool: Option<&mut Vec<Neuron>>,
+    ) -> Option<NeuronId> {
+        let n_layers = self.layers.len();
+        if n_layers < 3 || layer_idx == 0 || layer_idx >= n_layers - 1 {
+            return None;
+        }
+        let id = self.next_neuron_id;
+        self.next_neuron_id += 1;
+
+        let prev_layer = self.layers[layer_idx - 1].clone();
+        let next_layer = self.layers[layer_idx + 1].clone();
+        let size_after = self.layers[layer_idx].len() + 1;
+
+        let x = layer_idx as f32 * 3.0;
+        let y_raw = (size_after - 1) as f32 - (size_after as f32 / 2.0);
+        let y = y_raw / (size_after as f32).sqrt() * 2.5;
+        let z: f32 = rng.gen_range(-0.5..0.5);
+        let weight = rng.gen_range(0.0_f32..0.4);
+
+        let neuron = if let Some(pool) = reserve_pool {
+            if let Some(mut n) = pool.pop() {
+                n.id = id;
+                n.geometry = Vec3::new(x, y, z);
+                n.weight = weight;
+                n.synapses.clear();
+                n
+            } else {
+                let mut n = Neuron::new(id, Vec3::new(x, y, z), &self.config);
+                n.weight = weight;
+                n
+            }
+        } else {
+            let mut n = Neuron::new(id, Vec3::new(x, y, z), &self.config);
+            n.weight = weight;
+            n
+        };
+
+        self.neurons.insert(id, neuron);
+        self.layer_of.insert(id, layer_idx);
+        self.layers[layer_idx].push(id);
+        self.dropout_mask.insert(id, false);
+
+        let fan_in = prev_layer.len();
+        let fan_out = next_layer.len();
+        let base_scale = (6.0_f32 / (fan_in + fan_out) as f32).sqrt();
+        let attenuation_compensation = if layer_idx == 1 && self.config.lateral_inhibition > 0.0 {
+            1.0 / (1.0 - self.config.lateral_inhibition * 0.7).max(0.3)
+        } else {
+            1.0
+        };
+        let scale = base_scale * attenuation_compensation;
+
+        for &src in &prev_layer {
+            let w: f32 = rng.gen_range(-scale..=scale);
+            if let Some(n) = self.neurons.get_mut(&src) {
+                n.add_synapse(id, w, self.config.max_synapses_per_neuron);
+            }
+        }
+        for &tgt in &next_layer {
+            let w: f32 = rng.gen_range(-scale..=scale);
+            if let Some(n) = self.neurons.get_mut(&id) {
+                n.add_synapse(tgt, w, self.config.max_synapses_per_neuron);
+            }
+        }
+
+        Some(id)
+    }
+
     pub fn create_group(&mut self, member_ids: Vec<NeuronId>) -> GroupId {
         let id = self.next_group_id;
         self.next_group_id += 1;
@@ -738,4 +814,47 @@ pub fn mse_loss(output: &[f32], target: &[f32]) -> f32 {
     output.iter().zip(target.iter())
         .map(|(o, t)| (o - t).powi(2))
         .sum::<f32>() / output.len() as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+
+    #[test]
+    fn test_insert_neuron_at_layer_adds_one_neuron_and_synapses() {
+        let mut rng = StdRng::seed_from_u64(123);
+        let mut config = EnvironmentConfig::default();
+        config.max_synapses_per_neuron = 64;
+        let mut env = NeuralEnvironment::new(config);
+        env.build_layers(&[2, 4, 1], &mut rng);
+        let layer_1_len_before = env.layers[1].len();
+        assert_eq!(layer_1_len_before, 4);
+
+        let new_id = env.insert_neuron_at_layer(1, &mut rng, None);
+        assert!(new_id.is_some());
+        let new_id = new_id.unwrap();
+
+        assert_eq!(env.layers[1].len(), 5);
+        assert!(env.neurons.contains_key(&new_id));
+        assert_eq!(env.layer_of.get(&new_id), Some(&1));
+
+        let n = &env.neurons[&new_id];
+        let incoming = env.layers[0].iter().filter(|&&src| {
+            env.neurons.get(&src).map_or(false, |s| s.synapses.iter().any(|syn| syn.target == new_id))
+        }).count();
+        let outgoing = n.synapses.len();
+        assert_eq!(incoming, 2, "new neuron should have 2 incoming synapses from input layer");
+        assert_eq!(outgoing, 1, "new neuron should have 1 outgoing synapse to output layer");
+    }
+
+    #[test]
+    fn test_insert_neuron_at_layer_rejects_input_and_output_layers() {
+        let mut rng = StdRng::seed_from_u64(123);
+        let mut env = NeuralEnvironment::new(EnvironmentConfig::default());
+        env.build_layers(&[2, 4, 1], &mut rng);
+        assert!(env.insert_neuron_at_layer(0, &mut rng, None).is_none());
+        assert!(env.insert_neuron_at_layer(2, &mut rng, None).is_none());
+    }
 }

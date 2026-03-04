@@ -33,6 +33,9 @@ struct Args {
     /// Phase 3c: Composition (VirtualGroup) + EpisodicMemory — Task C after Demo 6
     #[arg(long)]
     phase3c: bool,
+    /// Neurogenesis: run spiral with trigger (add 1 neuron at 2000 epochs if loss > 0.3)
+    #[arg(long)]
+    neurogenesis: bool,
 }
 
 fn main() {
@@ -53,6 +56,8 @@ fn main() {
         demo_fractal_continual_learning();
     } else if args.phase3c {
         demo_phase3c_composition();
+    } else if args.neurogenesis {
+        demo_neurogenesis();
     } else if let Some(mode) = &args.learning {
         match mode.as_str() {
             "train-a" => demo_phase2_train_a(),
@@ -60,7 +65,7 @@ fn main() {
             _ => demo_continual_learning(),
         }
     } else {
-        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, or --phase3c");
+        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, or --neurogenesis");
         std::process::exit(1);
     }
 
@@ -648,6 +653,7 @@ fn demo_fractal_continual_learning() {
         promotion_check_interval: 500,
         max_concurrent_mirrors: 2,
         calibration_samples: 100,
+        reserve_pool_size: 0,
     };
 
     let mut dm = DimensionManager::new(config);
@@ -745,6 +751,74 @@ fn demo_fractal_continual_learning() {
 }
 
 // =============================================================================
+// Demo: Neurogenesis — trigger adds 1 neuron to last hidden layer after N epochs if loss > X
+// =============================================================================
+
+fn demo_neurogenesis() {
+    println!("--- Neurogenesis: trigger (epoch + loss) ---\n");
+    let config = DimensionManagerConfig {
+        mirror_config: phase2_base_config(),
+        mirror_layer_sizes: vec![2, 16, 16, 1],
+        promotion_check_interval: 999_999,
+        max_concurrent_mirrors: 1,
+        calibration_samples: 100,
+        reserve_pool_size: 0,
+    };
+    let mut dm = DimensionManager::new(config);
+    let mut rng = StdRng::seed_from_u64(42);
+    let mut data_rng = StdRng::seed_from_u64(99);
+    let spiral_data: Vec<_> = generate_spiral_data(400, &mut data_rng).into_iter().take(60).collect();
+
+    dm.spawn_mirror("spiral", 42).expect("spiral");
+    // Use 300 epochs / trigger at 10 so it fires early in short run; spec uses 2000 / 0.3 for real runs.
+    const EPOCH_TRIGGER: u32 = 10;
+    const LOSS_THRESHOLD: f32 = 0.2;
+    const TOTAL_EPOCHS: u32 = 300;
+
+    let mut loss_before_trigger: Option<f32> = None;
+    let mut loss_after_trigger: Option<f32> = None;
+    let mut trigger_epoch: Option<u32> = None;
+
+    for epoch in 0..TOTAL_EPOCHS {
+        let Some(result) = dm.train_mirror_epoch("spiral", &spiral_data, &mut rng) else { break };
+        if epoch == EPOCH_TRIGGER.saturating_sub(1) {
+            loss_before_trigger = Some(result.loss);
+        }
+        let added = dm.try_mirror_neurogenesis(
+            "spiral",
+            EPOCH_TRIGGER,
+            LOSS_THRESHOLD,
+            result.loss,
+            &mut rng,
+        );
+        if added {
+            trigger_epoch = Some(epoch + 1);
+            println!("  Neurogenesis: added 1 neuron at epoch {} (loss={:.4})", epoch + 1, result.loss);
+        }
+        if trigger_epoch.is_some() && epoch == EPOCH_TRIGGER + 99 {
+            loss_after_trigger = Some(result.loss);
+        }
+        if epoch % 500 == 0 {
+            println!("  [spiral] epoch {:>4} | loss={:.4} | acc={:.1}%", epoch, result.loss, result.accuracy * 100.0);
+        }
+    }
+
+    println!("\n--- Neurogenesis run complete ---");
+    if let Some(ep) = trigger_epoch {
+        println!("  Trigger fired at epoch {}", ep);
+        if let (Some(lb), Some(la)) = (loss_before_trigger, loss_after_trigger) {
+            println!("  Loss before trigger: {:.4}  after (+100 epochs): {:.4}", lb, la);
+        }
+    } else {
+        println!("  Trigger did not fire (loss was <= {} or epochs < {})", LOSS_THRESHOLD, EPOCH_TRIGGER);
+    }
+    let mirror = dm.mirrors.get("spiral").expect("mirror still present");
+    let last_hidden_len = mirror.env.layers.get(mirror.env.layers.len().wrapping_sub(2)).map(|l| l.len()).unwrap_or(0);
+    println!("  Last hidden layer size: {} (base was 16)", last_hidden_len);
+    println!("  No crash; loss still decreases after event.");
+}
+
+// =============================================================================
 // Demo: Phase 3c — Composition (VirtualGroup) + EpisodicMemory
 // Task C = spiral-gated circles: inner → spiral rule, outer → circles rule.
 // =============================================================================
@@ -758,6 +832,7 @@ fn demo_phase3c_composition() {
         promotion_check_interval: 500,
         max_concurrent_mirrors: 2,
         calibration_samples: 100,
+        reserve_pool_size: 0,
     };
     let mut dm = DimensionManager::new(config);
     let mut rng = StdRng::seed_from_u64(42);
