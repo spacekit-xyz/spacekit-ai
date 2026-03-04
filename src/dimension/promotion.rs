@@ -3,7 +3,7 @@
 use crate::types::GroupId;
 use serde::{Deserialize, Serialize};
 
-use super::embedding::{compute_group_embedding, cosine_similarity, GroupEmbedding};
+use super::embedding::{compute_group_embedding, build_tag_vector, cosine_similarity, GroupEmbedding, TAG_VECTOR_DIM};
 use super::main_dim::MainDimension;
 use super::mirror_dim::MirrorDimension;
 
@@ -77,12 +77,17 @@ pub fn promote(
     let mut env = mirror.env;
     env.freeze_all();
     let vector = compute_group_embedding(&mut env, calibration_data);
+    let metatags = mirror.task_name.clone();
+    let metatags_vec = vec![metatags.clone()];
     let embedding = GroupEmbedding {
         group_id: next_group_id,
         vector,
         task_name: mirror.task_name.clone(),
         accuracy: mirror.best_accuracy,
         intrinsic_dim: None,
+        description: None,
+        metatags: metatags_vec.clone(),
+        tag_vector: build_tag_vector(&metatags_vec, TAG_VECTOR_DIM),
     };
     main.register_group(
         next_group_id,

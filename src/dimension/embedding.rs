@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 /// Fixed vector encoding a group's mean activation pattern.
 /// Computed once at promotion. Never recomputed.
+/// Use **id** (group_id) to reference this group in the learned router and in training data.
+/// **description** and **metatags** support logging, filtering, and future text-conditioned routing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupEmbedding {
     pub group_id: GroupId,
@@ -16,18 +18,67 @@ pub struct GroupEmbedding {
     pub accuracy: f32,
     /// Optional: intrinsic dimensionality (e.g. PCA). For future use.
     pub intrinsic_dim: Option<f32>,
+    /// Human-readable description (e.g. "Spiral 2D binary classification"). For logging / routing.
+    pub description: Option<String>,
+    /// Tags for filtering or conditioning (e.g. ["spiral", "classification", "2d"]).
+    pub metatags: Vec<String>,
+    /// Vectorized metatags for search/re-rank (same dim for all groups; empty = no tag routing).
+    #[serde(default)]
+    pub tag_vector: Vec<f32>,
 }
 
-/// Hidden activation vector for one forward pass (same layout as embedding).
-/// Call after env.predict(input); returns activations of hidden layers only.
+/// Default dimension for tag vectors. Fixed size; no growing vocab — scales to any number of tags.
+pub const TAG_VECTOR_DIM: usize = 64;
+
+/// Deterministic hash of a string for tag vector index.
+fn hash_tag(s: &str) -> u64 {
+    let mut h: u64 = 5381;
+    for b in s.bytes() {
+        h = h.wrapping_mul(33).wrapping_add(b as u64);
+    }
+    h
+}
+
+/// Build a fixed-size vector from metatags (hash-based; no vocab). L2-normalized for cosine.
+/// Use for tag-space search and re-rank. Same dim for all groups.
+pub fn build_tag_vector(metatags: &[String], dim: usize) -> Vec<f32> {
+    if dim == 0 {
+        return vec![];
+    }
+    let mut v = vec![0.0f32; dim];
+    for tag in metatags {
+        let h = hash_tag(tag);
+        let i0 = (h as usize) % dim;
+        let i1 = ((h >> 16) as usize) % dim;
+        v[i0] += 1.0;
+        if i1 != i0 {
+            v[i1] += 1.0;
+        }
+    }
+    let n: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if n > 1e-10 {
+        for x in &mut v {
+            *x /= n;
+        }
+    }
+    v
+}
+
+/// Hidden activation vector for one forward pass.
+/// Same layer (1..n_layers-1), same neuron order, and no extra normalization as group embedding.
+/// Call after env.predict(input). Router compares this to GroupEmbedding.vector for cosine score.
 pub fn hidden_activation_vector(env: &NeuralEnvironment) -> Vec<f32> {
     let n_layers = env.layers.len();
     if n_layers < 2 {
         return vec![];
     }
-    env.layers[1..n_layers - 1]
+    let hidden_ids: Vec<_> = env.layers[1..n_layers - 1]
         .iter()
-        .flat_map(|layer| layer.iter().filter_map(|id| env.neurons.get(id)).map(|n| n.activation))
+        .flat_map(|layer| layer.iter().copied())
+        .collect();
+    hidden_ids
+        .iter()
+        .map(|&id| env.neurons.get(&id).map(|n| n.activation).unwrap_or(0.0))
         .collect()
 }
 
@@ -153,5 +204,61 @@ mod tests {
         let sim = cosine_similarity(&emb_a, &emb_b);
         assert!(sim >= -1.0 && sim <= 1.0);
         // Dissimilarity (cosine < 0.5) requires trained nets; validated in Step 2/4 integration.
+    }
+
+    #[test]
+    fn test_build_tag_vector_dim_and_normalized() {
+        let v = build_tag_vector(&[String::from("spiral")], TAG_VECTOR_DIM);
+        assert_eq!(v.len(), TAG_VECTOR_DIM);
+        let n: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(n > 0.99 && n < 1.01, "tag vector should be L2-normalized, got norm {}", n);
+    }
+
+    #[test]
+    fn test_build_tag_vector_deterministic() {
+        let a = build_tag_vector(&[String::from("spiral")], TAG_VECTOR_DIM);
+        let b = build_tag_vector(&[String::from("spiral")], TAG_VECTOR_DIM);
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert!((x - y).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn test_build_tag_vector_different_tags_different_vectors() {
+        let spiral = build_tag_vector(&[String::from("spiral")], TAG_VECTOR_DIM);
+        let circles = build_tag_vector(&[String::from("circles")], TAG_VECTOR_DIM);
+        let sim = cosine_similarity(&spiral, &circles);
+        assert!(sim < 1.0, "spiral and circles tag vectors should differ, cosine was {}", sim);
+    }
+
+    #[test]
+    fn test_build_tag_vector_same_query_high_similarity() {
+        let spiral_vec = build_tag_vector(&[String::from("spiral")], TAG_VECTOR_DIM);
+        let query = build_tag_vector(&[String::from("spiral")], TAG_VECTOR_DIM);
+        assert!(!spiral_vec.is_empty() && !query.is_empty());
+        let sim = cosine_similarity(&spiral_vec, &query);
+        assert!(sim > 0.99, "same tag should give cosine ~1, got {}", sim);
+    }
+
+    #[test]
+    fn test_build_tag_vector_empty_dim() {
+        let v = build_tag_vector(&[String::from("a")], 0);
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn test_hidden_activation_same_layout_as_embedding() {
+        let config = EnvironmentConfig::default();
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut env = NeuralEnvironment::new(config);
+        env.build_layers(&[2, 16, 16, 1], &mut rng);
+        let one_sample = vec![([0.1_f32, 0.2], [0.0])];
+        let embedding = compute_group_embedding(&mut env, &one_sample);
+        env.predict(&[0.1_f32, 0.2]);
+        let hidden = hidden_activation_vector(&env);
+        assert_eq!(hidden.len(), embedding.len());
+        let cos = cosine_similarity(&hidden, &embedding);
+        assert!((cos - 1.0).abs() < 1e-5, "single sample: activation should equal embedding, cos={}", cos);
     }
 }

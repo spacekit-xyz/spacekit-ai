@@ -707,6 +707,15 @@ fn demo_fractal_continual_learning() {
     };
     println!("\nTask B promoted as Group {}\n", circles_group);
 
+    // Train learned router so no-context infer uses single forward → logits → argmax.
+    // 400 epochs is a sweet spot; 800+ can drift and send spiral → group 1 (seed-dependent).
+    dm.train_and_set_router(
+        &[(&calibration_spiral[..], 0), (&calibration_circles[..], 1)],
+        &mut rng,
+        400,
+    );
+    println!("Learned router trained (2 groups, 400 epochs, lr=0.15, hidden=16).\n");
+
     // === RESULTS ===
     let final_spiral = dm.evaluate_main_group(spiral_group, &spiral_data);
     let final_circles = dm.evaluate_main_group(circles_group, &circles_data);
@@ -719,6 +728,13 @@ fn demo_fractal_continual_learning() {
     print_routing("Routed spiral input ", &dm, &out_spiral);
     let out_circles = dm.infer(&[0.0_f32, 0.9]);
     print_routing("Routed circles input", &dm, &out_circles);
+
+    let spiral_ctx = [String::from("spiral")];
+    let circles_ctx = [String::from("circles")];
+    let out_s = dm.infer_with_context(&[0.3_f32, 0.4], Some(&spiral_ctx));
+    print_routing("  +ctx [spiral] ", &dm, &out_s);
+    let out_c = dm.infer_with_context(&[0.0_f32, 0.9], Some(&circles_ctx));
+    print_routing("  +ctx [circles] ", &dm, &out_c);
 }
 
 /// Print chosen group, output, top groups by score, and winner−runner-up gap (scales to 1..N groups).

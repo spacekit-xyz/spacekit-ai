@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use rand::Rng;
+use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
@@ -11,11 +12,12 @@ use crate::environment::NeuralEnvironment;
 use crate::types::EnvironmentConfig;
 use crate::types::GroupId;
 
-use super::embedding::{compute_group_embedding, GroupEmbedding};
+use super::embedding::{compute_group_embedding, build_tag_vector, GroupEmbedding, TAG_VECTOR_DIM};
 use super::main_dim::MainDimension;
 use super::mirror_dim::{MirrorDimension, EpochResult};
 use super::observer::GlobalObserver;
 use super::promotion::PromotionGateConfig;
+use super::router::LearnedRouter;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DimensionManagerConfig {
@@ -57,9 +59,14 @@ impl DimensionManager {
         }
     }
 
-    /// Single entry point for inference.
+    /// Single entry point for inference. Pass context_tags to re-rank by tag-vector similarity.
     pub fn infer(&mut self, input: &[f32]) -> Vec<f32> {
-        self.observer.infer(input, &mut self.main)
+        self.observer.infer(input, &mut self.main, None)
+    }
+
+    /// Infer with optional context tags for tag-vector re-rank (e.g. ["spiral"] or ["circles"]).
+    pub fn infer_with_context(&mut self, input: &[f32], context_tags: Option<&[String]>) -> Vec<f32> {
+        self.observer.infer(input, &mut self.main, context_tags)
     }
 
     /// Spawn a new Mirror for a task. Fails if at max_concurrent_mirrors or name exists.
@@ -108,12 +115,16 @@ impl DimensionManager {
         let mut env = mirror.env;
         env.freeze_all();
         let vector = compute_group_embedding(&mut env, calibration_data);
+        let metatags = vec![mirror.task_name.clone()];
         let embedding = GroupEmbedding {
             group_id: self.next_group_id,
             vector,
             task_name: mirror.task_name.clone(),
             accuracy: mirror.best_accuracy,
             intrinsic_dim: None,
+            description: None,
+            metatags: metatags.clone(),
+            tag_vector: build_tag_vector(&metatags, TAG_VECTOR_DIM),
         };
         self.main.register_group(
             self.next_group_id,
@@ -184,6 +195,40 @@ impl DimensionManager {
     /// Per-group (gid, self_sim, cross_sim, margin, score) from last infer(); None if no infer yet.
     pub fn last_routing_scores(&self) -> Option<&[(GroupId, f32, f32, f32, f32)]> {
         self.observer.last_routing_scores.as_deref()
+    }
+
+    /// Train a learned router on labeled data and set it on the observer.
+    /// Each entry is (samples, group_index): group_index is the index into main.group_order (0 = first group, etc.).
+    /// Call after promotion so main.group_order.len() == data_per_group.len(). Uses input_dim = 2, hidden = 16, lr = 0.15.
+    /// Samples are shuffled each epoch to avoid biasing toward the last class.
+    pub fn train_and_set_router(
+        &mut self,
+        data_per_group: &[(&[([f32; 2], [f32; 1])], usize)],
+        rng: &mut impl Rng,
+        epochs: usize,
+    ) {
+        if data_per_group.is_empty() || self.main.group_order.len() != data_per_group.len() {
+            return;
+        }
+        let input_dim = 2usize;
+        let num_groups = data_per_group.len();
+        let mut router = LearnedRouter::new(input_dim, num_groups, 16, rng);
+        let mut samples: Vec<([f32; 2], usize)> = Vec::new();
+        for (data, group_index) in data_per_group {
+            if *group_index >= num_groups {
+                continue;
+            }
+            for (input, _target) in data.iter() {
+                samples.push((*input, *group_index));
+            }
+        }
+        for _ in 0..epochs {
+            samples.shuffle(rng);
+            for (input, group_index) in &samples {
+                router.train_step(input, *group_index as GroupId, rng);
+            }
+        }
+        self.observer.learned_router = Some(router);
     }
 }
 

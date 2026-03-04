@@ -55,6 +55,9 @@ impl MainDimension {
             task_name: task_name.clone(),
             accuracy,
             intrinsic_dim: embedding.intrinsic_dim,
+            description: embedding.description.clone(),
+            metatags: embedding.metatags.clone(),
+            tag_vector: embedding.tag_vector.clone(),
         };
         self.embedding_library.push(lib_emb.clone());
         self.group_order.push(group_id);
@@ -116,6 +119,9 @@ mod tests {
             task_name: "test".to_string(),
             accuracy: 0.9,
             intrinsic_dim: None,
+            description: None,
+            metatags: vec![],
+            tag_vector: vec![],
         };
         let mut main = MainDimension::new();
         main.register_group(0, "test".to_string(), env, embedding, 0.9, 0);
