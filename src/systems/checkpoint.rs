@@ -4,10 +4,7 @@
 // Saves the full trained Task A state to disk so Task B debugging runs
 // skip the 20-minute Task A training phase entirely.
 //
-// The gradient gate is implemented by the frozen flag on neurons/synapses.
-// Call env.freeze_consolidated_pathway() before save so saved state has
-// frozen=true on the consolidated pathway. No restore loop — backprop
-// and all plasticity systems skip frozen state.
+// MnistCheckpoint — Save Main (five frozen groups) + baseline accs for retention eval.
 // =============================================================================
 
 use serde::{Serialize, Deserialize};
@@ -15,6 +12,7 @@ use std::collections::HashMap;
 use crate::types::{NeuronId, GroupId};
 use crate::neuron::Neuron;
 use crate::types::NeuronGroup;
+use crate::dimension::MainDimension;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
@@ -151,6 +149,40 @@ pub fn load_phase2_checkpoint(
         ckpt.output_1,
         ckpt.data_seed,
     )
+}
+
+// =============================================================================
+// MNIST Checkpoint — save Main (five frozen groups) for retention evaluation
+// =============================================================================
+
+#[derive(Serialize, Deserialize)]
+pub struct MnistCheckpoint {
+    pub main: MainDimension,
+    pub group_order: Vec<GroupId>,
+    /// Baseline accuracies at save time (one per task) for retention comparison.
+    pub baseline_accs: Vec<f32>,
+}
+
+pub fn save_mnist_checkpoint(
+    main: &MainDimension,
+    group_order: &[GroupId],
+    baseline_accs: &[f32],
+    path: &str,
+) {
+    let checkpoint = MnistCheckpoint {
+        main: main.clone(),
+        group_order: group_order.to_vec(),
+        baseline_accs: baseline_accs.to_vec(),
+    };
+    let json = serde_json::to_string_pretty(&checkpoint).expect("MnistCheckpoint serialization failed");
+    std::fs::write(path, &json).unwrap_or_else(|e| panic!("Failed to write {}: {}", path, e));
+    println!("  Checkpoint saved: {} ({} KB)", path, json.len() / 1024);
+}
+
+pub fn load_mnist_checkpoint(path: &str) -> (MainDimension, Vec<GroupId>, Vec<f32>) {
+    let json = std::fs::read_to_string(path).unwrap_or_else(|_| panic!("Checkpoint not found: {}\nRun --mnist first and complete all 5 tasks.", path));
+    let ckpt: MnistCheckpoint = serde_json::from_str(&json).expect("MnistCheckpoint deserialization failed");
+    (ckpt.main, ckpt.group_order, ckpt.baseline_accs)
 }
 
 // =============================================================================

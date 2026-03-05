@@ -13,7 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5.60", features = ["derive"] }
+indicatif = "0.17"
 kiddo = "5.2.4"
+mnist = "0.6"
 rand = "0.8"
 rayon = "1.8"
 serde = { version = "1", features = ["derive"] }

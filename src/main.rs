@@ -1042,7 +1042,7 @@ fn demo_mnist_retention() {
     let (main, group_order, baseline_accs) = load_mnist_checkpoint(&checkpoint_path);
 
     let data_path = std::env::var("MNIST_ROOT").unwrap_or_else(|_| "data".to_string());
-    let (train_imgs, train_lbls, test_imgs, test_lbls) = load_mnist_normalized(&data_path);
+    let (_train_imgs, _train_lbls, test_imgs, test_lbls) = load_mnist_normalized(&data_path);
     let proj = RandomProjection::new(growformer::mnist::MNIST_INPUT, MNIST_PROJECTED, 42);
 
     let mut test_per_task: Vec<Vec<MnistSample>> = Vec::with_capacity(5);
