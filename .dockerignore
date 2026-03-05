@@ -1,0 +1,15 @@
+# Build artifacts and local data
+/target
+/data
+*.gz
+
+# Git and editor
+.git
+.gitignore
+.dockerignore
+*.swp
+*.swo
+
+# Docs and scripts (optional: remove if you want them in the image)
+/docs
+/scripts

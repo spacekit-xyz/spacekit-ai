@@ -1,10 +1,14 @@
 //! Mirror Dimension — isolated training environment for one task. Full plasticity.
 
+use rand::seq::SliceRandom;
 use rand::Rng;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::environment::NeuralEnvironment;
-use crate::types::EnvironmentConfig;
-use serde::{Deserialize, Serialize};
+use crate::types::{EnvironmentConfig, Sample};
 
 /// Isolated env for training one task. No Group A neurons; full plasticity.
 #[derive(Serialize, Deserialize)]
@@ -140,22 +144,92 @@ impl MirrorDimension {
     /// Train one epoch; returns mean loss and accuracy (0.0..1.0).
     pub fn train_epoch(
         &mut self,
-        data: &[([f32; 2], [f32; 1])],
+        data: &[crate::types::Sample],
         rng: &mut impl Rng,
     ) -> EpochResult {
         let mut total_loss = 0.0f32;
         let mut correct = 0usize;
         let n = data.len();
         for (input, target) in data {
-            let out = self.env.predict(input);
+            let input_slice = input.as_slice();
+            let out = self.env.predict(input_slice);
             let target_arr = [target[0]];
-            let loss = self.env.train_tick(input, &target_arr, rng).loss;
+            let loss = self.env.train_tick(input_slice, &target_arr, rng).loss;
             total_loss += loss;
             if out.len() >= 1 && (out[0] - target[0]).abs() < 0.5 {
                 correct += 1;
             }
         }
         let loss = if n > 0 { total_loss / n as f32 } else { 0.0 };
+        let accuracy = if n > 0 { correct as f32 / n as f32 } else { 0.0 };
+        self.epochs_trained += 1;
+        self.current_accuracy = accuracy;
+        if accuracy > self.best_accuracy {
+            self.best_accuracy = accuracy;
+        }
+        EpochResult { loss, accuracy, correct, total: n }
+    }
+
+    /// Train one epoch with minibatch SGD: B clones updated in parallel, then params averaged.
+    /// Gradient-only (no STDP/prune/grow/geometry) for deterministic averaging.
+    /// `batch_size` 1 is equivalent to sequential; use 16–64 for speed on multi-core.
+    pub fn train_epoch_minibatch(
+        &mut self,
+        data: &[Sample],
+        batch_size: usize,
+        epoch: u32,
+        rng: &mut impl Rng,
+    ) -> EpochResult {
+        let n = data.len();
+        if n == 0 {
+            return EpochResult { loss: 0.0, accuracy: 0.0, correct: 0, total: 0 };
+        }
+        let mut indices: Vec<usize> = (0..n).collect();
+        indices.shuffle(rng);
+        let mut total_loss = 0.0f32;
+        let mut batch_count = 0usize;
+
+        for (batch_idx, chunk) in indices.chunks(batch_size).enumerate() {
+            let batch: Vec<Sample> = chunk.iter().map(|&i| data[i].clone()).collect();
+            let b = batch.len();
+            if b == 0 {
+                continue;
+            }
+            let seed = (epoch as u64).wrapping_mul(1_000_000).wrapping_add(batch_idx as u64);
+            let mut clones: Vec<NeuralEnvironment> = (0..b).map(|_| self.env.clone()).collect();
+
+            let losses: Vec<f32> = clones
+                .par_iter_mut()
+                .zip(batch.par_iter())
+                .enumerate()
+                .map(|(i, (env, sample))| {
+                    let mut thread_rng = StdRng::seed_from_u64(seed.wrapping_add(i as u64));
+                    env.train_tick_gradient_only(
+                        sample.0.as_slice(),
+                        &[sample.1[0]],
+                        &mut thread_rng,
+                    )
+                })
+                .collect();
+
+            total_loss += losses.iter().sum::<f32>();
+            batch_count += b;
+            self.env = NeuralEnvironment::average_params_from(&clones);
+        }
+
+        let loss = if batch_count > 0 {
+            total_loss / batch_count as f32
+        } else {
+            0.0
+        };
+
+        let mut correct = 0usize;
+        for (input, target) in data {
+            let out = self.env.predict(input.as_slice());
+            if out.len() >= 1 && (out[0] - target[0]).abs() < 0.5 {
+                correct += 1;
+            }
+        }
         let accuracy = if n > 0 { correct as f32 / n as f32 } else { 0.0 };
         self.epochs_trained += 1;
         self.current_accuracy = accuracy;

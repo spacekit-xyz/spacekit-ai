@@ -173,7 +173,7 @@ impl GlobalObserver {
         &mut self,
         mirrors: &mut std::collections::HashMap<String, MirrorDimension>,
         main: &mut MainDimension,
-        calibration_data: &[([f32; 2], [f32; 1])],
+        calibration_data: &[crate::types::Sample],
         next_group_id: &mut GroupId,
     ) -> Vec<String> {
         let mut to_promote = Vec::new();

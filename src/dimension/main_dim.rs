@@ -111,7 +111,7 @@ mod tests {
         let mut env = NeuralEnvironment::new(config);
         env.build_layers(&[2, 16, 16, 1], &mut rng);
         env.freeze_all();
-        let calibration = vec![([0.0_f32, 0.0], [0.0]); 10];
+        let calibration: Vec<crate::types::Sample> = (0..10).map(|_| (vec![0.0_f32, 0.0], [0.0])).collect();
         let vector = crate::dimension::embedding::compute_group_embedding(&mut env, &calibration);
         let embedding = GroupEmbedding {
             group_id: 0,

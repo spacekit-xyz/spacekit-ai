@@ -35,7 +35,7 @@ pub enum PromotionDecision {
 pub fn evaluate_promotion(
     mirror: &mut MirrorDimension,
     main: &MainDimension,
-    calibration_data: &[([f32; 2], [f32; 1])],
+    calibration_data: &[crate::types::Sample],
     config: &PromotionGateConfig,
 ) -> PromotionDecision {
     if mirror.best_accuracy < config.accuracy_threshold {
@@ -71,7 +71,7 @@ pub fn evaluate_promotion(
 pub fn promote(
     mirror: MirrorDimension,
     main: &mut MainDimension,
-    calibration_data: &[([f32; 2], [f32; 1])],
+    calibration_data: &[crate::types::Sample],
     next_group_id: GroupId,
 ) -> GroupId {
     let mut env = mirror.env;

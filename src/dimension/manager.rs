@@ -105,13 +105,24 @@ impl DimensionManager {
     }
 
     /// Train one epoch in a named mirror.
+    /// Train one epoch on the mirror. If `batch_size` is `Some(b)` with `b > 1`, uses minibatch SGD
+    /// (B clones in parallel, then average params) for faster multi-core runs.
     pub fn train_mirror_epoch(
         &mut self,
         task_name: &str,
-        data: &[([f32; 2], [f32; 1])],
+        data: &[crate::types::Sample],
         rng: &mut impl Rng,
+        batch_size: Option<usize>,
     ) -> Option<EpochResult> {
-        self.mirrors.get_mut(task_name).map(|m| m.train_epoch(data, rng))
+        self.mirrors.get_mut(task_name).map(|m| {
+            match batch_size {
+                Some(b) if b > 1 => {
+                    let epoch = m.epochs_trained;
+                    m.train_epoch_minibatch(data, b, epoch, rng)
+                }
+                _ => m.train_epoch(data, rng),
+            }
+        })
     }
 
     /// If mirror has reached epoch_trigger and current_loss > loss_threshold and not yet triggered,
@@ -145,7 +156,7 @@ impl DimensionManager {
     }
 
     /// Check all mirrors for promotion; promote those that pass.
-    pub fn evaluate_promotions(&mut self, calibration_data: &[([f32; 2], [f32; 1])]) {
+    pub fn evaluate_promotions(&mut self, calibration_data: &[crate::types::Sample]) {
         let _ = self.observer.evaluate_mirrors(
             &mut self.mirrors,
             &mut self.main,
@@ -155,7 +166,7 @@ impl DimensionManager {
     }
 
     /// Force promote a mirror (for demos / testing). Consumes the mirror and registers in Main.
-    pub fn force_promote(&mut self, task_name: &str, calibration_data: &[([f32; 2], [f32; 1])]) -> Option<GroupId> {
+    pub fn force_promote(&mut self, task_name: &str, calibration_data: &[crate::types::Sample]) -> Option<GroupId> {
         let mirror = self.mirrors.remove(task_name)?;
         let mut env = mirror.env;
         env.freeze_all();
@@ -189,7 +200,7 @@ impl DimensionManager {
     pub fn evaluate_main_group(
         &mut self,
         group_id: GroupId,
-        data: &[([f32; 2], [f32; 1])],
+        data: &[crate::types::Sample],
     ) -> f32 {
         let fg = match self.main.groups.get_mut(&group_id) {
             Some(f) => f,
@@ -197,7 +208,7 @@ impl DimensionManager {
         };
         let mut correct = 0usize;
         for (input, target) in data {
-            let out = fg.env.predict(input);
+            let out = fg.env.predict(input.as_slice());
             if out.len() >= 1 && (out[0] - target[0]).abs() < 0.5 {
                 correct += 1;
             }
@@ -244,33 +255,33 @@ impl DimensionManager {
 
     /// Train a learned router on labeled data and set it on the observer.
     /// Each entry is (samples, group_index): group_index is the index into main.group_order (0 = first group, etc.).
-    /// Call after promotion so main.group_order.len() == data_per_group.len(). Uses input_dim = 2, hidden = 16, lr = 0.15.
+    /// Call after promotion so main.group_order.len() == data_per_group.len(). Uses input_dim from config.mirror_layer_sizes[0], hidden = 16, lr = 0.15.
     /// Samples are shuffled each epoch to avoid biasing toward the last class.
     pub fn train_and_set_router(
         &mut self,
-        data_per_group: &[(&[([f32; 2], [f32; 1])], usize)],
+        data_per_group: &[(&[crate::types::Sample], usize)],
         rng: &mut impl Rng,
         epochs: usize,
     ) {
         if data_per_group.is_empty() || self.main.group_order.len() != data_per_group.len() {
             return;
         }
-        let input_dim = 2usize;
+        let input_dim = self.config.mirror_layer_sizes.first().copied().unwrap_or(2);
         let num_groups = data_per_group.len();
         let mut router = LearnedRouter::new(input_dim, num_groups, 16, rng);
-        let mut samples: Vec<([f32; 2], usize)> = Vec::new();
+        let mut samples: Vec<(Vec<f32>, usize)> = Vec::new();
         for (data, group_index) in data_per_group {
             if *group_index >= num_groups {
                 continue;
             }
             for (input, _target) in data.iter() {
-                samples.push((*input, *group_index));
+                samples.push((input.clone(), *group_index));
             }
         }
         for _ in 0..epochs {
             samples.shuffle(rng);
             for (input, group_index) in &samples {
-                router.train_step(input, *group_index as GroupId, rng);
+                router.train_step(input.as_slice(), *group_index as GroupId, rng);
             }
         }
         self.observer.learned_router = Some(router);
@@ -288,19 +299,19 @@ impl DimensionManager {
     pub fn train_composition(
         &mut self,
         group_ids: &[GroupId],
-        data: &[([f32; 2], [f32; 1])],
+        data: &[crate::types::Sample],
         lr: f32,
         epochs: usize,
     ) -> (VirtualGroup, f32) {
         let mut vg = VirtualGroup::new(group_ids.to_vec());
         for _ in 0..epochs {
             for (input, target) in data {
-                vg.train_step(&mut self.main, input, target, lr);
+                vg.train_step(&mut self.main, input.as_slice(), target, lr);
             }
         }
         let mut correct = 0usize;
         for (input, target) in data {
-            let out = vg.predict(&mut self.main, input);
+            let out = vg.predict(&mut self.main, input.as_slice());
             if out.len() >= 1 && (out[0] - target[0]).abs() < 0.5 {
                 correct += 1;
             }
@@ -313,25 +324,30 @@ impl DimensionManager {
         (vg, acc)
     }
 
-    /// Store a successful composition in episodic memory. Signature = mean of input coords.
+    /// Store a successful composition in episodic memory. Signature = mean of input coords (any dimension).
     pub fn store_composition_episode(
         &mut self,
         virtual_group: &VirtualGroup,
-        data: &[([f32; 2], [f32; 1])],
+        data: &[crate::types::Sample],
         accuracy: f32,
         residual: f32,
     ) {
         if data.is_empty() {
             return;
         }
-        let mut sx = 0.0f32;
-        let mut sy = 0.0f32;
+        let dim = data[0].0.len();
+        let mut input_signature = vec![0.0f32; dim];
         for (input, _) in data {
-            sx += input[0];
-            sy += input[1];
+            for (i, &v) in input.iter().enumerate() {
+                if i < dim {
+                    input_signature[i] += v;
+                }
+            }
         }
         let n = data.len() as f32;
-        let input_signature = vec![sx / n, sy / n];
+        for v in &mut input_signature {
+            *v /= n;
+        }
         self.episodic_memory.store(Episode {
             input_signature,
             group_ids: virtual_group.group_ids.clone(),

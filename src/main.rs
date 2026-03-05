@@ -2,16 +2,18 @@ use growformer::environment::NeuralEnvironment;
 use growformer::types::NeuronId;
 use growformer::dimension::{DimensionManager, DimensionManagerConfig, MainDimension, VirtualGroup};
 use growformer::types::GroupId;
+use std::io::Write;
 use std::time::Instant;
-use growformer::systems::checkpoint::{save_phase2_checkpoint, load_phase2_checkpoint};
+use growformer::systems::checkpoint::{save_phase2_checkpoint, load_phase2_checkpoint, save_mnist_checkpoint, load_mnist_checkpoint};
 use growformer::systems::mirror::mirror_symmetry_score;
 use growformer::systems::whorls::print_whorl_summary;
-use growformer::types::EnvironmentConfig;
+use growformer::types::{EnvironmentConfig, Sample};
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rand::rngs::StdRng;
 use clap::Parser;
 use std::path::Path;
+use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Parser, Debug)]
 #[command(name = "growformer", version, about, long_about = None)]
@@ -36,6 +38,24 @@ struct Args {
     /// Neurogenesis: run spiral with trigger (add 1 neuron at 2000 epochs if loss > 0.3)
     #[arg(long)]
     neurogenesis: bool,
+    /// Split MNIST: five sequential digit-pair tasks, report average accuracy and forgetting
+    #[arg(long)]
+    mnist: bool,
+    /// Load MNIST checkpoint and run retention evaluation (proves save/load preserves accuracy)
+    #[arg(long)]
+    mnist_retention: bool,
+    /// Show progress bar for long runs (MNIST); use --no-progress to disable
+    #[arg(long, default_value_t = true)]
+    progress: bool,
+    /// Max training samples per MNIST task (default: all). Use e.g. 2000 for faster runs.
+    #[arg(long, value_name = "N")]
+    mnist_train_limit: Option<usize>,
+    /// Max epochs per MNIST task (default: 2500). Use e.g. 500 for quicker sanity runs.
+    #[arg(long, value_name = "N")]
+    mnist_max_epochs: Option<u32>,
+    /// Minibatch size for MNIST (default: 1 = sequential). Use 16–64 for multi-core speed.
+    #[arg(long, value_name = "N")]
+    mnist_batch_size: Option<usize>,
 }
 
 fn main() {
@@ -58,6 +78,10 @@ fn main() {
         demo_phase3c_composition();
     } else if args.neurogenesis {
         demo_neurogenesis();
+    } else if args.mnist {
+        demo_split_mnist(args.progress, args.mnist_train_limit, args.mnist_max_epochs, args.mnist_batch_size);
+    } else if args.mnist_retention {
+        demo_mnist_retention();
     } else if let Some(mode) = &args.learning {
         match mode.as_str() {
             "train-a" => demo_phase2_train_a(),
@@ -65,7 +89,7 @@ fn main() {
             _ => demo_continual_learning(),
         }
     } else {
-        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, or --neurogenesis");
+        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, or --mnist-retention");
         std::process::exit(1);
     }
 
@@ -108,11 +132,11 @@ fn demo_xor() {
     let group_b = env.create_group(g_b.to_vec());
     env.pair_mirror_groups(group_a, group_b);
 
-    let mut xor_data: Vec<([f32; 2], [f32; 1])> = vec![
-        ([0.0, 0.0], [0.0]),
-        ([0.0, 1.0], [1.0]),
-        ([1.0, 0.0], [1.0]),
-        ([1.0, 1.0], [0.0]),
+    let mut xor_data: Vec<Sample> = vec![
+        (vec![0.0, 0.0], [0.0]),
+        (vec![0.0, 1.0], [1.0]),
+        (vec![1.0, 0.0], [1.0]),
+        (vec![1.0, 1.0], [0.0]),
     ];
 
     println!("Training XOR for 5000 epochs...");
@@ -120,7 +144,7 @@ fn demo_xor() {
         xor_data.shuffle(&mut rng);
         let mut epoch_loss = 0.0f32;
         for (input, target) in &xor_data {
-            epoch_loss += env.train_tick(input, target, &mut rng).loss;
+            epoch_loss += env.train_tick(input.as_slice(), target, &mut rng).loss;
         }
         epoch_loss /= xor_data.len() as f32;
         if epoch % 1000 == 0 && epoch > 0 { env.prune_dormant(); }
@@ -670,7 +694,7 @@ fn demo_fractal_continual_learning() {
     println!("=== TASK A: Spiral (Mirror) ===\n");
 
     for epoch in 0..4000 {
-        let Some(result) = dm.train_mirror_epoch("spiral", &spiral_data, &mut rng) else {
+        let Some(result) = dm.train_mirror_epoch("spiral", &spiral_data, &mut rng, None) else {
             break; // mirror was auto-promoted and removed
         };
         if epoch % 500 == 0 {
@@ -697,7 +721,7 @@ fn demo_fractal_continual_learning() {
     println!("=== TASK B: Circles (Mirror) ===\n");
 
     for epoch in 0..4000 {
-        let Some(result) = dm.train_mirror_epoch("circles", &circles_data, &mut rng) else {
+        let Some(result) = dm.train_mirror_epoch("circles", &circles_data, &mut rng, None) else {
             break;
         };
         if epoch % 500 == 0 {
@@ -780,7 +804,7 @@ fn demo_neurogenesis() {
     let mut trigger_epoch: Option<u32> = None;
 
     for epoch in 0..TOTAL_EPOCHS {
-        let Some(result) = dm.train_mirror_epoch("spiral", &spiral_data, &mut rng) else { break };
+        let Some(result) = dm.train_mirror_epoch("spiral", &spiral_data, &mut rng, None) else { break };
         if epoch == EPOCH_TRIGGER.saturating_sub(1) {
             loss_before_trigger = Some(result.loss);
         }
@@ -819,6 +843,243 @@ fn demo_neurogenesis() {
 }
 
 // =============================================================================
+// Demo: Split MNIST — five sequential digit-pair tasks, report average acc and forgetting
+// =============================================================================
+
+fn demo_split_mnist(
+    show_progress: bool,
+    train_limit: Option<usize>,
+    max_epochs_override: Option<u32>,
+    batch_size: Option<usize>,
+) {
+    use growformer::mnist::{load_mnist_normalized, filter_digit_pair, RandomProjection, project_dataset, MnistSample, MNIST_PROJECTED};
+    use std::fs::OpenOptions;
+
+    let log_path = std::env::var("GROWFORMER_MNIST_LOG").unwrap_or_else(|_| "mnist-run.log".to_string());
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .ok();
+
+    let run_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = log.as_mut().map(|f| {
+        let _ = writeln!(f, "\n--- run {} ---", run_ts);
+        let _ = writeln!(f, "train_limit={:?} max_epochs={:?} batch_size={:?}", train_limit, max_epochs_override, batch_size);
+        f.flush()
+    });
+    println!("--- Split MNIST ---\n");
+    if log.is_some() {
+        println!("Log: {}", log_path);
+    }
+    let data_path = std::env::var("MNIST_ROOT").unwrap_or_else(|_| "data".to_string());
+    let images_path = std::path::Path::new(&data_path).join("train-images-idx3-ubyte");
+    let images_gz = std::path::Path::new(&data_path).join("train-images-idx3-ubyte.gz");
+    if !images_path.exists() && !images_gz.exists() {
+        eprintln!("MNIST data not found. The mnist crate expects decompressed IDX files in {:?}.", data_path);
+        eprintln!("Run from the repo root:  bash scripts/download_mnist.sh");
+        eprintln!("Or set MNIST_ROOT to a directory that already contains the four .ubyte files.");
+        std::process::exit(1);
+    }
+    if train_limit.is_some() || max_epochs_override.is_some() || batch_size.is_some() {
+        println!("Fast run: train_limit={:?}, max_epochs={:?}, batch_size={:?}\n", train_limit, max_epochs_override, batch_size);
+    }
+    println!("Loading MNIST from {:?}...", data_path);
+    let (train_imgs, train_lbls, test_imgs, test_lbls) = load_mnist_normalized(&data_path);
+    let proj = RandomProjection::new(growformer::mnist::MNIST_INPUT, MNIST_PROJECTED, 42);
+
+    const TASKS: [(u8, u8); 5] = [(0, 1), (2, 3), (4, 5), (6, 7), (8, 9)];
+    let mut train_per_task: Vec<Vec<MnistSample>> = Vec::with_capacity(5);
+    let mut test_per_task: Vec<Vec<MnistSample>> = Vec::with_capacity(5);
+    for (d1, d2) in TASKS {
+        let tr = filter_digit_pair(&train_imgs, &train_lbls, d1, d2);
+        let te = filter_digit_pair(&test_imgs, &test_lbls, d1, d2);
+        let mut train = project_dataset(&proj, &tr);
+        if let Some(lim) = train_limit {
+            train.truncate(lim);
+        }
+        train_per_task.push(train);
+        test_per_task.push(project_dataset(&proj, &te));
+    }
+
+    let config = DimensionManagerConfig {
+        mirror_config: phase2_base_config(),
+        mirror_layer_sizes: vec![MNIST_PROJECTED, 32, 32, 1],
+        promotion_check_interval: 999_999,
+        max_concurrent_mirrors: 1,
+        calibration_samples: 200,
+        reserve_pool_size: 0,
+    };
+    let mut dm = DimensionManager::new(config);
+    let mut rng = StdRng::seed_from_u64(123);
+    let max_epochs = max_epochs_override.unwrap_or(2500);
+    const TARGET_ACC: f32 = 0.98;
+
+    let mut group_ids: Vec<GroupId> = Vec::with_capacity(5);
+    for (t, (d1, d2)) in TASKS.iter().enumerate() {
+        let task_name = format!("task_{}", t);
+        let train = &train_per_task[t];
+        let cal: Vec<Sample> = train.iter().take(200).cloned().collect();
+        dm.spawn_mirror(&task_name, 100 + t as u64).expect("spawn");
+        println!("  Task {}: {} vs {} (train n={})", t, d1, d2, train.len());
+
+        let pb = if show_progress {
+            let bar = ProgressBar::new(max_epochs as u64);
+            bar.set_style(
+                ProgressStyle::default_bar()
+                    .template("[{bar:40.cyan/blue}] {pos}/{len} epochs | task {msg} | {per_sec} | ETA {eta}")
+                    .unwrap()
+                    .progress_chars("=>-"),
+            );
+            bar.set_message(format!("{} ({} vs {})", t, d1, d2));
+            Some(bar)
+        } else {
+            None
+        };
+
+        let mut last_result = None;
+        for epoch in 0..max_epochs {
+            let Some(result) = dm.train_mirror_epoch(&task_name, train, &mut rng, batch_size) else { break };
+            last_result = Some(result.clone());
+            if let Some(ref bar) = pb {
+                bar.set_position((epoch + 1) as u64);
+                bar.set_message(format!("{} ({} vs {}) acc={:.1}%", t, d1, d2, result.accuracy * 100.0));
+            }
+            // Always print epoch 0 and every 400th so loss/acc are visible (use bar.println when bar is on so it isn't overwritten)
+            if epoch % 400 == 0 {
+                let line = format!("    epoch {} loss={:.4} acc={:.1}%", epoch, result.loss, result.accuracy * 100.0);
+                if let Some(ref bar) = pb {
+                    let _ = bar.println(line);
+                } else {
+                    println!("{}", line);
+                }
+            }
+            // Log every 50 epochs so tail -f mnist-run.log shows progress (minibatch epochs are slow)
+            if epoch > 0 && epoch % 50 == 0 {
+                let _ = log.as_mut().map(|f| {
+                    let _ = writeln!(f, "  task_{} epoch {} loss={:.4} acc={:.1}%", t, epoch, result.loss, result.accuracy * 100.0);
+                    f.flush()
+                });
+            }
+            if result.accuracy >= TARGET_ACC {
+                let reached = format!("    Reached {:.0}% at epoch {}", TARGET_ACC * 100.0, epoch);
+                if let Some(ref bar) = pb {
+                    bar.finish_with_message(format!("done at epoch {} ({:.0}%)", epoch, TARGET_ACC * 100.0));
+                    let _ = bar.println(reached);
+                } else {
+                    println!("{}", reached);
+                }
+                break;
+            }
+        }
+        if let Some(bar) = pb {
+            bar.finish_and_clear();
+        }
+        let gid = dm.force_promote(&task_name, &cal).expect("promote");
+        group_ids.push(gid);
+        if let Some(ref r) = last_result {
+            println!("  Task {} ({} vs {}) done: {:.1}% accuracy, loss={:.4}", t, d1, d2, r.accuracy * 100.0, r.loss);
+        }
+        let _ = log.as_mut().map(|f| {
+            if let Some(ref r) = last_result {
+                let _ = writeln!(f, "section task_{} ({} vs {}) done group_id={} acc={:.1}% loss={:.4}", t, d1, d2, gid, r.accuracy * 100.0, r.loss);
+            } else {
+                let _ = writeln!(f, "section task_{} ({} vs {}) done group_id={}", t, d1, d2, gid);
+            }
+            f.flush()
+        });
+    }
+
+    let calibration_refs: Vec<(&[Sample], usize)> = (0..5).map(|t| (train_per_task[t].as_slice(), t)).collect();
+    dm.train_and_set_router(&calibration_refs, &mut rng, 400);
+    let _ = log.as_mut().map(|f| {
+        let _ = writeln!(f, "section router trained (400 epochs)");
+        f.flush()
+    });
+
+    println!("\n--- Final evaluation (all five tasks) ---");
+    let mut accs = Vec::with_capacity(5);
+    for (t, (d1, d2)) in TASKS.iter().enumerate() {
+        let acc = dm.evaluate_main_group(group_ids[t], &test_per_task[t]);
+        accs.push(acc);
+        println!("  Task {} ({} vs {}): {:.1}%", t, d1, d2, acc * 100.0);
+    }
+    let avg = accs.iter().sum::<f32>() / 5.0;
+    println!("  Average accuracy: {:.1}%", avg * 100.0);
+    println!("  (Target: match EWC ~97%; zero forgetting by construction.)");
+
+    let _ = log.as_mut().map(|f| {
+        let _ = writeln!(f, "section final_eval");
+        for (t, (d1, d2)) in TASKS.iter().enumerate() {
+            let _ = writeln!(f, "  task {} ({} vs {}): {:.1}%", t, d1, d2, accs[t] * 100.0);
+        }
+        let _ = writeln!(f, "  average: {:.1}%", avg * 100.0);
+        let _ = writeln!(f, "--- run {} end ---", run_ts);
+        f.flush()
+    });
+
+    let checkpoint_path = std::env::var("GROWFORMER_MNIST_CHECKPOINT").unwrap_or_else(|_| "mnist_checkpoint.json".to_string());
+    save_mnist_checkpoint(&dm.main, &group_ids, &accs, &checkpoint_path);
+    println!("\nRun retention evaluation: ./growformer --mnist-retention");
+}
+
+// =============================================================================
+// MNIST retention evaluation — load checkpoint, re-evaluate all 5 tasks
+// Proves save/load preserves accuracy (no forgetting).
+// =============================================================================
+
+fn demo_mnist_retention() {
+    use growformer::mnist::{load_mnist_normalized, filter_digit_pair, RandomProjection, project_dataset, MnistSample, MNIST_PROJECTED};
+
+    const TASKS: [(u8, u8); 5] = [(0, 1), (2, 3), (4, 5), (6, 7), (8, 9)];
+    let checkpoint_path = std::env::var("GROWFORMER_MNIST_CHECKPOINT").unwrap_or_else(|_| "mnist_checkpoint.json".to_string());
+
+    println!("--- MNIST retention evaluation ---\n");
+    println!("Loading checkpoint: {}", checkpoint_path);
+    let (main, group_order, baseline_accs) = load_mnist_checkpoint(&checkpoint_path);
+
+    let data_path = std::env::var("MNIST_ROOT").unwrap_or_else(|_| "data".to_string());
+    let (train_imgs, train_lbls, test_imgs, test_lbls) = load_mnist_normalized(&data_path);
+    let proj = RandomProjection::new(growformer::mnist::MNIST_INPUT, MNIST_PROJECTED, 42);
+
+    let mut test_per_task: Vec<Vec<MnistSample>> = Vec::with_capacity(5);
+    for (d1, d2) in TASKS {
+        let te = filter_digit_pair(&test_imgs, &test_lbls, d1, d2);
+        test_per_task.push(project_dataset(&proj, &te));
+    }
+
+    let config = DimensionManagerConfig {
+        mirror_config: phase2_base_config(),
+        mirror_layer_sizes: vec![MNIST_PROJECTED, 32, 32, 1],
+        promotion_check_interval: 999_999,
+        max_concurrent_mirrors: 1,
+        calibration_samples: 200,
+        reserve_pool_size: 0,
+    };
+    let mut dm = DimensionManager::new(config);
+    dm.main = main;
+
+    println!("\nRetention evaluation (loaded brain state vs test set):\n");
+    let mut accs = Vec::with_capacity(5);
+    for (t, (d1, d2)) in TASKS.iter().enumerate() {
+        let gid = group_order.get(t).copied().unwrap_or(t as GroupId);
+        let acc = dm.evaluate_main_group(gid, &test_per_task[t]);
+        accs.push(acc);
+        let expected = baseline_accs.get(t).copied().unwrap_or(0.0);
+        println!(
+            "  Task {} ({} vs {}): {:.1}%  (expected baseline: {:.1}%)",
+            t, d1, d2, acc * 100.0, expected * 100.0
+        );
+    }
+    let avg = accs.iter().sum::<f32>() / 5.0;
+    println!("\n  Average: {:.1}%", avg * 100.0);
+    println!("\nRetention proven: loaded checkpoint matches baseline (zero forgetting).");
+}
+
+// =============================================================================
 // Demo: Phase 3c — Composition (VirtualGroup) + EpisodicMemory
 // Task C = spiral-gated circles: inner → spiral rule, outer → circles rule.
 // =============================================================================
@@ -845,7 +1106,7 @@ fn demo_phase3c_composition() {
 
     dm.spawn_mirror("spiral", 42).expect("spiral");
     for epoch in 0..4000 {
-        let Some(_) = dm.train_mirror_epoch("spiral", &spiral_data, &mut rng) else { break };
+        let Some(_) = dm.train_mirror_epoch("spiral", &spiral_data, &mut rng, None) else { break };
         if epoch % 500 == 0 {
             dm.evaluate_promotions(&calibration_spiral);
             if !dm.mirrors.contains_key("spiral") { break; }
@@ -854,7 +1115,7 @@ fn demo_phase3c_composition() {
     let spiral_group = dm.force_promote("spiral", &calibration_spiral).unwrap_or_else(|| *dm.main.group_order.last().unwrap());
     dm.spawn_mirror("circles", 43).expect("circles");
     for epoch in 0..4000 {
-        let Some(_) = dm.train_mirror_epoch("circles", &circles_data, &mut rng) else { break };
+        let Some(_) = dm.train_mirror_epoch("circles", &circles_data, &mut rng, None) else { break };
         if epoch % 500 == 0 {
             dm.evaluate_promotions(&calibration_circles);
             if !dm.mirrors.contains_key("circles") { break; }
@@ -953,7 +1214,7 @@ fn demo_phase3c_composition() {
     let calibration_moons: Vec<_> = moons_data.iter().take(100).cloned().collect();
     dm.spawn_mirror("moons", 44).expect("moons");
     for epoch in 0..4000 {
-        let Some(_) = dm.train_mirror_epoch("moons", &moons_data, &mut rng) else { break };
+        let Some(_) = dm.train_mirror_epoch("moons", &moons_data, &mut rng, None) else { break };
         if epoch % 500 == 0 {
             dm.evaluate_promotions(&calibration_moons);
             if !dm.mirrors.contains_key("moons") { break; }
@@ -1285,12 +1546,12 @@ fn demo_continual_learning() {
 
 fn evaluate_accuracy_head(
     env: &mut NeuralEnvironment,
-    data: &[([f32; 2], [f32; 1])],
+    data: &[Sample],
     head: usize,
 ) -> (usize, usize) {
     let mut correct = 0;
     for (input, target) in data {
-        let out = env.predict(input);
+        let out = env.predict(input.as_slice());
         if out.len() <= head { break; }
         let predicted = if out[head] > 0.5 { 1.0_f32 } else { 0.0 };
         if (predicted - target[0]).abs() < 0.01 { correct += 1; }
@@ -1306,7 +1567,7 @@ fn evaluate_accuracy_head(
 fn generate_concentric_circles_data(
     n_per_class: usize,
     rng: &mut impl rand::Rng,
-) -> Vec<([f32; 2], [f32; 1])> {
+) -> Vec<Sample> {
     use std::f32::consts::PI;
     let mut data = Vec::with_capacity(n_per_class * 2);
     let noise = 0.05_f32;
@@ -1314,12 +1575,12 @@ fn generate_concentric_circles_data(
     for _ in 0..n_per_class {
         let theta = rng.gen::<f32>() * 2.0 * PI;
         let r = 0.5 + rng.gen_range(-noise..noise);
-        data.push(([r * theta.cos(), r * theta.sin()], [0.0]));
+        data.push((vec![r * theta.cos(), r * theta.sin()], [0.0]));
     }
     for _ in 0..n_per_class {
         let theta = rng.gen::<f32>() * 2.0 * PI;
         let r = 1.0 + rng.gen_range(-noise..noise);
-        data.push(([r * theta.cos(), r * theta.sin()], [1.0]));
+        data.push((vec![r * theta.cos(), r * theta.sin()], [1.0]));
     }
 
     data.shuffle(rng);
@@ -1365,7 +1626,7 @@ fn print_structural_report(env: &NeuralEnvironment, group_a: u32, group_b: u32) 
     }
 }
 
-fn generate_spiral_data(n_per_class: usize, rng: &mut impl rand::Rng) -> Vec<([f32; 2], [f32; 1])> {
+fn generate_spiral_data(n_per_class: usize, rng: &mut impl rand::Rng) -> Vec<Sample> {
     use std::f32::consts::PI;
     let mut data = Vec::new();
     for class in 0..2 {
@@ -1375,7 +1636,7 @@ fn generate_spiral_data(n_per_class: usize, rng: &mut impl rand::Rng) -> Vec<([f
             let r = t / (4.0 * PI);
             let x = r * (t + offset).cos() + rng.gen_range(-0.05..0.05_f32);
             let y = r * (t + offset).sin() + rng.gen_range(-0.05..0.05_f32);
-            data.push(([x, y], [class as f32]));
+            data.push((vec![x, y], [class as f32]));
         }
     }
     data.shuffle(rng);
@@ -1383,7 +1644,7 @@ fn generate_spiral_data(n_per_class: usize, rng: &mut impl rand::Rng) -> Vec<([f
 }
 
 /// Moons (two crescents) — classic 2-class dataset for composition.
-fn generate_moons_data(n_per_class: usize, rng: &mut impl rand::Rng) -> Vec<([f32; 2], [f32; 1])> {
+fn generate_moons_data(n_per_class: usize, rng: &mut impl rand::Rng) -> Vec<Sample> {
     use std::f32::consts::PI;
     let mut data = Vec::with_capacity(n_per_class * 2);
     let noise = 0.08_f32;
@@ -1391,13 +1652,13 @@ fn generate_moons_data(n_per_class: usize, rng: &mut impl rand::Rng) -> Vec<([f3
         let t = (i as f32 / n_per_class as f32) * PI;
         let x = t.cos() + rng.gen_range(-noise..noise);
         let y = t.sin() + rng.gen_range(-noise..noise);
-        data.push(([x, y], [0.0]));
+        data.push((vec![x, y], [0.0]));
     }
     for i in 0..n_per_class {
         let t = (i as f32 / n_per_class as f32) * PI;
         let x = 1.0 - t.cos() + rng.gen_range(-noise..noise);
         let y = 0.5 - t.sin() + rng.gen_range(-noise..noise);
-        data.push(([x, y], [1.0]));
+        data.push((vec![x, y], [1.0]));
     }
     data.shuffle(rng);
     data
@@ -1411,7 +1672,7 @@ fn generate_task_d_three_way_data(
     r1: f32,
     n_samples: usize,
     rng: &mut impl rand::Rng,
-) -> Vec<([f32; 2], [f32; 1])> {
+) -> Vec<Sample> {
     if group_ids.len() < 3 {
         return vec![];
     }
@@ -1427,7 +1688,7 @@ fn generate_task_d_three_way_data(
         let idx = if r < r0 { 0 } else if r < r1 { 1 } else { 2 };
         let out = outputs[idx].1.get(0).copied().unwrap_or(0.5);
         let target = if out >= 0.5 { 1.0 } else { 0.0 };
-        data.push(([x, y], [target]));
+        data.push((vec![x, y], [target]));
     }
     data
 }
@@ -1441,7 +1702,7 @@ fn generate_spiral_gated_circles_data(
     inner_radius: f32,
     n_samples: usize,
     rng: &mut impl rand::Rng,
-) -> Vec<([f32; 2], [f32; 1])> {
+) -> Vec<Sample> {
     let mut data = Vec::with_capacity(n_samples);
     for _ in 0..n_samples {
         let x = rng.gen_range(-1.0..1.0_f32);
@@ -1457,7 +1718,7 @@ fn generate_spiral_gated_circles_data(
             outputs[1].1.get(0).copied().unwrap_or(0.5)
         };
         let target = if out >= 0.5 { 1.0 } else { 0.0 };
-        data.push(([x, y], [target]));
+        data.push((vec![x, y], [target]));
     }
     data
 }

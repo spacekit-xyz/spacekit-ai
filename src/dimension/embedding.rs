@@ -87,7 +87,7 @@ pub fn hidden_activation_vector(env: &NeuralEnvironment) -> Vec<f32> {
 /// Caller sets group_id, task_name, accuracy when building GroupEmbedding.
 pub fn compute_group_embedding(
     env: &mut NeuralEnvironment,
-    calibration_data: &[([f32; 2], [f32; 1])],
+    calibration_data: &[crate::types::Sample],
 ) -> Vec<f32> {
     if calibration_data.is_empty() {
         return vec![];
@@ -104,7 +104,7 @@ pub fn compute_group_embedding(
     let dim = hidden_ids.len();
     let mut sum: Vec<f32> = vec![0.0; dim];
     for (input, _) in calibration_data {
-        env.predict(input);
+        env.predict(input.as_slice());
         for (i, &id) in hidden_ids.iter().enumerate() {
             if let Some(n) = env.neurons.get(&id) {
                 sum[i] += n.activation;
@@ -152,34 +152,34 @@ mod tests {
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 
-    fn spiral_like(n: usize, _rng: &mut StdRng) -> Vec<([f32; 2], [f32; 1])> {
+    fn spiral_like(n: usize, _rng: &mut StdRng) -> Vec<crate::types::Sample> {
         use std::f32::consts::PI;
         let mut out = Vec::with_capacity(n * 2);
         for i in 0..n {
             let t = (i as f32 / n as f32) * 2.0 * PI;
             let r = 0.5 + (i as f32 * 0.001) % 0.2;
-            out.push(([r * t.cos(), r * t.sin()], [0.0]));
+            out.push((vec![r * t.cos(), r * t.sin()], [0.0]));
         }
         for i in 0..n {
             let t = (i as f32 / n as f32) * 2.0 * PI + PI;
             let r = 0.5 + 0.3 + (i as f32 * 0.001) % 0.2;
-            out.push(([r * t.cos(), r * t.sin()], [1.0]));
+            out.push((vec![r * t.cos(), r * t.sin()], [1.0]));
         }
         out
     }
 
-    fn circles_like(n: usize, rng: &mut StdRng) -> Vec<([f32; 2], [f32; 1])> {
+    fn circles_like(n: usize, rng: &mut StdRng) -> Vec<crate::types::Sample> {
         use std::f32::consts::PI;
         let mut out = Vec::with_capacity(n * 2);
         for _ in 0..n {
             let theta = rng.gen::<f32>() * 2.0 * PI;
             let r = 0.5 + rng.gen_range(-0.05..0.05);
-            out.push(([r * theta.cos(), r * theta.sin()], [0.0]));
+            out.push((vec![r * theta.cos(), r * theta.sin()], [0.0]));
         }
         for _ in 0..n {
             let theta = rng.gen::<f32>() * 2.0 * PI;
             let r = 1.0 + rng.gen_range(-0.05..0.05);
-            out.push(([r * theta.cos(), r * theta.sin()], [1.0]));
+            out.push((vec![r * theta.cos(), r * theta.sin()], [1.0]));
         }
         out
     }
@@ -253,7 +253,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let mut env = NeuralEnvironment::new(config);
         env.build_layers(&[2, 16, 16, 1], &mut rng);
-        let one_sample = vec![([0.1_f32, 0.2], [0.0])];
+        let one_sample: Vec<crate::types::Sample> = vec![(vec![0.1_f32, 0.2], [0.0])];
         let embedding = compute_group_embedding(&mut env, &one_sample);
         env.predict(&[0.1_f32, 0.2]);
         let hidden = hidden_activation_vector(&env);

@@ -5,6 +5,9 @@ use crate::neuron::Neuron;
 pub type NeuronId = u32;
 pub type GroupId = u32;
 
+/// One supervised sample: input (variable length, e.g. 2 for spiral/circles or 64 for MNIST) and binary target.
+pub type Sample = (Vec<f32>, [f32; 1]);
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct Vec3 {
     pub x: f32,
