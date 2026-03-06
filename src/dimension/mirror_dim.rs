@@ -239,11 +239,10 @@ impl MirrorDimension {
         EpochResult { loss, accuracy, correct, total: n }
     }
 
-    /// True if accuracy has been stable (no improvement) for `window` epochs.
+    /// True if at least `window` epochs have been trained (used by promotion gate).
+    /// Note: this is epoch count only, not accuracy plateau; we don't track per-epoch history here.
     pub fn is_stable(&self, window: u32) -> bool {
         self.epochs_trained >= window
-        // Simplified: we don't track per-epoch history here; caller can check plateau externally.
-        // For the test we require epochs_trained >= window.
     }
 }
 

@@ -17,6 +17,6 @@ pub use main_dim::{MainDimension, FrozenGroupEnv};
 pub use mirror_dim::{MirrorDimension, EpochResult};
 pub use promotion::{PromotionGateConfig, PromotionDecision, evaluate_promotion, promote};
 pub use policy::{ContinuousPolicy, Policy};
-pub use router::{LearnedRouter, attend_heuristic, attend_by_query};
+pub use router::{LearnedRouter, attend_by_query};
 pub use observer::{GlobalObserver, RoutingConfig};
 pub use manager::{DimensionManager, DimensionManagerConfig, GroupSummary, MirrorSummary};
