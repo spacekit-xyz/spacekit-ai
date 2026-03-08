@@ -280,4 +280,60 @@ mod tests {
             assert_eq!(r.synapses.len(), orig.synapses.len());
         }
     }
+
+    /// Proves the MNIST checkpoint can be written to disk and loaded back.
+    /// Uses a temp file so it works on any system without polluting the repo.
+    #[test]
+    fn test_mnist_checkpoint_write_and_load() {
+        use crate::dimension::MainDimension;
+        use crate::dimension::embedding::GroupEmbedding;
+        use crate::environment::NeuralEnvironment;
+        use rand::SeedableRng;
+        use rand::rngs::StdRng;
+        use std::fs;
+
+        let config = EnvironmentConfig::default();
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut env = NeuralEnvironment::new(config);
+        env.build_layers(&[64, 32, 32, 1], &mut rng);
+        env.freeze_all();
+
+        let calibration: Vec<crate::types::Sample> = (0..5)
+            .map(|i| (vec![0.0_f32; 64], [if i % 2 == 0 { 0.0 } else { 1.0 }]))
+            .collect();
+        let vector = crate::dimension::embedding::compute_group_embedding(&mut env, &calibration);
+        let embedding = GroupEmbedding {
+            group_id: 0,
+            vector,
+            task_name: "test_task".to_string(),
+            accuracy: 0.95,
+            intrinsic_dim: None,
+            description: None,
+            metatags: vec![],
+            tag_vector: vec![],
+        };
+
+        let mut main = MainDimension::new();
+        main.register_group(0, "test_task".to_string(), env, embedding, 0.95, 100);
+        let group_order = vec![0];
+        let baseline_accs = vec![0.95, 0.92, 0.98, 0.97, 0.96];
+
+        let path = std::env::temp_dir().join("growformer_mnist_checkpoint_test.json");
+        let path_str = path.to_str().expect("temp path");
+
+        save_mnist_checkpoint(&main, &group_order, &baseline_accs, path_str);
+
+        assert!(path.exists(), "checkpoint file must exist after save");
+        let meta = fs::metadata(path_str).expect("metadata");
+        assert!(meta.len() > 100, "checkpoint file must be non-trivial ({} bytes)", meta.len());
+
+        let (loaded_main, loaded_order, loaded_accs) = load_mnist_checkpoint(path_str);
+
+        assert_eq!(loaded_order, group_order);
+        assert_eq!(loaded_accs, baseline_accs);
+        assert_eq!(loaded_main.group_order.len(), main.group_order.len());
+        assert!(loaded_main.groups.contains_key(&0));
+
+        fs::remove_file(path_str).ok();
+    }
 }

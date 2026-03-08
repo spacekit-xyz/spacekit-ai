@@ -856,11 +856,23 @@ fn demo_split_mnist(
     use std::fs::OpenOptions;
 
     let log_path = std::env::var("GROWFORMER_MNIST_LOG").unwrap_or_else(|_| "mnist-run.log".to_string());
+    let checkpoint_path = std::env::var("GROWFORMER_MNIST_CHECKPOINT").unwrap_or_else(|_| "mnist_checkpoint.json".to_string());
     let mut log = OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log_path)
         .ok();
+
+    // Build fingerprint: makes it obvious when EC2 binary is stale.
+    let pkg_version = env!("CARGO_PKG_VERSION");
+    let build_unix = option_env!("GROWFORMER_BUILD_UNIX").unwrap_or("unknown");
+    let build_target = option_env!("GROWFORMER_TARGET").unwrap_or("unknown");
+    let build_profile = option_env!("GROWFORMER_PROFILE").unwrap_or("unknown");
+    let build_git = option_env!("GROWFORMER_GIT_SHA").unwrap_or("nogit");
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "?".to_string());
 
     let run_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -868,14 +880,27 @@ fn demo_split_mnist(
         .unwrap_or(0);
     let _ = log.as_mut().map(|f| {
         let _ = writeln!(f, "\n--- run {} ---", run_ts);
+        let _ = writeln!(
+            f,
+            "build version={} build_unix={} target={} profile={} git={}",
+            pkg_version, build_unix, build_target, build_profile, build_git
+        );
+        let _ = writeln!(f, "cwd={}", cwd);
         let _ = writeln!(f, "train_limit={:?} max_epochs={:?} batch_size={:?}", train_limit, max_epochs_override, batch_size);
+        let _ = writeln!(f, "log_path={} checkpoint_path={}", log_path, checkpoint_path);
         f.flush()
     });
     println!("--- Split MNIST ---\n");
     if log.is_some() {
         println!("Log: {}", log_path);
     }
+    println!(
+        "Build: growformer v{} build_unix={} target={} profile={} git={}",
+        pkg_version, build_unix, build_target, build_profile, build_git
+    );
+    println!("Run: cwd={} log_path={} checkpoint_path={}", cwd, log_path, checkpoint_path);
     let data_path = std::env::var("MNIST_ROOT").unwrap_or_else(|_| "data".to_string());
+    println!("Run: MNIST_ROOT={}", data_path);
     let images_path = std::path::Path::new(&data_path).join("train-images-idx3-ubyte");
     let images_gz = std::path::Path::new(&data_path).join("train-images-idx3-ubyte.gz");
     if !images_path.exists() && !images_gz.exists() {
@@ -994,12 +1019,21 @@ fn demo_split_mnist(
     }
 
     let calibration_refs: Vec<(&[Sample], usize)> = (0..5).map(|t| (train_per_task[t].as_slice(), t)).collect();
+    let _ = log.as_mut().map(|f| {
+        let _ = writeln!(f, "section router start (epochs=400)");
+        f.flush()
+    });
     dm.train_and_set_router(&calibration_refs, &mut rng, 400);
     let _ = log.as_mut().map(|f| {
         let _ = writeln!(f, "section router trained (400 epochs)");
+        let _ = writeln!(f, "section router end");
         f.flush()
     });
 
+    let _ = log.as_mut().map(|f| {
+        let _ = writeln!(f, "section final_eval start");
+        f.flush()
+    });
     println!("\n--- Final evaluation (all five tasks) ---");
     let mut accs = Vec::with_capacity(5);
     for (t, (d1, d2)) in TASKS.iter().enumerate() {
@@ -1018,11 +1052,32 @@ fn demo_split_mnist(
         }
         let _ = writeln!(f, "  average: {:.1}%", avg * 100.0);
         let _ = writeln!(f, "--- run {} end ---", run_ts);
+        let _ = writeln!(f, "section final_eval end");
         f.flush()
     });
 
-    let checkpoint_path = std::env::var("GROWFORMER_MNIST_CHECKPOINT").unwrap_or_else(|_| "mnist_checkpoint.json".to_string());
+    println!("Saving checkpoint to {}", checkpoint_path);
+    let _ = log.as_mut().map(|f| {
+        let _ = writeln!(f, "section checkpoint_save start path={}", checkpoint_path);
+        f.flush()
+    });
     save_mnist_checkpoint(&dm.main, &group_ids, &accs, &checkpoint_path);
+    match std::fs::metadata(&checkpoint_path) {
+        Ok(m) => {
+            println!("Checkpoint verification: exists=true bytes={}", m.len());
+            let _ = log.as_mut().map(|f| {
+                let _ = writeln!(f, "section checkpoint_save end path={} exists=true bytes={}", checkpoint_path, m.len());
+                f.flush()
+            });
+        }
+        Err(e) => {
+            eprintln!("Checkpoint verification FAILED: path={} err={}", checkpoint_path, e);
+            let _ = log.as_mut().map(|f| {
+                let _ = writeln!(f, "section checkpoint_save end path={} exists=false err={}", checkpoint_path, e);
+                f.flush()
+            });
+        }
+    }
     println!("\nRun retention evaluation: ./growformer --mnist-retention");
 }
 
