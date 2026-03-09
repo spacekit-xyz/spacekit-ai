@@ -2199,6 +2199,29 @@ fn demo_language_distill_experiment(
         println!("  checkpoint save failed: {}", e);
     } else {
         println!("  base checkpoint saved: {}", base_ckpt);
+        let base_card = GleModelCard {
+            model_name: "Growformer Language Encoder (GLE) - base distill".to_string(),
+            checkpoint_path: base_ckpt.clone(),
+            created_unix: now_unix_secs(),
+            stack: "in-house distilled student -> bridge -> 64-d routing".to_string(),
+            notes: vec![
+                "No external transformer dependency at inference runtime.".to_string(),
+                "Base checkpoint before routing-focused fine-tune.".to_string(),
+            ],
+            metrics: vec![
+                ("mean_cosine_student_teacher".to_string(), mean_cos),
+                ("teacher_top1_intent_acc".to_string(), t_acc),
+                ("student_top1_intent_acc".to_string(), s_acc),
+                ("teacher_top3_intent_acc".to_string(), t_top3),
+                ("student_top3_intent_acc".to_string(), s_top3),
+                ("teacher_median_margin".to_string(), t_margin_med),
+                ("student_median_margin".to_string(), s_margin_med),
+            ],
+        };
+        match save_gle_model_card(&base_card) {
+            Ok(_) => println!("  model card saved: {}", model_card_path(&base_ckpt)),
+            Err(e) => println!("  model card save failed: {}", e),
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -2254,6 +2277,26 @@ fn demo_language_distill_experiment(
         println!("  tuned checkpoint save failed: {}", e);
     } else {
         println!("  tuned checkpoint saved: {}", tuned_ckpt);
+        let tuned_card = GleModelCard {
+            model_name: "Growformer Language Encoder (GLE) - routing tuned".to_string(),
+            checkpoint_path: tuned_ckpt.clone(),
+            created_unix: now_unix_secs(),
+            stack: "in-house distilled student -> bridge -> 64-d routing".to_string(),
+            notes: vec![
+                "Routing-tuned for support/coding dispatch.".to_string(),
+                "Use for low-latency private routing.".to_string(),
+            ],
+            metrics: vec![
+                ("routing_acc_support_coding".to_string(), route_acc),
+                ("routing_median_margin".to_string(), route_med_margin),
+                ("routing_p10_margin".to_string(), route_p10_margin),
+                ("mean_cosine_student_teacher".to_string(), mean_cos),
+            ],
+        };
+        match save_gle_model_card(&tuned_card) {
+            Ok(_) => println!("  tuned model card saved: {}", model_card_path(&tuned_ckpt)),
+            Err(e) => println!("  tuned model card save failed: {}", e),
+        }
     }
 }
 
@@ -2397,6 +2440,36 @@ struct JsonlLanguageSample {
     policy_regime: Option<String>,
     #[serde(default)]
     language_channel: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GleModelCard {
+    model_name: String,
+    checkpoint_path: String,
+    created_unix: u64,
+    stack: String,
+    notes: Vec<String>,
+    metrics: Vec<(String, f32)>,
+}
+
+fn model_card_path(checkpoint_path: &str) -> String {
+    format!("{}.meta.json", checkpoint_path)
+}
+
+fn save_gle_model_card(card: &GleModelCard) -> Result<(), String> {
+    let path = model_card_path(&card.checkpoint_path);
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create_dir_all failed: {}", e))?;
+    }
+    let json = serde_json::to_string_pretty(card).map_err(|e| format!("serialize failed: {}", e))?;
+    std::fs::write(&path, json).map_err(|e| format!("write failed: {}", e))
+}
+
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn load_language_samples_jsonl(path: &str) -> Result<Vec<LanguageSample>, String> {

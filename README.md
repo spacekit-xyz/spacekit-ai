@@ -84,6 +84,32 @@ growformer/
 
 ---
 
+## **Growformer Language Encoder (GLE)**
+
+GLE is the in-house language front-end for Growformer. It is a distilled student encoder
+trained and tuned for organism routing, then projected through the language bridge into the
+shared 64-d routing space.
+
+- No external transformer runtime is required for inference.
+- No third-party hosted model dependency is required for routing.
+- Checkpoints are private artifacts produced by this repo:
+  - `checkpoints/gle_student_base.json`
+  - `checkpoints/gle_student_routing_tuned.json`
+
+Latest internal routing run with `gle_student_routing_tuned.json`:
+
+- Intent accuracy: `100%`
+- Median routing margin: `1.828`
+- P10 routing margin: `1.818`
+- OOD AUROC: `1.000`
+- OOD FAR: `0.00%`
+
+This makes the language stack practical for private, low-latency, CPU-friendly routing:
+
+`text -> GLE semantic vector -> bridge -> 64-d routing vector -> Growformer group dispatch`
+
+---
+
 ## **The Six Systems**
 
 ### **System 1 — Metabolic Pruning (`systems/metabolic.rs`)**

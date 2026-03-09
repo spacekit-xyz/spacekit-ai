@@ -1,0 +1,28 @@
+{
+  "model_name": "Growformer Language Encoder (GLE) - routing tuned",
+  "checkpoint_path": "checkpoints/gle_student_routing_tuned.json",
+  "created_unix": 1773033773,
+  "stack": "in-house distilled student -> bridge -> 64-d routing",
+  "notes": [
+    "Routing-tuned for support/coding dispatch.",
+    "Use for low-latency private routing."
+  ],
+  "metrics": [
+    [
+      "routing_acc_support_coding",
+      1.0
+    ],
+    [
+      "routing_median_margin",
+      0.99760455
+    ],
+    [
+      "routing_p10_margin",
+      0.8419364
+    ],
+    [
+      "mean_cosine_student_teacher",
+      0.48188287
+    ]
+  ]
+}

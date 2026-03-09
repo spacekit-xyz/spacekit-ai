@@ -1,0 +1,40 @@
+{
+  "model_name": "Growformer Language Encoder (GLE) - base distill",
+  "checkpoint_path": "checkpoints/gle_student_base.json",
+  "created_unix": 1773033741,
+  "stack": "in-house distilled student -> bridge -> 64-d routing",
+  "notes": [
+    "No external transformer dependency at inference runtime.",
+    "Base checkpoint before routing-focused fine-tune."
+  ],
+  "metrics": [
+    [
+      "mean_cosine_student_teacher",
+      0.48188287
+    ],
+    [
+      "teacher_top1_intent_acc",
+      0.375
+    ],
+    [
+      "student_top1_intent_acc",
+      0.15
+    ],
+    [
+      "teacher_top3_intent_acc",
+      0.375
+    ],
+    [
+      "student_top3_intent_acc",
+      0.375
+    ],
+    [
+      "teacher_median_margin",
+      0.12622058
+    ],
+    [
+      "student_median_margin",
+      0.06601173
+    ]
+  ]
+}
