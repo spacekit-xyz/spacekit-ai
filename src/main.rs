@@ -103,6 +103,9 @@ struct Args {
     /// M3 eval: run action-schema accuracy/fallback metrics on synthetic validation set.
     #[arg(long)]
     language_action_eval: bool,
+    /// M2 requirement: EMA smoothing ablation over fixed alpha set.
+    #[arg(long)]
+    language_ema_ablation: bool,
 }
 
 fn main() {
@@ -124,6 +127,11 @@ fn main() {
     } else if args.language_action_eval {
         if let Err(e) = demo_language_action_eval() {
             eprintln!("Failed language action eval: {}", e);
+            std::process::exit(1);
+        }
+    } else if args.language_ema_ablation {
+        if let Err(e) = demo_language_ema_ablation() {
+            eprintln!("Failed language EMA ablation: {}", e);
             std::process::exit(1);
         }
     } else if let Some(path) = args.validate_gle.as_deref() {
@@ -174,7 +182,7 @@ fn main() {
             _ => demo_continual_learning(),
         }
     } else {
-        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, --language-pipeline, --language-distill, --print-gle-card, --validate-gle, --language-action-text, or --language-action-eval");
+        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, --language-pipeline, --language-distill, --print-gle-card, --validate-gle, --language-action-text, --language-action-eval, or --language-ema-ablation");
         std::process::exit(1);
     }
 
@@ -1867,7 +1875,7 @@ fn generate_spiral_gated_circles_data(
 // Demo: Language Pipeline (M1/M2) — calibration, routing metrics, OOD, checkpoint
 // =============================================================================
 
-fn build_language_demo_manager() -> (DimensionManager, GroupId, GroupId, CalibrationReport) {
+fn build_language_demo_manager(ema_alpha: f32) -> (DimensionManager, GroupId, GroupId, CalibrationReport) {
     let mut data_rng = StdRng::seed_from_u64(7);
     let config = DimensionManagerConfig {
         mirror_config: phase2_base_config(),
@@ -1889,7 +1897,7 @@ fn build_language_demo_manager() -> (DimensionManager, GroupId, GroupId, Calibra
     dm.configure_language(LanguageConfig {
         encoder: EncoderPreset::BertClass,
         bridge_output_dim: 64,
-        ema_alpha: 0.2,
+        ema_alpha,
         ood_similarity_threshold: 0.15,
         gle_http_endpoint: std::env::var("GROWFORMER_GLE_HTTP_ENDPOINT").ok(),
         gle_checkpoint: std::env::var("GROWFORMER_GLE_CHECKPOINT").ok(),
@@ -1922,7 +1930,7 @@ fn build_language_demo_manager() -> (DimensionManager, GroupId, GroupId, Calibra
 
 fn demo_language_pipeline() {
     println!("--- Language Pipeline (M1/M2) ---\n");
-    let (mut dm, support_gid, coding_gid, report) = build_language_demo_manager();
+    let (mut dm, support_gid, coding_gid, report) = build_language_demo_manager(0.2);
     println!("Promoted groups: support={} coding={}", support_gid, coding_gid);
     println!(
         "Bridge calibrated: domains={} samples={} multilingual={:.1}% frozen={}",
@@ -2047,7 +2055,7 @@ fn demo_language_pipeline() {
 
 fn demo_language_action(text: &str) -> Result<(), String> {
     println!("--- Language Action (M3 starter) ---\n");
-    let (mut dm, support_gid, coding_gid, _report) = build_language_demo_manager();
+    let (mut dm, support_gid, coding_gid, _report) = build_language_demo_manager(0.2);
     println!("Promoted groups: support={} coding={}", support_gid, coding_gid);
     let action = dm.route_text_to_action(text)?;
     let json = serde_json::to_string_pretty(&action).map_err(|e| e.to_string())?;
@@ -2057,7 +2065,7 @@ fn demo_language_action(text: &str) -> Result<(), String> {
 
 fn demo_language_action_eval() -> Result<(), String> {
     println!("--- Language Action Eval (M3) ---\n");
-    let (dm, _support_gid, _coding_gid, _report) = build_language_demo_manager();
+    let (dm, _support_gid, _coding_gid, _report) = build_language_demo_manager(0.2);
 
     let support_cases = vec![
         ("urgent account login issue please help", "SupportTicket"),
@@ -2114,6 +2122,40 @@ fn demo_language_action_eval() -> Result<(), String> {
     println!("  payload_valid_rate: {:.2}%", payload_valid_rate * 100.0);
     println!("  fallback_precision: {:.2}%", fallback_precision * 100.0);
 
+    Ok(())
+}
+
+fn demo_language_ema_ablation() -> Result<(), String> {
+    println!("--- Language EMA Ablation (M2) ---\n");
+    let alphas = [0.0_f32, 0.1, 0.2, 0.4];
+    for alpha in alphas {
+        let (mut dm, support_gid, coding_gid, _report) = build_language_demo_manager(alpha);
+        let mut in_domain: Vec<(String, GroupId)> = Vec::new();
+        for i in 0..120 {
+            in_domain.push((format!("please help with account login issue {}", i), support_gid));
+            in_domain.push((format!("implement a rust parser for payload {}", i), coding_gid));
+        }
+        let mut correct = 0usize;
+        let mut margins = Vec::new();
+        for (text, target_gid) in &in_domain {
+            let decision = dm.route_text(text)?;
+            if decision.chosen_group_id == Some(*target_gid) {
+                correct += 1;
+            }
+            margins.push(decision.margin);
+        }
+        let acc = correct as f32 / in_domain.len() as f32;
+        let med = percentile(&margins, 0.5);
+        let p10 = percentile(&margins, 0.1);
+        println!(
+            "  alpha={:.1} | intent_acc={:.2}% | median_margin={:.3} | p10_margin={:.3}",
+            alpha,
+            acc * 100.0,
+            med,
+            p10
+        );
+    }
+    println!("\nUse this table to choose alpha for stability vs turn-reactivity tradeoff.");
     Ok(())
 }
 
