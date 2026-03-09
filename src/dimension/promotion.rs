@@ -88,6 +88,7 @@ pub fn promote(
         description: None,
         metatags: metatags_vec.clone(),
         tag_vector: build_tag_vector(&metatags_vec, TAG_VECTOR_DIM),
+        language_vector: vec![],
     };
     main.register_group(
         next_group_id,

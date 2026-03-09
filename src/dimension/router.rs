@@ -185,6 +185,7 @@ mod tests {
                 description: None,
                 metatags: vec!["spiral".into()],
                 tag_vector: spiral_tv,
+                language_vector: vec![],
             },
             GroupEmbedding {
                 group_id: 1,
@@ -195,6 +196,7 @@ mod tests {
                 description: None,
                 metatags: vec!["circles".into()],
                 tag_vector: circles_tv,
+                language_vector: vec![],
             },
         ];
         let mut scores = vec![(0u32, 1.0f32), (1u32, 1.0f32)];

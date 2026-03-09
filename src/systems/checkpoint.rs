@@ -311,6 +311,7 @@ mod tests {
             description: None,
             metatags: vec![],
             tag_vector: vec![],
+            language_vector: vec![],
         };
 
         let mut main = MainDimension::new();

@@ -1,12 +1,12 @@
-# **Neuro — A Multidimensional Neural Training Environment in Rust**
+# **Growformer — A Multidimensional Neural Training Environment in Rust**
 
-## **What Neuro Is**
+## **What Growformer Is**
 
-Neuro is not “just another neural network implementation.”  
+Growformer is not “just another neural network implementation.”  
 It’s something much rarer: a **multidimensional computational medium** where learning emerges from the interaction of geometry, metabolism, sparsity, timing, energy flow, and spatial constraints — not from a fixed algebraic recipe.
 
 Traditional neural networks are static graphs with dynamic weights.  
-Neuro is a **dynamic graph with dynamic structure**, where:
+Growformer is a **dynamic graph with dynamic structure**, where:
 
 - neurons exist in 3D space  
 - synapses grow, strengthen, weaken, and die  
@@ -18,7 +18,7 @@ Neuro is a **dynamic graph with dynamic structure**, where:
 - geometry feeds back into learning  
 - structure is an *output* of training, not an input  
 
-Instead of forcing intelligence into a rigid architecture, Neuro simulates an **ecosystem** of interacting forces.  
+Instead of forcing intelligence into a rigid architecture, Growformer simulates an **ecosystem** of interacting forces.  
 Learning is not a single update rule — it is the emergent behavior of six coupled systems:
 
 1. **Weight dynamics** (backprop)  
@@ -30,7 +30,7 @@ Learning is not a single update rule — it is the emergent behavior of six coup
 
 The result is a system that behaves less like a classical MLP and more like a **living computational organism** — one that adapts, collapses, recovers, specializes, and self‑organizes.
 
-Neuro is a platform for exploring a different paradigm of learning:  
+Growformer is a platform for exploring a different paradigm of learning:  
 one where intelligence is not engineered, but **grown**.
 
 ---
@@ -64,7 +64,7 @@ Standard artificial neurons are defined by a single scalar — a weight, updated
 ## **Architecture**
 
 ```
-neuro/
+growformer/
 ├── Cargo.toml
 └── src/
     ├── lib.rs

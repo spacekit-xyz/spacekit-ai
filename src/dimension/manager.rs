@@ -14,6 +14,10 @@ use crate::types::GroupId;
 
 use super::composition::{EpisodicMemory, Episode, VirtualGroup};
 use super::embedding::{compute_group_embedding, build_tag_vector, GroupEmbedding, TAG_VECTOR_DIM};
+use super::language::{
+    CalibrationDataset, CalibrationReport, CalibrationRequirements, LanguageConfig,
+    LanguageRoutingDecision, LanguageRuntime, route_language_embedding,
+};
 use super::main_dim::MainDimension;
 use super::mirror_dim::{MirrorDimension, EpochResult};
 use super::observer::GlobalObserver;
@@ -50,6 +54,7 @@ pub struct DimensionManager {
     pub observer: GlobalObserver,
     pub episodic_memory: EpisodicMemory,
     pub config: DimensionManagerConfig,
+    pub language_runtime: LanguageRuntime,
     next_group_id: GroupId,
 }
 
@@ -61,6 +66,7 @@ impl DimensionManager {
             observer: GlobalObserver::new(PromotionGateConfig::default()),
             episodic_memory: EpisodicMemory::new(),
             config,
+            language_runtime: LanguageRuntime::new(LanguageConfig::default()),
             next_group_id: 0,
         }
     }
@@ -181,6 +187,7 @@ impl DimensionManager {
             description: None,
             metatags: metatags.clone(),
             tag_vector: build_tag_vector(&metatags, TAG_VECTOR_DIM),
+            language_vector: vec![],
         };
         self.main.register_group(
             self.next_group_id,
@@ -374,6 +381,94 @@ impl DimensionManager {
             blend_weights: episode.blend_weights.clone(),
         };
         vg.predict(&mut self.main, input)
+    }
+
+    /// Replace language runtime config (encoder preset, bridge dim, EMA alpha, OOD threshold).
+    pub fn configure_language(&mut self, config: LanguageConfig) {
+        self.language_runtime = LanguageRuntime::new(config);
+    }
+
+    /// Run one-time global bridge calibration and freeze the bridge.
+    pub fn calibrate_language_bridge(
+        &mut self,
+        dataset: &CalibrationDataset,
+        requirements: &CalibrationRequirements,
+    ) -> Result<CalibrationReport, String> {
+        self.language_runtime.calibrate(dataset, requirements)
+    }
+
+    /// Attach a calibrated 64-d language routing vector to an existing group.
+    pub fn set_group_language_vector(
+        &mut self,
+        group_id: GroupId,
+        language_vector: Vec<f32>,
+    ) -> Result<(), String> {
+        if language_vector.len() != self.language_runtime.config.bridge_output_dim {
+            return Err(format!(
+                "language vector must be {} dims, got {}",
+                self.language_runtime.config.bridge_output_dim,
+                language_vector.len()
+            ));
+        }
+        if let Some(group) = self.main.groups.get_mut(&group_id) {
+            group.embedding.language_vector = language_vector.clone();
+        } else {
+            return Err(format!("group {} not found", group_id));
+        }
+        if let Some(lib) = self.main.embedding_library.iter_mut().find(|e| e.group_id == group_id) {
+            lib.language_vector = language_vector;
+            Ok(())
+        } else {
+            Err(format!("embedding library entry missing for group {}", group_id))
+        }
+    }
+
+    /// Route raw text to a promoted group using encoder -> bridge -> 64-d cosine routing.
+    pub fn route_text(&mut self, text: &str) -> Result<LanguageRoutingDecision, String> {
+        let bridged = self.language_runtime.bridge_text(text)?;
+        Ok(route_language_embedding(
+            &self.main.embedding_library,
+            &bridged.routed_vector,
+            bridged.confidence,
+            self.language_runtime.config.ood_similarity_threshold,
+        ))
+    }
+
+    /// Build one group language vector by averaging bridged vectors over representative prompts.
+    pub fn build_group_language_vector_from_texts(
+        &mut self,
+        texts: &[String],
+    ) -> Result<Vec<f32>, String> {
+        if texts.is_empty() {
+            return Err("texts must not be empty".to_string());
+        }
+        let dim = self.language_runtime.config.bridge_output_dim;
+        let mut acc = vec![0.0f32; dim];
+        let mut n = 0f32;
+        for t in texts {
+            let out = self.language_runtime.bridge_text(t)?;
+            if out.routed_vector.len() != dim {
+                return Err("bridged vector has unexpected dimension".to_string());
+            }
+            for (a, v) in acc.iter_mut().zip(out.routed_vector.iter()) {
+                *a += *v;
+            }
+            n += 1.0;
+        }
+        for a in &mut acc {
+            *a /= n;
+        }
+        Ok(acc)
+    }
+
+    /// Convenience API: build and attach a group language vector from prompts.
+    pub fn set_group_language_vector_from_texts(
+        &mut self,
+        group_id: GroupId,
+        texts: &[String],
+    ) -> Result<(), String> {
+        let v = self.build_group_language_vector_from_texts(texts)?;
+        self.set_group_language_vector(group_id, v)
     }
 }
 

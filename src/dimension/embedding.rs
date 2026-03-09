@@ -25,6 +25,9 @@ pub struct GroupEmbedding {
     /// Vectorized metatags for search/re-rank (same dim for all groups; empty = no tag routing).
     #[serde(default)]
     pub tag_vector: Vec<f32>,
+    /// Optional language-space vector from global frozen bridge (default 64 dims).
+    #[serde(default)]
+    pub language_vector: Vec<f32>,
 }
 
 /// Default dimension for tag vectors. Fixed size; no growing vocab — scales to any number of tags.

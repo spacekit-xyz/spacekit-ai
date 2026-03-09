@@ -58,6 +58,7 @@ impl MainDimension {
             description: embedding.description.clone(),
             metatags: embedding.metatags.clone(),
             tag_vector: embedding.tag_vector.clone(),
+            language_vector: embedding.language_vector.clone(),
         };
         self.embedding_library.push(lib_emb.clone());
         self.group_order.push(group_id);
@@ -122,6 +123,7 @@ mod tests {
             description: None,
             metatags: vec![],
             tag_vector: vec![],
+            language_vector: vec![],
         };
         let mut main = MainDimension::new();
         main.register_group(0, "test".to_string(), env, embedding, 0.9, 0);
