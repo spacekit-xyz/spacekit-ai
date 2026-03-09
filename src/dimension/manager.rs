@@ -13,6 +13,7 @@ use crate::types::EnvironmentConfig;
 use crate::types::GroupId;
 
 use super::composition::{EpisodicMemory, Episode, VirtualGroup};
+use super::action::{ActionJson, action_from_routing};
 use super::embedding::{compute_group_embedding, build_tag_vector, GroupEmbedding, TAG_VECTOR_DIM};
 use super::language::{
     CalibrationDataset, CalibrationReport, CalibrationRequirements, LanguageConfig,
@@ -443,6 +444,12 @@ impl DimensionManager {
             bridged.confidence,
             self.language_runtime.config.ood_similarity_threshold,
         ))
+    }
+
+    /// M3 deterministic path: text -> routing -> structured action JSON.
+    pub fn route_text_to_action(&mut self, text: &str) -> Result<ActionJson, String> {
+        let routing = self.route_text(text)?;
+        Ok(action_from_routing(&self.main, &routing))
     }
 
     /// Build one group language vector by averaging bridged vectors over representative prompts.

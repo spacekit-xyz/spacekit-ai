@@ -1,4 +1,4 @@
-# **Growformer — A Multidimensional Neural Training Environment in Rust**
+# **Growformer — A Multidimensional Neural Training Environment**
 
 ## **What Growformer Is**
 
@@ -107,6 +107,13 @@ Latest internal routing run with `gle_student_routing_tuned.json`:
 This makes the language stack practical for private, low-latency, CPU-friendly routing:
 
 `text -> GLE semantic vector -> bridge -> 64-d routing vector -> Growformer group dispatch`
+
+Operational commands:
+
+- Print model card: `cargo run -- --print-gle-card checkpoints/gle_student_routing_tuned.json`
+- Validate checkpoint gate: `cargo run -- --validate-gle checkpoints/gle_student_routing_tuned.json`
+- M3 starter action JSON: `cargo run -- --language-action-text "help me reset password"`
+- CI helper script: `scripts/validate_gle.sh`
 
 ---
 

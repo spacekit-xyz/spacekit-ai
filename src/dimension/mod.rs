@@ -2,6 +2,7 @@
 //! Phase 3: isolated env per task; no shared substrate.
 
 pub mod composition;
+pub mod action;
 pub mod embedding;
 pub mod language;
 pub mod main_dim;
@@ -13,6 +14,7 @@ pub mod observer;
 pub mod manager;
 
 pub use composition::{EpisodicMemory, Episode, VirtualGroup};
+pub use action::{ActionJson, ActionType, action_from_routing};
 pub use embedding::{GroupEmbedding, compute_group_embedding, cosine_similarity, retrieve_relevant_groups};
 pub use language::{
     CalibrationCoverage, CalibrationDataset, CalibrationRequirements, CalibrationReport,

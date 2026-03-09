@@ -1,7 +1,7 @@
 use growformer::environment::NeuralEnvironment;
 use growformer::types::NeuronId;
 use growformer::dimension::{
-    CalibrationDataset, CalibrationRequirements, EncoderPreset, LanguageConfig, LanguageSample,
+    CalibrationDataset, CalibrationReport, CalibrationRequirements, EncoderPreset, LanguageConfig, LanguageSample,
     DimensionManager, DimensionManagerConfig, HashingLanguageEncoder, LanguageEncoder,
     MainDimension, VirtualGroup,
     route_language_embedding
@@ -97,6 +97,9 @@ struct Args {
     min_routing_median_margin: f32,
     #[arg(long, default_value_t = 0.10)]
     min_routing_p10_margin: f32,
+    /// M3 path: route one text and emit deterministic action JSON.
+    #[arg(long, value_name = "TEXT")]
+    language_action_text: Option<String>,
 }
 
 fn main() {
@@ -108,6 +111,11 @@ fn main() {
     if let Some(path) = args.print_gle_card.as_deref() {
         if let Err(e) = print_gle_model_card(path) {
             eprintln!("Failed to print GLE model card: {}", e);
+            std::process::exit(1);
+        }
+    } else if let Some(text) = args.language_action_text.as_deref() {
+        if let Err(e) = demo_language_action(text) {
+            eprintln!("Failed language action routing: {}", e);
             std::process::exit(1);
         }
     } else if let Some(path) = args.validate_gle.as_deref() {
@@ -158,7 +166,7 @@ fn main() {
             _ => demo_continual_learning(),
         }
     } else {
-        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, --language-pipeline, --language-distill, --print-gle-card, or --validate-gle");
+        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, --language-pipeline, --language-distill, --print-gle-card, --validate-gle, or --language-action-text");
         std::process::exit(1);
     }
 
@@ -1851,10 +1859,8 @@ fn generate_spiral_gated_circles_data(
 // Demo: Language Pipeline (M1/M2) — calibration, routing metrics, OOD, checkpoint
 // =============================================================================
 
-fn demo_language_pipeline() {
-    println!("--- Language Pipeline (M1/M2) ---\n");
+fn build_language_demo_manager() -> (DimensionManager, GroupId, GroupId, CalibrationReport) {
     let mut data_rng = StdRng::seed_from_u64(7);
-
     let config = DimensionManagerConfig {
         mirror_config: phase2_base_config(),
         mirror_layer_sizes: vec![2, 16, 16, 1],
@@ -1865,14 +1871,12 @@ fn demo_language_pipeline() {
     };
     let mut dm = DimensionManager::new(config);
 
-    // Create two minimal promoted groups as language routing targets.
     dm.spawn_mirror("support", 100).expect("spawn support");
     dm.spawn_mirror("coding", 101).expect("spawn coding");
     let cal_support = generate_spiral_data(50, &mut data_rng);
     let cal_coding = generate_concentric_circles_data(50, &mut data_rng);
     let support_gid = dm.force_promote("support", &cal_support).expect("promote support");
     let coding_gid = dm.force_promote("coding", &cal_coding).expect("promote coding");
-    println!("Promoted groups: support={} coding={}", support_gid, coding_gid);
 
     dm.configure_language(LanguageConfig {
         encoder: EncoderPreset::BertClass,
@@ -1891,13 +1895,6 @@ fn demo_language_pipeline() {
     let report = dm
         .calibrate_language_bridge(&calibration, &requirements)
         .expect("language calibration");
-    println!(
-        "Bridge calibrated: domains={} samples={} multilingual={:.1}% frozen={}",
-        report.coverage.domains,
-        report.coverage.samples,
-        report.coverage.multilingual_ratio * 100.0,
-        report.frozen_after_calibration
-    );
 
     let mut support_prompts = Vec::new();
     let mut coding_prompts = Vec::new();
@@ -1911,6 +1908,21 @@ fn demo_language_pipeline() {
         .expect("set support language vector");
     dm.set_group_language_vector_from_texts(coding_gid, &coding_prompts)
         .expect("set coding language vector");
+
+    (dm, support_gid, coding_gid, report)
+}
+
+fn demo_language_pipeline() {
+    println!("--- Language Pipeline (M1/M2) ---\n");
+    let (mut dm, support_gid, coding_gid, report) = build_language_demo_manager();
+    println!("Promoted groups: support={} coding={}", support_gid, coding_gid);
+    println!(
+        "Bridge calibrated: domains={} samples={} multilingual={:.1}% frozen={}",
+        report.coverage.domains,
+        report.coverage.samples,
+        report.coverage.multilingual_ratio * 100.0,
+        report.frozen_after_calibration
+    );
 
     let mut in_domain: Vec<(String, GroupId)> = Vec::new();
     for i in 0..150 {
@@ -2024,6 +2036,17 @@ fn demo_language_pipeline() {
         smoke.chosen_group_id, smoke.confidence
     );
 }
+
+fn demo_language_action(text: &str) -> Result<(), String> {
+    println!("--- Language Action (M3 starter) ---\n");
+    let (mut dm, support_gid, coding_gid, _report) = build_language_demo_manager();
+    println!("Promoted groups: support={} coding={}", support_gid, coding_gid);
+    let action = dm.route_text_to_action(text)?;
+    let json = serde_json::to_string_pretty(&action).map_err(|e| e.to_string())?;
+    println!("{}", json);
+    Ok(())
+}
+
 
 // =============================================================================
 // Demo: Language Distillation — tiny GLE student
