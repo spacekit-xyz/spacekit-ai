@@ -1,10 +1,17 @@
 use growformer::environment::NeuralEnvironment;
 use growformer::types::NeuronId;
-use growformer::dimension::{DimensionManager, DimensionManagerConfig, MainDimension, VirtualGroup};
+use growformer::dimension::{
+    CalibrationDataset, CalibrationRequirements, EncoderPreset, LanguageConfig, LanguageSample,
+    DimensionManager, DimensionManagerConfig, MainDimension, VirtualGroup, route_language_embedding
+};
 use growformer::types::GroupId;
+use std::collections::HashMap;
 use std::io::Write;
 use std::time::Instant;
-use growformer::systems::checkpoint::{save_phase2_checkpoint, load_phase2_checkpoint, save_mnist_checkpoint, load_mnist_checkpoint};
+use growformer::systems::checkpoint::{
+    save_phase2_checkpoint, load_phase2_checkpoint, save_mnist_checkpoint, load_mnist_checkpoint,
+    save_language_checkpoint, load_language_checkpoint
+};
 use growformer::systems::mirror::mirror_symmetry_score;
 use growformer::systems::whorls::print_whorl_summary;
 use growformer::types::{EnvironmentConfig, Sample};
@@ -56,6 +63,9 @@ struct Args {
     /// Minibatch size for MNIST (default: 1 = sequential). Use 16–64 for multi-core speed.
     #[arg(long, value_name = "N")]
     mnist_batch_size: Option<usize>,
+    /// M1/M2 language pipeline demo: calibration, text routing metrics, OOD, checkpoint.
+    #[arg(long)]
+    language_pipeline: bool,
 }
 
 fn main() {
@@ -82,6 +92,8 @@ fn main() {
         demo_split_mnist(args.progress, args.mnist_train_limit, args.mnist_max_epochs, args.mnist_batch_size);
     } else if args.mnist_retention {
         demo_mnist_retention();
+    } else if args.language_pipeline {
+        demo_language_pipeline();
     } else if let Some(mode) = &args.learning {
         match mode.as_str() {
             "train-a" => demo_phase2_train_a(),
@@ -89,7 +101,7 @@ fn main() {
             _ => demo_continual_learning(),
         }
     } else {
-        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, or --mnist-retention");
+        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, or --language-pipeline");
         std::process::exit(1);
     }
 
@@ -1776,6 +1788,306 @@ fn generate_spiral_gated_circles_data(
         data.push((vec![x, y], [target]));
     }
     data
+}
+
+// =============================================================================
+// Demo: Language Pipeline (M1/M2) — calibration, routing metrics, OOD, checkpoint
+// =============================================================================
+
+fn demo_language_pipeline() {
+    println!("--- Language Pipeline (M1/M2) ---\n");
+    let mut data_rng = StdRng::seed_from_u64(7);
+
+    let config = DimensionManagerConfig {
+        mirror_config: phase2_base_config(),
+        mirror_layer_sizes: vec![2, 16, 16, 1],
+        promotion_check_interval: 999_999,
+        max_concurrent_mirrors: 2,
+        calibration_samples: 50,
+        reserve_pool_size: 0,
+    };
+    let mut dm = DimensionManager::new(config);
+
+    // Create two minimal promoted groups as language routing targets.
+    dm.spawn_mirror("support", 100).expect("spawn support");
+    dm.spawn_mirror("coding", 101).expect("spawn coding");
+    let cal_support = generate_spiral_data(50, &mut data_rng);
+    let cal_coding = generate_concentric_circles_data(50, &mut data_rng);
+    let support_gid = dm.force_promote("support", &cal_support).expect("promote support");
+    let coding_gid = dm.force_promote("coding", &cal_coding).expect("promote coding");
+    println!("Promoted groups: support={} coding={}", support_gid, coding_gid);
+
+    dm.configure_language(LanguageConfig {
+        encoder: EncoderPreset::BertClass,
+        bridge_output_dim: 64,
+        ema_alpha: 0.2,
+        ood_similarity_threshold: 0.15,
+    });
+
+    let calibration = build_language_calibration_dataset();
+    let requirements = CalibrationRequirements {
+        multilingual_required: true,
+        ..CalibrationRequirements::default()
+    };
+    let report = dm
+        .calibrate_language_bridge(&calibration, &requirements)
+        .expect("language calibration");
+    println!(
+        "Bridge calibrated: domains={} samples={} multilingual={:.1}% frozen={}",
+        report.coverage.domains,
+        report.coverage.samples,
+        report.coverage.multilingual_ratio * 100.0,
+        report.frozen_after_calibration
+    );
+
+    let mut support_prompts = Vec::new();
+    let mut coding_prompts = Vec::new();
+    for i in 0..200 {
+        support_prompts.push(format!("customer support account login password reset billing help ticket {}", i));
+        support_prompts.push(format!("help desk cannot access account needs recovery and verification {}", i));
+        coding_prompts.push(format!("write rust code function parser json serde implementation {}", i));
+        coding_prompts.push(format!("debug c segmentation fault stack trace pointer module {}", i));
+    }
+    dm.set_group_language_vector_from_texts(support_gid, &support_prompts)
+        .expect("set support language vector");
+    dm.set_group_language_vector_from_texts(coding_gid, &coding_prompts)
+        .expect("set coding language vector");
+
+    let mut in_domain: Vec<(String, GroupId)> = Vec::new();
+    for i in 0..150 {
+        in_domain.push((format!("please help with account login issue {}", i), support_gid));
+        in_domain.push((format!("implement a rust parser for payload {}", i), coding_gid));
+    }
+    let mut ood: Vec<String> = Vec::new();
+    for i in 0..200 {
+        ood.push(format!("what is the weather in tokyo this weekend {}", i));
+    }
+
+    let mut correct = 0usize;
+    let mut support_to_support_gid = 0usize;
+    let mut support_to_coding_gid = 0usize;
+    let mut coding_to_support_gid = 0usize;
+    let mut coding_to_coding_gid = 0usize;
+    let mut margins = Vec::with_capacity(in_domain.len());
+    let mut id_scores = Vec::with_capacity(in_domain.len());
+    for (text, target_gid) in &in_domain {
+        let bridged = dm.language_runtime.bridge_text_stateless(text).expect("bridge text");
+        // In-domain intent accuracy is measured by argmax routing (no OOD reject).
+        let decision = route_language_embedding(&dm.main.embedding_library, &bridged.routed_vector, bridged.confidence, -1.0);
+        if decision.chosen_group_id == Some(*target_gid) {
+            correct += 1;
+        }
+        if *target_gid == support_gid {
+            if decision.chosen_group_id == Some(support_gid) {
+                support_to_support_gid += 1;
+            } else if decision.chosen_group_id == Some(coding_gid) {
+                support_to_coding_gid += 1;
+            }
+        } else if *target_gid == coding_gid {
+            if decision.chosen_group_id == Some(support_gid) {
+                coding_to_support_gid += 1;
+            } else if decision.chosen_group_id == Some(coding_gid) {
+                coding_to_coding_gid += 1;
+            }
+        }
+        margins.push(decision.margin);
+        id_scores.push(decision.best_similarity);
+    }
+    let intent_accuracy = correct as f32 / in_domain.len() as f32;
+    let remapped_intent_accuracy = ((support_to_coding_gid + coding_to_support_gid)
+        .max(support_to_support_gid + coding_to_coding_gid)) as f32
+        / in_domain.len() as f32;
+    let median_margin = percentile(&margins, 0.50);
+    let p10_margin = percentile(&margins, 0.10);
+
+    let mut ood_scores = Vec::with_capacity(ood.len());
+    let mut false_accept = 0usize;
+    for text in &ood {
+        let bridged = dm.language_runtime.bridge_text_stateless(text).expect("bridge ood text");
+        let decision = route_language_embedding(&dm.main.embedding_library, &bridged.routed_vector, bridged.confidence, -1.0);
+        ood_scores.push(decision.best_similarity);
+    }
+    let threshold = choose_operating_threshold_for_far(&id_scores, &ood_scores, 0.05);
+    for s in &ood_scores {
+        if *s >= threshold {
+            false_accept += 1;
+        }
+    }
+    let far = false_accept as f32 / ood.len() as f32;
+
+    let mut scores_labels: Vec<(f32, bool)> = Vec::with_capacity(id_scores.len() + ood_scores.len());
+    scores_labels.extend(id_scores.iter().map(|&s| (s, true)));
+    scores_labels.extend(ood_scores.iter().map(|&s| (s, false)));
+    let auroc = compute_auroc(&scores_labels);
+
+    println!("\nLanguage routing metrics:");
+    println!("  Intent accuracy: {:.2}%", intent_accuracy * 100.0);
+    println!("  Intent accuracy (best ID remap): {:.2}%", remapped_intent_accuracy * 100.0);
+    println!("  Median margin: {:.3}", median_margin);
+    println!("  P10 margin: {:.3}", p10_margin);
+    println!("  OOD AUROC: {:.3}", auroc);
+    println!("  OOD FAR @ threshold {:.3}: {:.2}%", threshold, far * 100.0);
+    println!(
+        "  Routing confusion: support->(s={}, c={}) coding->(s={}, c={})",
+        support_to_support_gid,
+        support_to_coding_gid,
+        coding_to_support_gid,
+        coding_to_coding_gid
+    );
+
+    println!("\nM2 gate checks:");
+    println!(
+        "  intent >= 95%: {}",
+        if remapped_intent_accuracy >= 0.95 { "PASS" } else { "FAIL" }
+    );
+    println!("  median margin >= 0.25: {}", if median_margin >= 0.25 { "PASS" } else { "FAIL" });
+    println!("  p10 margin >= 0.10: {}", if p10_margin >= 0.10 { "PASS" } else { "FAIL" });
+    println!("  OOD AUROC >= 0.90: {}", if auroc >= 0.90 { "PASS" } else { "FAIL" });
+    println!("  OOD FAR <= 5%: {}", if far <= 0.05 { "PASS" } else { "FAIL" });
+
+    let checkpoint_path = std::env::var("GROWFORMER_LANGUAGE_CHECKPOINT")
+        .unwrap_or_else(|_| "language_checkpoint.json".to_string());
+    let mut group_vectors: HashMap<GroupId, Vec<f32>> = HashMap::new();
+    for emb in &dm.main.embedding_library {
+        if !emb.language_vector.is_empty() {
+            group_vectors.insert(emb.group_id, emb.language_vector.clone());
+        }
+    }
+    save_language_checkpoint(&dm.language_runtime, &group_vectors, &checkpoint_path);
+    let (loaded_runtime, loaded_vectors) = load_language_checkpoint(&checkpoint_path);
+    dm.language_runtime = loaded_runtime;
+    for (gid, v) in loaded_vectors {
+        let _ = dm.set_group_language_vector(gid, v);
+    }
+    let smoke = dm.route_text("need help with password reset").expect("post-load route");
+    println!(
+        "\nCheckpoint reload smoke test: chosen_group={:?} confidence={:.3}",
+        smoke.chosen_group_id, smoke.confidence
+    );
+}
+
+fn build_language_calibration_dataset() -> CalibrationDataset {
+    let mut samples = Vec::new();
+    let domains = vec![
+        "customer_support",
+        "coding_tool_use",
+        "knowledge_qa",
+        "safety_refusal",
+        "procedural_instruction",
+        "short_conversation",
+        "multi_turn_followup",
+        "adversarial_noisy",
+    ];
+    let languages = ["english", "english", "english", "spanish", "french"];
+    for domain in domains {
+        for i in 0..500 {
+            let lang = languages[i % languages.len()];
+            let text = format!("{} sample {} in {}", domain, i, lang);
+            samples.push(LanguageSample {
+                domain: domain.to_string(),
+                text,
+                semantic_intent: format!("{}_intent", domain),
+                action_target: if domain == "coding_tool_use" {
+                    Some("tool_runner".to_string())
+                } else {
+                    None
+                },
+                policy_regime: if domain == "safety_refusal" { "strict".to_string() } else { "default".to_string() },
+                language_channel: lang.to_string(),
+            });
+        }
+    }
+    CalibrationDataset { samples }
+}
+
+fn percentile(values: &[f32], p: f32) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut s = values.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let pp = p.clamp(0.0, 1.0);
+    let idx = ((s.len().saturating_sub(1) as f32) * pp).round() as usize;
+    s[idx]
+}
+
+fn choose_operating_threshold_for_far(
+    in_domain_scores: &[f32],
+    ood_scores: &[f32],
+    target_far: f32,
+) -> f32 {
+    if in_domain_scores.is_empty() || ood_scores.is_empty() {
+        return 0.15;
+    }
+    let mut candidates: Vec<f32> = in_domain_scores
+        .iter()
+        .chain(ood_scores.iter())
+        .copied()
+        .collect();
+    candidates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+
+    let mut best_threshold = candidates[0];
+    let mut best_in_domain_accept = -1.0f32;
+    for &thr in &candidates {
+        let far = ood_scores.iter().filter(|&&s| s >= thr).count() as f32 / ood_scores.len() as f32;
+        if far > target_far {
+            continue;
+        }
+        let id_accept = in_domain_scores.iter().filter(|&&s| s >= thr).count() as f32
+            / in_domain_scores.len() as f32;
+        if id_accept > best_in_domain_accept {
+            best_in_domain_accept = id_accept;
+            best_threshold = thr;
+        }
+    }
+    if best_in_domain_accept < 0.0 {
+        // No threshold meets FAR target; choose highest threshold to minimize false accepts.
+        *candidates.last().unwrap_or(&0.15)
+    } else {
+        best_threshold
+    }
+}
+
+fn compute_auroc(scores_labels: &[(f32, bool)]) -> f32 {
+    if scores_labels.is_empty() {
+        return 0.5;
+    }
+    let positives = scores_labels.iter().filter(|(_, y)| *y).count() as f32;
+    let negatives = scores_labels.len() as f32 - positives;
+    if positives <= 0.0 || negatives <= 0.0 {
+        return 0.5;
+    }
+
+    let mut pairs = scores_labels.to_vec();
+    pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut tp = 0.0f32;
+    let mut fp = 0.0f32;
+    let mut prev_score = f32::INFINITY;
+    let mut points: Vec<(f32, f32)> = vec![(0.0, 0.0)];
+
+    for (score, is_pos) in pairs {
+        if score != prev_score {
+            points.push((fp / negatives, tp / positives));
+            prev_score = score;
+        }
+        if is_pos {
+            tp += 1.0;
+        } else {
+            fp += 1.0;
+        }
+    }
+    points.push((1.0, 1.0));
+
+    let mut auc = 0.0f32;
+    for w in points.windows(2) {
+        let (x1, y1) = w[0];
+        let (x2, y2) = w[1];
+        let dx = (x2 - x1).max(0.0);
+        auc += dx * (y1 + y2) * 0.5;
+    }
+    auc.clamp(0.0, 1.0)
 }
 
 

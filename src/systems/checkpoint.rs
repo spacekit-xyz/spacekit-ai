@@ -13,6 +13,7 @@ use crate::types::{NeuronId, GroupId};
 use crate::neuron::Neuron;
 use crate::types::NeuronGroup;
 use crate::dimension::MainDimension;
+use crate::dimension::LanguageRuntime;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
@@ -186,6 +187,36 @@ pub fn load_mnist_checkpoint(path: &str) -> (MainDimension, Vec<GroupId>, Vec<f3
 }
 
 // =============================================================================
+// Language Checkpoint — save calibrated bridge + per-group language vectors
+// =============================================================================
+
+#[derive(Serialize, Deserialize)]
+pub struct LanguageCheckpoint {
+    pub runtime: LanguageRuntime,
+    pub group_language_vectors: HashMap<GroupId, Vec<f32>>,
+}
+
+pub fn save_language_checkpoint(
+    runtime: &LanguageRuntime,
+    group_language_vectors: &HashMap<GroupId, Vec<f32>>,
+    path: &str,
+) {
+    let checkpoint = LanguageCheckpoint {
+        runtime: runtime.clone(),
+        group_language_vectors: group_language_vectors.clone(),
+    };
+    let json = serde_json::to_string_pretty(&checkpoint).expect("LanguageCheckpoint serialization failed");
+    std::fs::write(path, &json).unwrap_or_else(|e| panic!("Failed to write {}: {}", path, e));
+    println!("  Language checkpoint saved: {} ({} KB)", path, json.len() / 1024);
+}
+
+pub fn load_language_checkpoint(path: &str) -> (LanguageRuntime, HashMap<GroupId, Vec<f32>>) {
+    let json = std::fs::read_to_string(path).unwrap_or_else(|_| panic!("Language checkpoint not found: {}", path));
+    let ckpt: LanguageCheckpoint = serde_json::from_str(&json).expect("LanguageCheckpoint deserialization failed");
+    (ckpt.runtime, ckpt.group_language_vectors)
+}
+
+// =============================================================================
 // Unit tests — JSON round-trip of HashMap<NeuronId, Neuron>
 // Ensures serde_json key format (e.g. u32 keys as strings) doesn't corrupt
 // checkpoint load (e.g. 50% retention on load).
@@ -334,6 +365,29 @@ mod tests {
         assert_eq!(loaded_accs, baseline_accs);
         assert_eq!(loaded_main.group_order.len(), main.group_order.len());
         assert!(loaded_main.groups.contains_key(&0));
+
+        fs::remove_file(path_str).ok();
+    }
+
+    #[test]
+    fn test_language_checkpoint_write_and_load() {
+        use crate::dimension::{LanguageConfig, LanguageRuntime};
+        use std::fs;
+
+        let runtime = LanguageRuntime::new(LanguageConfig::default());
+        let mut vectors = HashMap::new();
+        vectors.insert(0u32, vec![0.1f32; 64]);
+        vectors.insert(1u32, vec![0.2f32; 64]);
+
+        let path = std::env::temp_dir().join("growformer_language_checkpoint_test.json");
+        let path_str = path.to_str().expect("temp path");
+        save_language_checkpoint(&runtime, &vectors, path_str);
+        assert!(path.exists(), "language checkpoint must exist");
+
+        let (loaded_runtime, loaded_vectors) = load_language_checkpoint(path_str);
+        assert_eq!(loaded_runtime.config.bridge_output_dim, runtime.config.bridge_output_dim);
+        assert_eq!(loaded_vectors.len(), vectors.len());
+        assert_eq!(loaded_vectors.get(&0).map(|v| v.len()), Some(64));
 
         fs::remove_file(path_str).ok();
     }

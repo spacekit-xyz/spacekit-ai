@@ -3,6 +3,7 @@ name = "growformer"
 version = "0.1.0"
 edition = "2021"
 build = "build.rs"
+default-run = "growformer"
 
 [lib]
 name = "growformer"

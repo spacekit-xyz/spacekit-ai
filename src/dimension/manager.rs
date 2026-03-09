@@ -434,6 +434,17 @@ impl DimensionManager {
         ))
     }
 
+    /// Stateless routing for independent single-turn evaluation.
+    pub fn route_text_stateless(&self, text: &str) -> Result<LanguageRoutingDecision, String> {
+        let bridged = self.language_runtime.bridge_text_stateless(text)?;
+        Ok(route_language_embedding(
+            &self.main.embedding_library,
+            &bridged.routed_vector,
+            bridged.confidence,
+            self.language_runtime.config.ood_similarity_threshold,
+        ))
+    }
+
     /// Build one group language vector by averaging bridged vectors over representative prompts.
     pub fn build_group_language_vector_from_texts(
         &mut self,
@@ -446,7 +457,7 @@ impl DimensionManager {
         let mut acc = vec![0.0f32; dim];
         let mut n = 0f32;
         for t in texts {
-            let out = self.language_runtime.bridge_text(t)?;
+            let out = self.language_runtime.bridge_text_stateless(t)?;
             if out.routed_vector.len() != dim {
                 return Err("bridged vector has unexpected dimension".to_string());
             }
