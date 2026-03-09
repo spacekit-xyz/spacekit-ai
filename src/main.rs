@@ -85,6 +85,9 @@ struct Args {
     /// Training epochs for language distillation experiment.
     #[arg(long, value_name = "N", default_value_t = 12)]
     language_distill_epochs: u32,
+    /// Print a GLE model card summary from a checkpoint path or .meta.json path.
+    #[arg(long, value_name = "PATH")]
+    print_gle_card: Option<String>,
 }
 
 fn main() {
@@ -93,7 +96,12 @@ fn main() {
     println!("=============================================================\n");
 
     let args = Args::parse();
-    if args.xor == true {
+    if let Some(path) = args.print_gle_card.as_deref() {
+        if let Err(e) = print_gle_model_card(path) {
+            eprintln!("Failed to print GLE model card: {}", e);
+            std::process::exit(1);
+        }
+    } else if args.xor == true {
         demo_xor();
     } else if args.spiral == true {
         demo_spiral();
@@ -127,7 +135,7 @@ fn main() {
             _ => demo_continual_learning(),
         }
     } else {
-        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, --language-pipeline, or --language-distill");
+        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, --language-pipeline, --language-distill, or --print-gle-card");
         std::process::exit(1);
     }
 
@@ -2456,6 +2464,14 @@ fn model_card_path(checkpoint_path: &str) -> String {
     format!("{}.meta.json", checkpoint_path)
 }
 
+fn resolve_model_card_input(path: &str) -> String {
+    if path.ends_with(".meta.json") {
+        path.to_string()
+    } else {
+        model_card_path(path)
+    }
+}
+
 fn save_gle_model_card(card: &GleModelCard) -> Result<(), String> {
     let path = model_card_path(&card.checkpoint_path);
     if let Some(parent) = std::path::Path::new(&path).parent() {
@@ -2470,6 +2486,30 @@ fn now_unix_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+fn print_gle_model_card(path: &str) -> Result<(), String> {
+    let resolved = resolve_model_card_input(path);
+    let json = std::fs::read_to_string(&resolved).map_err(|e| format!("read failed: {}", e))?;
+    let card: GleModelCard = serde_json::from_str(&json).map_err(|e| format!("parse failed: {}", e))?;
+    println!("GLE Model Card");
+    println!("  name: {}", card.model_name);
+    println!("  checkpoint: {}", card.checkpoint_path);
+    println!("  created_unix: {}", card.created_unix);
+    println!("  stack: {}", card.stack);
+    if !card.notes.is_empty() {
+        println!("  notes:");
+        for n in &card.notes {
+            println!("    - {}", n);
+        }
+    }
+    if !card.metrics.is_empty() {
+        println!("  metrics:");
+        for (k, v) in &card.metrics {
+            println!("    - {}: {:.6}", k, v);
+        }
+    }
+    Ok(())
 }
 
 fn load_language_samples_jsonl(path: &str) -> Result<Vec<LanguageSample>, String> {
