@@ -97,6 +97,15 @@ struct Args {
     min_routing_median_margin: f32,
     #[arg(long, default_value_t = 0.10)]
     min_routing_p10_margin: f32,
+    /// Validate M3 action schema metrics (CI-friendly).
+    #[arg(long)]
+    validate_action_schema: bool,
+    #[arg(long, default_value_t = 0.95)]
+    min_action_accuracy: f32,
+    #[arg(long, default_value_t = 0.98)]
+    min_fallback_precision: f32,
+    #[arg(long, default_value_t = 1.0)]
+    min_payload_valid_rate: f32,
     /// M3 path: route one text and emit deterministic action JSON.
     #[arg(long, value_name = "TEXT")]
     language_action_text: Option<String>,
@@ -128,6 +137,19 @@ fn main() {
         if let Err(e) = demo_language_action_eval() {
             eprintln!("Failed language action eval: {}", e);
             std::process::exit(1);
+        }
+    } else if args.validate_action_schema {
+        match validate_action_schema(
+            args.min_action_accuracy,
+            args.min_fallback_precision,
+            args.min_payload_valid_rate,
+        ) {
+            Ok(true) => {}
+            Ok(false) => std::process::exit(2),
+            Err(e) => {
+                eprintln!("Failed action schema validation: {}", e);
+                std::process::exit(1);
+            }
         }
     } else if args.language_ema_ablation {
         if let Err(e) = demo_language_ema_ablation() {
@@ -182,7 +204,7 @@ fn main() {
             _ => demo_continual_learning(),
         }
     } else {
-        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, --language-pipeline, --language-distill, --print-gle-card, --validate-gle, --language-action-text, --language-action-eval, or --language-ema-ablation");
+        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, --language-pipeline, --language-distill, --print-gle-card, --validate-gle, --validate-action-schema, --language-action-text, --language-action-eval, or --language-ema-ablation");
         std::process::exit(1);
     }
 
@@ -2065,6 +2087,21 @@ fn demo_language_action(text: &str) -> Result<(), String> {
 
 fn demo_language_action_eval() -> Result<(), String> {
     println!("--- Language Action Eval (M3) ---\n");
+    let m = eval_language_action_metrics()?;
+    println!("Action eval metrics:");
+    println!("  action_type_accuracy: {:.2}%", m.action_accuracy * 100.0);
+    println!("  payload_valid_rate: {:.2}%", m.payload_valid_rate * 100.0);
+    println!("  fallback_precision: {:.2}%", m.fallback_precision * 100.0);
+    Ok(())
+}
+
+struct ActionEvalMetrics {
+    action_accuracy: f32,
+    payload_valid_rate: f32,
+    fallback_precision: f32,
+}
+
+fn eval_language_action_metrics() -> Result<ActionEvalMetrics, String> {
     let (dm, _support_gid, _coding_gid, _report) = build_language_demo_manager(0.2);
 
     let support_cases = vec![
@@ -2113,16 +2150,45 @@ fn demo_language_action_eval() -> Result<(), String> {
         }
     }
 
-    let action_acc = correct_action_type as f32 / total.max(1) as f32;
-    let payload_valid_rate = valid_payload as f32 / total.max(1) as f32;
-    let fallback_precision = fallback_correct as f32 / fallback_total.max(1) as f32;
+    Ok(ActionEvalMetrics {
+        action_accuracy: correct_action_type as f32 / total.max(1) as f32,
+        payload_valid_rate: valid_payload as f32 / total.max(1) as f32,
+        fallback_precision: fallback_correct as f32 / fallback_total.max(1) as f32,
+    })
+}
 
-    println!("Action eval metrics:");
-    println!("  action_type_accuracy: {:.2}%", action_acc * 100.0);
-    println!("  payload_valid_rate: {:.2}%", payload_valid_rate * 100.0);
-    println!("  fallback_precision: {:.2}%", fallback_precision * 100.0);
+fn validate_action_schema(
+    min_action_accuracy: f32,
+    min_fallback_precision: f32,
+    min_payload_valid_rate: f32,
+) -> Result<bool, String> {
+    let m = eval_language_action_metrics()?;
+    let pass_acc = m.action_accuracy >= min_action_accuracy;
+    let pass_fallback = m.fallback_precision >= min_fallback_precision;
+    let pass_payload = m.payload_valid_rate >= min_payload_valid_rate;
+    let pass = pass_acc && pass_fallback && pass_payload;
 
-    Ok(())
+    println!("Action Schema Validation");
+    println!(
+        "  action_type_accuracy: {:.6} (threshold {:.6}) => {}",
+        m.action_accuracy,
+        min_action_accuracy,
+        if pass_acc { "PASS" } else { "FAIL" }
+    );
+    println!(
+        "  fallback_precision: {:.6} (threshold {:.6}) => {}",
+        m.fallback_precision,
+        min_fallback_precision,
+        if pass_fallback { "PASS" } else { "FAIL" }
+    );
+    println!(
+        "  payload_valid_rate: {:.6} (threshold {:.6}) => {}",
+        m.payload_valid_rate,
+        min_payload_valid_rate,
+        if pass_payload { "PASS" } else { "FAIL" }
+    );
+    println!("  verdict: {}", if pass { "PASS" } else { "FAIL" });
+    Ok(pass)
 }
 
 fn demo_language_ema_ablation() -> Result<(), String> {
