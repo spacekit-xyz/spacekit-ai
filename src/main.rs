@@ -88,6 +88,15 @@ struct Args {
     /// Print a GLE model card summary from a checkpoint path or .meta.json path.
     #[arg(long, value_name = "PATH")]
     print_gle_card: Option<String>,
+    /// Validate a GLE model card against acceptance thresholds (CI-friendly).
+    #[arg(long, value_name = "PATH")]
+    validate_gle: Option<String>,
+    #[arg(long, default_value_t = 0.95)]
+    min_routing_acc: f32,
+    #[arg(long, default_value_t = 0.25)]
+    min_routing_median_margin: f32,
+    #[arg(long, default_value_t = 0.10)]
+    min_routing_p10_margin: f32,
 }
 
 fn main() {
@@ -100,6 +109,20 @@ fn main() {
         if let Err(e) = print_gle_model_card(path) {
             eprintln!("Failed to print GLE model card: {}", e);
             std::process::exit(1);
+        }
+    } else if let Some(path) = args.validate_gle.as_deref() {
+        match validate_gle_model_card(
+            path,
+            args.min_routing_acc,
+            args.min_routing_median_margin,
+            args.min_routing_p10_margin,
+        ) {
+            Ok(true) => {}
+            Ok(false) => std::process::exit(2),
+            Err(e) => {
+                eprintln!("Failed to validate GLE model card: {}", e);
+                std::process::exit(1);
+            }
         }
     } else if args.xor == true {
         demo_xor();
@@ -135,7 +158,7 @@ fn main() {
             _ => demo_continual_learning(),
         }
     } else {
-        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, --language-pipeline, --language-distill, or --print-gle-card");
+        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, --language-pipeline, --language-distill, --print-gle-card, or --validate-gle");
         std::process::exit(1);
     }
 
@@ -2510,6 +2533,60 @@ fn print_gle_model_card(path: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn metric_lookup(card: &GleModelCard, key: &str) -> Option<f32> {
+    card.metrics
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| *v)
+}
+
+fn validate_gle_model_card(
+    path: &str,
+    min_acc: f32,
+    min_median_margin: f32,
+    min_p10_margin: f32,
+) -> Result<bool, String> {
+    let resolved = resolve_model_card_input(path);
+    let json = std::fs::read_to_string(&resolved).map_err(|e| format!("read failed: {}", e))?;
+    let card: GleModelCard = serde_json::from_str(&json).map_err(|e| format!("parse failed: {}", e))?;
+
+    let acc = metric_lookup(&card, "routing_acc_support_coding")
+        .ok_or_else(|| "missing metric routing_acc_support_coding".to_string())?;
+    let med = metric_lookup(&card, "routing_median_margin")
+        .ok_or_else(|| "missing metric routing_median_margin".to_string())?;
+    let p10 = metric_lookup(&card, "routing_p10_margin")
+        .ok_or_else(|| "missing metric routing_p10_margin".to_string())?;
+
+    let pass_acc = acc >= min_acc;
+    let pass_med = med >= min_median_margin;
+    let pass_p10 = p10 >= min_p10_margin;
+    let pass = pass_acc && pass_med && pass_p10;
+
+    println!("GLE Validation");
+    println!("  card: {}", resolved);
+    println!(
+        "  routing_acc_support_coding: {:.6} (threshold {:.6}) => {}",
+        acc,
+        min_acc,
+        if pass_acc { "PASS" } else { "FAIL" }
+    );
+    println!(
+        "  routing_median_margin: {:.6} (threshold {:.6}) => {}",
+        med,
+        min_median_margin,
+        if pass_med { "PASS" } else { "FAIL" }
+    );
+    println!(
+        "  routing_p10_margin: {:.6} (threshold {:.6}) => {}",
+        p10,
+        min_p10_margin,
+        if pass_p10 { "PASS" } else { "FAIL" }
+    );
+    println!("  verdict: {}", if pass { "PASS" } else { "FAIL" });
+
+    Ok(pass)
 }
 
 fn load_language_samples_jsonl(path: &str) -> Result<Vec<LanguageSample>, String> {
