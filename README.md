@@ -113,7 +113,12 @@ Operational commands:
 - Print model card: `cargo run -- --print-gle-card checkpoints/gle_student_routing_tuned.json`
 - Validate checkpoint gate: `cargo run -- --validate-gle checkpoints/gle_student_routing_tuned.json`
 - M3 starter action JSON: `cargo run -- --language-action-text "help me reset password"`
+- Validate M3 action schema: `cargo run -- --validate-action-schema`
+- Validate M3 action schema on Stage A+B JSONL:
+  `cargo run -- --validate-action-schema --action-eval-data data/language/stage_ab_action_eval.jsonl --action-eval-report reports/m3_action_eval.json`
 - CI helper script: `scripts/validate_gle.sh`
+- M3 script with Stage A+B data: `scripts/validate_action_schema.sh data/language/stage_ab_action_eval.jsonl reports/m3_action_eval.json`
+- Full stack gate (GLE + M3): `scripts/validate_stack.sh checkpoints/gle_student_routing_tuned.json data/language/stage_ab_action_eval.jsonl reports/m3_action_eval.json`
 
 ---
 

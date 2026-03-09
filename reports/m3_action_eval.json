@@ -1,0 +1,7 @@
+{
+  "action_target_accuracy_valid": 1.0,
+  "payload_valid_rate": 1.0,
+  "fallback_precision": 1.0,
+  "stage_a_samples": 3,
+  "stage_b_samples": 6
+}

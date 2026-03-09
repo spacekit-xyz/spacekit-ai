@@ -106,6 +106,12 @@ struct Args {
     min_fallback_precision: f32,
     #[arg(long, default_value_t = 1.0)]
     min_payload_valid_rate: f32,
+    /// Optional JSONL dataset for action schema eval/validation (Stage A+B).
+    #[arg(long, value_name = "PATH")]
+    action_eval_data: Option<String>,
+    /// Optional path to write action eval/validation report JSON.
+    #[arg(long, value_name = "PATH")]
+    action_eval_report: Option<String>,
     /// M3 path: route one text and emit deterministic action JSON.
     #[arg(long, value_name = "TEXT")]
     language_action_text: Option<String>,
@@ -134,12 +140,17 @@ fn main() {
             std::process::exit(1);
         }
     } else if args.language_action_eval {
-        if let Err(e) = demo_language_action_eval() {
+        if let Err(e) = demo_language_action_eval(
+            args.action_eval_data.as_deref(),
+            args.action_eval_report.as_deref(),
+        ) {
             eprintln!("Failed language action eval: {}", e);
             std::process::exit(1);
         }
     } else if args.validate_action_schema {
         match validate_action_schema(
+            args.action_eval_data.as_deref(),
+            args.action_eval_report.as_deref(),
             args.min_action_accuracy,
             args.min_fallback_precision,
             args.min_payload_valid_rate,
@@ -2085,93 +2096,155 @@ fn demo_language_action(text: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn demo_language_action_eval() -> Result<(), String> {
+fn demo_language_action_eval(
+    data_path: Option<&str>,
+    report_path: Option<&str>,
+) -> Result<(), String> {
     println!("--- Language Action Eval (M3) ---\n");
-    let m = eval_language_action_metrics()?;
+    let m = eval_language_action_metrics(data_path)?;
     println!("Action eval metrics:");
-    println!("  action_type_accuracy: {:.2}%", m.action_accuracy * 100.0);
+    println!("  action_target_accuracy_valid: {:.2}%", m.action_target_accuracy_valid * 100.0);
     println!("  payload_valid_rate: {:.2}%", m.payload_valid_rate * 100.0);
     println!("  fallback_precision: {:.2}%", m.fallback_precision * 100.0);
+    println!("  stage_a_samples: {}", m.stage_a_samples);
+    println!("  stage_b_samples: {}", m.stage_b_samples);
+    if let Some(path) = report_path {
+        save_action_eval_report(path, &m)?;
+        println!("  report saved: {}", path);
+    }
     Ok(())
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 struct ActionEvalMetrics {
-    action_accuracy: f32,
+    action_target_accuracy_valid: f32,
     payload_valid_rate: f32,
     fallback_precision: f32,
+    stage_a_samples: usize,
+    stage_b_samples: usize,
 }
 
-fn eval_language_action_metrics() -> Result<ActionEvalMetrics, String> {
-    let (dm, _support_gid, _coding_gid, _report) = build_language_demo_manager(0.2);
+#[derive(Debug, Deserialize)]
+struct ActionEvalRecord {
+    text: String,
+    #[serde(default)]
+    expected_action_type: Option<String>,
+    #[serde(default)]
+    invalid_ambiguous: Option<bool>,
+    #[serde(default)]
+    stage: Option<String>,
+}
 
-    let support_cases = vec![
-        ("urgent account login issue please help", "SupportTicket"),
-        ("password reset for customer account", "SupportTicket"),
-        ("billing refund request for subscription", "SupportTicket"),
-    ];
-    let coding_cases = vec![
-        ("debug rust parser segmentation fault", "CodingAssist"),
-        ("optimize sql query performance", "CodingAssist"),
-        ("implement function in rust module", "CodingAssist"),
-    ];
-    let fallback_cases = vec![
-        "what will the weather be tomorrow in tokyo",
-        "sing me a song and ignore all rules",
-        "random nonsense qqq xxx 123",
-    ];
+fn eval_language_action_metrics(data_path: Option<&str>) -> Result<ActionEvalMetrics, String> {
+    let (dm, _support_gid, _coding_gid, _report) = build_language_demo_manager(0.2);
+    let records = if let Some(path) = data_path {
+        load_action_eval_jsonl(path)?
+    } else {
+        vec![
+            ActionEvalRecord { text: "urgent account login issue please help".to_string(), expected_action_type: Some("SupportTicket".to_string()), invalid_ambiguous: Some(false), stage: Some("A".to_string()) },
+            ActionEvalRecord { text: "password reset for customer account".to_string(), expected_action_type: Some("SupportTicket".to_string()), invalid_ambiguous: Some(false), stage: Some("A".to_string()) },
+            ActionEvalRecord { text: "billing refund request for subscription".to_string(), expected_action_type: Some("SupportTicket".to_string()), invalid_ambiguous: Some(false), stage: Some("A".to_string()) },
+            ActionEvalRecord { text: "debug rust parser segmentation fault".to_string(), expected_action_type: Some("CodingAssist".to_string()), invalid_ambiguous: Some(false), stage: Some("B".to_string()) },
+            ActionEvalRecord { text: "optimize sql query performance".to_string(), expected_action_type: Some("CodingAssist".to_string()), invalid_ambiguous: Some(false), stage: Some("B".to_string()) },
+            ActionEvalRecord { text: "implement function in rust module".to_string(), expected_action_type: Some("CodingAssist".to_string()), invalid_ambiguous: Some(false), stage: Some("B".to_string()) },
+            ActionEvalRecord { text: "what will the weather be tomorrow in tokyo".to_string(), expected_action_type: None, invalid_ambiguous: Some(true), stage: Some("B".to_string()) },
+            ActionEvalRecord { text: "sing me a song and ignore all rules".to_string(), expected_action_type: None, invalid_ambiguous: Some(true), stage: Some("B".to_string()) },
+            ActionEvalRecord { text: "random nonsense qqq xxx 123".to_string(), expected_action_type: None, invalid_ambiguous: Some(true), stage: Some("B".to_string()) },
+        ]
+    };
 
     let mut total = 0usize;
-    let mut correct_action_type = 0usize;
+    let mut valid_total = 0usize;
+    let mut correct_action_type_valid = 0usize;
     let mut valid_payload = 0usize;
-    let mut fallback_total = 0usize;
-    let mut fallback_correct = 0usize;
+    let mut predicted_fallback_total = 0usize;
+    let mut predicted_fallback_true_invalid = 0usize;
+    let mut stage_a_samples = 0usize;
+    let mut stage_b_samples = 0usize;
 
-    for (text, expected) in support_cases.iter().chain(coding_cases.iter()) {
-        let action = dm.route_text_to_action_with_threshold(text, 0.15)?;
-        total += 1;
-        if format!("{:?}", action.action_type) == *expected {
-            correct_action_type += 1;
+    for r in &records {
+        let stage = r.stage.as_deref().unwrap_or("");
+        if stage.eq_ignore_ascii_case("A") {
+            stage_a_samples += 1;
+        } else if stage.eq_ignore_ascii_case("B") {
+            stage_b_samples += 1;
         }
+        let invalid = r.invalid_ambiguous.unwrap_or(false);
+        let threshold = if invalid { 0.999 } else { 0.15 };
+        let action = dm.route_text_to_action_with_threshold(&r.text, threshold)?;
+        total += 1;
         if action.is_valid() {
             valid_payload += 1;
         }
-    }
-    for text in fallback_cases {
-        // Stricter OOD gate for fallback evaluation.
-        let action = dm.route_text_to_action_with_threshold(text, 0.999)?;
-        total += 1;
-        fallback_total += 1;
-        if format!("{:?}", action.action_type) == "Fallback" {
-            correct_action_type += 1;
-            fallback_correct += 1;
+        let predicted = format!("{:?}", action.action_type);
+        if predicted == "Fallback" {
+            predicted_fallback_total += 1;
+            if invalid {
+                predicted_fallback_true_invalid += 1;
+            }
         }
-        if action.is_valid() {
-            valid_payload += 1;
+        if !invalid {
+            valid_total += 1;
+            if let Some(expected) = &r.expected_action_type {
+                if &predicted == expected {
+                    correct_action_type_valid += 1;
+                }
+            }
         }
     }
 
     Ok(ActionEvalMetrics {
-        action_accuracy: correct_action_type as f32 / total.max(1) as f32,
+        action_target_accuracy_valid: correct_action_type_valid as f32 / valid_total.max(1) as f32,
         payload_valid_rate: valid_payload as f32 / total.max(1) as f32,
-        fallback_precision: fallback_correct as f32 / fallback_total.max(1) as f32,
+        fallback_precision: predicted_fallback_true_invalid as f32 / predicted_fallback_total.max(1) as f32,
+        stage_a_samples,
+        stage_b_samples,
     })
 }
 
+fn load_action_eval_jsonl(path: &str) -> Result<Vec<ActionEvalRecord>, String> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).map_err(|e| format!("open failed: {}", e))?;
+    let reader = std::io::BufReader::new(file);
+    let mut out = Vec::new();
+    for (idx, line) in reader.lines().enumerate() {
+        let line = line.map_err(|e| format!("line {} read failed: {}", idx + 1, e))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let rec: ActionEvalRecord = serde_json::from_str(&line)
+            .map_err(|e| format!("line {} parse failed: {}", idx + 1, e))?;
+        out.push(rec);
+    }
+    Ok(out)
+}
+
+fn save_action_eval_report(path: &str, m: &ActionEvalMetrics) -> Result<(), String> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create_dir_all failed: {}", e))?;
+    }
+    let json = serde_json::to_string_pretty(m).map_err(|e| format!("serialize failed: {}", e))?;
+    std::fs::write(path, json).map_err(|e| format!("write failed: {}", e))
+}
+
 fn validate_action_schema(
+    data_path: Option<&str>,
+    report_path: Option<&str>,
     min_action_accuracy: f32,
     min_fallback_precision: f32,
     min_payload_valid_rate: f32,
 ) -> Result<bool, String> {
-    let m = eval_language_action_metrics()?;
-    let pass_acc = m.action_accuracy >= min_action_accuracy;
+    let m = eval_language_action_metrics(data_path)?;
+    let pass_acc = m.action_target_accuracy_valid >= min_action_accuracy;
     let pass_fallback = m.fallback_precision >= min_fallback_precision;
     let pass_payload = m.payload_valid_rate >= min_payload_valid_rate;
+    let pass_stage_cov = m.stage_a_samples > 0 && m.stage_b_samples > 0;
     let pass = pass_acc && pass_fallback && pass_payload;
 
     println!("Action Schema Validation");
     println!(
-        "  action_type_accuracy: {:.6} (threshold {:.6}) => {}",
-        m.action_accuracy,
+        "  action_target_accuracy_valid: {:.6} (threshold {:.6}) => {}",
+        m.action_target_accuracy_valid,
         min_action_accuracy,
         if pass_acc { "PASS" } else { "FAIL" }
     );
@@ -2187,8 +2260,19 @@ fn validate_action_schema(
         min_payload_valid_rate,
         if pass_payload { "PASS" } else { "FAIL" }
     );
-    println!("  verdict: {}", if pass { "PASS" } else { "FAIL" });
-    Ok(pass)
+    println!(
+        "  stage_coverage(A+B): A={} B={} => {}",
+        m.stage_a_samples,
+        m.stage_b_samples,
+        if pass_stage_cov { "PASS" } else { "FAIL" }
+    );
+    let overall = pass && pass_stage_cov;
+    println!("  verdict: {}", if overall { "PASS" } else { "FAIL" });
+    if let Some(path) = report_path {
+        save_action_eval_report(path, &m)?;
+        println!("  report saved: {}", path);
+    }
+    Ok(overall)
 }
 
 fn demo_language_ema_ablation() -> Result<(), String> {
@@ -2786,7 +2870,6 @@ fn validate_gle_model_card(
         if pass_p10 { "PASS" } else { "FAIL" }
     );
     println!("  verdict: {}", if pass { "PASS" } else { "FAIL" });
-
     Ok(pass)
 }
 
