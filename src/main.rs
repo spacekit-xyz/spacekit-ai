@@ -100,6 +100,9 @@ struct Args {
     /// M3 path: route one text and emit deterministic action JSON.
     #[arg(long, value_name = "TEXT")]
     language_action_text: Option<String>,
+    /// M3 eval: run action-schema accuracy/fallback metrics on synthetic validation set.
+    #[arg(long)]
+    language_action_eval: bool,
 }
 
 fn main() {
@@ -116,6 +119,11 @@ fn main() {
     } else if let Some(text) = args.language_action_text.as_deref() {
         if let Err(e) = demo_language_action(text) {
             eprintln!("Failed language action routing: {}", e);
+            std::process::exit(1);
+        }
+    } else if args.language_action_eval {
+        if let Err(e) = demo_language_action_eval() {
+            eprintln!("Failed language action eval: {}", e);
             std::process::exit(1);
         }
     } else if let Some(path) = args.validate_gle.as_deref() {
@@ -166,7 +174,7 @@ fn main() {
             _ => demo_continual_learning(),
         }
     } else {
-        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, --language-pipeline, --language-distill, --print-gle-card, --validate-gle, or --language-action-text");
+        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, --language-pipeline, --language-distill, --print-gle-card, --validate-gle, --language-action-text, or --language-action-eval");
         std::process::exit(1);
     }
 
@@ -2044,6 +2052,68 @@ fn demo_language_action(text: &str) -> Result<(), String> {
     let action = dm.route_text_to_action(text)?;
     let json = serde_json::to_string_pretty(&action).map_err(|e| e.to_string())?;
     println!("{}", json);
+    Ok(())
+}
+
+fn demo_language_action_eval() -> Result<(), String> {
+    println!("--- Language Action Eval (M3) ---\n");
+    let (dm, _support_gid, _coding_gid, _report) = build_language_demo_manager();
+
+    let support_cases = vec![
+        ("urgent account login issue please help", "SupportTicket"),
+        ("password reset for customer account", "SupportTicket"),
+        ("billing refund request for subscription", "SupportTicket"),
+    ];
+    let coding_cases = vec![
+        ("debug rust parser segmentation fault", "CodingAssist"),
+        ("optimize sql query performance", "CodingAssist"),
+        ("implement function in rust module", "CodingAssist"),
+    ];
+    let fallback_cases = vec![
+        "what will the weather be tomorrow in tokyo",
+        "sing me a song and ignore all rules",
+        "random nonsense qqq xxx 123",
+    ];
+
+    let mut total = 0usize;
+    let mut correct_action_type = 0usize;
+    let mut valid_payload = 0usize;
+    let mut fallback_total = 0usize;
+    let mut fallback_correct = 0usize;
+
+    for (text, expected) in support_cases.iter().chain(coding_cases.iter()) {
+        let action = dm.route_text_to_action_with_threshold(text, 0.15)?;
+        total += 1;
+        if format!("{:?}", action.action_type) == *expected {
+            correct_action_type += 1;
+        }
+        if action.is_valid() {
+            valid_payload += 1;
+        }
+    }
+    for text in fallback_cases {
+        // Stricter OOD gate for fallback evaluation.
+        let action = dm.route_text_to_action_with_threshold(text, 0.999)?;
+        total += 1;
+        fallback_total += 1;
+        if format!("{:?}", action.action_type) == "Fallback" {
+            correct_action_type += 1;
+            fallback_correct += 1;
+        }
+        if action.is_valid() {
+            valid_payload += 1;
+        }
+    }
+
+    let action_acc = correct_action_type as f32 / total.max(1) as f32;
+    let payload_valid_rate = valid_payload as f32 / total.max(1) as f32;
+    let fallback_precision = fallback_correct as f32 / fallback_total.max(1) as f32;
+
+    println!("Action eval metrics:");
+    println!("  action_type_accuracy: {:.2}%", action_acc * 100.0);
+    println!("  payload_valid_rate: {:.2}%", payload_valid_rate * 100.0);
+    println!("  fallback_precision: {:.2}%", fallback_precision * 100.0);
+
     Ok(())
 }
 

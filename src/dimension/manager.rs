@@ -449,7 +449,23 @@ impl DimensionManager {
     /// M3 deterministic path: text -> routing -> structured action JSON.
     pub fn route_text_to_action(&mut self, text: &str) -> Result<ActionJson, String> {
         let routing = self.route_text(text)?;
-        Ok(action_from_routing(&self.main, &routing))
+        Ok(action_from_routing(&self.main, &routing, text))
+    }
+
+    /// M3 deterministic path with an explicit OOD threshold override.
+    pub fn route_text_to_action_with_threshold(
+        &self,
+        text: &str,
+        ood_threshold: f32,
+    ) -> Result<ActionJson, String> {
+        let bridged = self.language_runtime.bridge_text_stateless(text)?;
+        let routing = route_language_embedding(
+            &self.main.embedding_library,
+            &bridged.routed_vector,
+            bridged.confidence,
+            ood_threshold,
+        );
+        Ok(action_from_routing(&self.main, &routing, text))
     }
 
     /// Build one group language vector by averaging bridged vectors over representative prompts.
