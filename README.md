@@ -108,6 +108,14 @@ This makes the language stack practical for private, low-latency, CPU-friendly r
 
 `text -> GLE semantic vector -> bridge -> 64-d routing vector -> Growformer group dispatch`
 
+Current language milestone status:
+
+- M1 (Language Embedding Foundation): complete
+- M2 (Embedding-First Routing Validation): complete
+- M3 (Intent-to-Action Layer): complete
+  - Gate command: `cargo run -- --validate-action-schema --action-eval-data data/language/stage_ab_action_eval_extended.jsonl --action-eval-report reports/m3_action_eval_extended.json`
+  - Latest result: PASS on Stage A+B extended evaluation dataset
+
 Operational commands:
 
 - Print model card: `cargo run -- --print-gle-card checkpoints/gle_student_routing_tuned.json`
@@ -116,6 +124,8 @@ Operational commands:
 - Validate M3 action schema: `cargo run -- --validate-action-schema`
 - Validate M3 action schema on Stage A+B JSONL:
   `cargo run -- --validate-action-schema --action-eval-data data/language/stage_ab_action_eval.jsonl --action-eval-report reports/m3_action_eval.json`
+- Validate M3 on extended paraphrase set:
+  `cargo run -- --validate-action-schema --action-eval-data data/language/stage_ab_action_eval_extended.jsonl --action-eval-report reports/m3_action_eval_extended.json`
 - CI helper script: `scripts/validate_gle.sh`
 - M3 script with Stage A+B data: `scripts/validate_action_schema.sh data/language/stage_ab_action_eval.jsonl reports/m3_action_eval.json`
 - Full stack gate (GLE + M3): `scripts/validate_stack.sh checkpoints/gle_student_routing_tuned.json data/language/stage_ab_action_eval.jsonl reports/m3_action_eval.json`

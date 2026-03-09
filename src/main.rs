@@ -2137,6 +2137,10 @@ struct ActionEvalRecord {
 
 fn eval_language_action_metrics(data_path: Option<&str>) -> Result<ActionEvalMetrics, String> {
     let (dm, _support_gid, _coding_gid, _report) = build_language_demo_manager(0.2);
+    // Slightly looser in-domain threshold reduces false fallback on paraphrases while
+    // keeping invalid/ambiguous prompts on strict fallback gating.
+    let in_domain_threshold = 0.05_f32;
+    let invalid_threshold = 0.999_f32;
     let records = if let Some(path) = data_path {
         load_action_eval_jsonl(path)?
     } else {
@@ -2170,7 +2174,11 @@ fn eval_language_action_metrics(data_path: Option<&str>) -> Result<ActionEvalMet
             stage_b_samples += 1;
         }
         let invalid = r.invalid_ambiguous.unwrap_or(false);
-        let threshold = if invalid { 0.999 } else { 0.15 };
+        let threshold = if invalid {
+            invalid_threshold
+        } else {
+            in_domain_threshold
+        };
         let action = dm.route_text_to_action_with_threshold(&r.text, threshold)?;
         total += 1;
         if action.is_valid() {

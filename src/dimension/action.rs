@@ -63,7 +63,22 @@ pub fn action_from_routing(
     routing: &LanguageRoutingDecision,
     text: &str,
 ) -> ActionJson {
+    let lower = text.to_ascii_lowercase();
+    let keyword_hint = infer_action_type_from_text(&lower);
     if routing.rejected_as_ood || routing.chosen_group_id.is_none() {
+        if let Some(hint) = keyword_hint {
+            if hint != ActionType::GeneralAssist {
+                return ActionJson {
+                    action_type: hint.clone(),
+                    target_group_id: None,
+                    group_task_name: None,
+                    confidence: routing.confidence,
+                    margin: routing.margin,
+                    reason: "keyword_override_after_reject".to_string(),
+                    payload: payload_for_action_type(hint, &lower),
+                };
+            }
+        }
         return ActionJson {
             action_type: ActionType::Fallback,
             target_group_id: None,
@@ -78,28 +93,17 @@ pub fn action_from_routing(
     }
     let gid = routing.chosen_group_id.unwrap_or_default();
     let task = main.groups.get(&gid).map(|g| g.task_name.clone());
-    let action_type = match task.as_deref().map(|s| s.to_ascii_lowercase()) {
+    let mut action_type = match task.as_deref().map(|s| s.to_ascii_lowercase()) {
         Some(t) if t.contains("support") => ActionType::SupportTicket,
         Some(t) if t.contains("coding") || t.contains("code") => ActionType::CodingAssist,
         _ => ActionType::GeneralAssist,
     };
-    let lower = text.to_ascii_lowercase();
-    let payload = match action_type {
-        ActionType::SupportTicket => Some(ActionPayload::SupportTicket {
-            issue_type: infer_support_issue_type(&lower),
-            priority: infer_priority(&lower),
-        }),
-        ActionType::CodingAssist => Some(ActionPayload::CodingAssist {
-            task: infer_coding_task(&lower),
-            language_hint: infer_language_hint(&lower),
-        }),
-        ActionType::GeneralAssist => Some(ActionPayload::GeneralAssist {
-            topic: infer_topic(&lower),
-        }),
-        ActionType::Fallback => Some(ActionPayload::Fallback {
-            fallback_code: "UNSPECIFIED".to_string(),
-        }),
-    };
+    if let Some(hint) = keyword_hint {
+        if hint != ActionType::GeneralAssist {
+            action_type = hint;
+        }
+    }
+    let payload = payload_for_action_type(action_type.clone(), &lower);
     ActionJson {
         action_type,
         target_group_id: Some(gid),
@@ -108,6 +112,69 @@ pub fn action_from_routing(
         margin: routing.margin,
         reason: "routed".to_string(),
         payload,
+    }
+}
+
+fn payload_for_action_type(action_type: ActionType, lower: &str) -> Option<ActionPayload> {
+    match action_type {
+        ActionType::SupportTicket => Some(ActionPayload::SupportTicket {
+            issue_type: infer_support_issue_type(lower),
+            priority: infer_priority(lower),
+        }),
+        ActionType::CodingAssist => Some(ActionPayload::CodingAssist {
+            task: infer_coding_task(lower),
+            language_hint: infer_language_hint(lower),
+        }),
+        ActionType::GeneralAssist => Some(ActionPayload::GeneralAssist {
+            topic: infer_topic(lower),
+        }),
+        ActionType::Fallback => Some(ActionPayload::Fallback {
+            fallback_code: "UNSPECIFIED".to_string(),
+        }),
+    }
+}
+
+fn infer_action_type_from_text(text: &str) -> Option<ActionType> {
+    let support_terms = [
+        "account",
+        "login",
+        "password",
+        "billing",
+        "refund",
+        "subscription",
+        "customer",
+        "help desk",
+        "ticket",
+        "unlock",
+        "sign in",
+        "access",
+    ];
+    let coding_terms = [
+        "code",
+        "debug",
+        "bug",
+        "stack trace",
+        "parser",
+        "rust",
+        "sql",
+        "python",
+        "c++",
+        "segmentation fault",
+        "implement",
+        "optimize",
+        "refactor",
+        "unit test",
+        "compile",
+        "middleware",
+    ];
+    let support_hits = support_terms.iter().filter(|t| text.contains(**t)).count();
+    let coding_hits = coding_terms.iter().filter(|t| text.contains(**t)).count();
+    if support_hits == 0 && coding_hits == 0 {
+        None
+    } else if coding_hits > support_hits {
+        Some(ActionType::CodingAssist)
+    } else {
+        Some(ActionType::SupportTicket)
     }
 }
 
