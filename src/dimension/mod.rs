@@ -17,7 +17,7 @@ pub use embedding::{GroupEmbedding, compute_group_embedding, cosine_similarity, 
 pub use language::{
     CalibrationCoverage, CalibrationDataset, CalibrationRequirements, CalibrationReport,
     EncoderPreset, EmaSmoother, HashingLanguageEncoder, LanguageBridge, LanguageConfig,
-    LanguageRoutingDecision, LanguageRuntime, LanguageSample, route_language_embedding,
+    LanguageEncoder, LanguageRoutingDecision, LanguageRuntime, LanguageSample, route_language_embedding,
 };
 pub use main_dim::{MainDimension, FrozenGroupEnv};
 pub use mirror_dim::{MirrorDimension, EpochResult};

@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
 use super::embedding::{cosine_similarity, GroupEmbedding};
@@ -59,6 +60,13 @@ pub struct LanguageConfig {
     pub bridge_output_dim: usize,
     pub ema_alpha: f32,
     pub ood_similarity_threshold: f32,
+    /// Optional HTTP endpoint for external encoder embeddings.
+    /// Expected API: POST JSON {"text": "...", "model": "..."} -> {"embedding":[f32...]}.
+    #[serde(default)]
+    pub gle_http_endpoint: Option<String>,
+    /// Optional local distilled tiny-student checkpoint path (our GLE artifact).
+    #[serde(default)]
+    pub gle_checkpoint: Option<String>,
 }
 
 impl Default for LanguageConfig {
@@ -68,6 +76,8 @@ impl Default for LanguageConfig {
             bridge_output_dim: DEFAULT_BRIDGE_DIM,
             ema_alpha: DEFAULT_EMA_ALPHA,
             ood_similarity_threshold: 0.15,
+            gle_http_endpoint: None,
+            gle_checkpoint: None,
         }
     }
 }
@@ -191,16 +201,39 @@ impl LanguageEncoder for HashingLanguageEncoder {
             return v;
         }
         // Lightweight lexical anchors improve separability for the placeholder encoder.
-        // Real deployments should replace this with MiniLM/BERT inference.
-        let support_keywords = [
-            "support", "account", "password", "billing", "customer", "login", "recovery", "refund",
-            "help", "ticket", "unlock", "subscription", "desk",
+        // Real deployments should replace this with a true transformer encoder runtime.
+        // Domain-family anchors used by the synthetic dataset in main.rs.
+        let customer_support_keywords = [
+            "customer", "support", "account", "password", "billing", "ticket", "refund", "login",
+            "unlock", "subscription", "recovery", "helpdesk",
         ];
-        let coding_keywords = [
-            "code", "rust", "parser", "function", "debug", "sql", "query", "compiler", "module",
-            "implement", "bug", "stack", "pointer", "serde", "index",
+        let coding_tool_keywords = [
+            "coding", "code", "rust", "function", "debug", "compiler", "sql", "query", "parser",
+            "tool", "stack", "pointer", "serde", "index", "module",
         ];
-        let weather_keywords = ["weather", "tokyo", "weekend", "forecast", "temperature"];
+        let knowledge_qa_keywords = [
+            "knowledge", "qa", "fact", "explain", "definition", "what", "why", "how", "answer",
+            "reference", "documentation",
+        ];
+        let safety_refusal_keywords = [
+            "safety", "policy", "refuse", "blocked", "forbidden", "harmful", "disallowed",
+            "compliance", "unsafe", "restricted",
+        ];
+        let procedural_instruction_keywords = [
+            "procedure", "instruction", "step", "follow", "sequence", "workflow", "checklist",
+            "process", "guide",
+        ];
+        let short_conversation_keywords = [
+            "hello", "hi", "thanks", "ok", "yes", "no", "greetings", "bye", "chat",
+        ];
+        let multi_turn_followup_keywords = [
+            "followup", "continue", "previous", "earlier", "context", "as-said", "next", "again",
+            "clarify", "thread",
+        ];
+        let adversarial_noisy_keywords = [
+            "adversarial", "noisy", "jailbreak", "prompt-injection", "ignore", "override",
+            "garbled", "nonsense", "obfuscated",
+        ];
         let stopwords = [
             "the", "a", "an", "and", "or", "to", "for", "of", "in", "on", "with", "is", "are",
             "this", "that", "please",
@@ -217,15 +250,30 @@ impl LanguageEncoder for HashingLanguageEncoder {
             if bytes.is_empty() {
                 continue;
             }
-            if dim >= 3 {
-                if support_keywords.contains(&lower.as_str()) {
+            if dim >= 8 {
+                if customer_support_keywords.contains(&lower.as_str()) {
                     v[0] += 4.0;
                 }
-                if coding_keywords.contains(&lower.as_str()) {
+                if coding_tool_keywords.contains(&lower.as_str()) {
                     v[1] += 4.0;
                 }
-                if weather_keywords.contains(&lower.as_str()) {
+                if knowledge_qa_keywords.contains(&lower.as_str()) {
                     v[2] += 4.0;
+                }
+                if safety_refusal_keywords.contains(&lower.as_str()) {
+                    v[3] += 4.0;
+                }
+                if procedural_instruction_keywords.contains(&lower.as_str()) {
+                    v[4] += 4.0;
+                }
+                if short_conversation_keywords.contains(&lower.as_str()) {
+                    v[5] += 4.0;
+                }
+                if multi_turn_followup_keywords.contains(&lower.as_str()) {
+                    v[6] += 4.0;
+                }
+                if adversarial_noisy_keywords.contains(&lower.as_str()) {
+                    v[7] += 4.0;
                 }
             }
             let mut h0: u64 = 1469598103934665603;
@@ -346,7 +394,7 @@ impl LanguageBridge {
         }
     }
 
-    pub fn calibrate_global<E: LanguageEncoder>(
+    pub fn calibrate_global<E: LanguageEncoder + ?Sized>(
         &mut self,
         encoder: &E,
         dataset: &CalibrationDataset,
@@ -492,7 +540,8 @@ pub struct LanguageRuntime {
 impl LanguageRuntime {
     pub fn new(config: LanguageConfig) -> Self {
         let encoder = HashingLanguageEncoder::new(config.encoder.clone());
-        let bridge = LanguageBridge::new(encoder.output_dim(), config.bridge_output_dim);
+        let input_dim = configured_encoder_dim(&config).unwrap_or_else(|| encoder.output_dim());
+        let bridge = LanguageBridge::new(input_dim, config.bridge_output_dim);
         let smoother = EmaSmoother::new(config.ema_alpha);
         Self {
             config,
@@ -507,15 +556,17 @@ impl LanguageRuntime {
         dataset: &CalibrationDataset,
         requirements: &CalibrationRequirements,
     ) -> Result<CalibrationReport, String> {
+        let encoder = self.build_encoder();
         let mut report = self
             .bridge
-            .calibrate_global(&self.encoder, dataset, requirements, true)?;
+            .calibrate_global(encoder.as_ref(), dataset, requirements, true)?;
         report.encoder_model = self.config.encoder.model_name();
         Ok(report)
     }
 
     pub fn bridge_text(&mut self, text: &str) -> Result<BridgeOutput, String> {
-        let encoded = self.encoder.encode(text);
+        let encoder = self.build_encoder();
+        let encoded = encoder.encode(text);
         let out = self.bridge.project(&encoded)?;
         let smoothed = self.smoother.update(&out.routed_vector);
         Ok(BridgeOutput {
@@ -526,8 +577,161 @@ impl LanguageRuntime {
 
     /// Stateless bridge path for independent turns / offline evaluation.
     pub fn bridge_text_stateless(&self, text: &str) -> Result<BridgeOutput, String> {
-        let encoded = self.encoder.encode(text);
+        let encoder = self.build_encoder();
+        let encoded = encoder.encode(text);
         self.bridge.project(&encoded)
+    }
+
+    fn build_encoder(&self) -> Box<dyn LanguageEncoder> {
+        if let (EncoderPreset::BertClass, Some(path)) =
+            (&self.config.encoder, self.config.gle_checkpoint.as_ref())
+        {
+            if let Ok(student) = GleStudentCheckpoint::load(path) {
+                return Box::new(GrowformerLanguageEncoder::new(student));
+            }
+        }
+        if let (EncoderPreset::BertClass, Some(endpoint)) =
+            (&self.config.encoder, self.config.gle_http_endpoint.clone())
+        {
+            return Box::new(HttpGleEncoder::new(
+                endpoint,
+                self.config.encoder.model_name(),
+                self.config.encoder.output_dim(),
+                self.encoder.clone(),
+            ));
+        }
+        Box::new(self.encoder.clone())
+    }
+}
+
+fn configured_encoder_dim(config: &LanguageConfig) -> Option<usize> {
+    if let (EncoderPreset::BertClass, Some(path)) = (&config.encoder, config.gle_checkpoint.as_ref()) {
+        if let Ok(student) = GleStudentCheckpoint::load(path) {
+            return Some(student.w2.len());
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GleStudentCheckpoint {
+    w1: Vec<Vec<f32>>,
+    b1: Vec<f32>,
+    w2: Vec<Vec<f32>>,
+    b2: Vec<f32>,
+}
+
+impl GleStudentCheckpoint {
+    fn load(path: &str) -> Result<Self, String> {
+        let json = std::fs::read_to_string(path).map_err(|e| format!("read failed: {}", e))?;
+        serde_json::from_str(&json).map_err(|e| format!("parse failed: {}", e))
+    }
+
+    fn predict(&self, x: &[f32]) -> Vec<f32> {
+        let mut h = vec![0.0f32; self.w1.len()];
+        for (j, hj) in h.iter_mut().enumerate() {
+            let mut acc = self.b1[j];
+            for (i, &xi) in x.iter().enumerate() {
+                acc += self.w1[j][i] * xi;
+            }
+            *hj = acc.tanh();
+        }
+        let mut y = vec![0.0f32; self.w2.len()];
+        for (o, yo) in y.iter_mut().enumerate() {
+            let mut acc = self.b2[o];
+            for (j, &hj) in h.iter().enumerate() {
+                acc += self.w2[o][j] * hj;
+            }
+            *yo = acc;
+        }
+        l2_normalize(&mut y);
+        y
+    }
+}
+
+#[derive(Debug, Clone)]
+struct GrowformerLanguageEncoder {
+    student: GleStudentCheckpoint,
+    base: HashingLanguageEncoder,
+}
+
+impl GrowformerLanguageEncoder {
+    fn new(student: GleStudentCheckpoint) -> Self {
+        let base = HashingLanguageEncoder::new(EncoderPreset::Custom {
+            model_name: "tiny-student-hash".to_string(),
+            output_dim: 256,
+        });
+        Self { student, base }
+    }
+}
+
+impl LanguageEncoder for GrowformerLanguageEncoder {
+    fn output_dim(&self) -> usize {
+        self.student.w2.len()
+    }
+
+    fn encode(&self, text: &str) -> Vec<f32> {
+        let x = self.base.encode(text);
+        self.student.predict(&x)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HttpGleEncoder {
+    endpoint: String,
+    model_name: String,
+    output_dim: usize,
+    fallback: HashingLanguageEncoder,
+}
+
+#[derive(Debug, Serialize)]
+struct HttpEncodeRequest<'a> {
+    text: &'a str,
+    model: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct HttpEncodeResponse {
+    embedding: Vec<f32>,
+}
+
+impl HttpGleEncoder {
+    fn new(
+        endpoint: String,
+        model_name: String,
+        output_dim: usize,
+        fallback: HashingLanguageEncoder,
+    ) -> Self {
+        Self {
+            endpoint,
+            model_name,
+            output_dim,
+            fallback,
+        }
+    }
+}
+
+impl LanguageEncoder for HttpGleEncoder {
+    fn output_dim(&self) -> usize {
+        self.output_dim
+    }
+
+    fn encode(&self, text: &str) -> Vec<f32> {
+        let req = HttpEncodeRequest {
+            text,
+            model: &self.model_name,
+        };
+        let client = Client::new();
+        let response = client.post(&self.endpoint).json(&req).send();
+        if let Ok(resp) = response {
+            if let Ok(payload) = resp.json::<HttpEncodeResponse>() {
+                if payload.embedding.len() == self.output_dim {
+                    return payload.embedding;
+                }
+            }
+        }
+        // Always keep the pipeline available even when remote encoder is unavailable.
+        self.fallback.encode(text)
     }
 }
 

@@ -2,7 +2,9 @@ use growformer::environment::NeuralEnvironment;
 use growformer::types::NeuronId;
 use growformer::dimension::{
     CalibrationDataset, CalibrationRequirements, EncoderPreset, LanguageConfig, LanguageSample,
-    DimensionManager, DimensionManagerConfig, MainDimension, VirtualGroup, route_language_embedding
+    DimensionManager, DimensionManagerConfig, HashingLanguageEncoder, LanguageEncoder,
+    MainDimension, VirtualGroup,
+    route_language_embedding
 };
 use growformer::types::GroupId;
 use std::collections::HashMap;
@@ -19,6 +21,7 @@ use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rand::rngs::StdRng;
 use clap::Parser;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -66,6 +69,22 @@ struct Args {
     /// M1/M2 language pipeline demo: calibration, text routing metrics, OOD, checkpoint.
     #[arg(long)]
     language_pipeline: bool,
+    /// Distill tiny Growformer Language Encoder (GLE) student.
+    #[arg(long)]
+    language_distill: bool,
+    /// Optional JSONL dataset for language distillation.
+    /// Expected fields: text, semantic_intent (or intent), optional domain/policy_regime/language_channel.
+    #[arg(long, value_name = "PATH")]
+    language_distill_data: Option<String>,
+    /// Optional path to save distilled tiny student checkpoint JSON.
+    #[arg(long, value_name = "PATH")]
+    language_distill_save: Option<String>,
+    /// Optional path to resume tiny student checkpoint JSON before training.
+    #[arg(long, value_name = "PATH")]
+    language_distill_resume: Option<String>,
+    /// Training epochs for language distillation experiment.
+    #[arg(long, value_name = "N", default_value_t = 12)]
+    language_distill_epochs: u32,
 }
 
 fn main() {
@@ -94,6 +113,13 @@ fn main() {
         demo_mnist_retention();
     } else if args.language_pipeline {
         demo_language_pipeline();
+    } else if args.language_distill {
+        demo_language_distill_experiment(
+            args.language_distill_data.as_deref(),
+            args.language_distill_save.as_deref(),
+            args.language_distill_resume.as_deref(),
+            args.language_distill_epochs,
+        );
     } else if let Some(mode) = &args.learning {
         match mode.as_str() {
             "train-a" => demo_phase2_train_a(),
@@ -101,7 +127,7 @@ fn main() {
             _ => demo_continual_learning(),
         }
     } else {
-        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, or --language-pipeline");
+        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, --language-pipeline, or --language-distill");
         std::process::exit(1);
     }
 
@@ -1822,6 +1848,8 @@ fn demo_language_pipeline() {
         bridge_output_dim: 64,
         ema_alpha: 0.2,
         ood_similarity_threshold: 0.15,
+        gle_http_endpoint: std::env::var("GROWFORMER_GLE_HTTP_ENDPOINT").ok(),
+        gle_checkpoint: std::env::var("GROWFORMER_GLE_CHECKPOINT").ok(),
     });
 
     let calibration = build_language_calibration_dataset();
@@ -1966,6 +1994,360 @@ fn demo_language_pipeline() {
     );
 }
 
+// =============================================================================
+// Demo: Language Distillation — tiny GLE student
+// =============================================================================
+
+fn demo_language_distill_experiment(
+    data_path: Option<&str>,
+    save_path: Option<&str>,
+    resume_path: Option<&str>,
+    epochs: u32,
+) {
+    println!("--- Language Distill Experiment ---\n");
+    let dataset = if let Some(path) = data_path {
+        match load_language_samples_jsonl(path) {
+            Ok(samples) if !samples.is_empty() => {
+                println!("Loaded distill dataset: {} samples from {}", samples.len(), path);
+                CalibrationDataset { samples }
+            }
+            Ok(_) => {
+                println!("Dataset at {} was empty, falling back to synthetic dataset.", path);
+                build_language_calibration_dataset()
+            }
+            Err(e) => {
+                println!("Failed to load {} ({}) — falling back to synthetic dataset.", path, e);
+                build_language_calibration_dataset()
+            }
+        }
+    } else {
+        build_language_calibration_dataset()
+    };
+    let teacher = HashingLanguageEncoder::new(EncoderPreset::BertClass); // stand-in teacher proxy
+    let student_base = HashingLanguageEncoder::new(EncoderPreset::Custom {
+        model_name: "tiny-student-hash".to_string(),
+        output_dim: 256,
+    });
+    let mut student = if let Some(path) = resume_path {
+        match load_tiny_student_checkpoint(path) {
+            Ok(s) => {
+                println!("Resumed tiny student from {}", path);
+                s
+            }
+            Err(e) => {
+                println!("Could not resume {} ({}) — starting fresh.", path, e);
+                TinyMlpStudent::new(256, 192, 384)
+            }
+        }
+    } else {
+        TinyMlpStudent::new(256, 192, 384)
+    };
+
+    // Split train/validation (80/20)
+    let split = (dataset.samples.len() as f32 * 0.8) as usize;
+    let train = &dataset.samples[..split];
+    let valid = &dataset.samples[split..];
+
+    let train_x: Vec<Vec<f32>> = train.iter().map(|s| student_base.encode(&s.text)).collect();
+    let train_t: Vec<Vec<f32>> = train
+        .iter()
+        .map(|s| teacher.encode(&s.text)[..384].to_vec())
+        .collect();
+    let train_intent: Vec<String> = train.iter().map(|s| s.semantic_intent.clone()).collect();
+
+    let valid_x: Vec<Vec<f32>> = valid.iter().map(|s| student_base.encode(&s.text)).collect();
+    let valid_t: Vec<Vec<f32>> = valid
+        .iter()
+        .map(|s| teacher.encode(&s.text)[..384].to_vec())
+        .collect();
+
+    // Distill: tiny features -> 384-d teacher space using MSE + cosine + triplet margin.
+    let mut indices: Vec<usize> = (0..train.len()).collect();
+    for epoch in 0..epochs {
+        indices.shuffle(&mut StdRng::seed_from_u64(10_000 + epoch as u64));
+        let mut total_loss = 0.0f32;
+        let mut steps = 0usize;
+        for chunk in indices.chunks(64) {
+            for &i in chunk {
+                // Hard negative: sample with different intent and highest teacher cosine in batch.
+                let mut neg_idx = i;
+                let mut best_sim = -2.0f32;
+                for &j in chunk {
+                    if train_intent[j] == train_intent[i] {
+                        continue;
+                    }
+                    let sim = cosine_similarity_local(&train_t[i], &train_t[j]);
+                    if sim > best_sim {
+                        best_sim = sim;
+                        neg_idx = j;
+                    }
+                }
+                if neg_idx == i {
+                    continue;
+                }
+                total_loss += student.train_step(
+                    &train_x[i],
+                    &train_t[i],
+                    &train_t[neg_idx],
+                    0.03,
+                    0.5, // mse
+                    0.5, // cosine align
+                    0.7, // triplet
+                    0.15,
+                );
+                steps += 1;
+            }
+        }
+        total_loss /= steps.max(1) as f32;
+        println!("  epoch {} distill_loss={:.6}", epoch, total_loss);
+    }
+
+    let mut cos_acc = 0.0f32;
+    let mut n = 0usize;
+    let mut teacher_centroids: HashMap<String, Vec<f32>> = HashMap::new();
+    let mut teacher_counts: HashMap<String, usize> = HashMap::new();
+    let mut student_centroids: HashMap<String, Vec<f32>> = HashMap::new();
+    let mut student_counts: HashMap<String, usize> = HashMap::new();
+
+    for (i, s) in train.iter().enumerate() {
+        let tv = train_t[i].clone();
+        let mut sv = student.predict(&train_x[i]);
+        l2_normalize_local(&mut sv);
+        add_centroid(&mut teacher_centroids, &mut teacher_counts, &s.semantic_intent, &tv);
+        add_centroid(&mut student_centroids, &mut student_counts, &s.semantic_intent, &sv);
+    }
+    finalize_centroids(&mut teacher_centroids, &teacher_counts);
+    finalize_centroids(&mut student_centroids, &student_counts);
+
+    let mut teacher_intent_ok = 0usize;
+    let mut student_intent_ok = 0usize;
+    let mut teacher_top3_ok = 0usize;
+    let mut student_top3_ok = 0usize;
+    let mut teacher_margins = Vec::new();
+    let mut student_margins = Vec::new();
+    for (i, s) in valid.iter().enumerate() {
+        let tv = valid_t[i].clone();
+        let mut sv = student.predict(&valid_x[i]);
+        l2_normalize_local(&mut sv);
+        cos_acc += cosine_similarity_local(&tv, &sv);
+        n += 1;
+
+        let t_scored = nearest_intents_scored(&tv, &teacher_centroids);
+        let t_pred = t_scored.first().map(|x| x.0.clone());
+        if t_pred.as_deref() == Some(s.semantic_intent.as_str()) {
+            teacher_intent_ok += 1;
+        }
+        let t_in_top3 = t_scored
+            .iter()
+            .take(3)
+            .any(|(intent, _)| intent == &s.semantic_intent);
+        if t_in_top3 {
+            teacher_top3_ok += 1;
+        }
+        if t_scored.len() >= 2 {
+            teacher_margins.push(t_scored[0].1 - t_scored[1].1);
+        }
+
+        let s_scored = nearest_intents_scored(&sv, &student_centroids);
+        let s_pred = s_scored.first().map(|x| x.0.clone());
+        if s_pred.as_deref() == Some(s.semantic_intent.as_str()) {
+            student_intent_ok += 1;
+        }
+        let s_in_top3 = s_scored
+            .iter()
+            .take(3)
+            .any(|(intent, _)| intent == &s.semantic_intent);
+        if s_in_top3 {
+            student_top3_ok += 1;
+        }
+        if s_scored.len() >= 2 {
+            student_margins.push(s_scored[0].1 - s_scored[1].1);
+        }
+    }
+
+    let mean_cos = if n == 0 { 0.0 } else { cos_acc / n as f32 };
+    let t_acc = if valid.is_empty() { 0.0 } else { teacher_intent_ok as f32 / valid.len() as f32 };
+    let s_acc = if valid.is_empty() { 0.0 } else { student_intent_ok as f32 / valid.len() as f32 };
+    let t_top3 = if valid.is_empty() { 0.0 } else { teacher_top3_ok as f32 / valid.len() as f32 };
+    let s_top3 = if valid.is_empty() { 0.0 } else { student_top3_ok as f32 / valid.len() as f32 };
+    let t_margin_med = percentile(&teacher_margins, 0.5);
+    let s_margin_med = percentile(&student_margins, 0.5);
+    let drop = (t_acc - s_acc).max(0.0);
+
+    println!("\nDistillation evaluation:");
+    println!("  mean cosine(student, teacher): {:.4}", mean_cos);
+    println!("  teacher intent centroid acc: {:.2}%", t_acc * 100.0);
+    println!("  student intent centroid acc: {:.2}%", s_acc * 100.0);
+    println!("  teacher top-3 intent acc: {:.2}%", t_top3 * 100.0);
+    println!("  student top-3 intent acc: {:.2}%", s_top3 * 100.0);
+    println!("  teacher median margin: {:.4}", t_margin_med);
+    println!("  student median margin: {:.4}", s_margin_med);
+    println!("  accuracy drop: {:.2}% points", drop * 100.0);
+    println!(
+        "  verdict: {}",
+        if s_acc >= 0.95 && drop <= 0.02 && mean_cos >= 0.80 {
+            "PASS (candidate tiny encoder)"
+        } else if t_acc < 0.60 {
+            "ITERATE (teacher weak on this benchmark; improve teacher/data alignment first)"
+        } else {
+            "ITERATE (improve student capacity/training data)"
+        }
+    );
+
+    let (base_ckpt, tuned_ckpt) = distill_checkpoint_paths(save_path);
+    if let Err(e) = save_tiny_student_checkpoint(&base_ckpt, &student) {
+        println!("  checkpoint save failed: {}", e);
+    } else {
+        println!("  base checkpoint saved: {}", base_ckpt);
+    }
+
+    // -------------------------------------------------------------------------
+    // Stage 2: routing-oriented fine-tune (support vs coding)
+    // -------------------------------------------------------------------------
+    let (routing_train, routing_valid) = build_routing_finetune_dataset();
+    let teacher_support_proto = average_teacher_embedding(&teacher, &routing_train.0);
+    let teacher_coding_proto = average_teacher_embedding(&teacher, &routing_train.1);
+
+    for epoch in 0..6u32 {
+        let mut loss = 0.0f32;
+        let mut steps = 0usize;
+        for text in &routing_train.0 {
+            let x = student_base.encode(text);
+            loss += student.train_step(
+                &x,
+                &teacher_support_proto,
+                &teacher_coding_proto,
+                0.02,
+                0.2,
+                0.3,
+                1.0,
+                0.35,
+            );
+            steps += 1;
+        }
+        for text in &routing_train.1 {
+            let x = student_base.encode(text);
+            loss += student.train_step(
+                &x,
+                &teacher_coding_proto,
+                &teacher_support_proto,
+                0.02,
+                0.2,
+                0.3,
+                1.0,
+                0.35,
+            );
+            steps += 1;
+        }
+        loss /= steps.max(1) as f32;
+        println!("  routing_finetune epoch {} loss={:.6}", epoch, loss);
+    }
+
+    let (route_acc, route_med_margin, route_p10_margin) =
+        eval_routing_student(&student, &student_base, &teacher_support_proto, &teacher_coding_proto, &routing_valid);
+    println!("\nRouting fine-tune evaluation:");
+    println!("  support/coding acc: {:.2}%", route_acc * 100.0);
+    println!("  median margin: {:.4}", route_med_margin);
+    println!("  p10 margin: {:.4}", route_p10_margin);
+
+    if let Err(e) = save_tiny_student_checkpoint(&tuned_ckpt, &student) {
+        println!("  tuned checkpoint save failed: {}", e);
+    } else {
+        println!("  tuned checkpoint saved: {}", tuned_ckpt);
+    }
+}
+
+fn distill_checkpoint_paths(save_path: Option<&str>) -> (String, String) {
+    if let Some(path) = save_path {
+        let p = std::path::Path::new(path);
+        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("gle_student");
+        let parent = p.parent().unwrap_or(std::path::Path::new("checkpoints"));
+        let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("json");
+        let base = parent.join(format!("{}_base.{}", stem, ext));
+        let tuned = parent.join(format!("{}_routing_tuned.{}", stem, ext));
+        (base.to_string_lossy().to_string(), tuned.to_string_lossy().to_string())
+    } else {
+        (
+            "checkpoints/gle_student_base.json".to_string(),
+            "checkpoints/gle_student_routing_tuned.json".to_string(),
+        )
+    }
+}
+
+fn build_routing_finetune_dataset() -> ((Vec<String>, Vec<String>), (Vec<String>, Vec<String>)) {
+    let mut support = Vec::new();
+    let mut coding = Vec::new();
+    for i in 0..220 {
+        support.push(format!("customer support account login password reset billing ticket {}", i));
+        support.push(format!("help desk request refund subscription issue account recovery {}", i));
+        coding.push(format!("write rust code function parser serde module implementation {}", i));
+        coding.push(format!("debug sql query index compiler stack pointer issue {}", i));
+    }
+    // 80/20 split
+    let split_s = ((support.len() as f32) * 0.8) as usize;
+    let split_c = ((coding.len() as f32) * 0.8) as usize;
+    (
+        (support[..split_s].to_vec(), coding[..split_c].to_vec()),
+        (support[split_s..].to_vec(), coding[split_c..].to_vec()),
+    )
+}
+
+fn average_teacher_embedding(teacher: &HashingLanguageEncoder, texts: &[String]) -> Vec<f32> {
+    if texts.is_empty() {
+        return vec![0.0; 384];
+    }
+    let mut acc = vec![0.0f32; 384];
+    for t in texts {
+        let emb = teacher.encode(t);
+        for i in 0..384 {
+            acc[i] += emb[i];
+        }
+    }
+    for v in &mut acc {
+        *v /= texts.len() as f32;
+    }
+    l2_normalize_local(&mut acc);
+    acc
+}
+
+fn eval_routing_student(
+    student: &TinyMlpStudent,
+    base: &HashingLanguageEncoder,
+    support_proto: &[f32],
+    coding_proto: &[f32],
+    valid: &(Vec<String>, Vec<String>),
+) -> (f32, f32, f32) {
+    let mut correct = 0usize;
+    let mut total = 0usize;
+    let mut margins = Vec::new();
+    for text in &valid.0 {
+        let mut y = student.predict(&base.encode(text));
+        l2_normalize_local(&mut y);
+        let s = cosine_similarity_local(&y, support_proto);
+        let c = cosine_similarity_local(&y, coding_proto);
+        if s >= c {
+            correct += 1;
+        }
+        margins.push((s - c).abs());
+        total += 1;
+    }
+    for text in &valid.1 {
+        let mut y = student.predict(&base.encode(text));
+        l2_normalize_local(&mut y);
+        let s = cosine_similarity_local(&y, support_proto);
+        let c = cosine_similarity_local(&y, coding_proto);
+        if c > s {
+            correct += 1;
+        }
+        margins.push((c - s).abs());
+        total += 1;
+    }
+    let acc = if total == 0 { 0.0 } else { correct as f32 / total as f32 };
+    let med = percentile(&margins, 0.5);
+    let p10 = percentile(&margins, 0.1);
+    (acc, med, p10)
+}
+
 fn build_language_calibration_dataset() -> CalibrationDataset {
     let mut samples = Vec::new();
     let domains = vec![
@@ -1998,6 +2380,261 @@ fn build_language_calibration_dataset() -> CalibrationDataset {
         }
     }
     CalibrationDataset { samples }
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonlLanguageSample {
+    text: String,
+    #[serde(default)]
+    semantic_intent: Option<String>,
+    #[serde(default)]
+    intent: Option<String>,
+    #[serde(default)]
+    domain: Option<String>,
+    #[serde(default)]
+    action_target: Option<String>,
+    #[serde(default)]
+    policy_regime: Option<String>,
+    #[serde(default)]
+    language_channel: Option<String>,
+}
+
+fn load_language_samples_jsonl(path: &str) -> Result<Vec<LanguageSample>, String> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).map_err(|e| format!("open failed: {}", e))?;
+    let reader = std::io::BufReader::new(file);
+    let mut out = Vec::new();
+    for (idx, line) in reader.lines().enumerate() {
+        let line = line.map_err(|e| format!("line {} read failed: {}", idx + 1, e))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let rec: JsonlLanguageSample = serde_json::from_str(&line)
+            .map_err(|e| format!("line {} json parse failed: {}", idx + 1, e))?;
+        let intent = rec
+            .semantic_intent
+            .or(rec.intent)
+            .unwrap_or_else(|| "unknown_intent".to_string());
+        out.push(LanguageSample {
+            domain: rec.domain.unwrap_or_else(|| "custom".to_string()),
+            text: rec.text,
+            semantic_intent: intent,
+            action_target: rec.action_target,
+            policy_regime: rec.policy_regime.unwrap_or_else(|| "default".to_string()),
+            language_channel: rec.language_channel.unwrap_or_else(|| "english".to_string()),
+        });
+    }
+    Ok(out)
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct TinyMlpStudent {
+    w1: Vec<Vec<f32>>,
+    b1: Vec<f32>,
+    w2: Vec<Vec<f32>>,
+    b2: Vec<f32>,
+}
+
+fn save_tiny_student_checkpoint(path: &str, student: &TinyMlpStudent) -> Result<(), String> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create_dir_all failed: {}", e))?;
+    }
+    let json = serde_json::to_string_pretty(student).map_err(|e| format!("serialize failed: {}", e))?;
+    std::fs::write(path, json).map_err(|e| format!("write failed: {}", e))
+}
+
+fn load_tiny_student_checkpoint(path: &str) -> Result<TinyMlpStudent, String> {
+    let json = std::fs::read_to_string(path).map_err(|e| format!("read failed: {}", e))?;
+    serde_json::from_str(&json).map_err(|e| format!("deserialize failed: {}", e))
+}
+
+impl TinyMlpStudent {
+    fn new(input_dim: usize, hidden_dim: usize, output_dim: usize) -> Self {
+        let mut w1 = vec![vec![0.0f32; input_dim]; hidden_dim];
+        let mut w2 = vec![vec![0.0f32; hidden_dim]; output_dim];
+        for (h, row) in w1.iter_mut().enumerate() {
+            for (i, wij) in row.iter_mut().enumerate() {
+                *wij = (((h as u64 * 2654435761 + i as u64 * 7919) % 1000) as f32 / 1000.0 - 0.5) * 0.02;
+            }
+        }
+        for (o, row) in w2.iter_mut().enumerate() {
+            for (h, woh) in row.iter_mut().enumerate() {
+                *woh = (((o as u64 * 2246822519 + h as u64 * 3571) % 1000) as f32 / 1000.0 - 0.5) * 0.02;
+            }
+        }
+        Self {
+            w1,
+            b1: vec![0.0; hidden_dim],
+            w2,
+            b2: vec![0.0; output_dim],
+        }
+    }
+
+    fn predict(&self, x: &[f32]) -> Vec<f32> {
+        let (h, y) = self.forward(x);
+        let _ = h;
+        y
+    }
+
+    fn forward(&self, x: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        let mut h = vec![0.0f32; self.w1.len()];
+        for (j, hj) in h.iter_mut().enumerate() {
+            let mut acc = self.b1[j];
+            for (i, &xi) in x.iter().enumerate() {
+                acc += self.w1[j][i] * xi;
+            }
+            *hj = acc.tanh();
+        }
+        let mut y = vec![0.0f32; self.w2.len()];
+        for (o, yo) in y.iter_mut().enumerate() {
+            let mut acc = self.b2[o];
+            for (j, &hj) in h.iter().enumerate() {
+                acc += self.w2[o][j] * hj;
+            }
+            *yo = acc;
+        }
+        (h, y)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn train_step(
+        &mut self,
+        x: &[f32],
+        pos_target: &[f32],
+        neg_target: &[f32],
+        lr: f32,
+        w_mse: f32,
+        w_cos: f32,
+        w_triplet: f32,
+        triplet_margin: f32,
+    ) -> f32 {
+        let (h, y) = self.forward(x);
+        let d = y.len().max(1) as f32;
+
+        let mut loss = 0.0f32;
+        let mut grad_y = vec![0.0f32; y.len()];
+
+        // MSE(y, pos)
+        for o in 0..y.len() {
+            let e = y[o] - pos_target[o];
+            loss += w_mse * (e * e / d);
+            grad_y[o] += w_mse * (2.0 * e / d);
+        }
+
+        // 1 - cos(y, pos)
+        let cos_pos = cosine_similarity_local(&y, pos_target);
+        loss += w_cos * (1.0 - cos_pos);
+        let dcos_pos = grad_cosine_wrt_a(&y, pos_target);
+        for o in 0..y.len() {
+            grad_y[o] += w_cos * (-dcos_pos[o]);
+        }
+
+        // Triplet: max(0, m - cos(y,pos) + cos(y,neg))
+        let cos_neg = cosine_similarity_local(&y, neg_target);
+        let trip = (triplet_margin - cos_pos + cos_neg).max(0.0);
+        loss += w_triplet * trip;
+        if trip > 0.0 {
+            let dcos_neg = grad_cosine_wrt_a(&y, neg_target);
+            for o in 0..y.len() {
+                grad_y[o] += w_triplet * (-dcos_pos[o] + dcos_neg[o]);
+            }
+        }
+
+        // Backprop into second layer
+        let mut grad_h = vec![0.0f32; h.len()];
+        for (o, &gy) in grad_y.iter().enumerate() {
+            for (j, &hj) in h.iter().enumerate() {
+                grad_h[j] += gy * self.w2[o][j];
+                self.w2[o][j] -= lr * gy * hj;
+            }
+            self.b2[o] -= lr * gy;
+        }
+
+        // Backprop through tanh and first layer
+        for (j, ghj_raw) in grad_h.iter().enumerate() {
+            let ghj = *ghj_raw * (1.0 - h[j] * h[j]);
+            for (i, &xi) in x.iter().enumerate() {
+                self.w1[j][i] -= lr * ghj * xi;
+            }
+            self.b1[j] -= lr * ghj;
+        }
+
+        loss
+    }
+}
+
+fn grad_cosine_wrt_a(a: &[f32], b: &[f32]) -> Vec<f32> {
+    if a.is_empty() || a.len() != b.len() {
+        return vec![];
+    }
+    let na = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na <= 1e-9 || nb <= 1e-9 {
+        return vec![0.0; a.len()];
+    }
+    let cos = cosine_similarity_local(a, b);
+    let inv = 1.0 / (na * nb);
+    let na2 = na * na;
+    let mut g = vec![0.0f32; a.len()];
+    for i in 0..a.len() {
+        g[i] = b[i] * inv - cos * (a[i] / na2);
+    }
+    g
+}
+
+fn add_centroid(
+    centroids: &mut HashMap<String, Vec<f32>>,
+    counts: &mut HashMap<String, usize>,
+    intent: &str,
+    v: &[f32],
+) {
+    let entry = centroids.entry(intent.to_string()).or_insert_with(|| vec![0.0; v.len()]);
+    for (e, x) in entry.iter_mut().zip(v.iter()) {
+        *e += *x;
+    }
+    *counts.entry(intent.to_string()).or_insert(0) += 1;
+}
+
+fn finalize_centroids(centroids: &mut HashMap<String, Vec<f32>>, counts: &HashMap<String, usize>) {
+    for (k, v) in centroids.iter_mut() {
+        let n = *counts.get(k).unwrap_or(&1) as f32;
+        for x in v.iter_mut() {
+            *x /= n;
+        }
+        l2_normalize_local(v);
+    }
+}
+
+fn nearest_intents_scored(v: &[f32], centroids: &HashMap<String, Vec<f32>>) -> Vec<(String, f32)> {
+    let mut out: Vec<(String, f32)> = centroids
+        .iter()
+        .map(|(intent, c)| (intent.clone(), cosine_similarity_local(v, c)))
+        .collect();
+    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
+fn cosine_similarity_local(a: &[f32], b: &[f32]) -> f32 {
+    if a.is_empty() || a.len() != b.len() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na <= 1e-9 || nb <= 1e-9 {
+        0.0
+    } else {
+        (dot / (na * nb)).clamp(-1.0, 1.0)
+    }
+}
+
+fn l2_normalize_local(v: &mut [f32]) {
+    let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if n > 1e-9 {
+        for x in v {
+            *x /= n;
+        }
+    }
 }
 
 fn percentile(values: &[f32], p: f32) -> f32 {
