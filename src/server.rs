@@ -4,10 +4,13 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::process::Command;
 use std::sync::Arc;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::time::Instant;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
@@ -16,6 +19,7 @@ use uuid::Uuid;
 struct AppState {
     growformer_bin: String,
     auth_token: Option<String>,
+    log_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,6 +42,7 @@ struct ChatResponse {
     session_id: String,
     mode: String,
     latency_ms: u128,
+    perf: ChatPerf,
     output: ChatOutput,
 }
 
@@ -49,9 +54,17 @@ struct ChatOutput {
 }
 
 #[derive(Debug, Serialize)]
+struct ChatPerf {
+    child_max_rss_bytes: Option<u64>,
+    child_user_s: Option<f32>,
+    child_sys_s: Option<f32>,
+}
+
+#[derive(Debug, Serialize)]
 struct HealthResponse {
     status: &'static str,
     growformer_bin: String,
+    log_path: Option<String>,
 }
 
 #[tokio::main]
@@ -62,10 +75,12 @@ async fn main() {
         .expect("invalid GROWFORMER_NODE_ADDR");
     let bin = std::env::var("GROWFORMER_BIN").unwrap_or_else(|_| "target/debug/growformer".to_string());
     let auth_token = std::env::var("GROWFORMER_NODE_TOKEN").ok();
+    let log_path = std::env::var("GROWFORMER_NODE_LOG_PATH").ok();
 
     let state = Arc::new(AppState {
         growformer_bin: bin,
         auth_token,
+        log_path,
     });
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -89,6 +104,7 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         growformer_bin: state.growformer_bin.clone(),
+        log_path: state.log_path.clone(),
     })
 }
 
@@ -148,7 +164,7 @@ async fn run_chat(
 
     let bin = state.growformer_bin.clone();
     let msg = req.message.clone();
-    let output = tokio::task::spawn_blocking(move || Command::new(&bin).arg(flag).arg(&msg).output())
+    let output = tokio::task::spawn_blocking(move || run_growformer_with_metrics(&bin, flag, &msg))
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join error: {}", e)))?
         .map_err(|e| {
@@ -158,22 +174,48 @@ async fn run_chat(
             )
         })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.output.stderr).to_string();
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("growformer failed: {}", stderr),
         ));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stdout = String::from_utf8_lossy(&output.output.stdout).to_string();
     let text = extract_primary_output(&stdout);
     let latency_ms = started.elapsed().as_millis();
+    let perf = ChatPerf {
+        child_max_rss_bytes: output.max_rss_bytes,
+        child_user_s: output.user_s,
+        child_sys_s: output.sys_s,
+    };
+
+    if let Some(path) = &state.log_path {
+        let line = json!({
+            "ts_unix_ms": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0),
+            "session_id": session_id,
+            "mode": req.mode,
+            "message_chars": req.message.len(),
+            "latency_ms": latency_ms,
+            "perf": {
+                "child_max_rss_bytes": perf.child_max_rss_bytes,
+                "child_user_s": perf.child_user_s,
+                "child_sys_s": perf.child_sys_s
+            }
+        })
+        .to_string();
+        let _ = append_jsonl(path, &line);
+    }
 
     Ok(ChatResponse {
-        session_id,
-        mode: req.mode,
+        session_id: session_id.to_string(),
+        mode: req.mode.to_string(),
         latency_ms,
+        perf,
         output: ChatOutput {
             text,
             raw_stdout: if req.options.include_raw_stdout {
@@ -212,4 +254,66 @@ fn extract_primary_output(stdout: &str) -> String {
         return stdout[i..].to_string();
     }
     stdout.to_string()
+}
+
+struct ChildRunOutput {
+    output: std::process::Output,
+    max_rss_bytes: Option<u64>,
+    user_s: Option<f32>,
+    sys_s: Option<f32>,
+}
+
+fn run_growformer_with_metrics(bin: &str, flag: &str, msg: &str) -> std::io::Result<ChildRunOutput> {
+    let timed = Command::new("/usr/bin/time")
+        .arg("-lp")
+        .arg(bin)
+        .arg(flag)
+        .arg(msg)
+        .output();
+
+    if let Ok(o) = timed {
+        let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+        let (rss, user_s, sys_s) = parse_time_lp(&stderr);
+        return Ok(ChildRunOutput {
+            output: o,
+            max_rss_bytes: rss,
+            user_s,
+            sys_s,
+        });
+    }
+
+    let o = Command::new(bin).arg(flag).arg(msg).output()?;
+    Ok(ChildRunOutput {
+        output: o,
+        max_rss_bytes: None,
+        user_s: None,
+        sys_s: None,
+    })
+}
+
+fn parse_time_lp(stderr: &str) -> (Option<u64>, Option<f32>, Option<f32>) {
+    let mut rss = None;
+    let mut user_s = None;
+    let mut sys_s = None;
+    for line in stderr.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("user ") {
+            user_s = rest.trim().parse::<f32>().ok();
+        } else if let Some(rest) = t.strip_prefix("sys ") {
+            sys_s = rest.trim().parse::<f32>().ok();
+        } else if t.contains("maximum resident set size") {
+            let n = t.split_whitespace().next().and_then(|x| x.parse::<u64>().ok());
+            rss = n;
+        }
+    }
+    (rss, user_s, sys_s)
+}
+
+fn append_jsonl(path: &str, line: &str) -> std::io::Result<()> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut f = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(f, "{}", line)?;
+    Ok(())
 }
