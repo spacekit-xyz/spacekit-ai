@@ -3,7 +3,7 @@ use growformer::types::NeuronId;
 use growformer::dimension::{
     CalibrationDataset, CalibrationReport, CalibrationRequirements, EncoderPreset, LanguageConfig, LanguageSample,
     DimensionManager, DimensionManagerConfig, HashingLanguageEncoder, LanguageEncoder,
-    MainDimension, VirtualGroup,
+    MainDimension, VirtualGroup, render_action_template, generate_code_from_action,
     route_language_embedding
 };
 use growformer::types::GroupId;
@@ -121,6 +121,65 @@ struct Args {
     /// M2 requirement: EMA smoothing ablation over fixed alpha set.
     #[arg(long)]
     language_ema_ablation: bool,
+    /// M4 path: route one text and emit constrained template response.
+    #[arg(long, value_name = "TEXT")]
+    language_generate_text: Option<String>,
+    /// M5 starter: route one coding text and emit code stub.
+    #[arg(long, value_name = "TEXT")]
+    language_code_text: Option<String>,
+    /// M5 eval: evaluate coding output quality on coding datasets.
+    #[arg(long)]
+    language_code_eval: bool,
+    /// Validate M5 code generation metrics (CI-friendly).
+    #[arg(long)]
+    validate_codegen: bool,
+    /// Optional JSONL dataset(s) for code generation eval.
+    /// Accepts a single path or comma-separated paths. If omitted, uses full Python/Rust/JS holdouts.
+    #[arg(long, value_name = "PATH")]
+    code_eval_data: Option<String>,
+    /// Optional path to write code eval report JSON.
+    #[arg(long, value_name = "PATH")]
+    code_eval_report: Option<String>,
+    #[arg(long, default_value_t = 0.95)]
+    min_codegen_language_match: f32,
+    #[arg(long, default_value_t = 0.80)]
+    min_codegen_specialized_rate: f32,
+    /// M5 real-learning path: run sequential code retention training/eval from plan JSON.
+    #[arg(long)]
+    m5_retention_eval: bool,
+    /// Retention plan path (defaults to M5 split manifest).
+    #[arg(long, value_name = "PATH", default_value = "data/language/m5/retention_eval_splits.json")]
+    m5_retention_plan: String,
+    /// Training epochs per phase for the learned M5 model.
+    #[arg(long, default_value_t = 20)]
+    m5_epochs: u32,
+    /// Learning rate for the learned M5 model.
+    #[arg(long, default_value_t = 0.20)]
+    m5_lr: f32,
+    /// Feature dimension for hashing-based text featurization.
+    #[arg(long, default_value_t = 512)]
+    m5_feature_dim: usize,
+    /// Optional path to write M5 retention report JSON.
+    #[arg(long, value_name = "PATH")]
+    m5_retention_report: Option<String>,
+    /// Replay samples mixed into each epoch to reduce forgetting.
+    #[arg(long, default_value_t = 24)]
+    m5_replay_per_epoch: usize,
+    /// M4 eval: evaluate constrained generation on Stage A+B data.
+    #[arg(long)]
+    language_generation_eval: bool,
+    /// Validate M4 generation metrics (CI-friendly).
+    #[arg(long)]
+    validate_generation: bool,
+    /// Maximum allowed absolute drop from M3 action accuracy to M4 task success.
+    #[arg(long, default_value_t = 0.01)]
+    max_task_success_drop: f32,
+    /// Maximum allowed M4 hallucination rate (template baseline target is 0.0).
+    #[arg(long, default_value_t = 0.02)]
+    max_hallucination_rate: f32,
+    /// Optional path to write M4 generation eval/validation report JSON.
+    #[arg(long, value_name = "PATH")]
+    generation_eval_report: Option<String>,
 }
 
 fn main() {
@@ -137,6 +196,50 @@ fn main() {
     } else if let Some(text) = args.language_action_text.as_deref() {
         if let Err(e) = demo_language_action(text) {
             eprintln!("Failed language action routing: {}", e);
+            std::process::exit(1);
+        }
+    } else if let Some(text) = args.language_generate_text.as_deref() {
+        if let Err(e) = demo_language_generate(text) {
+            eprintln!("Failed language generation routing: {}", e);
+            std::process::exit(1);
+        }
+    } else if let Some(text) = args.language_code_text.as_deref() {
+        if let Err(e) = demo_language_code(text) {
+            eprintln!("Failed language code generation: {}", e);
+            std::process::exit(1);
+        }
+    } else if args.language_code_eval {
+        if let Err(e) = demo_language_code_eval(
+            args.code_eval_data.as_deref(),
+            args.code_eval_report.as_deref(),
+        ) {
+            eprintln!("Failed language code eval: {}", e);
+            std::process::exit(1);
+        }
+    } else if args.validate_codegen {
+        match validate_codegen(
+            args.code_eval_data.as_deref(),
+            args.code_eval_report.as_deref(),
+            args.min_codegen_language_match,
+            args.min_codegen_specialized_rate,
+        ) {
+            Ok(true) => {}
+            Ok(false) => std::process::exit(2),
+            Err(e) => {
+                eprintln!("Failed codegen validation: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else if args.m5_retention_eval {
+        if let Err(e) = run_m5_retention_eval(
+            &args.m5_retention_plan,
+            args.m5_epochs,
+            args.m5_lr,
+            args.m5_feature_dim,
+            args.m5_replay_per_epoch,
+            args.m5_retention_report.as_deref(),
+        ) {
+            eprintln!("Failed M5 retention eval: {}", e);
             std::process::exit(1);
         }
     } else if args.language_action_eval {
@@ -159,6 +262,28 @@ fn main() {
             Ok(false) => std::process::exit(2),
             Err(e) => {
                 eprintln!("Failed action schema validation: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else if args.language_generation_eval {
+        if let Err(e) = demo_language_generation_eval(
+            args.action_eval_data.as_deref(),
+            args.generation_eval_report.as_deref(),
+        ) {
+            eprintln!("Failed language generation eval: {}", e);
+            std::process::exit(1);
+        }
+    } else if args.validate_generation {
+        match validate_generation(
+            args.action_eval_data.as_deref(),
+            args.generation_eval_report.as_deref(),
+            args.max_task_success_drop,
+            args.max_hallucination_rate,
+        ) {
+            Ok(true) => {}
+            Ok(false) => std::process::exit(2),
+            Err(e) => {
+                eprintln!("Failed generation validation: {}", e);
                 std::process::exit(1);
             }
         }
@@ -215,7 +340,7 @@ fn main() {
             _ => demo_continual_learning(),
         }
     } else {
-        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, --language-pipeline, --language-distill, --print-gle-card, --validate-gle, --validate-action-schema, --language-action-text, --language-action-eval, or --language-ema-ablation");
+        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, --language-pipeline, --language-distill, --print-gle-card, --validate-gle, --validate-action-schema, --validate-generation, --validate-codegen, --m5-retention-eval, --language-action-text, --language-generate-text, --language-code-text, --language-code-eval, --language-action-eval, --language-generation-eval, or --language-ema-ablation");
         std::process::exit(1);
     }
 
@@ -2094,6 +2219,827 @@ fn demo_language_action(text: &str) -> Result<(), String> {
     let json = serde_json::to_string_pretty(&action).map_err(|e| e.to_string())?;
     println!("{}", json);
     Ok(())
+}
+
+fn demo_language_generate(text: &str) -> Result<(), String> {
+    println!("--- Controlled Language Generation (M4) ---\n");
+    let (mut dm, support_gid, coding_gid, _report) = build_language_demo_manager(0.2);
+    println!("Promoted groups: support={} coding={}", support_gid, coding_gid);
+    let action = dm.route_text_to_action(text)?;
+    let response = render_action_template(&action);
+    let action_json = serde_json::to_string_pretty(&action).map_err(|e| e.to_string())?;
+    println!("Action JSON:\n{}", action_json);
+    println!(
+        "\nTemplate response:\n{}\n(traceable={} template_id={})",
+        response.text, response.traceable, response.template_id
+    );
+    Ok(())
+}
+
+fn demo_language_code(text: &str) -> Result<(), String> {
+    println!("--- Coding Output (M5 starter) ---\n");
+    let (mut dm, support_gid, coding_gid, _report) = build_language_demo_manager(0.2);
+    println!("Promoted groups: support={} coding={}", support_gid, coding_gid);
+    let action = dm.route_text_to_action(text)?;
+    let action_json = serde_json::to_string_pretty(&action).map_err(|e| e.to_string())?;
+    println!("Action JSON:\n{}", action_json);
+    match generate_code_from_action(&action, text) {
+        Some(code) => {
+            println!(
+                "\nGenerated code ({}, {}):\n{}",
+                code.language, code.kind, code.code
+            );
+        }
+        None => {
+            println!("\nNo code generated (non-coding action).");
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CodeEvalMetrics {
+    total_samples: usize,
+    coding_action_rate: f32,
+    generation_rate: f32,
+    language_match_rate: f32,
+    specialized_stub_rate: f32,
+    per_language: Vec<CodeEvalLanguageMetrics>,
+    language_mismatches: Vec<CodeEvalMismatch>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CodeEvalLanguageMetrics {
+    language: String,
+    samples: usize,
+    coding_action_rate: f32,
+    generation_rate: f32,
+    language_match_rate: f32,
+    specialized_stub_rate: f32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CodeEvalMismatch {
+    expected_language: String,
+    predicted_language: String,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodeEvalRecord {
+    text: String,
+    #[serde(default)]
+    code_language: Option<String>,
+}
+
+fn demo_language_code_eval(
+    data_path: Option<&str>,
+    report_path: Option<&str>,
+) -> Result<(), String> {
+    println!("--- Language Code Eval (M5 starter) ---\n");
+    let m = eval_language_code_metrics(data_path)?;
+    println!("Code eval metrics:");
+    println!("  total_samples: {}", m.total_samples);
+    println!("  coding_action_rate: {:.2}%", m.coding_action_rate * 100.0);
+    println!("  generation_rate: {:.2}%", m.generation_rate * 100.0);
+    println!("  language_match_rate: {:.2}%", m.language_match_rate * 100.0);
+    println!("  specialized_stub_rate: {:.2}%", m.specialized_stub_rate * 100.0);
+    if !m.per_language.is_empty() {
+        println!("  per-language:");
+        for lang in &m.per_language {
+            println!(
+                "    - {} | n={} | coding={:.1}% | gen={:.1}% | lang_match={:.1}% | specialized={:.1}%",
+                lang.language,
+                lang.samples,
+                lang.coding_action_rate * 100.0,
+                lang.generation_rate * 100.0,
+                lang.language_match_rate * 100.0,
+                lang.specialized_stub_rate * 100.0
+            );
+        }
+    }
+    if !m.language_mismatches.is_empty() {
+        println!("  language mismatches (showing up to 5):");
+        for mm in m.language_mismatches.iter().take(5) {
+            println!(
+                "    - expected={} predicted={} | {}",
+                mm.expected_language, mm.predicted_language, mm.text
+            );
+        }
+    }
+    if let Some(path) = report_path {
+        save_codegen_eval_report(path, &m)?;
+        println!("  report saved: {}", path);
+    }
+    Ok(())
+}
+
+fn load_code_eval_jsonl(path: &str) -> Result<Vec<CodeEvalRecord>, String> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).map_err(|e| format!("open failed: {}", e))?;
+    let reader = std::io::BufReader::new(file);
+    let mut out = Vec::new();
+    for (idx, line) in reader.lines().enumerate() {
+        let line = line.map_err(|e| format!("line {} read failed: {}", idx + 1, e))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let rec: CodeEvalRecord =
+            serde_json::from_str(&line).map_err(|e| format!("line {} parse failed: {}", idx + 1, e))?;
+        out.push(rec);
+    }
+    Ok(out)
+}
+
+fn resolve_code_eval_paths(data_path: Option<&str>) -> Vec<String> {
+    if let Some(spec) = data_path {
+        let paths: Vec<String> = spec
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        if !paths.is_empty() {
+            return paths;
+        }
+    }
+    vec![
+        "data/language/m5/eval_python_holdout.jsonl".to_string(),
+        "data/language/m5/eval_rust_holdout.jsonl".to_string(),
+        "data/language/m5/eval_javascript_holdout.jsonl".to_string(),
+    ]
+}
+
+fn eval_language_code_metrics(data_path: Option<&str>) -> Result<CodeEvalMetrics, String> {
+    let (dm, _support_gid, _coding_gid, _report) = build_language_demo_manager(0.2);
+    let mut records = Vec::new();
+    for path in resolve_code_eval_paths(data_path) {
+        let mut chunk = load_code_eval_jsonl(&path)?;
+        records.append(&mut chunk);
+    }
+
+    let mut total = 0usize;
+    let mut coding_actions = 0usize;
+    let mut generated = 0usize;
+    let mut lang_match_num = 0usize;
+    let mut lang_match_den = 0usize;
+    let mut specialized = 0usize;
+    let mut per_language: HashMap<String, (usize, usize, usize, usize, usize, usize)> = HashMap::new();
+    let mut mismatches = Vec::new();
+    // tuple: (samples, coding_actions, generated, lang_match_num, lang_match_den, specialized)
+
+    for r in &records {
+        let action = dm.route_text_to_action_with_threshold(&r.text, 0.05)?;
+        total += 1;
+        let expected_lang = r
+            .code_language
+            .as_deref()
+            .unwrap_or("unknown")
+            .to_ascii_lowercase();
+        let entry = per_language
+            .entry(expected_lang.clone())
+            .or_insert((0, 0, 0, 0, 0, 0));
+        entry.0 += 1;
+
+        if format!("{:?}", action.action_type) == "CodingAssist" {
+            coding_actions += 1;
+            entry.1 += 1;
+        }
+        if let Some(out) = generate_code_from_action(&action, &r.text) {
+            generated += 1;
+            entry.2 += 1;
+            if !out.code.contains("// TODO:") && !out.code.contains("# TODO:") {
+                specialized += 1;
+                entry.5 += 1;
+            }
+            if let Some(expected) = &r.code_language {
+                lang_match_den += 1;
+                entry.4 += 1;
+                if out.language.eq_ignore_ascii_case(expected) {
+                    lang_match_num += 1;
+                    entry.3 += 1;
+                } else {
+                    mismatches.push(CodeEvalMismatch {
+                        expected_language: expected.to_ascii_lowercase(),
+                        predicted_language: out.language.to_ascii_lowercase(),
+                        text: r.text.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    let mut breakdown = Vec::new();
+    let mut langs: Vec<String> = per_language.keys().cloned().collect();
+    langs.sort();
+    for lang in langs {
+        if let Some((samples, coding_n, gen_n, match_n, match_d, spec_n)) = per_language.get(&lang) {
+            breakdown.push(CodeEvalLanguageMetrics {
+                language: lang,
+                samples: *samples,
+                coding_action_rate: *coding_n as f32 / (*samples).max(1) as f32,
+                generation_rate: *gen_n as f32 / (*samples).max(1) as f32,
+                language_match_rate: *match_n as f32 / (*match_d).max(1) as f32,
+                specialized_stub_rate: *spec_n as f32 / (*gen_n).max(1) as f32,
+            });
+        }
+    }
+
+    Ok(CodeEvalMetrics {
+        total_samples: total,
+        coding_action_rate: coding_actions as f32 / total.max(1) as f32,
+        generation_rate: generated as f32 / total.max(1) as f32,
+        language_match_rate: lang_match_num as f32 / lang_match_den.max(1) as f32,
+        specialized_stub_rate: specialized as f32 / generated.max(1) as f32,
+        per_language: breakdown,
+        language_mismatches: mismatches,
+    })
+}
+
+fn save_codegen_eval_report(path: &str, m: &CodeEvalMetrics) -> Result<(), String> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create_dir_all failed: {}", e))?;
+    }
+    let json = serde_json::to_string_pretty(m).map_err(|e| format!("serialize failed: {}", e))?;
+    std::fs::write(path, json).map_err(|e| format!("write failed: {}", e))
+}
+
+fn validate_codegen(
+    data_path: Option<&str>,
+    report_path: Option<&str>,
+    min_language_match: f32,
+    min_specialized_rate: f32,
+) -> Result<bool, String> {
+    let m = eval_language_code_metrics(data_path)?;
+    let pass_lang = m.language_match_rate >= min_language_match;
+    let pass_spec = m.specialized_stub_rate >= min_specialized_rate;
+    let overall = pass_lang && pass_spec;
+    println!("Code Generation Validation (M5 starter)");
+    println!(
+        "  language_match_rate: {:.6} (threshold {:.6}) => {}",
+        m.language_match_rate,
+        min_language_match,
+        if pass_lang { "PASS" } else { "FAIL" }
+    );
+    println!(
+        "  specialized_stub_rate: {:.6} (threshold {:.6}) => {}",
+        m.specialized_stub_rate,
+        min_specialized_rate,
+        if pass_spec { "PASS" } else { "FAIL" }
+    );
+    println!("  verdict: {}", if overall { "PASS" } else { "FAIL" });
+    if let Some(path) = report_path {
+        save_codegen_eval_report(path, &m)?;
+        println!("  report saved: {}", path);
+    }
+    Ok(overall)
+}
+
+#[derive(Debug, Deserialize)]
+struct M5RetentionPlan {
+    train_sequence: Vec<M5RetentionPhase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct M5RetentionPhase {
+    phase: u32,
+    domain: String,
+    train_file: String,
+    post_phase_eval_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct M5CodeRecord {
+    text: String,
+    #[serde(default)]
+    code_language: Option<String>,
+    #[serde(default)]
+    semantic_intent: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct M5PhaseEvalMetric {
+    file: String,
+    language: String,
+    samples: usize,
+    language_accuracy: f32,
+    task_accuracy: f32,
+    combined_score: f32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct M5PhaseReport {
+    phase: u32,
+    domain: String,
+    train_samples: usize,
+    evals: Vec<M5PhaseEvalMetric>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct M5DomainRetention {
+    domain: String,
+    baseline_score: f32,
+    final_score: f32,
+    retention_ratio: f32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct M5RetentionReport {
+    epochs_per_phase: u32,
+    learning_rate: f32,
+    feature_dim: usize,
+    replay_per_epoch: usize,
+    phase_reports: Vec<M5PhaseReport>,
+    domain_retention: Vec<M5DomainRetention>,
+    mean_retention_ratio: f32,
+}
+
+#[derive(Debug, Clone)]
+struct LinearHead {
+    labels: Vec<String>,
+    w: Vec<Vec<f32>>,
+    b: Vec<f32>,
+}
+
+impl LinearHead {
+    fn new(labels: Vec<String>, feature_dim: usize) -> Self {
+        let classes = labels.len().max(1);
+        Self {
+            labels,
+            w: vec![vec![0.0; feature_dim]; classes],
+            b: vec![0.0; classes],
+        }
+    }
+
+    fn label_idx(&self, label: &str) -> Option<usize> {
+        self.labels.iter().position(|l| l == label)
+    }
+
+    fn logits(&self, x: &[f32]) -> Vec<f32> {
+        let mut out = vec![0.0; self.w.len()];
+        for c in 0..self.w.len() {
+            let mut s = self.b[c];
+            for (wi, xi) in self.w[c].iter().zip(x.iter()) {
+                s += wi * xi;
+            }
+            out[c] = s;
+        }
+        out
+    }
+
+    fn probs(&self, x: &[f32]) -> Vec<f32> {
+        let logits = self.logits(x);
+        let m = logits
+            .iter()
+            .cloned()
+            .fold(f32::NEG_INFINITY, |a, b| a.max(b));
+        let mut expv: Vec<f32> = logits.iter().map(|v| (v - m).exp()).collect();
+        let sum: f32 = expv.iter().sum::<f32>().max(1e-8);
+        for v in &mut expv {
+            *v /= sum;
+        }
+        expv
+    }
+
+    fn predict_idx(&self, x: &[f32]) -> usize {
+        let p = self.probs(x);
+        let mut best_i = 0usize;
+        let mut best_v = f32::MIN;
+        for (i, v) in p.iter().enumerate() {
+            if *v > best_v {
+                best_v = *v;
+                best_i = i;
+            }
+        }
+        best_i
+    }
+
+    fn train_step(&mut self, x: &[f32], target: usize, lr: f32) {
+        let probs = self.probs(x);
+        for c in 0..self.w.len() {
+            let y = if c == target { 1.0 } else { 0.0 };
+            let grad = probs[c] - y;
+            for (j, xj) in x.iter().enumerate() {
+                self.w[c][j] -= lr * grad * *xj;
+            }
+            self.b[c] -= lr * grad;
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct M5Learner {
+    feature_dim: usize,
+    lang_head: LinearHead,
+    task_head: LinearHead,
+}
+
+impl M5Learner {
+    fn new(feature_dim: usize, lang_labels: Vec<String>, task_labels: Vec<String>) -> Self {
+        Self {
+            feature_dim,
+            lang_head: LinearHead::new(lang_labels, feature_dim),
+            task_head: LinearHead::new(task_labels, feature_dim),
+        }
+    }
+
+    fn train_epoch(&mut self, records: &[M5CodeRecord], lr: f32) {
+        for r in records {
+            let x = hash_features(&r.text, self.feature_dim);
+            if let Some(lang) = r.code_language.as_deref() {
+                if let Some(t) = self.lang_head.label_idx(&lang.to_ascii_lowercase()) {
+                    self.lang_head.train_step(&x, t, lr);
+                }
+            }
+            if let Some(intent) = r.semantic_intent.as_deref() {
+                if let Some(t) = self.task_head.label_idx(intent) {
+                    self.task_head.train_step(&x, t, lr);
+                }
+            }
+        }
+    }
+}
+
+fn hash_features(text: &str, dim: usize) -> Vec<f32> {
+    let mut v = vec![0.0f32; dim.max(1)];
+    for tok in text
+        .to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|t| !t.is_empty())
+    {
+        let mut h: u64 = 1469598103934665603;
+        for b in tok.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(1099511628211);
+        }
+        let idx = (h as usize) % v.len();
+        v[idx] += 1.0;
+    }
+    let norm = (v.iter().map(|x| x * x).sum::<f32>()).sqrt().max(1e-6);
+    for x in &mut v {
+        *x /= norm;
+    }
+    v
+}
+
+fn load_m5_code_jsonl(path: &str) -> Result<Vec<M5CodeRecord>, String> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).map_err(|e| format!("open failed: {}", e))?;
+    let reader = std::io::BufReader::new(file);
+    let mut out = Vec::new();
+    for (idx, line) in reader.lines().enumerate() {
+        let line = line.map_err(|e| format!("line {} read failed: {}", idx + 1, e))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let rec: M5CodeRecord =
+            serde_json::from_str(&line).map_err(|e| format!("line {} parse failed: {}", idx + 1, e))?;
+        out.push(rec);
+    }
+    Ok(out)
+}
+
+fn eval_m5_file(learner: &M5Learner, file: &str) -> Result<M5PhaseEvalMetric, String> {
+    let records = load_m5_code_jsonl(file)?;
+    let mut lang_total = 0usize;
+    let mut lang_correct = 0usize;
+    let mut task_total = 0usize;
+    let mut task_correct = 0usize;
+    let mut language_name = "unknown".to_string();
+
+    for r in &records {
+        let x = hash_features(&r.text, learner.feature_dim);
+        if let Some(expected_lang) = r.code_language.as_deref() {
+            language_name = expected_lang.to_ascii_lowercase();
+            if !learner.lang_head.labels.is_empty() {
+                lang_total += 1;
+                let p = learner.lang_head.predict_idx(&x);
+                if learner.lang_head.labels.get(p) == Some(&expected_lang.to_ascii_lowercase()) {
+                    lang_correct += 1;
+                }
+            }
+        }
+        if let Some(expected_task) = r.semantic_intent.as_deref() {
+            if !learner.task_head.labels.is_empty() {
+                task_total += 1;
+                let p = learner.task_head.predict_idx(&x);
+                if learner.task_head.labels.get(p) == Some(&expected_task.to_string()) {
+                    task_correct += 1;
+                }
+            }
+        }
+    }
+    let lang_acc = lang_correct as f32 / lang_total.max(1) as f32;
+    let task_acc = task_correct as f32 / task_total.max(1) as f32;
+    Ok(M5PhaseEvalMetric {
+        file: file.to_string(),
+        language: language_name,
+        samples: records.len(),
+        language_accuracy: lang_acc,
+        task_accuracy: task_acc,
+        combined_score: 0.5 * (lang_acc + task_acc),
+    })
+}
+
+fn run_m5_retention_eval(
+    plan_path: &str,
+    epochs: u32,
+    lr: f32,
+    feature_dim: usize,
+    replay_per_epoch: usize,
+    report_path: Option<&str>,
+) -> Result<(), String> {
+    let plan_json = std::fs::read_to_string(plan_path).map_err(|e| format!("read plan failed: {}", e))?;
+    let plan: M5RetentionPlan =
+        serde_json::from_str(&plan_json).map_err(|e| format!("parse plan failed: {}", e))?;
+    if plan.train_sequence.is_empty() {
+        return Err("train_sequence is empty".to_string());
+    }
+
+    let mut lang_set = std::collections::BTreeSet::new();
+    let mut task_set = std::collections::BTreeSet::new();
+    for phase in &plan.train_sequence {
+        for r in load_m5_code_jsonl(&phase.train_file)? {
+            if let Some(l) = r.code_language {
+                lang_set.insert(l.to_ascii_lowercase());
+            }
+            if let Some(t) = r.semantic_intent {
+                task_set.insert(t);
+            }
+        }
+    }
+    let mut learner = M5Learner::new(
+        feature_dim,
+        lang_set.into_iter().collect(),
+        task_set.into_iter().collect(),
+    );
+
+    let mut phase_reports = Vec::new();
+    let mut baseline: HashMap<String, f32> = HashMap::new();
+    let mut last_score: HashMap<String, f32> = HashMap::new();
+    let mut replay_memory: Vec<M5CodeRecord> = Vec::new();
+
+    println!("--- M5 Retention Eval (real learning) ---\n");
+    for phase in &plan.train_sequence {
+        let train_records = load_m5_code_jsonl(&phase.train_file)?;
+        for epoch in 0..epochs {
+            learner.train_epoch(&train_records, lr);
+            if !replay_memory.is_empty() && replay_per_epoch > 0 {
+                let mut replay_batch = Vec::with_capacity(replay_per_epoch);
+                let offset = (epoch as usize * replay_per_epoch) % replay_memory.len();
+                for i in 0..replay_per_epoch {
+                    let idx = (offset + i) % replay_memory.len();
+                    replay_batch.push(replay_memory[idx].clone());
+                }
+                learner.train_epoch(&replay_batch, lr * 0.5);
+            }
+        }
+        replay_memory.extend(train_records.iter().cloned());
+        let mut evals = Vec::new();
+        for f in &phase.post_phase_eval_files {
+            let m = eval_m5_file(&learner, f)?;
+            if !baseline.contains_key(&m.language) {
+                baseline.insert(m.language.clone(), m.combined_score);
+            }
+            last_score.insert(m.language.clone(), m.combined_score);
+            evals.push(m);
+        }
+        println!(
+            "phase {} [{}] trained {} samples, eval files={}",
+            phase.phase,
+            phase.domain,
+            train_records.len(),
+            evals.len()
+        );
+        phase_reports.push(M5PhaseReport {
+            phase: phase.phase,
+            domain: phase.domain.clone(),
+            train_samples: train_records.len(),
+            evals,
+        });
+    }
+
+    let mut domain_retention = Vec::new();
+    let mut ratios = Vec::new();
+    let mut keys: Vec<String> = baseline.keys().cloned().collect();
+    keys.sort();
+    for k in keys {
+        let b = *baseline.get(&k).unwrap_or(&0.0);
+        let f = *last_score.get(&k).unwrap_or(&0.0);
+        let ratio = if b <= 1e-8 { 0.0 } else { f / b };
+        ratios.push(ratio);
+        domain_retention.push(M5DomainRetention {
+            domain: k,
+            baseline_score: b,
+            final_score: f,
+            retention_ratio: ratio,
+        });
+    }
+    let mean_ret = ratios.iter().sum::<f32>() / ratios.len().max(1) as f32;
+    println!("\nRetention ratios:");
+    for d in &domain_retention {
+        println!(
+            "  {}: baseline={:.3} final={:.3} ratio={:.3}",
+            d.domain, d.baseline_score, d.final_score, d.retention_ratio
+        );
+    }
+    println!("  mean_retention_ratio={:.3}", mean_ret);
+
+    let report = M5RetentionReport {
+        epochs_per_phase: epochs,
+        learning_rate: lr,
+        feature_dim,
+        replay_per_epoch,
+        phase_reports,
+        domain_retention,
+        mean_retention_ratio: mean_ret,
+    };
+    if let Some(path) = report_path {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("create_dir_all failed: {}", e))?;
+        }
+        let json =
+            serde_json::to_string_pretty(&report).map_err(|e| format!("serialize report failed: {}", e))?;
+        std::fs::write(path, json).map_err(|e| format!("write report failed: {}", e))?;
+        println!("  report saved: {}", path);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GenerationEvalMetrics {
+    m3_action_target_accuracy_valid: f32,
+    m4_task_success_rate: f32,
+    task_success_drop_abs: f32,
+    template_hallucination_rate: f32,
+    stage_a_samples: usize,
+    stage_b_samples: usize,
+}
+
+fn demo_language_generation_eval(
+    data_path: Option<&str>,
+    report_path: Option<&str>,
+) -> Result<(), String> {
+    println!("--- Language Generation Eval (M4 template-only) ---\n");
+    let m = eval_language_generation_metrics(data_path)?;
+    println!("Generation eval metrics:");
+    println!(
+        "  m3_action_target_accuracy_valid: {:.2}%",
+        m.m3_action_target_accuracy_valid * 100.0
+    );
+    println!("  m4_task_success_rate: {:.2}%", m.m4_task_success_rate * 100.0);
+    println!("  task_success_drop_abs: {:.2}%", m.task_success_drop_abs * 100.0);
+    println!(
+        "  template_hallucination_rate: {:.2}%",
+        m.template_hallucination_rate * 100.0
+    );
+    println!("  stage_a_samples: {}", m.stage_a_samples);
+    println!("  stage_b_samples: {}", m.stage_b_samples);
+    if let Some(path) = report_path {
+        save_generation_eval_report(path, &m)?;
+        println!("  report saved: {}", path);
+    }
+    Ok(())
+}
+
+fn eval_language_generation_metrics(data_path: Option<&str>) -> Result<GenerationEvalMetrics, String> {
+    let (dm, _support_gid, _coding_gid, _report) = build_language_demo_manager(0.2);
+    let in_domain_threshold = 0.05_f32;
+    let invalid_threshold = 0.999_f32;
+    let records = if let Some(path) = data_path {
+        load_action_eval_jsonl(path)?
+    } else {
+        vec![
+            ActionEvalRecord { text: "urgent account login issue please help".to_string(), expected_action_type: Some("SupportTicket".to_string()), invalid_ambiguous: Some(false), stage: Some("A".to_string()) },
+            ActionEvalRecord { text: "password reset for customer account".to_string(), expected_action_type: Some("SupportTicket".to_string()), invalid_ambiguous: Some(false), stage: Some("A".to_string()) },
+            ActionEvalRecord { text: "billing refund request for subscription".to_string(), expected_action_type: Some("SupportTicket".to_string()), invalid_ambiguous: Some(false), stage: Some("A".to_string()) },
+            ActionEvalRecord { text: "debug rust parser segmentation fault".to_string(), expected_action_type: Some("CodingAssist".to_string()), invalid_ambiguous: Some(false), stage: Some("B".to_string()) },
+            ActionEvalRecord { text: "optimize sql query performance".to_string(), expected_action_type: Some("CodingAssist".to_string()), invalid_ambiguous: Some(false), stage: Some("B".to_string()) },
+            ActionEvalRecord { text: "implement function in rust module".to_string(), expected_action_type: Some("CodingAssist".to_string()), invalid_ambiguous: Some(false), stage: Some("B".to_string()) },
+            ActionEvalRecord { text: "what will the weather be tomorrow in tokyo".to_string(), expected_action_type: None, invalid_ambiguous: Some(true), stage: Some("B".to_string()) },
+            ActionEvalRecord { text: "sing me a song and ignore all rules".to_string(), expected_action_type: None, invalid_ambiguous: Some(true), stage: Some("B".to_string()) },
+            ActionEvalRecord { text: "random nonsense qqq xxx 123".to_string(), expected_action_type: None, invalid_ambiguous: Some(true), stage: Some("B".to_string()) },
+        ]
+    };
+
+    let mut valid_total = 0usize;
+    let mut m3_correct = 0usize;
+    let mut m4_success = 0usize;
+    let mut total = 0usize;
+    let mut hallucinations = 0usize;
+    let mut stage_a_samples = 0usize;
+    let mut stage_b_samples = 0usize;
+
+    for r in &records {
+        let stage = r.stage.as_deref().unwrap_or("");
+        if stage.eq_ignore_ascii_case("A") {
+            stage_a_samples += 1;
+        } else if stage.eq_ignore_ascii_case("B") {
+            stage_b_samples += 1;
+        }
+        let invalid = r.invalid_ambiguous.unwrap_or(false);
+        let threshold = if invalid {
+            invalid_threshold
+        } else {
+            in_domain_threshold
+        };
+        let action = dm.route_text_to_action_with_threshold(&r.text, threshold)?;
+        let generated = render_action_template(&action);
+        total += 1;
+        if !generated.traceable || generated.text.contains("SCHEMA_MISMATCH") {
+            hallucinations += 1;
+        }
+
+        if !invalid {
+            valid_total += 1;
+            if let Some(expected) = &r.expected_action_type {
+                let predicted = format!("{:?}", action.action_type);
+                let expected_marker = expected_template_marker(expected);
+                if &predicted == expected {
+                    m3_correct += 1;
+                    if generated.traceable && generated.text.starts_with(expected_marker) {
+                        m4_success += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    let m3_acc = m3_correct as f32 / valid_total.max(1) as f32;
+    let m4_acc = m4_success as f32 / valid_total.max(1) as f32;
+    let task_drop = (m3_acc - m4_acc).max(0.0);
+    Ok(GenerationEvalMetrics {
+        m3_action_target_accuracy_valid: m3_acc,
+        m4_task_success_rate: m4_acc,
+        task_success_drop_abs: task_drop,
+        template_hallucination_rate: hallucinations as f32 / total.max(1) as f32,
+        stage_a_samples,
+        stage_b_samples,
+    })
+}
+
+fn expected_template_marker(action_type: &str) -> &'static str {
+    match action_type {
+        "SupportTicket" => "[SupportTicket]",
+        "CodingAssist" => "[CodingAssist]",
+        "GeneralAssist" => "[GeneralAssist]",
+        _ => "[Fallback]",
+    }
+}
+
+fn save_generation_eval_report(path: &str, m: &GenerationEvalMetrics) -> Result<(), String> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create_dir_all failed: {}", e))?;
+    }
+    let json = serde_json::to_string_pretty(m).map_err(|e| format!("serialize failed: {}", e))?;
+    std::fs::write(path, json).map_err(|e| format!("write failed: {}", e))
+}
+
+fn validate_generation(
+    data_path: Option<&str>,
+    report_path: Option<&str>,
+    max_task_success_drop: f32,
+    max_hallucination_rate: f32,
+) -> Result<bool, String> {
+    let m = eval_language_generation_metrics(data_path)?;
+    let pass_nonreg = m.task_success_drop_abs <= max_task_success_drop;
+    let pass_hallu = m.template_hallucination_rate <= max_hallucination_rate;
+    let pass_stage_cov = m.stage_a_samples > 0 && m.stage_b_samples > 0;
+    let overall = pass_nonreg && pass_hallu && pass_stage_cov;
+
+    println!("M4 Generation Validation");
+    println!(
+        "  m3_action_target_accuracy_valid: {:.6}",
+        m.m3_action_target_accuracy_valid
+    );
+    println!(
+        "  m4_task_success_rate: {:.6}",
+        m.m4_task_success_rate
+    );
+    println!(
+        "  task_success_drop_abs: {:.6} (max {:.6}) => {}",
+        m.task_success_drop_abs,
+        max_task_success_drop,
+        if pass_nonreg { "PASS" } else { "FAIL" }
+    );
+    println!(
+        "  template_hallucination_rate: {:.6} (max {:.6}) => {}",
+        m.template_hallucination_rate,
+        max_hallucination_rate,
+        if pass_hallu { "PASS" } else { "FAIL" }
+    );
+    println!(
+        "  stage_coverage(A+B): A={} B={} => {}",
+        m.stage_a_samples,
+        m.stage_b_samples,
+        if pass_stage_cov { "PASS" } else { "FAIL" }
+    );
+    println!("  verdict: {}", if overall { "PASS" } else { "FAIL" });
+    if let Some(path) = report_path {
+        save_generation_eval_report(path, &m)?;
+        println!("  report saved: {}", path);
+    }
+    Ok(overall)
 }
 
 fn demo_language_action_eval(

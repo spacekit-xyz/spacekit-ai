@@ -3,6 +3,8 @@
 
 pub mod composition;
 pub mod action;
+pub mod codegen;
+pub mod generation;
 pub mod embedding;
 pub mod language;
 pub mod main_dim;
@@ -15,6 +17,8 @@ pub mod manager;
 
 pub use composition::{EpisodicMemory, Episode, VirtualGroup};
 pub use action::{ActionJson, ActionType, action_from_routing};
+pub use codegen::{CodeGeneration, generate_code_from_action};
+pub use generation::{GeneratedResponse, render_action_template};
 pub use embedding::{GroupEmbedding, compute_group_embedding, cosine_similarity, retrieve_relevant_groups};
 pub use language::{
     CalibrationCoverage, CalibrationDataset, CalibrationRequirements, CalibrationReport,

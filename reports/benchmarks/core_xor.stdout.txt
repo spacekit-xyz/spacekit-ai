@@ -1,0 +1,47 @@
+=============================================================
+  Growformer Neural Environment — Training Demo
+=============================================================
+
+--- Demo 1: XOR ---
+
+Training XOR for 5000 epochs...
+  epoch     0 | loss=0.27856 | sparsity=0.25 | h→o: ["0.189", "-0.016", "0.768", "-0.272"]
+  epoch   500 | loss=0.25582 | sparsity=0.50 | h→o: ["0.338", "-0.009", "0.949", "-1.144"]
+  epoch  1000 | loss=0.17262 | sparsity=0.25 | h→o: ["3.638", "-0.201", "3.669", "-4.928"]
+  epoch  1500 | loss=0.17055 | sparsity=0.75 | h→o: ["4.989", "-0.700", "4.936", "-4.947"]
+  epoch  2000 | loss=0.14049 | sparsity=0.75 | h→o: ["4.985", "-2.744", "4.956", "-5.000"]
+  epoch  2500 | loss=0.13547 | sparsity=0.25 | h→o: ["4.984", "-5.000", "4.935", "-4.991"]
+  epoch  3000 | loss=0.13547 | sparsity=0.25 | h→o: ["4.984", "-4.999", "4.933", "-4.992"]
+  epoch  3500 | loss=0.13595 | sparsity=0.50 | h→o: ["4.992", "-4.997", "4.955", "-4.959"]
+  epoch  4000 | loss=0.13545 | sparsity=0.25 | h→o: ["5.000", "-4.984", "4.977", "-4.935"]
+  epoch  4500 | loss=0.13545 | sparsity=0.25 | h→o: ["5.000", "-4.984", "4.973", "-4.934"]
+
+Inference:
+  Input    Expected  Predicted  Correct
+  ---------------------------------------
+  [0,0]     0.0       0.3500    ✓
+  [0,1]     1.0       0.6318    ✓
+  [1,0]     1.0       0.6333    ✓
+  [1,1]     0.0       0.3515    ✓
+
+  Accuracy: 4/4
+
+--- Structural Report ---
+  Synapses — total: 12, max: 4, min: 0
+  Total energy cost: 29.924
+  Geometric spread (stddev): NaN
+  Mirror symmetry (fractal dim, group 0 ↔ 1): 1.0000
+  Firing sparsity (last forward pass): 0.500
+  Whorls detected: 0
+  No whorls detected.
+
+  Neuron snapshots:
+    ID    Weight     Fired     Syns        Energy    Group
+  --------------------------------------------------------
+     0    0.0053   20000.0        4        9.9817        -
+     1    0.0085   20000.0        4        9.9813        -
+     2   -1.6868    4020.0        1        2.4923        0
+     3   -3.6573    8285.0        1        2.5000        0
+     4   -0.3587   20000.0        1        2.4687        1
+     5    1.6730   20000.0        1        2.5000        1
+     6   -0.0199   20000.0        0       -0.0000        -

@@ -1,0 +1,34 @@
+{
+  "total_samples": 60,
+  "coding_action_rate": 1.0,
+  "generation_rate": 1.0,
+  "language_match_rate": 1.0,
+  "specialized_stub_rate": 1.0,
+  "per_language": [
+    {
+      "language": "javascript",
+      "samples": 20,
+      "coding_action_rate": 1.0,
+      "generation_rate": 1.0,
+      "language_match_rate": 1.0,
+      "specialized_stub_rate": 1.0
+    },
+    {
+      "language": "python",
+      "samples": 20,
+      "coding_action_rate": 1.0,
+      "generation_rate": 1.0,
+      "language_match_rate": 1.0,
+      "specialized_stub_rate": 1.0
+    },
+    {
+      "language": "rust",
+      "samples": 20,
+      "coding_action_rate": 1.0,
+      "generation_rate": 1.0,
+      "language_match_rate": 1.0,
+      "specialized_stub_rate": 1.0
+    }
+  ],
+  "language_mismatches": []
+}

@@ -1,0 +1,7 @@
+{
+  "total_samples": 6,
+  "coding_action_rate": 1.0,
+  "generation_rate": 1.0,
+  "language_match_rate": 1.0,
+  "specialized_stub_rate": 1.0
+}

@@ -1,0 +1,98 @@
+{
+  "epochs_per_phase": 20,
+  "learning_rate": 0.2,
+  "feature_dim": 512,
+  "replay_per_epoch": 24,
+  "phase_reports": [
+    {
+      "phase": 1,
+      "domain": "coding_python",
+      "train_samples": 24,
+      "evals": [
+        {
+          "file": "data/language/m5/eval_python_holdout.jsonl",
+          "language": "python",
+          "samples": 20,
+          "language_accuracy": 1.0,
+          "task_accuracy": 1.0,
+          "combined_score": 1.0
+        }
+      ]
+    },
+    {
+      "phase": 2,
+      "domain": "coding_rust",
+      "train_samples": 24,
+      "evals": [
+        {
+          "file": "data/language/m5/eval_python_holdout.jsonl",
+          "language": "python",
+          "samples": 20,
+          "language_accuracy": 1.0,
+          "task_accuracy": 1.0,
+          "combined_score": 1.0
+        },
+        {
+          "file": "data/language/m5/eval_rust_holdout.jsonl",
+          "language": "rust",
+          "samples": 20,
+          "language_accuracy": 1.0,
+          "task_accuracy": 1.0,
+          "combined_score": 1.0
+        }
+      ]
+    },
+    {
+      "phase": 3,
+      "domain": "coding_javascript",
+      "train_samples": 24,
+      "evals": [
+        {
+          "file": "data/language/m5/eval_python_holdout.jsonl",
+          "language": "python",
+          "samples": 20,
+          "language_accuracy": 0.9,
+          "task_accuracy": 1.0,
+          "combined_score": 0.95
+        },
+        {
+          "file": "data/language/m5/eval_rust_holdout.jsonl",
+          "language": "rust",
+          "samples": 20,
+          "language_accuracy": 1.0,
+          "task_accuracy": 1.0,
+          "combined_score": 1.0
+        },
+        {
+          "file": "data/language/m5/eval_javascript_holdout.jsonl",
+          "language": "javascript",
+          "samples": 20,
+          "language_accuracy": 1.0,
+          "task_accuracy": 1.0,
+          "combined_score": 1.0
+        }
+      ]
+    }
+  ],
+  "domain_retention": [
+    {
+      "domain": "javascript",
+      "baseline_score": 1.0,
+      "final_score": 1.0,
+      "retention_ratio": 1.0
+    },
+    {
+      "domain": "python",
+      "baseline_score": 1.0,
+      "final_score": 0.95,
+      "retention_ratio": 0.95
+    },
+    {
+      "domain": "rust",
+      "baseline_score": 1.0,
+      "final_score": 1.0,
+      "retention_ratio": 1.0
+    }
+  ],
+  "mean_retention_ratio": 0.98333335
+}

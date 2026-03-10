@@ -113,8 +113,11 @@ Current language milestone status:
 - M1 (Language Embedding Foundation): complete
 - M2 (Embedding-First Routing Validation): complete
 - M3 (Intent-to-Action Layer): complete
+- M4 (Controlled Language Generation, template-only): complete
   - Gate command: `cargo run -- --validate-action-schema --action-eval-data data/language/stage_ab_action_eval_extended.jsonl --action-eval-report reports/m3_action_eval_extended.json`
   - Latest result: PASS on Stage A+B extended evaluation dataset
+  - M4 gate command: `cargo run -- --validate-generation --action-eval-data data/language/stage_ab_action_eval_extended.jsonl --generation-eval-report reports/m4_generation_eval_extended.json`
+  - Latest result: PASS (task-success non-regression + template hallucination baseline)
 
 Operational commands:
 
@@ -126,9 +129,70 @@ Operational commands:
   `cargo run -- --validate-action-schema --action-eval-data data/language/stage_ab_action_eval.jsonl --action-eval-report reports/m3_action_eval.json`
 - Validate M3 on extended paraphrase set:
   `cargo run -- --validate-action-schema --action-eval-data data/language/stage_ab_action_eval_extended.jsonl --action-eval-report reports/m3_action_eval_extended.json`
+- M4 starter generated response:
+  `cargo run -- --language-generate-text "please help reset my account password"`
+- M5 starter code generation:
+  `cargo run -- --language-code-text "implement binary search in rust"`
+- M5 code generation eval:
+  `cargo run -- --language-code-eval --code-eval-data data/language/m5/eval_codegen_mixed.jsonl --code-eval-report reports/m5_codegen_eval_mixed.json`
+- M5 code generation validation gate:
+  `cargo run -- --validate-codegen --code-eval-data data/language/m5/eval_codegen_mixed.jsonl --code-eval-report reports/m5_codegen_eval_mixed.json`
+- M5 full holdout eval (Python+Rust+JS defaults, with per-language metrics):
+  `cargo run -- --language-code-eval --code-eval-report reports/m5_codegen_eval_holdouts.json`
+- M5 full holdout validation gate:
+  `cargo run -- --validate-codegen --code-eval-report reports/m5_codegen_eval_holdouts.json`
+- M5 demo script:
+  `bash scripts/demo_code_tasks.sh`
+- M5 real sequential training + retention eval (non-mock):
+  `cargo run -- --m5-retention-eval --m5-retention-plan data/language/m5/retention_eval_splits.json --m5-epochs 30 --m5-lr 0.2 --m5-feature-dim 512 --m5-retention-report reports/m5_retention_report.json`
+- M5 retention eval with replay anti-forgetting:
+  `cargo run -- --m5-retention-eval --m5-retention-plan data/language/m5/retention_eval_splits.json --m5-epochs 30 --m5-lr 0.2 --m5-feature-dim 512 --m5-replay-per-epoch 24 --m5-retention-report reports/m5_retention_report_replay.json`
+- Evaluate M4 constrained generation:
+  `cargo run -- --language-generation-eval --action-eval-data data/language/stage_ab_action_eval_extended.jsonl --generation-eval-report reports/m4_generation_eval_extended.json`
+- Validate M4 constrained generation gate:
+  `cargo run -- --validate-generation --action-eval-data data/language/stage_ab_action_eval_extended.jsonl --generation-eval-report reports/m4_generation_eval_extended.json`
 - CI helper script: `scripts/validate_gle.sh`
 - M3 script with Stage A+B data: `scripts/validate_action_schema.sh data/language/stage_ab_action_eval.jsonl reports/m3_action_eval.json`
-- Full stack gate (GLE + M3): `scripts/validate_stack.sh checkpoints/gle_student_routing_tuned.json data/language/stage_ab_action_eval.jsonl reports/m3_action_eval.json`
+- M4 script with Stage A+B data: `scripts/validate_generation.sh data/language/stage_ab_action_eval_extended.jsonl reports/m4_generation_eval_extended.json`
+- Full stack gate (GLE + M3 + M4): `scripts/validate_stack.sh checkpoints/gle_student_routing_tuned.json data/language/stage_ab_action_eval_extended.jsonl reports/m3_action_eval_extended.json reports/m4_generation_eval_extended.json`
+
+M5 dataset scaffolding (coding retention):
+
+- Python train set: `data/language/m5/train_python_coding.jsonl`
+- Rust train set: `data/language/m5/train_rust_coding.jsonl`
+- JavaScript train set: `data/language/m5/train_javascript_coding.jsonl`
+- Holdout eval sets:
+  - `data/language/m5/eval_python_holdout.jsonl`
+  - `data/language/m5/eval_rust_holdout.jsonl`
+  - `data/language/m5/eval_javascript_holdout.jsonl`
+- Sequential retention plan:
+  - `data/language/m5/retention_eval_splits.json`
+  - Train order: Python -> Rust -> JavaScript
+  - Retention target: post-sequence ratio `>= 0.97` per domain
+- Curriculum template for systematic data collection:
+  - `data/language/m5/CURRICULUM_V1_TEMPLATE.md`
+
+Benchmarks:
+
+- Language/code benchmark suite (repeated runs with latency + RSS):
+  - `bash scripts/benchmark_language.sh 5 reports/benchmarks`
+- Core task benchmark suite (single-run XOR/Spiral/Language pipeline):
+  - `bash scripts/benchmark_core_tasks.sh reports/benchmarks`
+- Latest measured CLI baseline on this machine (debug build):
+  - `--language-action-text`: ~`1.43s` warm average, ~`9.5 MB` max RSS
+  - `--language-code-text`: ~`1.43s` average, ~`9.6 MB` max RSS
+  - `--language-code-eval` (60 samples): ~`1.53s` average, ~`9.9 MB` max RSS
+
+Growformer Node (HTTP dev server):
+
+- Start server:
+  - `cargo run --bin growformer-node`
+- Health:
+  - `curl http://127.0.0.1:8080/v1/health`
+- Chat/codegen request:
+  - `curl -X POST http://127.0.0.1:8080/v1/chat -H "Content-Type: application/json" -d '{"mode":"codegen","message":"implement a web server in rust","options":{"include_raw_stdout":false}}'`
+- SSE chat stream:
+  - `curl -N -X POST http://127.0.0.1:8080/v1/chat/stream -H "Content-Type: application/json" -d '{"mode":"codegen","message":"implement a web server in rust"}'`
 
 ---
 

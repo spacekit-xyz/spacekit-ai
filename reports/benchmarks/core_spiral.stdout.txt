@@ -1,0 +1,8 @@
+=============================================================
+  Growformer Neural Environment — Training Demo
+=============================================================
+
+--- Demo 2: Spiral Classification ---
+
+Training on 400 samples, architecture [2→16→16→1], 8000 epochs...
+  epoch    0 | loss=0.21425 | syn=301 | sparse=0.12 | act=0.155 | spread=2.96 | mass=1.10 | lr=0.15000

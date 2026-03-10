@@ -164,8 +164,17 @@ fn infer_action_type_from_text(text: &str) -> Option<ActionType> {
         "optimize",
         "refactor",
         "unit test",
+        "test",
+        "pytest",
+        "jest",
+        "javascript",
+        "typescript",
+        "node",
+        "node.js",
+        "dom",
         "compile",
         "middleware",
+        "server",
     ];
     let support_hits = support_terms.iter().filter(|t| text.contains(**t)).count();
     let coding_hits = coding_terms.iter().filter(|t| text.contains(**t)).count();
@@ -199,6 +208,10 @@ fn infer_priority(text: &str) -> String {
 fn infer_coding_task(text: &str) -> String {
     if text.contains("debug") || text.contains("error") || text.contains("fault") {
         "debug".to_string()
+    } else if text.contains("test") || text.contains("pytest") || text.contains("jest") {
+        "test".to_string()
+    } else if text.contains("refactor") {
+        "refactor".to_string()
     } else if text.contains("optimize") || text.contains("performance") {
         "optimize".to_string()
     } else {
@@ -207,8 +220,24 @@ fn infer_coding_task(text: &str) -> String {
 }
 
 fn infer_language_hint(text: &str) -> String {
+    let tokens: Vec<&str> = text
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '+')
+        .filter(|t| !t.is_empty())
+        .collect();
+    let has_token = |needle: &str| tokens.iter().any(|t| t.eq_ignore_ascii_case(needle));
     if text.contains("rust") {
         "rust".to_string()
+    } else if text.contains("typescript") || has_token("ts") || has_token("tsx") {
+        "typescript".to_string()
+    } else if text.contains("javascript")
+        || text.contains("node.js")
+        || text.contains("nodejs")
+        || has_token("js")
+        || has_token("jsx")
+        || has_token("jest")
+        || has_token("npm")
+    {
+        "javascript".to_string()
     } else if text.contains("sql") {
         "sql".to_string()
     } else if text.contains("python") {
