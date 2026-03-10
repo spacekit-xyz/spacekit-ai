@@ -16,6 +16,7 @@ use growformer::systems::checkpoint::{
 };
 use growformer::systems::mirror::mirror_symmetry_score;
 use growformer::systems::whorls::print_whorl_summary;
+use growformer::service::LanguageService;
 use growformer::types::{EnvironmentConfig, Sample};
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
@@ -2217,9 +2218,12 @@ fn demo_language_pipeline() {
 
 fn demo_language_action(text: &str) -> Result<(), String> {
     println!("--- Language Action (M3 starter) ---\n");
-    let (mut dm, support_gid, coding_gid, _report) = build_language_demo_manager(0.2);
-    println!("Promoted groups: support={} coding={}", support_gid, coding_gid);
-    let action = dm.route_text_to_action(text)?;
+    let mut svc = LanguageService::new_default()?;
+    println!(
+        "Promoted groups: support={} coding={}",
+        svc.support_gid, svc.coding_gid
+    );
+    let action = svc.action(text)?;
     let json = serde_json::to_string_pretty(&action).map_err(|e| e.to_string())?;
     println!("{}", json);
     Ok(())
@@ -2227,10 +2231,12 @@ fn demo_language_action(text: &str) -> Result<(), String> {
 
 fn demo_language_generate(text: &str) -> Result<(), String> {
     println!("--- Controlled Language Generation (M4) ---\n");
-    let (mut dm, support_gid, coding_gid, _report) = build_language_demo_manager(0.2);
-    println!("Promoted groups: support={} coding={}", support_gid, coding_gid);
-    let action = dm.route_text_to_action(text)?;
-    let response = render_action_template(&action);
+    let mut svc = LanguageService::new_default()?;
+    println!(
+        "Promoted groups: support={} coding={}",
+        svc.support_gid, svc.coding_gid
+    );
+    let (action, response) = svc.generation(text)?;
     let action_json = serde_json::to_string_pretty(&action).map_err(|e| e.to_string())?;
     println!("Action JSON:\n{}", action_json);
     println!(
@@ -2242,12 +2248,15 @@ fn demo_language_generate(text: &str) -> Result<(), String> {
 
 fn demo_language_code(text: &str) -> Result<(), String> {
     println!("--- Coding Output (M5 starter) ---\n");
-    let (mut dm, support_gid, coding_gid, _report) = build_language_demo_manager(0.2);
-    println!("Promoted groups: support={} coding={}", support_gid, coding_gid);
-    let action = dm.route_text_to_action(text)?;
+    let mut svc = LanguageService::new_default()?;
+    println!(
+        "Promoted groups: support={} coding={}",
+        svc.support_gid, svc.coding_gid
+    );
+    let (action, code) = svc.codegen(text)?;
     let action_json = serde_json::to_string_pretty(&action).map_err(|e| e.to_string())?;
     println!("Action JSON:\n{}", action_json);
-    match generate_code_from_action(&action, text) {
+    match code {
         Some(code) => {
             println!(
                 "\nGenerated code ({}, {}):\n{}",

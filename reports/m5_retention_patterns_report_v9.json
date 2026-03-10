@@ -1,0 +1,62 @@
+{
+  "epochs_per_phase": 100,
+  "learning_rate": 0.12,
+  "feature_dim": 1024,
+  "replay_per_epoch": 64,
+  "replay_prior_ratio": 0.9,
+  "phase_reports": [
+    {
+      "phase": 1,
+      "domain": "design_patterns",
+      "train_samples": 48,
+      "evals": [
+        {
+          "file": "data/language/m5/eval_design_patterns_holdout.jsonl",
+          "language": "design_patterns",
+          "samples": 24,
+          "language_accuracy": 1.0,
+          "task_accuracy": 1.0,
+          "combined_score": 1.0
+        }
+      ]
+    },
+    {
+      "phase": 2,
+      "domain": "architectural_patterns",
+      "train_samples": 48,
+      "evals": [
+        {
+          "file": "data/language/m5/eval_design_patterns_holdout.jsonl",
+          "language": "design_patterns",
+          "samples": 24,
+          "language_accuracy": 1.0,
+          "task_accuracy": 1.0,
+          "combined_score": 1.0
+        },
+        {
+          "file": "data/language/m5/eval_architectural_patterns_holdout.jsonl",
+          "language": "architectural_patterns",
+          "samples": 24,
+          "language_accuracy": 1.0,
+          "task_accuracy": 1.0,
+          "combined_score": 1.0
+        }
+      ]
+    }
+  ],
+  "domain_retention": [
+    {
+      "domain": "architectural_patterns",
+      "baseline_score": 1.0,
+      "final_score": 1.0,
+      "retention_ratio": 1.0
+    },
+    {
+      "domain": "design_patterns",
+      "baseline_score": 1.0,
+      "final_score": 1.0,
+      "retention_ratio": 1.0
+    }
+  ],
+  "mean_retention_ratio": 1.0
+}

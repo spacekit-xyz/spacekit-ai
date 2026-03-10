@@ -3,21 +3,22 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use growformer::service::LanguageService;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::convert::Infallible;
-use std::net::SocketAddr;
-use std::process::Command;
-use std::sync::Arc;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
 #[derive(Clone)]
 struct AppState {
-    growformer_bin: String,
+    service: Arc<Mutex<LanguageService>>,
     auth_token: Option<String>,
     log_path: Option<String>,
 }
@@ -63,7 +64,7 @@ struct ChatPerf {
 #[derive(Debug, Serialize)]
 struct HealthResponse {
     status: &'static str,
-    growformer_bin: String,
+    runtime: &'static str,
     log_path: Option<String>,
 }
 
@@ -73,12 +74,12 @@ async fn main() {
         .unwrap_or_else(|_| "127.0.0.1:8080".to_string())
         .parse()
         .expect("invalid GROWFORMER_NODE_ADDR");
-    let bin = std::env::var("GROWFORMER_BIN").unwrap_or_else(|_| "target/debug/growformer".to_string());
     let auth_token = std::env::var("GROWFORMER_NODE_TOKEN").ok();
     let log_path = std::env::var("GROWFORMER_NODE_LOG_PATH").ok();
+    let service = LanguageService::new_default().expect("failed to initialize language service");
 
     let state = Arc::new(AppState {
-        growformer_bin: bin,
+        service: Arc::new(Mutex::new(service)),
         auth_token,
         log_path,
     });
@@ -103,7 +104,7 @@ async fn main() {
 async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
-        growformer_bin: state.growformer_bin.clone(),
+        runtime: "in_process_lib",
         log_path: state.log_path.clone(),
     })
 }
@@ -150,10 +151,45 @@ async fn run_chat(
         .clone()
         .unwrap_or_else(|| Uuid::new_v4().to_string());
 
-    let flag = match req.mode.as_str() {
-        "action" => "--language-action-text",
-        "generation" => "--language-generate-text",
-        "codegen" => "--language-code-text",
+    let mut svc = state.service.lock().await;
+    let (text, raw_stdout) = match req.mode.as_str() {
+        "action" => {
+            let action = svc
+                .action(&req.message)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("inference failed: {}", e)))?;
+            let pretty = serde_json::to_string_pretty(&action)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize failed: {}", e)))?;
+            (format!("Action JSON:\n{}", pretty), pretty)
+        }
+        "generation" => {
+            let (action, generated) = svc
+                .generation(&req.message)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("inference failed: {}", e)))?;
+            let action_json = serde_json::to_string_pretty(&action)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize failed: {}", e)))?;
+            (
+                format!(
+                    "Action JSON:\n{}\n\nTemplate response:\n{}",
+                    action_json, generated.text
+                ),
+                generated.text,
+            )
+        }
+        "codegen" => {
+            let (action, code) = svc
+                .codegen(&req.message)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("inference failed: {}", e)))?;
+            let action_json = serde_json::to_string_pretty(&action)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize failed: {}", e)))?;
+            let text = match code {
+                Some(code) => format!(
+                    "Action JSON:\n{}\n\nGenerated code ({}, {}):\n{}",
+                    action_json, code.language, code.kind, code.code
+                ),
+                None => format!("Action JSON:\n{}\n\nNo code output", action_json),
+            };
+            (text.clone(), text)
+        }
         other => {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -161,34 +197,12 @@ async fn run_chat(
             ))
         }
     };
-
-    let bin = state.growformer_bin.clone();
-    let msg = req.message.clone();
-    let output = tokio::task::spawn_blocking(move || run_growformer_with_metrics(&bin, flag, &msg))
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join error: {}", e)))?
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to execute '{}': {}", state.growformer_bin, e),
-            )
-        })?;
-
-    if !output.output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.output.stderr).to_string();
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("growformer failed: {}", stderr),
-        ));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.output.stdout).to_string();
-    let text = extract_primary_output(&stdout);
+    drop(svc);
     let latency_ms = started.elapsed().as_millis();
     let perf = ChatPerf {
-        child_max_rss_bytes: output.max_rss_bytes,
-        child_user_s: output.user_s,
-        child_sys_s: output.sys_s,
+        child_max_rss_bytes: None,
+        child_user_s: None,
+        child_sys_s: None,
     };
 
     if let Some(path) = &state.log_path {
@@ -219,7 +233,7 @@ async fn run_chat(
         output: ChatOutput {
             text,
             raw_stdout: if req.options.include_raw_stdout {
-                Some(stdout)
+                Some(raw_stdout)
             } else {
                 None
             },
@@ -241,72 +255,6 @@ fn authorize(headers: &HeaderMap, state: &AppState) -> Result<(), (StatusCode, S
     } else {
         Err((StatusCode::UNAUTHORIZED, "missing/invalid bearer token".to_string()))
     }
-}
-
-fn extract_primary_output(stdout: &str) -> String {
-    if let Some(i) = stdout.find("Generated code") {
-        return stdout[i..].to_string();
-    }
-    if let Some(i) = stdout.find("Template response:") {
-        return stdout[i..].to_string();
-    }
-    if let Some(i) = stdout.find("Action JSON:") {
-        return stdout[i..].to_string();
-    }
-    stdout.to_string()
-}
-
-struct ChildRunOutput {
-    output: std::process::Output,
-    max_rss_bytes: Option<u64>,
-    user_s: Option<f32>,
-    sys_s: Option<f32>,
-}
-
-fn run_growformer_with_metrics(bin: &str, flag: &str, msg: &str) -> std::io::Result<ChildRunOutput> {
-    let timed = Command::new("/usr/bin/time")
-        .arg("-lp")
-        .arg(bin)
-        .arg(flag)
-        .arg(msg)
-        .output();
-
-    if let Ok(o) = timed {
-        let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-        let (rss, user_s, sys_s) = parse_time_lp(&stderr);
-        return Ok(ChildRunOutput {
-            output: o,
-            max_rss_bytes: rss,
-            user_s,
-            sys_s,
-        });
-    }
-
-    let o = Command::new(bin).arg(flag).arg(msg).output()?;
-    Ok(ChildRunOutput {
-        output: o,
-        max_rss_bytes: None,
-        user_s: None,
-        sys_s: None,
-    })
-}
-
-fn parse_time_lp(stderr: &str) -> (Option<u64>, Option<f32>, Option<f32>) {
-    let mut rss = None;
-    let mut user_s = None;
-    let mut sys_s = None;
-    for line in stderr.lines() {
-        let t = line.trim();
-        if let Some(rest) = t.strip_prefix("user ") {
-            user_s = rest.trim().parse::<f32>().ok();
-        } else if let Some(rest) = t.strip_prefix("sys ") {
-            sys_s = rest.trim().parse::<f32>().ok();
-        } else if t.contains("maximum resident set size") {
-            let n = t.split_whitespace().next().and_then(|x| x.parse::<u64>().ok());
-            rss = n;
-        }
-    }
-    (rss, user_s, sys_s)
 }
 
 fn append_jsonl(path: &str, line: &str) -> std::io::Result<()> {

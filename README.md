@@ -82,6 +82,14 @@ growformer/
         └── mirror.rs        — System 6: Mirror group coupling
 ```
 
+Runtime topology (shared library path):
+
+`CLI (main.rs)` -> `growformer::service::LanguageService` -> `dimension::{action,generation,codegen}`
+
+`Node (server.rs)` -> `growformer::service::LanguageService` -> `dimension::{action,generation,codegen}`
+
+This means both entrypoints now use the same in-process inference and initialization path.
+
 ---
 
 ## **Growformer Language Encoder (GLE)**
@@ -184,6 +192,8 @@ M5 dataset scaffolding (coding retention):
   - `data/language/m5/eval_architectural_patterns_holdout.jsonl`
   - `data/language/m5/retention_patterns_eval_splits.json`
   - Current size: train `48 + 48`, holdout `24 + 24`
+  - Expanded benchmark run:
+    `cargo run -- --m5-retention-eval --m5-retention-plan data/language/m5/retention_patterns_eval_splits.json --m5-epochs 100 --m5-lr 0.12 --m5-feature-dim 1024 --m5-replay-per-epoch 64 --m5-replay-prior-ratio 0.9 --m5-retention-report reports/m5_retention_patterns_report_v9.json`
 
 Benchmarks:
 
@@ -208,6 +218,8 @@ Growformer Node (HTTP dev server):
   - `curl -X POST http://127.0.0.1:8080/v1/chat -H "Content-Type: application/json" -d '{"mode":"codegen","message":"implement a web server in rust","options":{"include_raw_stdout":false}}'`
 - SSE chat stream:
   - `curl -N -X POST http://127.0.0.1:8080/v1/chat/stream -H "Content-Type: application/json" -d '{"mode":"codegen","message":"implement a web server in rust"}'`
+- Runtime note:
+  - `growformer-node` now calls Growformer as a shared library in-process (no CLI subprocess per request).
 
 ---
 
