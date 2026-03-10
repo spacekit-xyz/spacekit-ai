@@ -4,6 +4,7 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -198,9 +199,8 @@ impl MirrorDimension {
             let seed = (epoch as u64).wrapping_mul(1_000_000).wrapping_add(batch_idx as u64);
             let mut clones: Vec<NeuralEnvironment> = (0..b).map(|_| self.env.clone()).collect();
 
-            let losses: Vec<f32> = clones
-                .par_iter_mut()
-                .zip(batch.par_iter())
+            let losses: Vec<f32> = crate::maybe_par_iter_mut!(clones)
+                .zip(crate::maybe_par_iter!(batch))
                 .enumerate()
                 .map(|(i, (env, sample))| {
                     let mut thread_rng = StdRng::seed_from_u64(seed.wrapping_add(i as u64));

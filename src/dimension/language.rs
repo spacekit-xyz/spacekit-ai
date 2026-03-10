@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+#[cfg(feature = "native")]
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
@@ -545,6 +546,8 @@ pub struct LanguageRuntime {
     pub encoder: HashingLanguageEncoder,
     pub bridge: LanguageBridge,
     pub smoother: EmaSmoother,
+    #[serde(skip)]
+    preloaded_students: Vec<GleStudentCheckpoint>,
 }
 
 impl LanguageRuntime {
@@ -558,6 +561,7 @@ impl LanguageRuntime {
             encoder,
             bridge,
             smoother,
+            preloaded_students: Vec::new(),
         }
     }
 
@@ -593,6 +597,48 @@ impl LanguageRuntime {
     }
 
     fn build_encoder(&self) -> Box<dyn LanguageEncoder> {
+        if let Some(enc) = self.build_encoder_from_preloaded() {
+            return enc;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(enc) = self.build_encoder_from_disk() {
+                return enc;
+            }
+        }
+        #[cfg(feature = "native")]
+        {
+            if let (EncoderPreset::BertClass, Some(endpoint)) =
+                (&self.config.encoder, self.config.gle_http_endpoint.clone())
+            {
+                return Box::new(HttpGleEncoder::new(
+                    endpoint,
+                    self.config.encoder.model_name(),
+                    self.config.encoder.output_dim(),
+                    self.encoder.clone(),
+                ));
+            }
+        }
+        Box::new(self.encoder.clone())
+    }
+
+    fn build_encoder_from_preloaded(&self) -> Option<Box<dyn LanguageEncoder>> {
+        if self.preloaded_students.is_empty() {
+            return None;
+        }
+        if self.preloaded_students.len() == 1 {
+            return Some(Box::new(GrowformerLanguageEncoder::new(
+                self.preloaded_students[0].clone(),
+            )));
+        }
+        Some(Box::new(MultiGleEncoder::new(
+            self.preloaded_students.clone(),
+            self.config.gle_checkpoint_weights.clone(),
+        )))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn build_encoder_from_disk(&self) -> Option<Box<dyn LanguageEncoder>> {
         if let EncoderPreset::BertClass = &self.config.encoder {
             let paths = resolved_gle_checkpoint_paths(&self.config);
             if !paths.is_empty() {
@@ -612,31 +658,33 @@ impl LanguageRuntime {
                     }
                 }
                 if loaded.len() == 1 {
-                    return Box::new(GrowformerLanguageEncoder::new(loaded.remove(0)));
+                    return Some(Box::new(GrowformerLanguageEncoder::new(loaded.remove(0))));
                 }
                 if loaded.len() > 1 {
-                    return Box::new(MultiGleEncoder::new(
+                    return Some(Box::new(MultiGleEncoder::new(
                         loaded,
                         self.config.gle_checkpoint_weights.clone(),
-                    ));
+                    )));
                 }
             }
         }
-        if let (EncoderPreset::BertClass, Some(endpoint)) =
-            (&self.config.encoder, self.config.gle_http_endpoint.clone())
-        {
-            return Box::new(HttpGleEncoder::new(
-                endpoint,
-                self.config.encoder.model_name(),
-                self.config.encoder.output_dim(),
-                self.encoder.clone(),
-            ));
+        None
+    }
+
+    /// Load GLE student checkpoints from byte slices (WASM-compatible path).
+    pub fn load_students_from_bytes(&mut self, data: &[&[u8]]) -> Result<usize, String> {
+        let mut count = 0;
+        for bytes in data {
+            let student = GleStudentCheckpoint::from_bytes(bytes)?;
+            self.preloaded_students.push(student);
+            count += 1;
         }
-        Box::new(self.encoder.clone())
+        Ok(count)
     }
 }
 
 fn configured_encoder_dim(config: &LanguageConfig) -> Option<usize> {
+    #[cfg(not(target_arch = "wasm32"))]
     if let EncoderPreset::BertClass = &config.encoder {
         for path in resolved_gle_checkpoint_paths(config) {
             if let Ok(student) = GleStudentCheckpoint::load(&path) {
@@ -644,9 +692,11 @@ fn configured_encoder_dim(config: &LanguageConfig) -> Option<usize> {
             }
         }
     }
+    let _ = config;
     None
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn resolved_gle_checkpoint_paths(config: &LanguageConfig) -> Vec<String> {
     if !config.gle_checkpoints.is_empty() {
         return config.gle_checkpoints.clone();
@@ -663,9 +713,14 @@ struct GleStudentCheckpoint {
 }
 
 impl GleStudentCheckpoint {
+    #[cfg(not(target_arch = "wasm32"))]
     fn load(path: &str) -> Result<Self, String> {
         let json = std::fs::read_to_string(path).map_err(|e| format!("read failed: {}", e))?;
         serde_json::from_str(&json).map_err(|e| format!("parse failed: {}", e))
+    }
+
+    pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
+        serde_json::from_slice(data).map_err(|e| format!("parse failed: {}", e))
     }
 
     fn predict(&self, x: &[f32]) -> Vec<f32> {
@@ -782,6 +837,7 @@ impl LanguageEncoder for MultiGleEncoder {
     }
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug, Clone)]
 struct HttpGleEncoder {
     endpoint: String,
@@ -790,17 +846,20 @@ struct HttpGleEncoder {
     fallback: HashingLanguageEncoder,
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug, Serialize)]
 struct HttpEncodeRequest<'a> {
     text: &'a str,
     model: &'a str,
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug, Deserialize)]
 struct HttpEncodeResponse {
     embedding: Vec<f32>,
 }
 
+#[cfg(feature = "native")]
 impl HttpGleEncoder {
     fn new(
         endpoint: String,
@@ -817,6 +876,7 @@ impl HttpGleEncoder {
     }
 }
 
+#[cfg(feature = "native")]
 impl LanguageEncoder for HttpGleEncoder {
     fn output_dim(&self) -> usize {
         self.output_dim
@@ -836,7 +896,6 @@ impl LanguageEncoder for HttpGleEncoder {
                 }
             }
         }
-        // Always keep the pipeline available even when remote encoder is unavailable.
         self.fallback.encode(text)
     }
 }

@@ -1,3 +1,4 @@
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use crate::types::*;
 use crate::neuron::Neuron;
@@ -17,8 +18,7 @@ pub fn apply_metabolic_pressure(
     output_protected: &HashSet<NeuronId>,
     input_protected: &HashSet<NeuronId>,
 ) -> usize {
-    let pruned_per: Vec<(NeuronId, Vec<usize>)> = neurons
-        .par_iter()
+    let pruned_per: Vec<(NeuronId, Vec<usize>)> = crate::maybe_par_iter!(neurons)
         .filter_map(|(&id, neuron)| {
             if neuron.frozen { return None; }
             if !neuron.over_budget() { return None; }

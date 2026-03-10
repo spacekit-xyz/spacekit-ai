@@ -4,8 +4,12 @@ use rand::SeedableRng;
 
 use crate::dimension::{
     generate_code_from_action, render_action_template, ActionJson, CalibrationDataset, CalibrationReport,
-    CalibrationRequirements, CodeGeneration, DimensionManager, DimensionManagerConfig, EncoderPreset,
+    CalibrationRequirements, CodeGeneration, DimensionManager, DimensionManagerConfig,
     GeneratedResponse, LanguageConfig, LanguageSample,
+};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::dimension::{
+    EncoderPreset,
 };
 use crate::types::{EnvironmentConfig, GroupId, Sample};
 
@@ -17,8 +21,19 @@ pub struct LanguageService {
 }
 
 impl LanguageService {
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new_default() -> Result<Self, String> {
         let (dm, support_gid, coding_gid, report) = build_language_demo_manager(0.2)?;
+        Ok(Self {
+            dm,
+            support_gid,
+            coding_gid,
+            calibration: report,
+        })
+    }
+
+    pub fn new_with_config(config: LanguageConfig) -> Result<Self, String> {
+        let (dm, support_gid, coding_gid, report) = build_language_demo_manager_with_config(0.2, config)?;
         Ok(Self {
             dm,
             support_gid,
@@ -42,10 +57,35 @@ impl LanguageService {
         let code = generate_code_from_action(&action, text);
         Ok((action, code))
     }
+
+    pub fn load_gle_students_from_bytes(&mut self, data: &[&[u8]]) -> Result<usize, String> {
+        self.dm.language_runtime.load_students_from_bytes(data)
+    }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn build_language_demo_manager(
     ema_alpha: f32,
+) -> Result<(DimensionManager, GroupId, GroupId, CalibrationReport), String> {
+    let gle_checkpoint = std::env::var("GROWFORMER_GLE_CHECKPOINT").ok();
+    let gle_checkpoints = parse_csv_env("GROWFORMER_GLE_CHECKPOINTS");
+    let gle_checkpoint_weights = parse_csv_env_f32("GROWFORMER_GLE_WEIGHTS");
+    let config = LanguageConfig {
+        encoder: EncoderPreset::BertClass,
+        bridge_output_dim: 64,
+        ema_alpha,
+        ood_similarity_threshold: 0.15,
+        gle_http_endpoint: std::env::var("GROWFORMER_GLE_HTTP_ENDPOINT").ok(),
+        gle_checkpoint,
+        gle_checkpoints,
+        gle_checkpoint_weights,
+    };
+    build_language_demo_manager_with_config(ema_alpha, config)
+}
+
+pub fn build_language_demo_manager_with_config(
+    _ema_alpha: f32,
+    lang_config: LanguageConfig,
 ) -> Result<(DimensionManager, GroupId, GroupId, CalibrationReport), String> {
     let mut data_rng = StdRng::seed_from_u64(7);
     let config = DimensionManagerConfig {
@@ -71,19 +111,7 @@ pub fn build_language_demo_manager(
         .force_promote("coding", &cal_coding)
         .ok_or_else(|| "failed to promote coding mirror".to_string())?;
 
-    let gle_checkpoint = std::env::var("GROWFORMER_GLE_CHECKPOINT").ok();
-    let gle_checkpoints = parse_csv_env("GROWFORMER_GLE_CHECKPOINTS");
-    let gle_checkpoint_weights = parse_csv_env_f32("GROWFORMER_GLE_WEIGHTS");
-    dm.configure_language(LanguageConfig {
-        encoder: EncoderPreset::BertClass,
-        bridge_output_dim: 64,
-        ema_alpha,
-        ood_similarity_threshold: 0.15,
-        gle_http_endpoint: std::env::var("GROWFORMER_GLE_HTTP_ENDPOINT").ok(),
-        gle_checkpoint,
-        gle_checkpoints,
-        gle_checkpoint_weights,
-    });
+    dm.configure_language(lang_config);
 
     let calibration = build_language_calibration_dataset();
     let requirements = CalibrationRequirements {
@@ -118,6 +146,7 @@ pub fn build_language_demo_manager(
     Ok((dm, support_gid, coding_gid, report))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_csv_env(key: &str) -> Vec<String> {
     std::env::var(key)
         .ok()
@@ -131,6 +160,7 @@ fn parse_csv_env(key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_csv_env_f32(key: &str) -> Option<Vec<f32>> {
     let raw = std::env::var(key).ok()?;
     let mut out = Vec::new();
@@ -254,4 +284,3 @@ fn build_language_calibration_dataset() -> CalibrationDataset {
     }
     CalibrationDataset { samples }
 }
-

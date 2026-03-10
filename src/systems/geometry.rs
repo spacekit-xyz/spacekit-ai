@@ -1,4 +1,5 @@
 use rand::Rng;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use crate::types::*;
 use crate::neuron::Neuron;
@@ -87,8 +88,7 @@ pub fn update_geometry(
         .map(|(&id, n)| (id, n.synapses.iter().map(|s| (s.target, s.metabolic_cost())).collect()))
         .collect();
 
-    // Parallel force computation
-    let forces: Vec<(NeuronId, Vec3)> = snapshot.par_iter()
+    let forces: Vec<(NeuronId, Vec3)> = crate::maybe_par_iter!(snapshot)
         .map(|(&id, &(pos, act, mass, layer, group_id))| {
             let centroid = layer_centroids.get(layer).copied().unwrap_or(Vec3::zero());
             let mut f = Vec3::zero();

@@ -14,7 +14,9 @@ use crate::neuron::Neuron;
 use crate::types::NeuronGroup;
 use crate::dimension::MainDimension;
 use crate::dimension::LanguageRuntime;
+#[cfg(not(target_arch = "wasm32"))]
 use rand::rngs::StdRng;
+#[cfg(not(target_arch = "wasm32"))]
 use rand::SeedableRng;
 
 // =============================================================================
@@ -48,6 +50,7 @@ pub struct Phase2Checkpoint {
 // save_phase2_checkpoint — call after freeze_consolidated_pathway() in train-a
 // =============================================================================
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn save_phase2_checkpoint(
     env: &crate::environment::NeuralEnvironment,
     group_a_ids: &[NeuronId],
@@ -100,6 +103,7 @@ pub fn save_phase2_checkpoint(
 // load_phase2_checkpoint — reconstructs env; frozen flags come from saved state
 // =============================================================================
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_phase2_checkpoint(
     path: &str,
     config: &crate::types::EnvironmentConfig,
@@ -164,6 +168,7 @@ pub struct MnistCheckpoint {
     pub baseline_accs: Vec<f32>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn save_mnist_checkpoint(
     main: &MainDimension,
     group_order: &[GroupId],
@@ -180,6 +185,7 @@ pub fn save_mnist_checkpoint(
     println!("  Checkpoint saved: {} ({} KB)", path, json.len() / 1024);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_mnist_checkpoint(path: &str) -> (MainDimension, Vec<GroupId>, Vec<f32>) {
     let json = std::fs::read_to_string(path).unwrap_or_else(|_| panic!("Checkpoint not found: {}\nRun --mnist first and complete all 5 tasks.", path));
     let ckpt: MnistCheckpoint = serde_json::from_str(&json).expect("MnistCheckpoint deserialization failed");
@@ -196,6 +202,7 @@ pub struct LanguageCheckpoint {
     pub group_language_vectors: HashMap<GroupId, Vec<f32>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn save_language_checkpoint(
     runtime: &LanguageRuntime,
     group_language_vectors: &HashMap<GroupId, Vec<f32>>,
@@ -210,10 +217,19 @@ pub fn save_language_checkpoint(
     println!("  Language checkpoint saved: {} ({} KB)", path, json.len() / 1024);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_language_checkpoint(path: &str) -> (LanguageRuntime, HashMap<GroupId, Vec<f32>>) {
     let json = std::fs::read_to_string(path).unwrap_or_else(|_| panic!("Language checkpoint not found: {}", path));
     let ckpt: LanguageCheckpoint = serde_json::from_str(&json).expect("LanguageCheckpoint deserialization failed");
     (ckpt.runtime, ckpt.group_language_vectors)
+}
+
+pub fn serialize_checkpoint_to_bytes<T: Serialize>(val: &T) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(val).map_err(|e| format!("serialize failed: {}", e))
+}
+
+pub fn deserialize_checkpoint_from_bytes<T: for<'de> Deserialize<'de>>(data: &[u8]) -> Result<T, String> {
+    serde_json::from_slice(data).map_err(|e| format!("deserialize failed: {}", e))
 }
 
 // =============================================================================
@@ -222,7 +238,7 @@ pub fn load_language_checkpoint(path: &str) -> (LanguageRuntime, HashMap<GroupId
 // checkpoint load (e.g. 50% retention on load).
 // =============================================================================
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::types::{Vec3, EnvironmentConfig, Synapse};

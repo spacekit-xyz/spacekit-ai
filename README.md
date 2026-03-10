@@ -90,6 +90,64 @@ Runtime topology (shared library path):
 
 This means both entrypoints now use the same in-process inference and initialization path.
 
+`WASM (wasm32)` -> `growformer::service::LanguageService` -> `dimension::{action,generation,codegen}`
+
+The library compiles to `wasm32-unknown-unknown` with `--no-default-features`.
+
+---
+
+## **WASM Support**
+
+The Growformer library compiles to WebAssembly. Only the **lib crate** targets WASM — the CLI and Node binaries are native-only.
+
+### Feature flags
+
+| Feature | Default | What it enables |
+|---------|---------|-----------------|
+| `native` | yes | `reqwest` HTTP encoder, filesystem checkpoint loading |
+| `server` | yes | `axum`/`tokio` HTTP server (`growformer-node` binary) |
+| `parallel` | yes | `rayon` parallel iterators in compute path |
+| `cli` | yes | `clap`, `indicatif`, `mnist`, `kiddo` for the CLI binary |
+
+WASM builds disable all of these:
+
+```bash
+cargo check --lib --no-default-features --target wasm32-unknown-unknown
+```
+
+### WASM API usage
+
+```rust
+use growformer::dimension::LanguageConfig;
+use growformer::service::LanguageService;
+
+let config = LanguageConfig::default();
+let mut svc = LanguageService::new_with_config(config)?;
+
+// Optional: load GLE checkpoints from pre-fetched bytes
+svc.load_gle_students_from_bytes(&[&checkpoint_bytes])?;
+
+let action = svc.action("implement a rust web server")?;
+let (_action, response) = svc.generation("help me reset my password")?;
+let (_action, code) = svc.codegen("implement a rust web server")?;
+```
+
+### What is gated behind `#[cfg(not(target_arch = "wasm32"))]`
+
+- `LanguageService::new_default()` (reads env vars — use `new_with_config()` instead)
+- `GleStudentCheckpoint::load()` (reads filesystem — use `from_bytes()` instead)
+- All `save_*`/`load_*` checkpoint functions (use `serialize_checkpoint_to_bytes()`/`deserialize_checkpoint_from_bytes()`)
+- `HttpGleEncoder` (requires `reqwest`)
+- `pub mod mnist` (depends on `mnist` crate filesystem I/O)
+
+### What is gated behind `#[cfg(feature = "parallel")]`
+
+- `rayon` parallel iterators. When disabled, all compute falls back to sequential `.iter()`.
+
+### Entropy
+
+WASM builds automatically pull in `getrandom` with the `js` feature for `rand` entropy via `crypto.getRandomValues()`.
+
 ---
 
 ## **Growformer Language Encoder (GLE)**

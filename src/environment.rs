@@ -1,4 +1,5 @@
 use rand::Rng;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -385,9 +386,7 @@ impl NeuralEnvironment {
                 })
                 .collect();
 
-            // Parallel: compute pre-activation sum for each neuron in this layer
-            let sums: Vec<(NeuronId, f32)> = layer_ids
-                .par_iter()
+            let sums: Vec<(NeuronId, f32)> = crate::maybe_par_iter!(layer_ids)
                 .map(|&nid| {
                     let sum: f32 = prev_layer
                         .iter()
@@ -656,8 +655,7 @@ impl NeuralEnvironment {
                 .collect();
 
             type SynUpdate = (NeuronId, f32, bool);
-            let updates: Vec<(NeuronId, f32, Option<f32>, Vec<SynUpdate>)> = snapshot
-                .par_iter()
+            let updates: Vec<(NeuronId, f32, Option<f32>, Vec<SynUpdate>)> = crate::maybe_par_iter!(snapshot)
                 .map(|(src_id, src_act, mass, frozen, is_cons, weight, syn_snap)| {
                     let is_input = layer_of.get(src_id) == Some(&0);
                     let eff_lr = if *frozen || *is_cons {

@@ -17,19 +17,29 @@ path = "src/main.rs"
 name = "growformer-node"
 path = "src/server.rs"
 
+[features]
+default = ["native", "server", "parallel", "cli"]
+native = ["reqwest"]
+server = ["axum", "tokio", "tower-http", "async-stream", "futures-core", "uuid"]
+parallel = ["rayon"]
+cli = ["clap", "indicatif", "mnist", "kiddo"]
+
 [dependencies]
-clap = { version = "4.5.60", features = ["derive"] }
-indicatif = "0.17"
-kiddo = "5.2.4"
-mnist = "0.6"
+clap = { version = "4.5.60", features = ["derive"], optional = true }
+indicatif = { version = "0.17", optional = true }
+kiddo = { version = "5.2.4", optional = true }
+mnist = { version = "0.6", optional = true }
 rand = "0.8"
-rayon = "1.8"
+rayon = { version = "1.8", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-axum = "0.7"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-uuid = { version = "1", features = ["v4", "serde"] }
-tower-http = { version = "0.5", features = ["cors"] }
-async-stream = "0.3"
-futures-core = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
+uuid = { version = "1", features = ["v4", "serde"], optional = true }
+axum = { version = "0.7", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
+tower-http = { version = "0.5", features = ["cors"], optional = true }
+async-stream = { version = "0.3", optional = true }
+futures-core = { version = "0.3", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
