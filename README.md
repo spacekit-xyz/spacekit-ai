@@ -183,6 +183,7 @@ M5 dataset scaffolding (coding retention):
   - `data/language/m5/train_architectural_patterns.jsonl`
   - `data/language/m5/eval_architectural_patterns_holdout.jsonl`
   - `data/language/m5/retention_patterns_eval_splits.json`
+  - Current size: train `48 + 48`, holdout `24 + 24`
 
 Benchmarks:
 
