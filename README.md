@@ -149,6 +149,10 @@ Operational commands:
   `cargo run -- --m5-retention-eval --m5-retention-plan data/language/m5/retention_eval_splits.json --m5-epochs 30 --m5-lr 0.2 --m5-feature-dim 512 --m5-replay-per-epoch 24 --m5-retention-report reports/m5_retention_report_replay.json`
 - M5 subject training (design + architectural patterns):
   `cargo run -- --m5-retention-eval --m5-retention-plan data/language/m5/retention_patterns_eval_splits.json --m5-epochs 30 --m5-lr 0.2 --m5-feature-dim 512 --m5-replay-per-epoch 24 --m5-retention-report reports/m5_retention_patterns_report.json`
+- M5 subject training with prior-domain replay bias:
+  `cargo run -- --m5-retention-eval --m5-retention-plan data/language/m5/retention_patterns_eval_splits.json --m5-epochs 40 --m5-lr 0.2 --m5-feature-dim 512 --m5-replay-per-epoch 24 --m5-replay-prior-ratio 0.9 --m5-retention-report reports/m5_retention_patterns_report_v3.json`
+- M5 targeted interference fix run (domain/intent-aware features):
+  `cargo run -- --m5-retention-eval --m5-retention-plan data/language/m5/retention_patterns_eval_splits.json --m5-epochs 60 --m5-lr 0.2 --m5-feature-dim 512 --m5-replay-per-epoch 36 --m5-replay-prior-ratio 0.9 --m5-retention-report reports/m5_retention_patterns_report_v7.json`
 - Evaluate M4 constrained generation:
   `cargo run -- --language-generation-eval --action-eval-data data/language/stage_ab_action_eval_extended.jsonl --generation-eval-report reports/m4_generation_eval_extended.json`
 - Validate M4 constrained generation gate:

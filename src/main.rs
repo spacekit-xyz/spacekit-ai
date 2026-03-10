@@ -165,6 +165,9 @@ struct Args {
     /// Replay samples mixed into each epoch to reduce forgetting.
     #[arg(long, default_value_t = 24)]
     m5_replay_per_epoch: usize,
+    /// Fraction of replay batch dedicated to prior-domain samples (anti-forgetting).
+    #[arg(long, default_value_t = 0.8)]
+    m5_replay_prior_ratio: f32,
     /// M4 eval: evaluate constrained generation on Stage A+B data.
     #[arg(long)]
     language_generation_eval: bool,
@@ -237,6 +240,7 @@ fn main() {
             args.m5_lr,
             args.m5_feature_dim,
             args.m5_replay_per_epoch,
+            args.m5_replay_prior_ratio,
             args.m5_retention_report.as_deref(),
         ) {
             eprintln!("Failed M5 retention eval: {}", e);
@@ -2515,6 +2519,8 @@ struct M5CodeRecord {
     code_language: Option<String>,
     #[serde(default)]
     semantic_intent: Option<String>,
+    #[serde(default)]
+    domain: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2549,6 +2555,7 @@ struct M5RetentionReport {
     learning_rate: f32,
     feature_dim: usize,
     replay_per_epoch: usize,
+    replay_prior_ratio: f32,
     phase_reports: Vec<M5PhaseReport>,
     domain_retention: Vec<M5DomainRetention>,
     mean_retention_ratio: f32,
@@ -2645,7 +2652,7 @@ impl M5Learner {
 
     fn train_epoch(&mut self, records: &[M5CodeRecord], lr: f32) {
         for r in records {
-            let x = hash_features(&r.text, self.feature_dim);
+            let x = feature_vector_for_record(r, self.feature_dim);
             if let Some(lang) = r.code_language.as_deref() {
                 if let Some(t) = self.lang_head.label_idx(&lang.to_ascii_lowercase()) {
                     self.lang_head.train_step(&x, t, lr);
@@ -2658,6 +2665,28 @@ impl M5Learner {
             }
         }
     }
+}
+
+fn feature_vector_for_record(r: &M5CodeRecord, dim: usize) -> Vec<f32> {
+    let mut text = r.text.clone();
+    // Inject structured cues so semantically-close domains (design vs architecture)
+    // remain separable during sequential training.
+    if let Some(d) = r.domain.as_deref() {
+        text.push(' ');
+        text.push_str("domain_");
+        text.push_str(d);
+    }
+    if let Some(i) = r.semantic_intent.as_deref() {
+        text.push(' ');
+        text.push_str("intent_");
+        text.push_str(i);
+    }
+    if let Some(lang) = r.code_language.as_deref() {
+        text.push(' ');
+        text.push_str("lang_");
+        text.push_str(lang);
+    }
+    hash_features(&text, dim)
 }
 
 fn hash_features(text: &str, dim: usize) -> Vec<f32> {
@@ -2708,7 +2737,7 @@ fn eval_m5_file(learner: &M5Learner, file: &str) -> Result<M5PhaseEvalMetric, St
     let mut language_name = "unknown".to_string();
 
     for r in &records {
-        let x = hash_features(&r.text, learner.feature_dim);
+        let x = feature_vector_for_record(r, learner.feature_dim);
         if let Some(expected_lang) = r.code_language.as_deref() {
             language_name = expected_lang.to_ascii_lowercase();
             if !learner.lang_head.labels.is_empty() {
@@ -2747,6 +2776,7 @@ fn run_m5_retention_eval(
     lr: f32,
     feature_dim: usize,
     replay_per_epoch: usize,
+    replay_prior_ratio: f32,
     report_path: Option<&str>,
 ) -> Result<(), String> {
     let plan_json = std::fs::read_to_string(plan_path).map_err(|e| format!("read plan failed: {}", e))?;
@@ -2785,13 +2815,14 @@ fn run_m5_retention_eval(
         for epoch in 0..epochs {
             learner.train_epoch(&train_records, lr);
             if !replay_memory.is_empty() && replay_per_epoch > 0 {
-                let mut replay_batch = Vec::with_capacity(replay_per_epoch);
-                let offset = (epoch as usize * replay_per_epoch) % replay_memory.len();
-                for i in 0..replay_per_epoch {
-                    let idx = (offset + i) % replay_memory.len();
-                    replay_batch.push(replay_memory[idx].clone());
-                }
-                learner.train_epoch(&replay_batch, lr * 0.5);
+                let replay_batch = make_replay_batch(
+                    &replay_memory,
+                    &phase.domain,
+                    replay_per_epoch,
+                    replay_prior_ratio,
+                    epoch as usize,
+                );
+                learner.train_epoch(&replay_batch, lr);
             }
         }
         replay_memory.extend(train_records.iter().cloned());
@@ -2850,6 +2881,7 @@ fn run_m5_retention_eval(
         learning_rate: lr,
         feature_dim,
         replay_per_epoch,
+        replay_prior_ratio,
         phase_reports,
         domain_retention,
         mean_retention_ratio: mean_ret,
@@ -2864,6 +2896,42 @@ fn run_m5_retention_eval(
         println!("  report saved: {}", path);
     }
     Ok(())
+}
+
+fn make_replay_batch(
+    replay_memory: &[M5CodeRecord],
+    current_domain: &str,
+    replay_per_epoch: usize,
+    replay_prior_ratio: f32,
+    epoch_idx: usize,
+) -> Vec<M5CodeRecord> {
+    if replay_memory.is_empty() || replay_per_epoch == 0 {
+        return Vec::new();
+    }
+    let ratio = replay_prior_ratio.clamp(0.0, 1.0);
+    let prior_target = ((replay_per_epoch as f32) * ratio).round() as usize;
+
+    let prior_pool: Vec<&M5CodeRecord> = replay_memory
+        .iter()
+        .filter(|r| r.domain.as_deref().unwrap_or("") != current_domain)
+        .collect();
+    let all_pool: Vec<&M5CodeRecord> = replay_memory.iter().collect();
+    let mut out = Vec::with_capacity(replay_per_epoch);
+
+    if !prior_pool.is_empty() {
+        let off = (epoch_idx * prior_target.max(1)) % prior_pool.len();
+        for i in 0..prior_target.min(replay_per_epoch) {
+            out.push(prior_pool[(off + i) % prior_pool.len()].clone());
+        }
+    }
+    if !all_pool.is_empty() && out.len() < replay_per_epoch {
+        let remaining = replay_per_epoch - out.len();
+        let off = (epoch_idx * remaining.max(1)) % all_pool.len();
+        for i in 0..remaining {
+            out.push(all_pool[(off + i) % all_pool.len()].clone());
+        }
+    }
+    out
 }
 
 #[derive(Debug, Serialize, Deserialize)]
