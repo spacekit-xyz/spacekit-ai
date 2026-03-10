@@ -147,6 +147,8 @@ Operational commands:
   `cargo run -- --m5-retention-eval --m5-retention-plan data/language/m5/retention_eval_splits.json --m5-epochs 30 --m5-lr 0.2 --m5-feature-dim 512 --m5-retention-report reports/m5_retention_report.json`
 - M5 retention eval with replay anti-forgetting:
   `cargo run -- --m5-retention-eval --m5-retention-plan data/language/m5/retention_eval_splits.json --m5-epochs 30 --m5-lr 0.2 --m5-feature-dim 512 --m5-replay-per-epoch 24 --m5-retention-report reports/m5_retention_report_replay.json`
+- M5 subject training (design + architectural patterns):
+  `cargo run -- --m5-retention-eval --m5-retention-plan data/language/m5/retention_patterns_eval_splits.json --m5-epochs 30 --m5-lr 0.2 --m5-feature-dim 512 --m5-replay-per-epoch 24 --m5-retention-report reports/m5_retention_patterns_report.json`
 - Evaluate M4 constrained generation:
   `cargo run -- --language-generation-eval --action-eval-data data/language/stage_ab_action_eval_extended.jsonl --generation-eval-report reports/m4_generation_eval_extended.json`
 - Validate M4 constrained generation gate:
@@ -171,6 +173,12 @@ M5 dataset scaffolding (coding retention):
   - Retention target: post-sequence ratio `>= 0.97` per domain
 - Curriculum template for systematic data collection:
   - `data/language/m5/CURRICULUM_V1_TEMPLATE.md`
+- Pattern-subject datasets:
+  - `data/language/m5/train_design_patterns.jsonl`
+  - `data/language/m5/eval_design_patterns_holdout.jsonl`
+  - `data/language/m5/train_architectural_patterns.jsonl`
+  - `data/language/m5/eval_architectural_patterns_holdout.jsonl`
+  - `data/language/m5/retention_patterns_eval_splits.json`
 
 Benchmarks:
 
@@ -187,6 +195,8 @@ Growformer Node (HTTP dev server):
 
 - Start server:
   - `cargo run --bin growformer-node`
+- Start server with perf JSONL logging:
+  - `GROWFORMER_NODE_LOG_PATH=reports/node_perf.jsonl cargo run --bin growformer-node`
 - Health:
   - `curl http://127.0.0.1:8080/v1/health`
 - Chat/codegen request:
