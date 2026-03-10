@@ -2057,13 +2057,18 @@ fn build_language_demo_manager(ema_alpha: f32) -> (DimensionManager, GroupId, Gr
     let support_gid = dm.force_promote("support", &cal_support).expect("promote support");
     let coding_gid = dm.force_promote("coding", &cal_coding).expect("promote coding");
 
+    let gle_checkpoint = std::env::var("GROWFORMER_GLE_CHECKPOINT").ok();
+    let gle_checkpoints = parse_csv_env("GROWFORMER_GLE_CHECKPOINTS");
+    let gle_checkpoint_weights = parse_csv_env_f32("GROWFORMER_GLE_WEIGHTS");
     dm.configure_language(LanguageConfig {
         encoder: EncoderPreset::BertClass,
         bridge_output_dim: 64,
         ema_alpha,
         ood_similarity_threshold: 0.15,
         gle_http_endpoint: std::env::var("GROWFORMER_GLE_HTTP_ENDPOINT").ok(),
-        gle_checkpoint: std::env::var("GROWFORMER_GLE_CHECKPOINT").ok(),
+        gle_checkpoint,
+        gle_checkpoints,
+        gle_checkpoint_weights,
     });
 
     let calibration = build_language_calibration_dataset();
@@ -2089,6 +2094,36 @@ fn build_language_demo_manager(ema_alpha: f32) -> (DimensionManager, GroupId, Gr
         .expect("set coding language vector");
 
     (dm, support_gid, coding_gid, report)
+}
+
+fn parse_csv_env(key: &str) -> Vec<String> {
+    std::env::var(key)
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_csv_env_f32(key: &str) -> Option<Vec<f32>> {
+    let raw = std::env::var(key).ok()?;
+    let mut out = Vec::new();
+    for part in raw.split(',') {
+        let t = part.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if let Ok(v) = t.parse::<f32>() {
+            out.push(v);
+        } else {
+            return None;
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 fn demo_language_pipeline() {

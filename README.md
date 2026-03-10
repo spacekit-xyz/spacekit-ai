@@ -103,6 +103,10 @@ shared 64-d routing space.
 - Checkpoints are private artifacts produced by this repo:
   - `checkpoints/gle_student_base.json`
   - `checkpoints/gle_student_routing_tuned.json`
+- Runtime can load one or many local GLE checkpoints:
+  - Single: `GROWFORMER_GLE_CHECKPOINT=checkpoints/gle_student_routing_tuned.json`
+  - Ensemble: `GROWFORMER_GLE_CHECKPOINTS=checkpoints/gle_student_base.json,checkpoints/gle_student_routing_tuned.json`
+  - Optional ensemble weights: `GROWFORMER_GLE_WEIGHTS=0.3,0.7`
 
 Latest internal routing run with `gle_student_routing_tuned.json`:
 

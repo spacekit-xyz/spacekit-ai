@@ -67,6 +67,14 @@ pub struct LanguageConfig {
     /// Optional local distilled tiny-student checkpoint path (our GLE artifact).
     #[serde(default)]
     pub gle_checkpoint: Option<String>,
+    /// Optional multi-checkpoint ensemble paths for local distilled students.
+    /// When set, these are attempted first; valid checkpoints are combined.
+    #[serde(default)]
+    pub gle_checkpoints: Vec<String>,
+    /// Optional weights for gle_checkpoints (same order). If missing or invalid,
+    /// uniform weighting is used across loaded checkpoints.
+    #[serde(default)]
+    pub gle_checkpoint_weights: Option<Vec<f32>>,
 }
 
 impl Default for LanguageConfig {
@@ -78,6 +86,8 @@ impl Default for LanguageConfig {
             ood_similarity_threshold: 0.15,
             gle_http_endpoint: None,
             gle_checkpoint: None,
+            gle_checkpoints: Vec::new(),
+            gle_checkpoint_weights: None,
         }
     }
 }
@@ -583,11 +593,33 @@ impl LanguageRuntime {
     }
 
     fn build_encoder(&self) -> Box<dyn LanguageEncoder> {
-        if let (EncoderPreset::BertClass, Some(path)) =
-            (&self.config.encoder, self.config.gle_checkpoint.as_ref())
-        {
-            if let Ok(student) = GleStudentCheckpoint::load(path) {
-                return Box::new(GrowformerLanguageEncoder::new(student));
+        if let EncoderPreset::BertClass = &self.config.encoder {
+            let paths = resolved_gle_checkpoint_paths(&self.config);
+            if !paths.is_empty() {
+                let mut loaded: Vec<GleStudentCheckpoint> = Vec::new();
+                let mut target_out_dim: Option<usize> = None;
+                for path in paths {
+                    if let Ok(student) = GleStudentCheckpoint::load(&path) {
+                        let out_dim = student.output_dim();
+                        if let Some(target) = target_out_dim {
+                            if out_dim == target {
+                                loaded.push(student);
+                            }
+                        } else {
+                            target_out_dim = Some(out_dim);
+                            loaded.push(student);
+                        }
+                    }
+                }
+                if loaded.len() == 1 {
+                    return Box::new(GrowformerLanguageEncoder::new(loaded.remove(0)));
+                }
+                if loaded.len() > 1 {
+                    return Box::new(MultiGleEncoder::new(
+                        loaded,
+                        self.config.gle_checkpoint_weights.clone(),
+                    ));
+                }
             }
         }
         if let (EncoderPreset::BertClass, Some(endpoint)) =
@@ -605,12 +637,21 @@ impl LanguageRuntime {
 }
 
 fn configured_encoder_dim(config: &LanguageConfig) -> Option<usize> {
-    if let (EncoderPreset::BertClass, Some(path)) = (&config.encoder, config.gle_checkpoint.as_ref()) {
-        if let Ok(student) = GleStudentCheckpoint::load(path) {
-            return Some(student.w2.len());
+    if let EncoderPreset::BertClass = &config.encoder {
+        for path in resolved_gle_checkpoint_paths(config) {
+            if let Ok(student) = GleStudentCheckpoint::load(&path) {
+                return Some(student.w2.len());
+            }
         }
     }
     None
+}
+
+fn resolved_gle_checkpoint_paths(config: &LanguageConfig) -> Vec<String> {
+    if !config.gle_checkpoints.is_empty() {
+        return config.gle_checkpoints.clone();
+    }
+    config.gle_checkpoint.iter().cloned().collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -647,6 +688,10 @@ impl GleStudentCheckpoint {
         l2_normalize(&mut y);
         y
     }
+
+    fn output_dim(&self) -> usize {
+        self.w2.len()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -673,6 +718,67 @@ impl LanguageEncoder for GrowformerLanguageEncoder {
     fn encode(&self, text: &str) -> Vec<f32> {
         let x = self.base.encode(text);
         self.student.predict(&x)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MultiGleEncoder {
+    students: Vec<GleStudentCheckpoint>,
+    weights: Vec<f32>,
+    base: HashingLanguageEncoder,
+}
+
+impl MultiGleEncoder {
+    fn new(students: Vec<GleStudentCheckpoint>, maybe_weights: Option<Vec<f32>>) -> Self {
+        let n = students.len();
+        let mut weights = maybe_weights.unwrap_or_default();
+        if weights.len() != n || weights.iter().any(|w| *w <= 0.0) {
+            weights = vec![1.0; n];
+        }
+        let sum = weights.iter().sum::<f32>();
+        if sum > 1e-8 {
+            for w in &mut weights {
+                *w /= sum;
+            }
+        } else {
+            let uniform = 1.0 / n as f32;
+            weights.fill(uniform);
+        }
+        let base = HashingLanguageEncoder::new(EncoderPreset::Custom {
+            model_name: "tiny-student-hash".to_string(),
+            output_dim: 256,
+        });
+        Self {
+            students,
+            weights,
+            base,
+        }
+    }
+}
+
+impl LanguageEncoder for MultiGleEncoder {
+    fn output_dim(&self) -> usize {
+        self.students.first().map(|s| s.output_dim()).unwrap_or(0)
+    }
+
+    fn encode(&self, text: &str) -> Vec<f32> {
+        let x = self.base.encode(text);
+        let dim = self.output_dim();
+        if dim == 0 || self.students.is_empty() {
+            return vec![];
+        }
+        let mut out = vec![0.0f32; dim];
+        for (student, &w) in self.students.iter().zip(self.weights.iter()) {
+            let y = student.predict(&x);
+            if y.len() != dim {
+                continue;
+            }
+            for i in 0..dim {
+                out[i] += w * y[i];
+            }
+        }
+        l2_normalize(&mut out);
+        out
     }
 }
 
