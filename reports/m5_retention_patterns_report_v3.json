@@ -8,12 +8,12 @@
     {
       "phase": 1,
       "domain": "design_patterns",
-      "train_samples": 24,
+      "train_samples": 48,
       "evals": [
         {
           "file": "data/language/m5/eval_design_patterns_holdout.jsonl",
           "language": "design_patterns",
-          "samples": 12,
+          "samples": 24,
           "language_accuracy": 1.0,
           "task_accuracy": 1.0,
           "combined_score": 1.0
@@ -23,12 +23,12 @@
     {
       "phase": 2,
       "domain": "architectural_patterns",
-      "train_samples": 24,
+      "train_samples": 48,
       "evals": [
         {
           "file": "data/language/m5/eval_design_patterns_holdout.jsonl",
           "language": "design_patterns",
-          "samples": 12,
+          "samples": 24,
           "language_accuracy": 1.0,
           "task_accuracy": 1.0,
           "combined_score": 1.0
@@ -36,7 +36,7 @@
         {
           "file": "data/language/m5/eval_architectural_patterns_holdout.jsonl",
           "language": "architectural_patterns",
-          "samples": 12,
+          "samples": 24,
           "language_accuracy": 1.0,
           "task_accuracy": 1.0,
           "combined_score": 1.0

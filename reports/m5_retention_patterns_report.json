@@ -3,42 +3,43 @@
   "learning_rate": 0.2,
   "feature_dim": 512,
   "replay_per_epoch": 24,
+  "replay_prior_ratio": 0.8,
   "phase_reports": [
     {
       "phase": 1,
       "domain": "design_patterns",
-      "train_samples": 18,
+      "train_samples": 48,
       "evals": [
         {
           "file": "data/language/m5/eval_design_patterns_holdout.jsonl",
           "language": "design_patterns",
-          "samples": 12,
+          "samples": 24,
           "language_accuracy": 1.0,
-          "task_accuracy": 0.9166667,
-          "combined_score": 0.9583334
+          "task_accuracy": 1.0,
+          "combined_score": 1.0
         }
       ]
     },
     {
       "phase": 2,
       "domain": "architectural_patterns",
-      "train_samples": 12,
+      "train_samples": 48,
       "evals": [
         {
           "file": "data/language/m5/eval_design_patterns_holdout.jsonl",
           "language": "design_patterns",
-          "samples": 12,
-          "language_accuracy": 0.8333333,
-          "task_accuracy": 0.8333333,
-          "combined_score": 0.8333333
+          "samples": 24,
+          "language_accuracy": 1.0,
+          "task_accuracy": 1.0,
+          "combined_score": 1.0
         },
         {
           "file": "data/language/m5/eval_architectural_patterns_holdout.jsonl",
           "language": "architectural_patterns",
-          "samples": 12,
-          "language_accuracy": 0.5833333,
-          "task_accuracy": 0.5,
-          "combined_score": 0.5416666
+          "samples": 24,
+          "language_accuracy": 1.0,
+          "task_accuracy": 1.0,
+          "combined_score": 1.0
         }
       ]
     }
@@ -46,16 +47,16 @@
   "domain_retention": [
     {
       "domain": "architectural_patterns",
-      "baseline_score": 0.5416666,
-      "final_score": 0.5416666,
+      "baseline_score": 1.0,
+      "final_score": 1.0,
       "retention_ratio": 1.0
     },
     {
       "domain": "design_patterns",
-      "baseline_score": 0.9583334,
-      "final_score": 0.8333333,
-      "retention_ratio": 0.8695652
+      "baseline_score": 1.0,
+      "final_score": 1.0,
+      "retention_ratio": 1.0
     }
   ],
-  "mean_retention_ratio": 0.9347826
+  "mean_retention_ratio": 1.0
 }
