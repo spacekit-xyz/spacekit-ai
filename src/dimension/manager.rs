@@ -538,14 +538,48 @@ impl DimensionManager {
         }
     }
 
-    /// Route raw text to a promoted group using encoder -> bridge -> 64-d cosine routing.
+    /// Route raw text to a promoted group using encoder -> bridge -> routing.
+    /// When a trained LearnedRouter is present and dimensions match, uses the router (MLP);
+    /// otherwise falls back to cosine similarity over embedding_library centroids.
     pub fn route_text(&mut self, text: &str) -> Result<LanguageRoutingDecision, String> {
         let bridged = self.language_runtime.bridge_text(text)?;
+        let vec = &bridged.routed_vector;
+        let confidence = bridged.confidence;
+        let ood_threshold = self.language_runtime.config.ood_similarity_threshold;
+
+        let use_router = self.observer.learned_router.as_ref().map_or(false, |r| {
+            r.input_dim == vec.len() && r.num_groups == self.main.group_order.len()
+        });
+
+        if use_router {
+            let router = self.observer.learned_router.as_mut().unwrap();
+            let logits = router.predict_logits(vec);
+            if logits.len() == self.main.group_order.len() {
+                let mut indexed: Vec<(usize, f32)> =
+                    logits.iter().copied().enumerate().collect();
+                indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                let (best_idx, best_logit) = indexed.first().copied().unwrap_or((0, -1e9));
+                let second_logit = indexed.get(1).map(|x| x.1).unwrap_or(-1e9);
+                let margin = best_logit - second_logit;
+                let chosen_group_id = self.main.group_order.get(best_idx).copied();
+                // Router logits are not on cosine scale; only reject when we have no valid group.
+                let rejected_as_ood = chosen_group_id.is_none();
+                return Ok(LanguageRoutingDecision {
+                    chosen_group_id: if rejected_as_ood { None } else { chosen_group_id },
+                    best_similarity: best_logit,
+                    second_similarity: second_logit,
+                    margin,
+                    confidence,
+                    rejected_as_ood,
+                });
+            }
+        }
+
         Ok(route_language_embedding(
             &self.main.embedding_library,
-            &bridged.routed_vector,
-            bridged.confidence,
-            self.language_runtime.config.ood_similarity_threshold,
+            vec,
+            confidence,
+            ood_threshold,
         ))
     }
 

@@ -33,6 +33,6 @@ pub use promotion::{PromotionGateConfig, PromotionDecision, evaluate_promotion, 
 pub use policy::{ContinuousPolicy, Policy};
 pub use router::{LearnedRouter, attend_by_query};
 pub use observer::{GlobalObserver, RoutingConfig};
-pub use action_classifier::{ActionClassifier, action_target_to_type};
+pub use action_classifier::{ActionClassifier, action_target_to_type, action_type_one_hot};
 pub use generation_head::GenerationHead;
 pub use manager::{DimensionManager, DimensionManagerConfig, GroupSummary, MirrorSummary, EpisodicSummary, CheckpointSizeSummary};

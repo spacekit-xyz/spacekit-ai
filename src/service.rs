@@ -4,9 +4,10 @@ use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 
 use crate::dimension::{
-    generate_code_from_action, render_action_template, ActionJson, CalibrationDataset, CalibrationReport,
-    CalibrationRequirements, CheckpointSizeSummary, CodeGeneration, DimensionManager, DimensionManagerConfig,
-    EpisodicSummary, GeneratedResponse, LanguageConfig, LanguageRoutingDecision, LanguageSample,
+    action_type_one_hot, generate_code_from_action, render_action_template, ActionJson, CalibrationDataset,
+    CalibrationReport, CalibrationRequirements, CheckpointSizeSummary, CodeGeneration, DimensionManager,
+    DimensionManagerConfig, EpisodicSummary, GeneratedResponse, LanguageConfig, LanguageRoutingDecision,
+    LanguageSample,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::dimension::EncoderPreset;
@@ -170,7 +171,9 @@ impl LanguageService {
 
         let resp = if let Some(ref head) = self.dm.generation_head {
             if let Ok((raw, _)) = self.dm.language_runtime.encode_and_bridge(text) {
-                let generated = head.generate(&raw, 300, 0.8);
+                let mut cond = raw;
+                cond.extend(action_type_one_hot(&action.action_type));
+                let generated = head.generate(&cond, 300, 0.8);
                 if generated.len() > 5 {
                     GeneratedResponse {
                         text: generated,
@@ -197,7 +200,9 @@ impl LanguageService {
 
         let code = if let Some(ref head) = self.dm.codegen_head {
             if let Ok((raw, _)) = self.dm.language_runtime.encode_and_bridge(text) {
-                let generated = head.generate(&raw, 500, 0.7);
+                let mut cond = raw;
+                cond.extend(action_type_one_hot(&action.action_type));
+                let generated = head.generate(&cond, 500, 0.7);
                 if generated.len() > 5 {
                     let lang = match action.payload {
                         Some(crate::dimension::action::ActionPayload::CodingAssist { ref language_hint, .. }) =>

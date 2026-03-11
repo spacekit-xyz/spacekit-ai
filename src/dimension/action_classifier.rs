@@ -16,6 +16,13 @@ fn action_type_index(at: &ActionType) -> usize {
     }
 }
 
+/// One-hot encoding of action type for conditioning generation heads. Returns a 4-element vector.
+pub fn action_type_one_hot(at: &ActionType) -> [f32; NUM_ACTION_TYPES] {
+    let mut out = [0.0f32; NUM_ACTION_TYPES];
+    out[action_type_index(at)] = 1.0;
+    out
+}
+
 fn index_to_action_type(idx: usize) -> ActionType {
     match idx {
         0 => ActionType::SupportTicket,

@@ -2413,24 +2413,35 @@ fn demo_train_brain(epochs: u32, output_path: &str) -> Result<(), String> {
 
     // ---------------------------------------------------------------
     // Stage 3: Train GenerationHead (response)
+    // Conditioning = [raw_embedding; action_type_one_hot] so the head sees intent.
     // ---------------------------------------------------------------
     println!("\n--- Stage 3: GenerationHead Training (responses) ---");
-    let mut gen_head = GenerationHead::new(raw_dim, 512);
-    let response_pairs: Vec<(&[f32], &str)> = raw_embeddings.iter().zip(samples.iter())
-        .filter_map(|(emb, s)| {
-            s.expected_response.as_deref().map(|r| (emb.as_slice(), r))
-        })
-        .collect();
-    println!("  {} response training pairs", response_pairs.len());
+    let cond_dim = raw_dim + growformer::dimension::action_classifier::NUM_ACTION_TYPES;
+    let mut gen_cond: Vec<Vec<f32>> = Vec::new();
+    let mut gen_resp: Vec<&str> = Vec::new();
+    for (raw, s) in raw_embeddings.iter().zip(samples.iter()) {
+        if let Some(r) = s.expected_response.as_deref() {
+            let mut cond = raw.clone();
+            cond.extend(
+                growformer::dimension::action_type_one_hot(&action_target_to_type(
+                    s.action_target.as_deref().unwrap_or("coding"),
+                )),
+            );
+            gen_cond.push(cond);
+            gen_resp.push(r);
+        }
+    }
+    let mut gen_head = GenerationHead::new(cond_dim, 512);
+    println!("  {} response training pairs (cond_dim={})", gen_cond.len(), cond_dim);
     let gen_epochs = (epochs * 10).max(200);
     let gen_lr = 0.001;
     for epoch in 0..gen_epochs {
         let mut total_loss = 0.0f32;
-        for (emb, resp) in &response_pairs {
-            total_loss += gen_head.train_step(emb, resp, gen_lr);
+        for (cond, resp) in gen_cond.iter().zip(gen_resp.iter()) {
+            total_loss += gen_head.train_step(cond, resp, gen_lr);
         }
         if epoch % 20 == 0 || epoch == gen_epochs - 1 {
-            let avg = total_loss / response_pairs.len().max(1) as f32;
+            let avg = total_loss / gen_cond.len().max(1) as f32;
             println!("  GenHead epoch {}/{} loss={:.4}", epoch, gen_epochs, avg);
         }
     }
@@ -2438,24 +2449,34 @@ fn demo_train_brain(epochs: u32, output_path: &str) -> Result<(), String> {
 
     // ---------------------------------------------------------------
     // Stage 4: Train CodegenHead (code)
+    // Conditioning = [raw_embedding; action_type_one_hot].
     // ---------------------------------------------------------------
     println!("\n--- Stage 4: CodegenHead Training (code) ---");
-    let mut code_head = GenerationHead::new(raw_dim, 512);
-    let code_pairs: Vec<(&[f32], &str)> = raw_embeddings.iter().zip(samples.iter())
-        .filter_map(|(emb, s)| {
-            s.expected_code.as_deref()
-                .filter(|c| !c.is_empty() && *c != "null")
-                .map(|c| (emb.as_slice(), c))
-        })
-        .collect();
-    println!("  {} code training pairs", code_pairs.len());
+    let mut code_cond: Vec<Vec<f32>> = Vec::new();
+    let mut code_tgt: Vec<&str> = Vec::new();
+    for (raw, s) in raw_embeddings.iter().zip(samples.iter()) {
+        if let Some(c) = s.expected_code.as_deref() {
+            if !c.is_empty() && c != "null" {
+                let mut cond = raw.clone();
+                cond.extend(
+                    growformer::dimension::action_type_one_hot(&action_target_to_type(
+                        s.action_target.as_deref().unwrap_or("coding"),
+                    )),
+                );
+                code_cond.push(cond);
+                code_tgt.push(c);
+            }
+        }
+    }
+    let mut code_head = GenerationHead::new(cond_dim, 512);
+    println!("  {} code training pairs (cond_dim={})", code_cond.len(), cond_dim);
     for epoch in 0..gen_epochs {
         let mut total_loss = 0.0f32;
-        for (emb, code) in &code_pairs {
-            total_loss += code_head.train_step(emb, code, gen_lr);
+        for (cond, code) in code_cond.iter().zip(code_tgt.iter()) {
+            total_loss += code_head.train_step(cond, code, gen_lr);
         }
         if epoch % 20 == 0 || epoch == gen_epochs - 1 {
-            let avg = total_loss / code_pairs.len().max(1) as f32;
+            let avg = total_loss / code_cond.len().max(1) as f32;
             println!("  CodeHead epoch {}/{} loss={:.4}", epoch, gen_epochs, avg);
         }
     }
