@@ -49,6 +49,7 @@ impl Default for DimensionManagerConfig {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct DimensionManager {
     pub main: MainDimension,
     pub mirrors: HashMap<String, MirrorDimension>,

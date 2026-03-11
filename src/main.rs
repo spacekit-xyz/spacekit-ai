@@ -190,6 +190,10 @@ struct Args {
     /// Optional path to write acceptance report JSON.
     #[arg(long, value_name = "PATH")]
     acceptance_report_path: Option<String>,
+
+    /// Export a trained brain (DimensionManager) to a binary file for WASM loading.
+    #[arg(long, value_name = "PATH")]
+    export_brain: Option<String>,
 }
 
 fn main() {
@@ -338,6 +342,11 @@ fn main() {
     } else if args.acceptance_report {
         if let Err(e) = demo_acceptance_report(args.acceptance_report_path.as_deref()) {
             eprintln!("Failed acceptance report: {}", e);
+            std::process::exit(1);
+        }
+    } else if let Some(path) = &args.export_brain {
+        if let Err(e) = demo_export_brain(path) {
+            eprintln!("Failed to export brain: {}", e);
             std::process::exit(1);
         }
     } else if args.language_pipeline {
@@ -2303,6 +2312,23 @@ fn demo_acceptance_report(report_path: Option<&str>) -> Result<(), String> {
         "\nOverall: {}",
         if report.passed { "PASS" } else { "FAIL" }
     );
+    Ok(())
+}
+
+fn demo_export_brain(path: &str) -> Result<(), String> {
+    println!("--- Export Brain ---\n");
+    let svc = LanguageService::new_default()?;
+
+    let brain_bytes = svc.export_brain()?;
+    let size_kb = brain_bytes.len() / 1024;
+
+    std::fs::write(path, &brain_bytes).map_err(|e| format!("write failed: {}", e))?;
+
+    println!("Brain exported: {} ({} KB)", path, size_kb);
+    println!("  Groups: {}", svc.dm.main.group_order.len());
+    println!("  Mirrors: {}", svc.dm.mirrors.len());
+    println!("  Episodic episodes: {}", svc.dm.episodic_memory.episodes.len());
+    println!("\nLoad this in WASM with: growformer_load_brain(bytes)");
     Ok(())
 }
 

@@ -33,9 +33,11 @@ pub(crate) use maybe_par_iter_mut;
 
 pub mod dimension;
 pub mod environment;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 pub mod mnist;
 pub mod neuron;
 pub mod systems;
 pub mod types;
 pub mod service;
+#[cfg(feature = "wasm-bindgen")]
+pub mod wasm;

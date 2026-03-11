@@ -185,6 +185,28 @@ impl LanguageService {
     }
 
     // -----------------------------------------------------------------------
+    // Brain export / import (full DimensionManager state)
+    // -----------------------------------------------------------------------
+
+    pub fn export_brain(&self) -> Result<Vec<u8>, String> {
+        crate::systems::checkpoint::serialize_checkpoint_to_bytes(&self.dm)
+    }
+
+    pub fn load_brain(&mut self, data: &[u8]) -> Result<(), String> {
+        let dm: DimensionManager =
+            crate::systems::checkpoint::deserialize_checkpoint_from_bytes(data)?;
+        self.dm = dm;
+        let groups: Vec<_> = self.dm.main.group_order.clone();
+        if let Some(&gid) = groups.first() {
+            self.support_gid = gid;
+        }
+        if let Some(&gid) = groups.get(1) {
+            self.coding_gid = gid;
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
     // M6: Agent mode management
     // -----------------------------------------------------------------------
 
