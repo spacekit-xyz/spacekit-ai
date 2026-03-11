@@ -4,7 +4,7 @@ use growformer::dimension::{
     CalibrationDataset, CalibrationReport, CalibrationRequirements, EncoderPreset, LanguageConfig, LanguageSample,
     DimensionManager, DimensionManagerConfig, HashingLanguageEncoder, LanguageEncoder,
     MainDimension, VirtualGroup, render_action_template, generate_code_from_action,
-    route_language_embedding
+    route_language_embedding, GenerationHead, action_target_to_type,
 };
 use growformer::types::GroupId;
 use std::collections::HashMap;
@@ -194,6 +194,16 @@ struct Args {
     /// Export a trained brain (DimensionManager) to a binary file for WASM loading.
     #[arg(long, value_name = "PATH")]
     export_brain: Option<String>,
+
+    /// Train the full neural brain end-to-end: GLE encoder, router, action classifier, generation heads.
+    #[arg(long)]
+    train_brain: bool,
+    /// Training epochs for brain training.
+    #[arg(long, value_name = "N", default_value_t = 30)]
+    brain_epochs: u32,
+    /// Output path for trained brain binary.
+    #[arg(long, value_name = "PATH", default_value = "brain.bin")]
+    brain_output: String,
 }
 
 fn main() {
@@ -349,6 +359,11 @@ fn main() {
             eprintln!("Failed to export brain: {}", e);
             std::process::exit(1);
         }
+    } else if args.train_brain {
+        if let Err(e) = demo_train_brain(args.brain_epochs, &args.brain_output) {
+            eprintln!("Failed to train brain: {}", e);
+            std::process::exit(1);
+        }
     } else if args.language_pipeline {
         demo_language_pipeline();
     } else if args.language_distill {
@@ -365,7 +380,7 @@ fn main() {
             _ => demo_continual_learning(),
         }
     } else {
-        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, --language-pipeline, --language-distill, --print-gle-card, --validate-gle, --validate-action-schema, --validate-generation, --validate-codegen, --m5-retention-eval, --acceptance-report, --language-action-text, --language-generate-text, --language-code-text, --language-code-eval, --language-action-eval, --language-generation-eval, or --language-ema-ablation");
+        println!("Please specify either --train-brain, --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, --language-pipeline, --language-distill, --print-gle-card, --validate-gle, --validate-action-schema, --validate-generation, --validate-codegen, --m5-retention-eval, --acceptance-report, --language-action-text, --language-generate-text, --language-code-text, --language-code-eval, --language-action-eval, --language-generation-eval, or --language-ema-ablation");
         std::process::exit(1);
     }
 
@@ -2332,6 +2347,160 @@ fn demo_export_brain(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn demo_train_brain(epochs: u32, output_path: &str) -> Result<(), String> {
+    println!("=== Full Neural Brain Training ===\n");
+    let mut rng = StdRng::seed_from_u64(42);
+
+    let samples = load_all_m5_training_data()?;
+    println!("Loaded {} training samples", samples.len());
+
+    let mut svc = LanguageService::new_default()?;
+
+    // Compute both raw (384-dim) and bridged (64-dim) embeddings.
+    // Bridged vectors for routing/classification; raw vectors for generation conditioning.
+    println!("\n--- Computing embeddings ---");
+    let mut raw_embeddings: Vec<Vec<f32>> = Vec::with_capacity(samples.len());
+    let mut bridged_embeddings: Vec<Vec<f32>> = Vec::with_capacity(samples.len());
+    for s in &samples {
+        match svc.dm.language_runtime.encode_and_bridge(&s.text) {
+            Ok((raw, bridged)) => {
+                raw_embeddings.push(raw);
+                bridged_embeddings.push(bridged.routed_vector.clone());
+            }
+            Err(_) => {
+                raw_embeddings.push(vec![0.0; 384]);
+                bridged_embeddings.push(vec![0.0; 64]);
+            }
+        }
+    }
+    let raw_dim = raw_embeddings.first().map_or(384, |e| e.len());
+    let bridge_dim = bridged_embeddings.first().map_or(64, |e| e.len());
+    println!("  {} samples: raw={}d, bridged={}d", samples.len(), raw_dim, bridge_dim);
+
+    let num_groups = svc.dm.main.group_order.len();
+    let group_map = |s: &LanguageSample| -> usize {
+        match s.action_target.as_deref() {
+            Some("support") => 0,
+            Some("coding") => 1.min(num_groups - 1),
+            _ => 1.min(num_groups - 1),
+        }
+    };
+
+    // ---------------------------------------------------------------
+    // Stage 1: Train LearnedRouter on bridged embeddings
+    // ---------------------------------------------------------------
+    println!("\n--- Stage 1: LearnedRouter Training ---");
+    let router_samples: Vec<(Vec<f32>, usize)> = bridged_embeddings.iter().zip(samples.iter())
+        .map(|(emb, s)| (emb.clone(), group_map(s)))
+        .collect();
+    let (router_loss, router_acc) = svc.dm.train_language_router(&router_samples, epochs as usize, &mut rng);
+    println!("  Router loss={:.4} accuracy={:.1}%", router_loss, router_acc * 100.0);
+
+    // ---------------------------------------------------------------
+    // Stage 2: Train ActionClassifier
+    // ---------------------------------------------------------------
+    println!("\n--- Stage 2: ActionClassifier Training ---");
+    let action_samples: Vec<(Vec<f32>, growformer::dimension::action::ActionType)> = bridged_embeddings
+        .iter()
+        .zip(samples.iter())
+        .map(|(emb, s)| {
+            let at = action_target_to_type(s.action_target.as_deref().unwrap_or("coding"));
+            (emb.clone(), at)
+        })
+        .collect();
+    let (clf_loss, clf_acc) = svc.dm.train_action_classifier(&action_samples, 200, 0.05);
+    println!("  Classifier loss={:.4} accuracy={:.1}%", clf_loss, clf_acc * 100.0);
+
+    // ---------------------------------------------------------------
+    // Stage 3: Train GenerationHead (response)
+    // ---------------------------------------------------------------
+    println!("\n--- Stage 3: GenerationHead Training (responses) ---");
+    let mut gen_head = GenerationHead::new(raw_dim, 512);
+    let response_pairs: Vec<(&[f32], &str)> = raw_embeddings.iter().zip(samples.iter())
+        .filter_map(|(emb, s)| {
+            s.expected_response.as_deref().map(|r| (emb.as_slice(), r))
+        })
+        .collect();
+    println!("  {} response training pairs", response_pairs.len());
+    let gen_epochs = (epochs * 10).max(200);
+    let gen_lr = 0.001;
+    for epoch in 0..gen_epochs {
+        let mut total_loss = 0.0f32;
+        for (emb, resp) in &response_pairs {
+            total_loss += gen_head.train_step(emb, resp, gen_lr);
+        }
+        if epoch % 20 == 0 || epoch == gen_epochs - 1 {
+            let avg = total_loss / response_pairs.len().max(1) as f32;
+            println!("  GenHead epoch {}/{} loss={:.4}", epoch, gen_epochs, avg);
+        }
+    }
+    svc.dm.generation_head = Some(gen_head);
+
+    // ---------------------------------------------------------------
+    // Stage 4: Train CodegenHead (code)
+    // ---------------------------------------------------------------
+    println!("\n--- Stage 4: CodegenHead Training (code) ---");
+    let mut code_head = GenerationHead::new(raw_dim, 512);
+    let code_pairs: Vec<(&[f32], &str)> = raw_embeddings.iter().zip(samples.iter())
+        .filter_map(|(emb, s)| {
+            s.expected_code.as_deref()
+                .filter(|c| !c.is_empty() && *c != "null")
+                .map(|c| (emb.as_slice(), c))
+        })
+        .collect();
+    println!("  {} code training pairs", code_pairs.len());
+    for epoch in 0..gen_epochs {
+        let mut total_loss = 0.0f32;
+        for (emb, code) in &code_pairs {
+            total_loss += code_head.train_step(emb, code, gen_lr);
+        }
+        if epoch % 20 == 0 || epoch == gen_epochs - 1 {
+            let avg = total_loss / code_pairs.len().max(1) as f32;
+            println!("  CodeHead epoch {}/{} loss={:.4}", epoch, gen_epochs, avg);
+        }
+    }
+    svc.dm.codegen_head = Some(code_head);
+
+    // ---------------------------------------------------------------
+    // Export brain
+    // ---------------------------------------------------------------
+    println!("\n--- Exporting Brain ---");
+    let brain_bytes = svc.export_brain()?;
+    let size_kb = brain_bytes.len() / 1024;
+    std::fs::write(output_path, &brain_bytes).map_err(|e| format!("write failed: {}", e))?;
+    println!("Brain exported: {} ({} KB)", output_path, size_kb);
+    println!("  Groups: {}", svc.dm.main.group_order.len());
+    println!("  Router: {}", svc.dm.observer.learned_router.is_some());
+    println!("  ActionClassifier: {}", svc.dm.action_classifier.is_some());
+    println!("  GenerationHead: {}", svc.dm.generation_head.is_some());
+    println!("  CodegenHead: {}", svc.dm.codegen_head.is_some());
+
+    // Quick inference demo using the service API (goes through trained heads)
+    println!("\n--- Quick Inference Demo ---");
+    let test_prompts = [
+        "help me reset my password",
+        "implement binary search in Python",
+        "explain the observer pattern",
+    ];
+    for prompt in &test_prompts {
+        println!("\n  prompt: {:?}", prompt);
+        if let Ok(action) = svc.dm.route_text_to_action(prompt) {
+            println!("  action: {:?} (conf={:.2})", action.action_type, action.confidence);
+        }
+        if let Ok((_, resp)) = svc.generation(prompt) {
+            let r = &resp.text;
+            println!("  gen [{}]: {:?}", resp.template_id, &r[..r.len().min(120)]);
+        }
+        if let Ok((_, Some(code))) = svc.codegen(prompt) {
+            let c = &code.code;
+            println!("  code [{}]: {:?}", code.kind, &c[..c.len().min(120)]);
+        }
+    }
+
+    println!("\n=== Brain training complete ===");
+    Ok(())
+}
+
 fn demo_language_action(text: &str) -> Result<(), String> {
     println!("--- Language Action (M3 starter) ---\n");
     let mut svc = LanguageService::new_default()?;
@@ -3475,16 +3644,16 @@ fn demo_language_distill_experiment(
                 CalibrationDataset { samples }
             }
             Ok(_) => {
-                println!("Dataset at {} was empty, falling back to synthetic dataset.", path);
-                build_language_calibration_dataset()
+                println!("Dataset at {} was empty, trying M5 data directory.", path);
+                load_m5_or_synthetic()
             }
             Err(e) => {
-                println!("Failed to load {} ({}) — falling back to synthetic dataset.", path, e);
-                build_language_calibration_dataset()
+                println!("Failed to load {} ({}) — trying M5 data directory.", path, e);
+                load_m5_or_synthetic()
             }
         }
     } else {
-        build_language_calibration_dataset()
+        load_m5_or_synthetic()
     };
     let teacher = HashingLanguageEncoder::new(EncoderPreset::BertClass); // stand-in teacher proxy
     let student_base = HashingLanguageEncoder::new(EncoderPreset::Custom {
@@ -3783,13 +3952,21 @@ fn distill_checkpoint_paths(save_path: Option<&str>) -> (String, String) {
 fn build_routing_finetune_dataset() -> ((Vec<String>, Vec<String>), (Vec<String>, Vec<String>)) {
     let mut support = Vec::new();
     let mut coding = Vec::new();
-    for i in 0..220 {
-        support.push(format!("customer support account login password reset billing ticket {}", i));
-        support.push(format!("help desk request refund subscription issue account recovery {}", i));
-        coding.push(format!("write rust code function parser serde module implementation {}", i));
-        coding.push(format!("debug sql query index compiler stack pointer issue {}", i));
+    if let Ok(samples) = load_all_m5_training_data() {
+        for s in &samples {
+            match s.action_target.as_deref() {
+                Some("support") => support.push(s.text.clone()),
+                Some("coding") => coding.push(s.text.clone()),
+                _ => {}
+            }
+        }
     }
-    // 80/20 split
+    if support.is_empty() || coding.is_empty() {
+        for i in 0..60 {
+            support.push(format!("customer support account login password reset billing ticket {}", i));
+            coding.push(format!("write rust code function parser serde module implementation {}", i));
+        }
+    }
     let split_s = ((support.len() as f32) * 0.8) as usize;
     let split_c = ((coding.len() as f32) * 0.8) as usize;
     (
@@ -3882,6 +4059,8 @@ fn build_language_calibration_dataset() -> CalibrationDataset {
                 },
                 policy_regime: if domain == "safety_refusal" { "strict".to_string() } else { "default".to_string() },
                 language_channel: lang.to_string(),
+                expected_response: None,
+                expected_code: None,
             });
         }
     }
@@ -3903,6 +4082,10 @@ struct JsonlLanguageSample {
     policy_regime: Option<String>,
     #[serde(default)]
     language_channel: Option<String>,
+    #[serde(default)]
+    expected_response: Option<String>,
+    #[serde(default)]
+    expected_code: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -4043,9 +4226,51 @@ fn load_language_samples_jsonl(path: &str) -> Result<Vec<LanguageSample>, String
             action_target: rec.action_target,
             policy_regime: rec.policy_regime.unwrap_or_else(|| "default".to_string()),
             language_channel: rec.language_channel.unwrap_or_else(|| "english".to_string()),
+            expected_response: rec.expected_response,
+            expected_code: rec.expected_code,
         });
     }
     Ok(out)
+}
+
+fn load_m5_or_synthetic() -> CalibrationDataset {
+    match load_all_m5_training_data() {
+        Ok(samples) if !samples.is_empty() => {
+            println!("Loaded M5 training data: {} samples", samples.len());
+            CalibrationDataset { samples }
+        }
+        Ok(_) => {
+            println!("M5 data empty, falling back to synthetic dataset.");
+            build_language_calibration_dataset()
+        }
+        Err(e) => {
+            println!("M5 data not found ({}) — falling back to synthetic dataset.", e);
+            build_language_calibration_dataset()
+        }
+    }
+}
+
+fn load_all_m5_training_data() -> Result<Vec<LanguageSample>, String> {
+    let dir = std::path::Path::new("data/language/m5");
+    if !dir.exists() {
+        return Err(format!("M5 data directory not found: {}", dir.display()));
+    }
+    let mut all = Vec::new();
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|e| format!("read_dir failed: {}", e))?
+        .filter_map(|e| e.ok())
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("train_") && name.ends_with(".jsonl") {
+            let path = entry.path();
+            let samples = load_language_samples_jsonl(path.to_str().unwrap())?;
+            println!("  loaded {}: {} samples", name, samples.len());
+            all.extend(samples);
+        }
+    }
+    Ok(all)
 }
 
 #[derive(Clone, Serialize, Deserialize)]

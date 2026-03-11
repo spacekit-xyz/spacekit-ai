@@ -167,7 +167,26 @@ impl LanguageService {
     pub fn generation(&mut self, text: &str) -> Result<(ActionJson, GeneratedResponse), String> {
         let start = portable_instant();
         let action = self.dm.route_text_to_action(text)?;
-        let resp = render_action_template(&action);
+
+        let resp = if let Some(ref head) = self.dm.generation_head {
+            if let Ok((raw, _)) = self.dm.language_runtime.encode_and_bridge(text) {
+                let generated = head.generate(&raw, 300, 0.8);
+                if generated.len() > 5 {
+                    GeneratedResponse {
+                        text: generated,
+                        template_id: "neural_gen".to_string(),
+                        traceable: false,
+                    }
+                } else {
+                    render_action_template(&action)
+                }
+            } else {
+                render_action_template(&action)
+            }
+        } else {
+            render_action_template(&action)
+        };
+
         self.record_latency(start);
         Ok((action, resp))
     }
@@ -175,7 +194,31 @@ impl LanguageService {
     pub fn codegen(&mut self, text: &str) -> Result<(ActionJson, Option<CodeGeneration>), String> {
         let start = portable_instant();
         let action = self.dm.route_text_to_action(text)?;
-        let code = generate_code_from_action(&action, text);
+
+        let code = if let Some(ref head) = self.dm.codegen_head {
+            if let Ok((raw, _)) = self.dm.language_runtime.encode_and_bridge(text) {
+                let generated = head.generate(&raw, 500, 0.7);
+                if generated.len() > 5 {
+                    let lang = match action.payload {
+                        Some(crate::dimension::action::ActionPayload::CodingAssist { ref language_hint, .. }) =>
+                            language_hint.clone(),
+                        _ => "python".to_string(),
+                    };
+                    Some(CodeGeneration {
+                        language: lang,
+                        code: generated,
+                        kind: "neural_gen".to_string(),
+                    })
+                } else {
+                    generate_code_from_action(&action, text)
+                }
+            } else {
+                generate_code_from_action(&action, text)
+            }
+        } else {
+            generate_code_from_action(&action, text)
+        };
+
         self.record_latency(start);
         Ok((action, code))
     }
@@ -589,6 +632,8 @@ fn build_language_calibration_dataset() -> CalibrationDataset {
                     "default".to_string()
                 },
                 language_channel: lang.to_string(),
+                expected_response: None,
+                expected_code: None,
             });
         }
     }

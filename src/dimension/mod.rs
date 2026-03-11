@@ -3,8 +3,10 @@
 
 pub mod composition;
 pub mod action;
+pub mod action_classifier;
 pub mod codegen;
 pub mod generation;
+pub mod generation_head;
 pub mod embedding;
 pub mod language;
 pub mod main_dim;
@@ -31,4 +33,6 @@ pub use promotion::{PromotionGateConfig, PromotionDecision, evaluate_promotion, 
 pub use policy::{ContinuousPolicy, Policy};
 pub use router::{LearnedRouter, attend_by_query};
 pub use observer::{GlobalObserver, RoutingConfig};
+pub use action_classifier::{ActionClassifier, action_target_to_type};
+pub use generation_head::GenerationHead;
 pub use manager::{DimensionManager, DimensionManagerConfig, GroupSummary, MirrorSummary, EpisodicSummary, CheckpointSizeSummary};

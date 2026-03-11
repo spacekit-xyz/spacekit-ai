@@ -101,6 +101,8 @@ pub struct LanguageSample {
     pub action_target: Option<String>,
     pub policy_regime: String,
     pub language_channel: String,
+    pub expected_response: Option<String>,
+    pub expected_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -596,6 +598,15 @@ impl LanguageRuntime {
         self.bridge.project(&encoded)
     }
 
+    /// Returns (raw_encoder_vec, bridged_output). The raw vector preserves full information
+    /// for conditioning generation heads; the bridged vector is for routing.
+    pub fn encode_and_bridge(&self, text: &str) -> Result<(Vec<f32>, BridgeOutput), String> {
+        let encoder = self.build_encoder();
+        let encoded = encoder.encode(text);
+        let bridged = self.bridge.project(&encoded)?;
+        Ok((encoded, bridged))
+    }
+
     fn build_encoder(&self) -> Box<dyn LanguageEncoder> {
         if let Some(enc) = self.build_encoder_from_preloaded() {
             return enc;
@@ -950,6 +961,8 @@ mod tests {
                         action_target: None,
                         policy_regime: "default".to_string(),
                         language_channel: "english".to_string(),
+                        expected_response: None,
+                        expected_code: None,
                     })
                 })
                 .collect(),

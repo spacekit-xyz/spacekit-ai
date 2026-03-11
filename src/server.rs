@@ -82,7 +82,31 @@ async fn main() {
         .expect("invalid GROWFORMER_NODE_ADDR");
     let auth_token = std::env::var("GROWFORMER_NODE_TOKEN").ok();
     let log_path = std::env::var("GROWFORMER_NODE_LOG_PATH").ok();
-    let service = LanguageService::new_default().expect("failed to initialize language service");
+    let mut service = LanguageService::new_default().expect("failed to initialize language service");
+
+    // Auto-load trained brain if GROWFORMER_BRAIN_PATH is set or brain.bin exists
+    let brain_path = std::env::var("GROWFORMER_BRAIN_PATH")
+        .unwrap_or_else(|_| "brain.bin".to_string());
+    if let Ok(data) = std::fs::read(&brain_path) {
+        match service.load_brain(&data) {
+            Ok(()) => {
+                let has_gen = service.dm.generation_head.is_some();
+                let has_code = service.dm.codegen_head.is_some();
+                let has_clf = service.dm.action_classifier.is_some();
+                let has_router = service.dm.observer.learned_router.is_some();
+                println!(
+                    "Brain loaded: {} ({} KB) router={} classifier={} gen_head={} code_head={}",
+                    brain_path,
+                    data.len() / 1024,
+                    has_router,
+                    has_clf,
+                    has_gen,
+                    has_code
+                );
+            }
+            Err(e) => eprintln!("Warning: failed to load brain {}: {}", brain_path, e),
+        }
+    }
 
     let state = Arc::new(AppState {
         service: Arc::new(Mutex::new(service)),

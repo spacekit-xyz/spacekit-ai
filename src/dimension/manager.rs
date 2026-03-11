@@ -13,7 +13,9 @@ use crate::types::EnvironmentConfig;
 use crate::types::GroupId;
 
 use super::composition::{EpisodicMemory, Episode, VirtualGroup};
-use super::action::{ActionJson, action_from_routing};
+use super::action::{ActionJson, ActionType, action_from_routing};
+use super::action_classifier::ActionClassifier;
+use super::generation_head::GenerationHead;
 use super::embedding::{compute_group_embedding, build_tag_vector, GroupEmbedding, TAG_VECTOR_DIM};
 use super::language::{
     CalibrationDataset, CalibrationReport, CalibrationRequirements, LanguageConfig,
@@ -57,6 +59,9 @@ pub struct DimensionManager {
     pub episodic_memory: EpisodicMemory,
     pub config: DimensionManagerConfig,
     pub language_runtime: LanguageRuntime,
+    pub action_classifier: Option<ActionClassifier>,
+    pub generation_head: Option<GenerationHead>,
+    pub codegen_head: Option<GenerationHead>,
     next_group_id: GroupId,
     low_confidence_streak: u32,
     pub auto_spawn_threshold: f32,
@@ -72,6 +77,9 @@ impl DimensionManager {
             episodic_memory: EpisodicMemory::new(),
             config,
             language_runtime: LanguageRuntime::new(LanguageConfig::default()),
+            action_classifier: None,
+            generation_head: None,
+            codegen_head: None,
             next_group_id: 0,
             low_confidence_streak: 0,
             auto_spawn_threshold: 0.15,
@@ -309,7 +317,106 @@ impl DimensionManager {
         self.observer.learned_router = Some(router);
     }
 
-    /// Create a VirtualGroup for the given group IDs and train blend weights on data.
+    /// Train a LearnedRouter on (embedding, group_index) pairs from language data.
+    /// `samples` is (embedding_vec, group_index). Returns (train_loss, accuracy).
+    pub fn train_language_router(
+        &mut self,
+        samples: &[(Vec<f32>, usize)],
+        epochs: usize,
+        rng: &mut impl Rng,
+    ) -> (f32, f32) {
+        let num_groups = self.main.group_order.len();
+        if num_groups == 0 || samples.is_empty() {
+            return (0.0, 0.0);
+        }
+        let input_dim = samples[0].0.len();
+        let hidden = 64.min(input_dim);
+        let mut router = LearnedRouter::new(input_dim, num_groups, hidden, rng);
+        let mut indices: Vec<usize> = (0..samples.len()).collect();
+        let mut last_loss = 0.0f32;
+        for _epoch in 0..epochs {
+            indices.shuffle(rng);
+            let mut total_loss = 0.0f32;
+            for &i in &indices {
+                let (ref emb, group_idx) = samples[i];
+                total_loss += router.train_step(emb, group_idx as GroupId, rng);
+            }
+            last_loss = total_loss / indices.len() as f32;
+        }
+        let mut correct = 0usize;
+        for (emb, expected) in samples {
+            if let Some(chosen) = router.choose_group(emb) {
+                if chosen as usize == *expected {
+                    correct += 1;
+                }
+            }
+        }
+        let accuracy = correct as f32 / samples.len() as f32;
+        self.observer.learned_router = Some(router);
+        (last_loss, accuracy)
+    }
+
+    /// Train the action classifier from (embedding, ActionType) pairs with balanced class sampling.
+    /// Returns (loss, accuracy).
+    pub fn train_action_classifier(
+        &mut self,
+        samples: &[(Vec<f32>, ActionType)],
+        epochs: usize,
+        lr: f32,
+    ) -> (f32, f32) {
+        if samples.is_empty() {
+            return (0.0, 0.0);
+        }
+        let input_dim = samples[0].0.len();
+        let mut clf = ActionClassifier::new(input_dim, 48);
+
+        // Group indices by class for balanced sampling
+        use super::action_classifier::NUM_ACTION_TYPES;
+        let mut by_class: Vec<Vec<usize>> = vec![vec![]; NUM_ACTION_TYPES];
+        for (i, (_, at)) in samples.iter().enumerate() {
+            let idx = match at {
+                ActionType::SupportTicket => 0,
+                ActionType::CodingAssist => 1,
+                ActionType::GeneralAssist => 2,
+                ActionType::Fallback => 3,
+            };
+            by_class[idx].push(i);
+        }
+        let active_classes: Vec<usize> = by_class.iter().enumerate()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(i, _)| i)
+            .collect();
+        let samples_per_class_per_epoch = 50;
+
+        let mut last_loss = 0.0f32;
+        let mut rng_seed = 77u64;
+        for _ in 0..epochs {
+            let mut total_loss = 0.0f32;
+            let mut steps = 0usize;
+            for &cls in &active_classes {
+                let pool = &by_class[cls];
+                for k in 0..samples_per_class_per_epoch {
+                    rng_seed = rng_seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    let idx = pool[(rng_seed as usize / 7) % pool.len()];
+                    let (ref emb, ref at) = samples[idx];
+                    total_loss += clf.train_step(emb, at, lr);
+                    steps += 1;
+                    let _ = k;
+                }
+            }
+            last_loss = total_loss / steps.max(1) as f32;
+        }
+        let mut correct = 0usize;
+        for (emb, expected) in samples {
+            if clf.predict(emb) == *expected {
+                correct += 1;
+            }
+        }
+        let accuracy = correct as f32 / samples.len() as f32;
+        self.action_classifier = Some(clf);
+        (last_loss, accuracy)
+    }
+
     /// Returns (trained VirtualGroup, accuracy on data). Use small data (e.g. 20–50 samples).
     pub fn train_composition(
         &mut self,
@@ -456,7 +563,20 @@ impl DimensionManager {
     /// M3 deterministic path: text -> routing -> structured action JSON.
     pub fn route_text_to_action(&mut self, text: &str) -> Result<ActionJson, String> {
         let routing = self.route_text(text)?;
-        Ok(action_from_routing(&self.main, &routing, text))
+        let mut action = action_from_routing(&self.main, &routing, text);
+
+        if let Some(ref clf) = self.action_classifier {
+            if let Ok(bridged) = self.language_runtime.bridge_text_stateless(text) {
+                let (predicted_type, conf) = clf.predict_with_confidence(&bridged.routed_vector);
+                if conf > 0.4 {
+                    action.action_type = predicted_type;
+                    action.confidence = conf;
+                    action.reason = "classified".to_string();
+                }
+            }
+        }
+
+        Ok(action)
     }
 
     /// M3 deterministic path with an explicit OOD threshold override.

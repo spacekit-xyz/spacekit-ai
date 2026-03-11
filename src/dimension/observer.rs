@@ -31,7 +31,6 @@ pub struct GlobalObserver {
     pub promotion_gate_config: PromotionGateConfig,
     pub coherence: f32,
     pub routing_config: RoutingConfig,
-    #[serde(skip)]
     pub learned_router: Option<LearnedRouter>,
     /// Set each infer(); used for logging which group was routed.
     #[serde(skip)]
