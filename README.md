@@ -184,10 +184,15 @@ Current language milestone status:
 - M2 (Embedding-First Routing Validation): complete
 - M3 (Intent-to-Action Layer): complete
 - M4 (Controlled Language Generation, template-only): complete
-  - Gate command: `cargo run -- --validate-action-schema --action-eval-data data/language/stage_ab_action_eval_extended.jsonl --action-eval-report reports/m3_action_eval_extended.json`
-  - Latest result: PASS on Stage A+B extended evaluation dataset
-  - M4 gate command: `cargo run -- --validate-generation --action-eval-data data/language/stage_ab_action_eval_extended.jsonl --generation-eval-report reports/m4_generation_eval_extended.json`
-  - Latest result: PASS (task-success non-regression + template hallucination baseline)
+- M5 (Continual Language Learning Integration): complete
+- M6 (Production Agent Modes): complete
+
+Gate commands:
+
+- M3: `cargo run -- --validate-action-schema --action-eval-data data/language/stage_ab_action_eval_extended.jsonl`
+- M4: `cargo run -- --validate-generation --action-eval-data data/language/stage_ab_action_eval_extended.jsonl`
+- M5: `cargo run -- --m5-retention-eval --m5-retention-plan data/language/m5/retention_eval_splits_full.json`
+- M6: `cargo run -- --acceptance-report`
 
 Operational commands:
 
@@ -227,12 +232,30 @@ Operational commands:
   `cargo run -- --language-generation-eval --action-eval-data data/language/stage_ab_action_eval_extended.jsonl --generation-eval-report reports/m4_generation_eval_extended.json`
 - Validate M4 constrained generation gate:
   `cargo run -- --validate-generation --action-eval-data data/language/stage_ab_action_eval_extended.jsonl --generation-eval-report reports/m4_generation_eval_extended.json`
+- M5 full 7-domain retention (coding + patterns + Stage C/D):
+  `cargo run -- --m5-retention-eval --m5-retention-plan data/language/m5/retention_eval_splits_full.json --m5-epochs 20 --m5-retention-report reports/m5_retention_full.json`
+- M6 acceptance report: `cargo run -- --acceptance-report --acceptance-report-path reports/m6_acceptance.json`
 - CI helper script: `scripts/validate_gle.sh`
 - M3 script with Stage A+B data: `scripts/validate_action_schema.sh data/language/stage_ab_action_eval.jsonl reports/m3_action_eval.json`
 - M4 script with Stage A+B data: `scripts/validate_generation.sh data/language/stage_ab_action_eval_extended.jsonl reports/m4_generation_eval_extended.json`
 - Full stack gate (GLE + M3 + M4): `scripts/validate_stack.sh checkpoints/gle_student_routing_tuned.json data/language/stage_ab_action_eval_extended.jsonl reports/m3_action_eval_extended.json reports/m4_generation_eval_extended.json`
 
-M5 dataset scaffolding (coding retention):
+M5 datasets:
+
+- Stage C (multi-turn stateful):
+  - `data/language/m5/train_multi_turn.jsonl` (24 samples)
+  - `data/language/m5/eval_multi_turn_holdout.jsonl` (20 samples)
+- Stage D (adversarial/noisy):
+  - `data/language/m5/train_adversarial.jsonl` (24 samples)
+  - `data/language/m5/eval_adversarial_holdout.jsonl` (20 samples)
+- Full 7-domain retention plan: `data/language/m5/retention_eval_splits_full.json`
+  - Train order: Python -> Rust -> JavaScript -> Design Patterns -> Architectural Patterns -> Multi-turn -> Adversarial
+  - Retention target: post-sequence ratio `>= 0.97` per domain
+  - Latest result: `mean_retention_ratio=1.000` across all 7 domains
+- Automatic Mirror spawn trigger: K=10 consecutive low-confidence routing batches
+  - Configured via `DimensionManager::auto_spawn_k` and `auto_spawn_threshold`
+
+M5 coding datasets (original):
 
 - Python train set: `data/language/m5/train_python_coding.jsonl`
 - Rust train set: `data/language/m5/train_rust_coding.jsonl`
@@ -282,6 +305,27 @@ Growformer Node (HTTP dev server):
   - `curl -N -X POST http://127.0.0.1:8080/v1/chat/stream -H "Content-Type: application/json" -d '{"mode":"codegen","message":"implement a web server in rust"}'`
 - Runtime note:
   - `growformer-node` now calls Growformer as a shared library in-process (no CLI subprocess per request).
+
+M6 Agent Modes:
+
+- Two modes share one backend:
+  - **ContextFile** — retrieval-augmented agent. Injects context snippets, reads micro-brain episodic summaries (read-only).
+  - **MicroBrain** — trained compact brain agent. Routes via Growformer language pipeline, consumes retrieval snippets if available.
+- Shared-state contract:
+  - Context-file mode may read episodic summaries via `read_episodic_summaries()`.
+  - Micro-brain mode may consume retrieval snippets via `context_snippets()`.
+  - Raw episodic memory is never directly mutated by context-file mode.
+  - Every cross-mode handoff is logged with mode origin, confidence, reason, and timestamp.
+- API endpoints:
+  - `POST /v1/mode` — switch between `context_file` and `micro_brain`
+  - `GET /v1/acceptance` — full M6 acceptance report JSON
+  - `GET /v1/health` — now includes `agent_mode` field
+  - `POST /v1/chat` — now accepts optional `agent_mode` and `context_snippets` fields
+- SLO tracking:
+  - Latency P95 tracked per inference call (configurable via `SloConfig`)
+  - Checkpoint domain count tracked
+  - Acceptance report includes pass/fail against SLO targets
+- CLI: `cargo run -- --acceptance-report --acceptance-report-path reports/m6_acceptance.json`
 
 ---
 

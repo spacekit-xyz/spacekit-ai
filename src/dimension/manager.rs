@@ -57,6 +57,9 @@ pub struct DimensionManager {
     pub config: DimensionManagerConfig,
     pub language_runtime: LanguageRuntime,
     next_group_id: GroupId,
+    low_confidence_streak: u32,
+    pub auto_spawn_threshold: f32,
+    pub auto_spawn_k: u32,
 }
 
 impl DimensionManager {
@@ -69,6 +72,9 @@ impl DimensionManager {
             config,
             language_runtime: LanguageRuntime::new(LanguageConfig::default()),
             next_group_id: 0,
+            low_confidence_streak: 0,
+            auto_spawn_threshold: 0.15,
+            auto_spawn_k: 10,
         }
     }
 
@@ -504,6 +510,84 @@ impl DimensionManager {
         let v = self.build_group_language_vector_from_texts(texts)?;
         self.set_group_language_vector(group_id, v)
     }
+
+    /// Track routing confidence and detect when K consecutive route calls
+    /// fall below `auto_spawn_threshold`. Returns `Some(task_name)` when the
+    /// spawn trigger fires, or `None` if confidence is still acceptable.
+    /// Caller is responsible for actually spawning the mirror if desired.
+    pub fn track_confidence_for_auto_spawn(
+        &mut self,
+        routing: &LanguageRoutingDecision,
+    ) -> Option<String> {
+        let below = routing.rejected_as_ood
+            || routing.best_similarity < self.auto_spawn_threshold;
+        if below {
+            self.low_confidence_streak += 1;
+        } else {
+            self.low_confidence_streak = 0;
+        }
+        if self.low_confidence_streak >= self.auto_spawn_k {
+            self.low_confidence_streak = 0;
+            let name = format!("auto_spawn_{}", self.next_group_id);
+            Some(name)
+        } else {
+            None
+        }
+    }
+
+    /// Route text and auto-check for mirror spawn trigger.
+    /// Returns (routing_decision, Option<suggested_mirror_name>).
+    pub fn route_text_with_spawn_check(
+        &mut self,
+        text: &str,
+    ) -> Result<(LanguageRoutingDecision, Option<String>), String> {
+        let routing = self.route_text(text)?;
+        let spawn = self.track_confidence_for_auto_spawn(&routing);
+        Ok((routing, spawn))
+    }
+
+    pub fn low_confidence_streak(&self) -> u32 {
+        self.low_confidence_streak
+    }
+
+    /// Summarize episodic memory for cross-mode read access (M6 shared-state contract).
+    pub fn episodic_summaries(&self) -> Vec<EpisodicSummary> {
+        self.episodic_memory
+            .episodes
+            .iter()
+            .enumerate()
+            .map(|(i, ep)| EpisodicSummary {
+                index: i,
+                group_ids: ep.group_ids.clone(),
+                accuracy: ep.accuracy,
+                residual: ep.residual,
+            })
+            .collect()
+    }
+
+    /// Count of checkpoint-worthy state: groups, mirrors, episodes.
+    pub fn checkpoint_size_summary(&self) -> CheckpointSizeSummary {
+        CheckpointSizeSummary {
+            promoted_groups: self.main.group_order.len(),
+            active_mirrors: self.mirrors.len(),
+            episodic_episodes: self.episodic_memory.episodes.len(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpisodicSummary {
+    pub index: usize,
+    pub group_ids: Vec<GroupId>,
+    pub accuracy: f32,
+    pub residual: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointSizeSummary {
+    pub promoted_groups: usize,
+    pub active_mirrors: usize,
+    pub episodic_episodes: usize,
 }
 
 #[derive(Debug, Clone)]

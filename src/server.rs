@@ -3,7 +3,7 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use growformer::service::LanguageService;
+use growformer::service::{AgentMode, LanguageService};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::convert::Infallible;
@@ -29,6 +29,10 @@ struct ChatRequest {
     mode: String,
     message: String,
     #[serde(default)]
+    agent_mode: Option<String>,
+    #[serde(default)]
+    context_snippets: Vec<String>,
+    #[serde(default)]
     options: ChatOptions,
 }
 
@@ -42,6 +46,7 @@ struct ChatOptions {
 struct ChatResponse {
     session_id: String,
     mode: String,
+    agent_mode: String,
     latency_ms: u128,
     perf: ChatPerf,
     output: ChatOutput,
@@ -65,6 +70,7 @@ struct ChatPerf {
 struct HealthResponse {
     status: &'static str,
     runtime: &'static str,
+    agent_mode: String,
     log_path: Option<String>,
 }
 
@@ -91,6 +97,8 @@ async fn main() {
         .route("/v1/health", get(health))
         .route("/v1/chat", post(chat))
         .route("/v1/chat/stream", post(chat_stream))
+        .route("/v1/acceptance", get(acceptance))
+        .route("/v1/mode", post(set_mode))
         .layer(cors)
         .with_state(state.clone());
 
@@ -102,11 +110,54 @@ async fn main() {
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
+    let svc = state.service.lock().await;
+    let mode_str = format!("{:?}", svc.active_mode());
     Json(HealthResponse {
         status: "ok",
         runtime: "in_process_lib",
+        agent_mode: mode_str,
         log_path: state.log_path.clone(),
     })
+}
+
+async fn acceptance(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let svc = state.service.lock().await;
+    let report = svc.acceptance_report();
+    Json(serde_json::to_value(&report).unwrap_or_default())
+}
+
+#[derive(Debug, Deserialize)]
+struct SetModeRequest {
+    mode: String,
+    confidence: Option<f32>,
+    reason: Option<String>,
+}
+
+async fn set_mode(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<SetModeRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    authorize(&headers, &state)?;
+    let new_mode = match req.mode.as_str() {
+        "context_file" | "ContextFile" => AgentMode::ContextFile,
+        "micro_brain" | "MicroBrain" => AgentMode::MicroBrain,
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("unknown mode '{}'; use context_file|micro_brain", other),
+            ))
+        }
+    };
+    let mut svc = state.service.lock().await;
+    svc.set_mode(
+        new_mode,
+        req.confidence.unwrap_or(1.0),
+        req.reason.as_deref().unwrap_or("api_request"),
+    );
+    Ok(Json(json!({"ok": true, "mode": format!("{:?}", new_mode)})))
 }
 
 async fn chat(
@@ -152,6 +203,24 @@ async fn run_chat(
         .unwrap_or_else(|| Uuid::new_v4().to_string());
 
     let mut svc = state.service.lock().await;
+
+    if let Some(am) = &req.agent_mode {
+        let new_mode = match am.as_str() {
+            "context_file" | "ContextFile" => Some(AgentMode::ContextFile),
+            "micro_brain" | "MicroBrain" => Some(AgentMode::MicroBrain),
+            _ => None,
+        };
+        if let Some(m) = new_mode {
+            svc.set_mode(m, 1.0, "chat_request");
+        }
+    }
+
+    for snippet in &req.context_snippets {
+        svc.push_context_snippet(snippet.clone());
+    }
+
+    let active_mode = svc.active_mode();
+
     let (text, raw_stdout) = match req.mode.as_str() {
         "action" => {
             let action = svc
@@ -213,6 +282,7 @@ async fn run_chat(
                 .unwrap_or(0),
             "session_id": session_id,
             "mode": req.mode,
+            "agent_mode": format!("{:?}", active_mode),
             "message_chars": req.message.len(),
             "latency_ms": latency_ms,
             "perf": {
@@ -228,6 +298,7 @@ async fn run_chat(
     Ok(ChatResponse {
         session_id: session_id.to_string(),
         mode: req.mode.to_string(),
+        agent_mode: format!("{:?}", active_mode),
         latency_ms,
         perf,
         output: ChatOutput {

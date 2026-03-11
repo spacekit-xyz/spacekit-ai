@@ -1,23 +1,124 @@
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
+use serde::{Deserialize, Serialize};
 
 use crate::dimension::{
     generate_code_from_action, render_action_template, ActionJson, CalibrationDataset, CalibrationReport,
-    CalibrationRequirements, CodeGeneration, DimensionManager, DimensionManagerConfig,
-    GeneratedResponse, LanguageConfig, LanguageSample,
+    CalibrationRequirements, CheckpointSizeSummary, CodeGeneration, DimensionManager, DimensionManagerConfig,
+    EpisodicSummary, GeneratedResponse, LanguageConfig, LanguageRoutingDecision, LanguageSample,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use crate::dimension::{
-    EncoderPreset,
-};
+use crate::dimension::EncoderPreset;
 use crate::types::{EnvironmentConfig, GroupId, Sample};
+
+// ---------------------------------------------------------------------------
+// M6: Agent Modes
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentMode {
+    ContextFile,
+    MicroBrain,
+}
+
+impl Default for AgentMode {
+    fn default() -> Self {
+        AgentMode::MicroBrain
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoffLogEntry {
+    pub from_mode: AgentMode,
+    pub to_mode: AgentMode,
+    pub confidence: f32,
+    pub reason: String,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub timestamp_ms: u128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SloConfig {
+    pub latency_p95_ms: f64,
+    pub max_memory_bytes: u64,
+    pub max_checkpoint_domains: usize,
+}
+
+impl Default for SloConfig {
+    fn default() -> Self {
+        Self {
+            latency_p95_ms: 50.0,
+            max_memory_bytes: 50 * 1024 * 1024,
+            max_checkpoint_domains: 100,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SloSnapshot {
+    pub latency_samples: Vec<f64>,
+    pub latency_p95_ms: f64,
+    pub checkpoint_domains: usize,
+    pub latency_ok: bool,
+    pub checkpoint_ok: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcceptanceReport {
+    pub understanding: UnderstandingMetrics,
+    pub generation: GenerationMetrics,
+    pub continual_learning: ContinualLearningMetrics,
+    pub system: SystemMetrics,
+    pub modes: ModeMetrics,
+    pub passed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnderstandingMetrics {
+    pub groups_count: usize,
+    pub routing_confidence_streak: u32,
+    pub auto_spawn_k: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerationMetrics {
+    pub template_based: bool,
+    pub codegen_languages: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContinualLearningMetrics {
+    pub episodic_episodes: usize,
+    pub checkpoint_summary: CheckpointSizeSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemMetrics {
+    pub slo: SloSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModeMetrics {
+    pub active_mode: AgentMode,
+    pub handoff_count: usize,
+    pub modes_available: Vec<AgentMode>,
+}
+
+// ---------------------------------------------------------------------------
+// LanguageService — core shared service
+// ---------------------------------------------------------------------------
 
 pub struct LanguageService {
     pub dm: DimensionManager,
     pub support_gid: GroupId,
     pub coding_gid: GroupId,
     pub calibration: CalibrationReport,
+    pub mode: AgentMode,
+    pub slo_config: SloConfig,
+    latency_log: Vec<f64>,
+    handoff_log: Vec<HandoffLogEntry>,
+    context_snippets: Vec<String>,
 }
 
 impl LanguageService {
@@ -29,6 +130,11 @@ impl LanguageService {
             support_gid,
             coding_gid,
             calibration: report,
+            mode: AgentMode::MicroBrain,
+            slo_config: SloConfig::default(),
+            latency_log: Vec::new(),
+            handoff_log: Vec::new(),
+            context_snippets: Vec::new(),
         })
     }
 
@@ -39,29 +145,211 @@ impl LanguageService {
             support_gid,
             coding_gid,
             calibration: report,
+            mode: AgentMode::MicroBrain,
+            slo_config: SloConfig::default(),
+            latency_log: Vec::new(),
+            handoff_log: Vec::new(),
+            context_snippets: Vec::new(),
         })
     }
 
+    // -----------------------------------------------------------------------
+    // Core inference (unchanged API, now records latency)
+    // -----------------------------------------------------------------------
+
     pub fn action(&mut self, text: &str) -> Result<ActionJson, String> {
-        self.dm.route_text_to_action(text)
+        let start = portable_instant();
+        let result = self.dm.route_text_to_action(text);
+        self.record_latency(start);
+        result
     }
 
     pub fn generation(&mut self, text: &str) -> Result<(ActionJson, GeneratedResponse), String> {
-        let action = self.action(text)?;
+        let start = portable_instant();
+        let action = self.dm.route_text_to_action(text)?;
         let resp = render_action_template(&action);
+        self.record_latency(start);
         Ok((action, resp))
     }
 
     pub fn codegen(&mut self, text: &str) -> Result<(ActionJson, Option<CodeGeneration>), String> {
-        let action = self.action(text)?;
+        let start = portable_instant();
+        let action = self.dm.route_text_to_action(text)?;
         let code = generate_code_from_action(&action, text);
+        self.record_latency(start);
         Ok((action, code))
     }
 
     pub fn load_gle_students_from_bytes(&mut self, data: &[&[u8]]) -> Result<usize, String> {
         self.dm.language_runtime.load_students_from_bytes(data)
     }
+
+    // -----------------------------------------------------------------------
+    // M6: Agent mode management
+    // -----------------------------------------------------------------------
+
+    pub fn set_mode(&mut self, new_mode: AgentMode, confidence: f32, reason: &str) {
+        if new_mode == self.mode {
+            return;
+        }
+        let entry = HandoffLogEntry {
+            from_mode: self.mode,
+            to_mode: new_mode,
+            confidence,
+            reason: reason.to_string(),
+            #[cfg(not(target_arch = "wasm32"))]
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0),
+        };
+        self.handoff_log.push(entry);
+        self.mode = new_mode;
+    }
+
+    pub fn active_mode(&self) -> AgentMode {
+        self.mode
+    }
+
+    pub fn handoff_log(&self) -> &[HandoffLogEntry] {
+        &self.handoff_log
+    }
+
+    /// Context-file mode: inject retrieval snippets that MicroBrain can also consume.
+    pub fn push_context_snippet(&mut self, snippet: String) {
+        self.context_snippets.push(snippet);
+    }
+
+    pub fn context_snippets(&self) -> &[String] {
+        &self.context_snippets
+    }
+
+    pub fn clear_context_snippets(&mut self) {
+        self.context_snippets.clear();
+    }
+
+    /// Context-file mode: read-only access to micro-brain episodic summaries.
+    pub fn read_episodic_summaries(&self) -> Vec<EpisodicSummary> {
+        self.dm.episodic_summaries()
+    }
+
+    /// Route with auto-spawn detection. Returns (routing, Option<suggested_mirror_name>).
+    pub fn route_with_spawn_check(
+        &mut self,
+        text: &str,
+    ) -> Result<(LanguageRoutingDecision, Option<String>), String> {
+        self.dm.route_text_with_spawn_check(text)
+    }
+
+    // -----------------------------------------------------------------------
+    // M6: SLO tracking
+    // -----------------------------------------------------------------------
+
+    fn record_latency(&mut self, start: u64) {
+        let elapsed = portable_elapsed_ms(start);
+        self.latency_log.push(elapsed);
+        if self.latency_log.len() > 10_000 {
+            self.latency_log.drain(0..5_000);
+        }
+    }
+
+    pub fn slo_snapshot(&self) -> SloSnapshot {
+        let p95 = percentile(&self.latency_log, 0.95);
+        let ckpt = self.dm.checkpoint_size_summary();
+        SloSnapshot {
+            latency_samples: vec![],
+            latency_p95_ms: p95,
+            checkpoint_domains: ckpt.promoted_groups,
+            latency_ok: p95 <= self.slo_config.latency_p95_ms,
+            checkpoint_ok: ckpt.promoted_groups <= self.slo_config.max_checkpoint_domains,
+        }
+    }
+
+    pub fn latency_count(&self) -> usize {
+        self.latency_log.len()
+    }
+
+    // -----------------------------------------------------------------------
+    // M6: Acceptance report
+    // -----------------------------------------------------------------------
+
+    pub fn acceptance_report(&self) -> AcceptanceReport {
+        let slo = self.slo_snapshot();
+        let ckpt = self.dm.checkpoint_size_summary();
+
+        let passed = slo.latency_ok && slo.checkpoint_ok;
+
+        AcceptanceReport {
+            understanding: UnderstandingMetrics {
+                groups_count: ckpt.promoted_groups,
+                routing_confidence_streak: self.dm.low_confidence_streak(),
+                auto_spawn_k: self.dm.auto_spawn_k,
+            },
+            generation: GenerationMetrics {
+                template_based: true,
+                codegen_languages: vec![
+                    "python".into(),
+                    "rust".into(),
+                    "javascript".into(),
+                ],
+            },
+            continual_learning: ContinualLearningMetrics {
+                episodic_episodes: ckpt.episodic_episodes,
+                checkpoint_summary: ckpt,
+            },
+            system: SystemMetrics { slo },
+            modes: ModeMetrics {
+                active_mode: self.mode,
+                handoff_count: self.handoff_log.len(),
+                modes_available: vec![AgentMode::ContextFile, AgentMode::MicroBrain],
+            },
+            passed,
+        }
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Portable timing helpers (work under WASM and native)
+// ---------------------------------------------------------------------------
+
+#[cfg(not(target_arch = "wasm32"))]
+fn portable_instant() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn portable_instant() -> u64 {
+    0
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn portable_elapsed_ms(start_us: u64) -> f64 {
+    let now = portable_instant();
+    (now.saturating_sub(start_us)) as f64 / 1000.0
+}
+
+#[cfg(target_arch = "wasm32")]
+fn portable_elapsed_ms(_start_us: u64) -> f64 {
+    0.0
+}
+
+fn percentile(data: &[f64], p: f64) -> f64 {
+    if data.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = data.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((sorted.len() as f64 - 1.0) * p).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+// ---------------------------------------------------------------------------
+// Builder helpers
+// ---------------------------------------------------------------------------
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn build_language_demo_manager(
@@ -92,7 +380,7 @@ pub fn build_language_demo_manager_with_config(
         mirror_config: phase2_base_config(),
         mirror_layer_sizes: vec![2, 16, 16, 1],
         promotion_check_interval: 999_999,
-        max_concurrent_mirrors: 2,
+        max_concurrent_mirrors: 4,
         calibration_samples: 50,
         reserve_pool_size: 0,
     };

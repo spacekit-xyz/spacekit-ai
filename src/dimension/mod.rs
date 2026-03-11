@@ -31,4 +31,4 @@ pub use promotion::{PromotionGateConfig, PromotionDecision, evaluate_promotion, 
 pub use policy::{ContinuousPolicy, Policy};
 pub use router::{LearnedRouter, attend_by_query};
 pub use observer::{GlobalObserver, RoutingConfig};
-pub use manager::{DimensionManager, DimensionManagerConfig, GroupSummary, MirrorSummary};
+pub use manager::{DimensionManager, DimensionManagerConfig, GroupSummary, MirrorSummary, EpisodicSummary, CheckpointSizeSummary};

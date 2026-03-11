@@ -184,6 +184,12 @@ struct Args {
     /// Optional path to write M4 generation eval/validation report JSON.
     #[arg(long, value_name = "PATH")]
     generation_eval_report: Option<String>,
+    /// M6: Print acceptance report (understanding, generation, continual learning, system metrics).
+    #[arg(long)]
+    acceptance_report: bool,
+    /// Optional path to write acceptance report JSON.
+    #[arg(long, value_name = "PATH")]
+    acceptance_report_path: Option<String>,
 }
 
 fn main() {
@@ -329,6 +335,11 @@ fn main() {
         demo_split_mnist(args.progress, args.mnist_train_limit, args.mnist_max_epochs, args.mnist_batch_size);
     } else if args.mnist_retention {
         demo_mnist_retention();
+    } else if args.acceptance_report {
+        if let Err(e) = demo_acceptance_report(args.acceptance_report_path.as_deref()) {
+            eprintln!("Failed acceptance report: {}", e);
+            std::process::exit(1);
+        }
     } else if args.language_pipeline {
         demo_language_pipeline();
     } else if args.language_distill {
@@ -345,7 +356,7 @@ fn main() {
             _ => demo_continual_learning(),
         }
     } else {
-        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, --language-pipeline, --language-distill, --print-gle-card, --validate-gle, --validate-action-schema, --validate-generation, --validate-codegen, --m5-retention-eval, --language-action-text, --language-generate-text, --language-code-text, --language-code-eval, --language-action-eval, --language-generation-eval, or --language-ema-ablation");
+        println!("Please specify either --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, --language-pipeline, --language-distill, --print-gle-card, --validate-gle, --validate-action-schema, --validate-generation, --validate-codegen, --m5-retention-eval, --acceptance-report, --language-action-text, --language-generate-text, --language-code-text, --language-code-eval, --language-action-eval, --language-generation-eval, or --language-ema-ablation");
         std::process::exit(1);
     }
 
@@ -2249,6 +2260,50 @@ fn demo_language_pipeline() {
         "\nCheckpoint reload smoke test: chosen_group={:?} confidence={:.3}",
         smoke.chosen_group_id, smoke.confidence
     );
+}
+
+fn demo_acceptance_report(report_path: Option<&str>) -> Result<(), String> {
+    println!("--- M6 Acceptance Report ---\n");
+    let mut svc = LanguageService::new_default()?;
+
+    for prompt in &[
+        "help me reset my password",
+        "implement a rust web server",
+        "explain the observer pattern",
+        "what is the capital of france",
+    ] {
+        let _ = svc.action(prompt);
+    }
+
+    svc.set_mode(
+        growformer::service::AgentMode::ContextFile,
+        0.9,
+        "acceptance_test",
+    );
+    svc.push_context_snippet("relevant documentation about auth flows".to_string());
+    let _ = svc.action("check auth flow documentation");
+
+    svc.set_mode(
+        growformer::service::AgentMode::MicroBrain,
+        0.95,
+        "acceptance_test_return",
+    );
+    let _ = svc.action("implement binary search in python");
+
+    let report = svc.acceptance_report();
+    let json = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+    println!("{}", json);
+
+    if let Some(path) = report_path {
+        std::fs::write(path, &json).map_err(|e| format!("write report failed: {}", e))?;
+        println!("\nReport written to {}", path);
+    }
+
+    println!(
+        "\nOverall: {}",
+        if report.passed { "PASS" } else { "FAIL" }
+    );
+    Ok(())
 }
 
 fn demo_language_action(text: &str) -> Result<(), String> {
