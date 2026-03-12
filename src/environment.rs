@@ -589,15 +589,24 @@ impl NeuralEnvironment {
     // -------------------------------------------------------------------------
 
     pub fn backprop(&mut self, output: &[f32], target: &[f32]) -> f32 {
-        let loss = mse_loss(output, target);
+        let loss = if self.config.output_bce {
+            bce_loss(output, target)
+        } else {
+            mse_loss(output, target)
+        };
         let n_layers = self.layers.len();
         let mut deltas: HashMap<NeuronId, f32> = HashMap::new();
+        let use_bce = self.config.output_bce;
 
         // Output layer — update bias immediately
         for (i, &nid) in self.layers[n_layers - 1].iter().enumerate() {
             let o = output.get(i).copied().unwrap_or(0.0);
             let t = target.get(i).copied().unwrap_or(0.0);
-            let delta = (o - t) * o * (1.0 - o);
+            let delta = if use_bce {
+                o - t
+            } else {
+                (o - t) * o * (1.0 - o)
+            };
             deltas.insert(nid, delta);
             if let Some(n) = self.neurons.get_mut(&nid) {
                 if n.frozen { continue; }
@@ -931,6 +940,15 @@ pub struct TickResult {
 pub fn mse_loss(output: &[f32], target: &[f32]) -> f32 {
     output.iter().zip(target.iter())
         .map(|(o, t)| (o - t).powi(2))
+        .sum::<f32>() / output.len() as f32
+}
+
+pub fn bce_loss(output: &[f32], target: &[f32]) -> f32 {
+    output.iter().zip(target.iter())
+        .map(|(o, t)| {
+            let p = o.clamp(1e-7, 1.0 - 1e-7);
+            -(t * p.ln() + (1.0 - t) * (1.0 - p).ln())
+        })
         .sum::<f32>() / output.len() as f32
 }
 

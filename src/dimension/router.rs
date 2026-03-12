@@ -89,6 +89,20 @@ impl LearnedRouter {
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))?;
         Some(idx as GroupId)
     }
+
+    /// Average parameters from multiple routers (same topology). Used for parallel minibatch SGD:
+    /// clone router B times, run B train steps in parallel, then average_from(&clones).
+    pub fn average_from(routers: &[Self]) -> Option<Self> {
+        if routers.is_empty() {
+            return None;
+        }
+        let envs: Vec<NeuralEnvironment> = routers.iter().map(|r| r.env.clone()).collect();
+        Some(LearnedRouter {
+            env: NeuralEnvironment::average_params_from(&envs),
+            num_groups: routers[0].num_groups,
+            input_dim: routers[0].input_dim,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------

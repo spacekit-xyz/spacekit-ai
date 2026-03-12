@@ -4,8 +4,10 @@ use growformer::dimension::{
     CalibrationDataset, CalibrationReport, CalibrationRequirements, EncoderPreset, LanguageConfig, LanguageSample,
     DimensionManager, DimensionManagerConfig, HashingLanguageEncoder, LanguageEncoder,
     MainDimension, VirtualGroup, render_action_template, generate_code_from_action,
-    route_language_embedding, GenerationHead, action_target_to_type,
+    route_language_embedding, GroupGenEnv, action_target_to_type,
 };
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use growformer::types::GroupId;
 use std::collections::HashMap;
 use std::io::Write;
@@ -198,7 +200,19 @@ struct Args {
     /// Train the full neural brain end-to-end: GLE encoder, router, action classifier, generation heads.
     #[arg(long)]
     train_brain: bool,
-    /// Training epochs for brain training.
+    /// Run a quick validation of brain training (cap samples and epochs, then assert inference). Use before long full runs.
+    #[arg(long)]
+    validate_brain_training: bool,
+    /// When validating or for quick runs: max training samples (0 = no cap).
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    brain_max_samples: usize,
+    /// When validating: max generation epochs (0 = use full schedule).
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    brain_quick_gen_epochs: u32,
+    /// Generation epochs for per-group NeuralEnvironment training (0 = auto from brain-epochs × 50).
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    brain_gen_epochs: u32,
+    /// Training epochs for brain training (router + classifier).
     #[arg(long, value_name = "N", default_value_t = 30)]
     brain_epochs: u32,
     /// Output path for trained brain binary.
@@ -359,8 +373,25 @@ fn main() {
             eprintln!("Failed to export brain: {}", e);
             std::process::exit(1);
         }
-    } else if args.train_brain {
-        if let Err(e) = demo_train_brain(args.brain_epochs, &args.brain_output) {
+    } else if args.train_brain || args.validate_brain_training {
+        let max_samples = if args.validate_brain_training && args.brain_max_samples == 0 {
+            100
+        } else {
+            args.brain_max_samples
+        };
+        let quick_gen_epochs = if args.validate_brain_training && args.brain_quick_gen_epochs == 0 {
+            15
+        } else {
+            args.brain_quick_gen_epochs
+        };
+        if let Err(e) = demo_train_brain(
+            args.brain_epochs,
+            &args.brain_output,
+            max_samples,
+            quick_gen_epochs,
+            args.brain_gen_epochs,
+            args.validate_brain_training,
+        ) {
             eprintln!("Failed to train brain: {}", e);
             std::process::exit(1);
         }
@@ -380,7 +411,7 @@ fn main() {
             _ => demo_continual_learning(),
         }
     } else {
-        println!("Please specify either --train-brain, --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, --language-pipeline, --language-distill, --print-gle-card, --validate-gle, --validate-action-schema, --validate-generation, --validate-codegen, --m5-retention-eval, --acceptance-report, --language-action-text, --language-generate-text, --language-code-text, --language-code-eval, --language-action-eval, --language-generation-eval, or --language-ema-ablation");
+        println!("Please specify either --train-brain, --validate-brain-training, --xor, --spiral, --concentric-circles, --mlp, --learning, --fractal, --phase3c, --neurogenesis, --mnist, --mnist-retention, --language-pipeline, --language-distill, --print-gle-card, --validate-gle, --validate-action-schema, --validate-generation, --validate-codegen, --m5-retention-eval, --acceptance-report, --language-action-text, --language-generate-text, --language-code-text, --language-code-eval, --language-action-eval, --language-generation-eval, or --language-ema-ablation");
         std::process::exit(1);
     }
 
@@ -2347,25 +2378,62 @@ fn demo_export_brain(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn demo_train_brain(epochs: u32, output_path: &str) -> Result<(), String> {
+/// Returns batch size for parallel minibatch training (router/heads). Uses available CPU count when the `parallel` feature is on.
+fn brain_parallel_batch_size() -> Option<usize> {
+    #[cfg(feature = "parallel")]
+    {
+        std::thread::available_parallelism()
+            .ok()
+            .map(|p| p.get().min(32).max(2))
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        None
+    }
+}
+
+fn demo_train_brain(
+    epochs: u32,
+    output_path: &str,
+    max_samples: usize,
+    quick_gen_epochs: u32,
+    gen_epochs_override: u32,
+    validate: bool,
+) -> Result<(), String> {
     println!("=== Full Neural Brain Training ===\n");
+    if validate {
+        println!("(validate mode: capped samples and gen epochs, will assert inference)\n");
+    }
     let mut rng = StdRng::seed_from_u64(42);
 
-    let samples = load_all_m5_training_data()?;
+    let mut samples = load_all_m5_training_data()?;
     println!("Loaded {} training samples", samples.len());
+    if max_samples > 0 && samples.len() > max_samples {
+        samples.shuffle(&mut rng);
+        samples.truncate(max_samples);
+        let support_n = samples.iter().filter(|s| s.action_target.as_deref() == Some("support")).count();
+        let coding_n = samples.iter().filter(|s| s.action_target.as_deref() == Some("coding")).count();
+        let other_n = samples.len() - support_n - coding_n;
+        println!("  shuffled and truncated to {} (support={}, coding={}, other={})", samples.len(), support_n, coding_n, other_n);
+    }
 
     let mut svc = LanguageService::new_default()?;
 
     // Compute both raw (384-dim) and bridged (64-dim) embeddings.
     // Bridged vectors for routing/classification; raw vectors for generation conditioning.
+    // When the `parallel` feature is enabled, embedding computation runs in parallel across cores.
     println!("\n--- Computing embeddings ---");
+    let runtime = &svc.dm.language_runtime;
+    let results: Vec<_> = growformer::maybe_par_iter!(samples)
+        .map(|s| runtime.encode_and_bridge(&s.text))
+        .collect();
     let mut raw_embeddings: Vec<Vec<f32>> = Vec::with_capacity(samples.len());
     let mut bridged_embeddings: Vec<Vec<f32>> = Vec::with_capacity(samples.len());
-    for s in &samples {
-        match svc.dm.language_runtime.encode_and_bridge(&s.text) {
+    for res in results {
+        match res {
             Ok((raw, bridged)) => {
                 raw_embeddings.push(raw);
-                bridged_embeddings.push(bridged.routed_vector.clone());
+                bridged_embeddings.push(bridged.routed_vector);
             }
             Err(_) => {
                 raw_embeddings.push(vec![0.0; 384]);
@@ -2393,7 +2461,12 @@ fn demo_train_brain(epochs: u32, output_path: &str) -> Result<(), String> {
     let router_samples: Vec<(Vec<f32>, usize)> = bridged_embeddings.iter().zip(samples.iter())
         .map(|(emb, s)| (emb.clone(), group_map(s)))
         .collect();
-    let (router_loss, router_acc) = svc.dm.train_language_router(&router_samples, epochs as usize, &mut rng);
+    let (router_loss, router_acc) = svc.dm.train_language_router(
+        &router_samples,
+        epochs as usize,
+        &mut rng,
+        brain_parallel_batch_size(),
+    );
     println!("  Router loss={:.4} accuracy={:.1}%", router_loss, router_acc * 100.0);
 
     // ---------------------------------------------------------------
@@ -2412,75 +2485,96 @@ fn demo_train_brain(epochs: u32, output_path: &str) -> Result<(), String> {
     println!("  Classifier loss={:.4} accuracy={:.1}%", clf_loss, clf_acc * 100.0);
 
     // ---------------------------------------------------------------
-    // Stage 3: Train GenerationHead (response)
-    // Conditioning = [raw_embedding; action_type_one_hot] so the head sees intent.
+    // Stages 3+4: Per-group generation envs (Growformer substrate)
+    // Each group gets its own NeuralEnvironment for text AND code generation.
+    // Conditioning = bridged_embedding (64d) — routing already selected the group.
+    // All groups train in parallel (structurally isolated, no shared state).
     // ---------------------------------------------------------------
-    println!("\n--- Stage 3: GenerationHead Training (responses) ---");
-    let cond_dim = raw_dim + growformer::dimension::action_classifier::NUM_ACTION_TYPES;
-    let mut gen_cond: Vec<Vec<f32>> = Vec::new();
-    let mut gen_resp: Vec<&str> = Vec::new();
-    for (raw, s) in raw_embeddings.iter().zip(samples.iter()) {
-        if let Some(r) = s.expected_response.as_deref() {
-            let mut cond = raw.clone();
-            cond.extend(
-                growformer::dimension::action_type_one_hot(&action_target_to_type(
-                    s.action_target.as_deref().unwrap_or("coding"),
-                )),
-            );
-            gen_cond.push(cond);
-            gen_resp.push(r);
-        }
-    }
-    let mut gen_head = GenerationHead::new(cond_dim, 512);
-    println!("  {} response training pairs (cond_dim={})", gen_cond.len(), cond_dim);
-    let gen_epochs = (epochs * 10).max(200);
-    let gen_lr = 0.001;
-    for epoch in 0..gen_epochs {
-        let mut total_loss = 0.0f32;
-        for (cond, resp) in gen_cond.iter().zip(gen_resp.iter()) {
-            total_loss += gen_head.train_step(cond, resp, gen_lr);
-        }
-        if epoch % 20 == 0 || epoch == gen_epochs - 1 {
-            let avg = total_loss / gen_cond.len().max(1) as f32;
-            println!("  GenHead epoch {}/{} loss={:.4}", epoch, gen_epochs, avg);
-        }
-    }
-    svc.dm.generation_head = Some(gen_head);
+    let num_groups = svc.dm.main.group_order.len().max(1);
+    let gen_epochs: usize = if quick_gen_epochs > 0 {
+        quick_gen_epochs as usize
+    } else if gen_epochs_override > 0 {
+        gen_epochs_override as usize
+    } else {
+        (epochs as usize * 50).max(500)
+    };
+    println!("\n--- Stages 3+4: Per-Group Generation Envs (parallel) ---");
+    println!("  gen_epochs={}, num_groups={}", gen_epochs, num_groups);
 
-    // ---------------------------------------------------------------
-    // Stage 4: Train CodegenHead (code)
-    // Conditioning = [raw_embedding; action_type_one_hot].
-    // ---------------------------------------------------------------
-    println!("\n--- Stage 4: CodegenHead Training (code) ---");
-    let mut code_cond: Vec<Vec<f32>> = Vec::new();
-    let mut code_tgt: Vec<&str> = Vec::new();
-    for (raw, s) in raw_embeddings.iter().zip(samples.iter()) {
+    // Partition training data by (group, kind)
+    let mut gen_by_group: HashMap<usize, Vec<(&[f32], &str)>> = HashMap::new();
+    let mut code_by_group: HashMap<usize, Vec<(&[f32], &str)>> = HashMap::new();
+    for (bridged, s) in bridged_embeddings.iter().zip(samples.iter()) {
+        let gidx = group_map(s);
+        if let Some(r) = s.expected_response.as_deref() {
+            gen_by_group.entry(gidx).or_default().push((bridged.as_slice(), r));
+        }
         if let Some(c) = s.expected_code.as_deref() {
             if !c.is_empty() && c != "null" {
-                let mut cond = raw.clone();
-                cond.extend(
-                    growformer::dimension::action_type_one_hot(&action_target_to_type(
-                        s.action_target.as_deref().unwrap_or("coding"),
-                    )),
-                );
-                code_cond.push(cond);
-                code_tgt.push(c);
+                code_by_group.entry(gidx).or_default().push((bridged.as_slice(), c));
             }
         }
     }
-    let mut code_head = GenerationHead::new(cond_dim, 512);
-    println!("  {} code training pairs (cond_dim={})", code_cond.len(), cond_dim);
-    for epoch in 0..gen_epochs {
-        let mut total_loss = 0.0f32;
-        for (cond, code) in code_cond.iter().zip(code_tgt.iter()) {
-            total_loss += code_head.train_step(cond, code, gen_lr);
+
+    // Build task list: (group_idx, kind, data_ref)
+    struct GenTask<'a> {
+        gidx: usize,
+        kind: &'static str,
+        pairs: &'a [(&'a [f32], &'a str)],
+        seed: u64,
+    }
+    let mut tasks: Vec<GenTask> = Vec::new();
+    for gidx in 0..num_groups {
+        if let Some(p) = gen_by_group.get(&gidx) {
+            if !p.is_empty() {
+                tasks.push(GenTask { gidx, kind: "gen", pairs: p.as_slice(), seed: 100 + gidx as u64 });
+            }
         }
-        if epoch % 20 == 0 || epoch == gen_epochs - 1 {
-            let avg = total_loss / code_cond.len().max(1) as f32;
-            println!("  CodeHead epoch {}/{} loss={:.4}", epoch, gen_epochs, avg);
+        if let Some(p) = code_by_group.get(&gidx) {
+            if !p.is_empty() {
+                tasks.push(GenTask { gidx, kind: "code", pairs: p.as_slice(), seed: 200 + gidx as u64 });
+            }
         }
     }
-    svc.dm.codegen_head = Some(code_head);
+    for t in &tasks {
+        println!("  task: group {} {} — {} pairs", t.gidx, t.kind, t.pairs.len());
+    }
+
+    let log_interval = (gen_epochs / 50).max(1);
+    let results: Vec<(usize, &str, GroupGenEnv)> = std::thread::scope(|s| {
+        let handles: Vec<_> = tasks.iter().map(|task| {
+            s.spawn(move || {
+                let mut task_rng = StdRng::seed_from_u64(task.seed);
+                let mut env = GroupGenEnv::new(&mut task_rng);
+                let mut indices: Vec<usize> = (0..task.pairs.len()).collect();
+                for epoch in 0..gen_epochs {
+                    indices.shuffle(&mut task_rng);
+                    let mut total_loss = 0.0f32;
+                    for &i in &indices {
+                        total_loss += env.train_step(task.pairs[i].0, task.pairs[i].1, &mut task_rng);
+                    }
+                    if epoch % log_interval == 0 || epoch == gen_epochs - 1 {
+                        let avg = total_loss / task.pairs.len().max(1) as f32;
+                        println!("    [{} g{}] epoch {}/{} loss={:.4} synapses={}",
+                            task.kind, task.gidx, epoch, gen_epochs, avg, env.total_synapses());
+                    }
+                }
+                env.freeze();
+                println!("    [{} g{}] frozen: {} neurons, {} synapses",
+                    task.kind, task.gidx, env.total_neurons(), env.total_synapses());
+                (task.gidx, task.kind, env)
+            })
+        }).collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    for (gidx, kind, env) in results {
+        match kind {
+            "gen" => { svc.dm.group_gen_envs.insert(gidx, env); }
+            "code" => { svc.dm.group_code_envs.insert(gidx, env); }
+            _ => {}
+        }
+    }
 
     // ---------------------------------------------------------------
     // Export brain
@@ -2493,8 +2587,16 @@ fn demo_train_brain(epochs: u32, output_path: &str) -> Result<(), String> {
     println!("  Groups: {}", svc.dm.main.group_order.len());
     println!("  Router: {}", svc.dm.observer.learned_router.is_some());
     println!("  ActionClassifier: {}", svc.dm.action_classifier.is_some());
-    println!("  GenerationHead: {}", svc.dm.generation_head.is_some());
-    println!("  CodegenHead: {}", svc.dm.codegen_head.is_some());
+    println!("  GenerationHead (legacy): {}", svc.dm.generation_head.is_some());
+    println!("  CodegenHead (legacy): {}", svc.dm.codegen_head.is_some());
+    println!("  GroupGenEnvs: {} groups", svc.dm.group_gen_envs.len());
+    println!("  GroupCodeEnvs: {} groups", svc.dm.group_code_envs.len());
+    for (gidx, env) in &svc.dm.group_gen_envs {
+        println!("    gen[{}]: {} neurons, {} synapses, frozen={}", gidx, env.total_neurons(), env.total_synapses(), env.frozen);
+    }
+    for (gidx, env) in &svc.dm.group_code_envs {
+        println!("    code[{}]: {} neurons, {} synapses, frozen={}", gidx, env.total_neurons(), env.total_synapses(), env.frozen);
+    }
 
     // Quick inference demo using the service API (goes through trained heads)
     println!("\n--- Quick Inference Demo ---");
@@ -2516,6 +2618,25 @@ fn demo_train_brain(epochs: u32, output_path: &str) -> Result<(), String> {
             let c = &code.code;
             println!("  code [{}]: {:?}", code.kind, &c[..c.len().min(120)]);
         }
+    }
+
+    if validate {
+        use growformer::dimension::action::ActionType;
+        let checks: [(&str, ActionType); 3] = [
+            ("help me reset my password", ActionType::SupportTicket),
+            ("implement binary search in Python", ActionType::CodingAssist),
+            ("explain the observer pattern", ActionType::CodingAssist),
+        ];
+        for (prompt, expected) in &checks {
+            let action = svc.dm.route_text_to_action(prompt).map_err(|e| format!("route_text_to_action failed: {}", e))?;
+            if action.action_type != *expected {
+                return Err(format!(
+                    "validate: prompt {:?} expected action {:?}, got {:?}",
+                    prompt, expected, action.action_type
+                ));
+            }
+        }
+        println!("\n  Validate: action routing checks passed.");
     }
 
     println!("\n=== Brain training complete ===");

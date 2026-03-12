@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::types::GroupId;
+
 use super::action::ActionType;
 
 pub const NUM_ACTION_TYPES: usize = 4;
@@ -21,6 +23,21 @@ pub fn action_type_one_hot(at: &ActionType) -> [f32; NUM_ACTION_TYPES] {
     let mut out = [0.0f32; NUM_ACTION_TYPES];
     out[action_type_index(at)] = 1.0;
     out
+}
+
+/// One-hot encoding of routed group for conditioning generation heads (region binding).
+/// Returns a vector of length `num_dims` (typically `group_order.len()`). Used so the head
+/// receives an explicit region signal and can select the correct attractor per group.
+pub fn group_id_one_hot(group_id: Option<GroupId>, group_order: &[GroupId], num_dims: usize) -> Vec<f32> {
+    let mut v = vec![0.0f32; num_dims];
+    if let Some(gid) = group_id {
+        if let Some(idx) = group_order.iter().position(|&g| g == gid) {
+            if idx < num_dims {
+                v[idx] = 1.0;
+            }
+        }
+    }
+    v
 }
 
 fn index_to_action_type(idx: usize) -> ActionType {

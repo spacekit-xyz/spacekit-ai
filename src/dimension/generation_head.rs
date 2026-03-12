@@ -242,9 +242,60 @@ impl GenerationHead {
 
         String::from_utf8_lossy(&output).to_string()
     }
-}
 
-#[cfg(test)]
+    /// **Do not use for training.** Parameter averaging smooths out the weights and produces
+    /// gibberish generation. Sequential, sample-by-sample training is required (see main.rs).
+    #[deprecated(note = "parameter averaging breaks generation; use sequential train_step loop")]
+    pub fn average_from(heads: &[Self]) -> Option<Self> {
+        if heads.is_empty() {
+            return None;
+        }
+        let n = heads.len() as f32;
+        let cond_dim = heads[0].cond_dim;
+        let hidden_dim = heads[0].hidden_dim;
+        let input_dim = heads[0].input_dim;
+
+        let mut char_table = vec![vec![0.0f32; CHAR_EMBED_DIM]; VOCAB_SIZE];
+        for (c, row) in char_table.iter_mut().enumerate() {
+            for (d, v) in row.iter_mut().enumerate() {
+                *v = heads.iter().map(|h| h.char_emb.table[c][d]).sum::<f32>() / n;
+            }
+        }
+        let char_emb = CharEmbeddings { table: char_table };
+
+        let mut w1 = vec![vec![0.0f32; input_dim]; hidden_dim];
+        for (j, row) in w1.iter_mut().enumerate() {
+            for (i, v) in row.iter_mut().enumerate() {
+                *v = heads.iter().map(|h| h.w1[j][i]).sum::<f32>() / n;
+            }
+        }
+        let mut b1 = vec![0.0f32; hidden_dim];
+        for (j, v) in b1.iter_mut().enumerate() {
+            *v = heads.iter().map(|h| h.b1[j]).sum::<f32>() / n;
+        }
+        let mut w2 = vec![vec![0.0f32; hidden_dim]; VOCAB_SIZE];
+        for (o, row) in w2.iter_mut().enumerate() {
+            for (j, v) in row.iter_mut().enumerate() {
+                *v = heads.iter().map(|h| h.w2[o][j]).sum::<f32>() / n;
+            }
+        }
+        let mut b2 = vec![0.0f32; VOCAB_SIZE];
+        for (o, v) in b2.iter_mut().enumerate() {
+            *v = heads.iter().map(|h| h.b2[o]).sum::<f32>() / n;
+        }
+
+        Some(GenerationHead {
+            char_emb,
+            w1,
+            b1,
+            w2,
+            b2,
+            cond_dim,
+            hidden_dim,
+            input_dim,
+        })
+    }
+}
 mod tests {
     use super::*;
 

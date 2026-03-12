@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use rand::Rng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -16,6 +18,7 @@ use super::composition::{EpisodicMemory, Episode, VirtualGroup};
 use super::action::{ActionJson, ActionType, action_from_routing};
 use super::action_classifier::ActionClassifier;
 use super::generation_head::GenerationHead;
+use super::group_gen::GroupGenEnv;
 use super::embedding::{compute_group_embedding, build_tag_vector, GroupEmbedding, TAG_VECTOR_DIM};
 use super::language::{
     CalibrationDataset, CalibrationReport, CalibrationRequirements, LanguageConfig,
@@ -62,6 +65,10 @@ pub struct DimensionManager {
     pub action_classifier: Option<ActionClassifier>,
     pub generation_head: Option<GenerationHead>,
     pub codegen_head: Option<GenerationHead>,
+    #[serde(default)]
+    pub group_gen_envs: HashMap<usize, GroupGenEnv>,
+    #[serde(default)]
+    pub group_code_envs: HashMap<usize, GroupGenEnv>,
     next_group_id: GroupId,
     low_confidence_streak: u32,
     pub auto_spawn_threshold: f32,
@@ -80,6 +87,8 @@ impl DimensionManager {
             action_classifier: None,
             generation_head: None,
             codegen_head: None,
+            group_gen_envs: HashMap::new(),
+            group_code_envs: HashMap::new(),
             next_group_id: 0,
             low_confidence_streak: 0,
             auto_spawn_threshold: 0.15,
@@ -319,11 +328,13 @@ impl DimensionManager {
 
     /// Train a LearnedRouter on (embedding, group_index) pairs from language data.
     /// `samples` is (embedding_vec, group_index). Returns (train_loss, accuracy).
+    /// When `batch_size` is `Some(b)`, runs minibatch SGD: B clones train in parallel, then params are averaged (uses multiple cores).
     pub fn train_language_router(
         &mut self,
         samples: &[(Vec<f32>, usize)],
         epochs: usize,
         rng: &mut impl Rng,
+        batch_size: Option<usize>,
     ) -> (f32, f32) {
         let num_groups = self.main.group_order.len();
         if num_groups == 0 || samples.is_empty() {
@@ -334,15 +345,44 @@ impl DimensionManager {
         let mut router = LearnedRouter::new(input_dim, num_groups, hidden, rng);
         let mut indices: Vec<usize> = (0..samples.len()).collect();
         let mut last_loss = 0.0f32;
-        for _epoch in 0..epochs {
+
+        let use_parallel = batch_size.map_or(0, |b| b).saturating_sub(1) > 0;
+
+        for epoch in 0..epochs {
             indices.shuffle(rng);
-            let mut total_loss = 0.0f32;
-            for &i in &indices {
-                let (ref emb, group_idx) = samples[i];
-                total_loss += router.train_step(emb, group_idx as GroupId, rng);
+            if use_parallel {
+                let b = batch_size.unwrap_or(1);
+                for chunk in indices.chunks(b) {
+                    let batch_data: Vec<(&[f32], usize)> = chunk
+                        .iter()
+                        .map(|&i| (samples[i].0.as_slice(), samples[i].1))
+                        .collect();
+                    let mut clones: Vec<LearnedRouter> =
+                        (0..batch_data.len()).map(|_| router.clone()).collect();
+                    let seed_base = (epoch as u64).wrapping_mul(1_000_000).wrapping_add(chunk[0] as u64);
+                    let losses: Vec<f32> = crate::maybe_par_iter_mut!(clones)
+                        .zip(batch_data)
+                        .enumerate()
+                        .map(|(i, (clone, (emb, group_idx)))| {
+                            let mut thread_rng = StdRng::seed_from_u64(seed_base.wrapping_add(i as u64));
+                            clone.train_step(emb, group_idx as GroupId, &mut thread_rng)
+                        })
+                        .collect();
+                    last_loss = losses.iter().sum::<f32>() / losses.len().max(1) as f32;
+                    if let Some(avg_router) = LearnedRouter::average_from(&clones) {
+                        router = avg_router;
+                    }
+                }
+            } else {
+                let mut total_loss = 0.0f32;
+                for &i in &indices {
+                    let (ref emb, group_idx) = samples[i];
+                    total_loss += router.train_step(emb, group_idx as GroupId, rng);
+                }
+                last_loss = total_loss / indices.len() as f32;
             }
-            last_loss = total_loss / indices.len() as f32;
         }
+
         let mut correct = 0usize;
         for (emb, expected) in samples {
             if let Some(chosen) = router.choose_group(emb) {

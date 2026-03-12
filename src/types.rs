@@ -334,7 +334,13 @@ pub struct EnvironmentConfig {
     pub prune_long_age: u32,
     pub stdp_enabled: bool,
     pub dropout_rate: f32,
-    // pub homeostasis_tau: f32,
+
+    /// Use binary cross-entropy gradient at the output layer instead of MSE.
+    /// With sigmoid activation, MSE gradient = (o-t)*o*(1-o) which vanishes
+    /// as outputs saturate. BCE gradient = (o-t) stays strong at saturation.
+    /// Enable for binary-target tasks (generation). Default false (MSE, validated
+    /// for spiral/MNIST classification).
+    pub output_bce: bool,
 }
 
 impl Default for EnvironmentConfig {
@@ -409,6 +415,7 @@ impl Default for EnvironmentConfig {
             homeostasis_lr: 0.0003,       // gentle bias nudge — weaker than gradient lr
             lateral_inhibition: 0.0, // disabled by default — set 0.1–0.2 for hidden layers
             lr_decay: 0.0,
+            output_bce: false,
         }
     }
 }

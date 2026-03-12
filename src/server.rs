@@ -3,7 +3,7 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use growformer::service::{AgentMode, LanguageService};
+use growformer::service::{AgentMode, Feedback, LanguageService};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::convert::Infallible;
@@ -30,10 +30,16 @@ struct ChatRequest {
     message: String,
     #[serde(default)]
     agent_mode: Option<String>,
+    /// Optional: use this named checkpoint for this request (see GET /v1/brains).
+    #[serde(default)]
+    brain: Option<String>,
     #[serde(default)]
     context_snippets: Vec<String>,
     #[serde(default)]
     options: ChatOptions,
+    /// Optional: feedback for the *previous* turn (outcome: accept | reject | correct; correction text for correct).
+    #[serde(default)]
+    feedback: Option<Feedback>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -84,27 +90,62 @@ async fn main() {
     let log_path = std::env::var("GROWFORMER_NODE_LOG_PATH").ok();
     let mut service = LanguageService::new_default().expect("failed to initialize language service");
 
-    // Auto-load trained brain if GROWFORMER_BRAIN_PATH is set or brain.bin exists
-    let brain_path = std::env::var("GROWFORMER_BRAIN_PATH")
-        .unwrap_or_else(|_| "brain.bin".to_string());
-    if let Ok(data) = std::fs::read(&brain_path) {
-        match service.load_brain(&data) {
-            Ok(()) => {
-                let has_gen = service.dm.generation_head.is_some();
-                let has_code = service.dm.codegen_head.is_some();
-                let has_clf = service.dm.action_classifier.is_some();
-                let has_router = service.dm.observer.learned_router.is_some();
-                println!(
-                    "Brain loaded: {} ({} KB) router={} classifier={} gen_head={} code_head={}",
-                    brain_path,
-                    data.len() / 1024,
-                    has_router,
-                    has_clf,
-                    has_gen,
-                    has_code
-                );
+    // Auto-load trained brain(s)
+    // - GROWFORMER_BRAIN_DIR: directory of .bin files → load each as name = filename stem, first = active
+    // - GROWFORMER_BRAIN_PATH: single file → load as "default" (legacy)
+    if let Ok(dir) = std::env::var("GROWFORMER_BRAIN_DIR") {
+        let mut names: Vec<String> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |e| e == "bin") {
+                    let name = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("unnamed")
+                        .to_string();
+                    if let Ok(data) = std::fs::read(&path) {
+                        if service.load_brain_as(&name, &data).is_ok() {
+                            names.push(name);
+                        }
+                    }
+                }
             }
-            Err(e) => eprintln!("Warning: failed to load brain {}: {}", brain_path, e),
+        }
+        if !names.is_empty() {
+            names.sort();
+            let active = names.first().cloned().unwrap_or_default();
+            service.set_active_brain(&active);
+            println!(
+                "Brains loaded from {}: {} (active: {})",
+                dir,
+                names.join(", "),
+                active
+            );
+        }
+    } else {
+        let brain_path = std::env::var("GROWFORMER_BRAIN_PATH")
+            .unwrap_or_else(|_| "brain.bin".to_string());
+        if let Ok(data) = std::fs::read(&brain_path) {
+            match service.load_brain(&data) {
+                Ok(()) => {
+                    let dm = service.active_dm();
+                    let has_gen = dm.generation_head.is_some();
+                    let has_code = dm.codegen_head.is_some();
+                    let has_clf = dm.action_classifier.is_some();
+                    let has_router = dm.observer.learned_router.is_some();
+                    println!(
+                        "Brain loaded: {} ({} KB) router={} classifier={} gen_head={} code_head={}",
+                        brain_path,
+                        data.len() / 1024,
+                        has_router,
+                        has_clf,
+                        has_gen,
+                        has_code
+                    );
+                }
+                Err(e) => eprintln!("Warning: failed to load brain {}: {}", brain_path, e),
+            }
         }
     }
 
@@ -119,10 +160,12 @@ async fn main() {
         .allow_headers(Any);
     let app = Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/brains", get(list_brains))
         .route("/v1/chat", post(chat))
         .route("/v1/chat/stream", post(chat_stream))
         .route("/v1/acceptance", get(acceptance))
         .route("/v1/mode", post(set_mode))
+        .route("/v1/brain/save", post(brain_save))
         .layer(cors)
         .with_state(state.clone());
 
@@ -142,6 +185,49 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
         agent_mode: mode_str,
         log_path: state.log_path.clone(),
     })
+}
+
+#[derive(Debug, Serialize)]
+struct BrainsResponse {
+    brains: Vec<String>,
+    active: String,
+}
+
+async fn list_brains(State(state): State<Arc<AppState>>) -> Json<BrainsResponse> {
+    let svc = state.service.lock().await;
+    let brains = svc.list_brains();
+    let active = svc.active_brain.clone();
+    Json(BrainsResponse { brains, active })
+}
+
+#[derive(Debug, Deserialize)]
+struct BrainSaveRequest {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    brain: Option<String>,
+}
+
+async fn brain_save(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<BrainSaveRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    authorize(&headers, &state)?;
+    let path = req.path.or_else(|| std::env::var("GROWFORMER_BRAIN_PATH").ok())
+        .unwrap_or_else(|| "brain.bin".to_string());
+    let mut svc = state.service.lock().await;
+    let prev_active = svc.active_brain.clone();
+    if let Some(name) = &req.brain {
+        if !svc.list_brains().contains(name) {
+            return Err((StatusCode::BAD_REQUEST, format!("unknown brain '{}'", name)));
+        }
+        svc.set_active_brain(name);
+    }
+    let bytes = svc.export_brain().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    svc.set_active_brain(&prev_active);
+    std::fs::write(&path, &bytes).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(json!({ "ok": true, "path": path, "bytes": bytes.len() })))
 }
 
 async fn acceptance(
@@ -228,6 +314,9 @@ async fn run_chat(
 
     let mut svc = state.service.lock().await;
 
+    if let Some(name) = &req.brain {
+        svc.set_active_brain(name);
+    }
     if let Some(am) = &req.agent_mode {
         let new_mode = match am.as_str() {
             "context_file" | "ContextFile" => Some(AgentMode::ContextFile),
@@ -243,16 +332,21 @@ async fn run_chat(
         svc.push_context_snippet(snippet.clone());
     }
 
+    if let Some(ref feedback) = req.feedback {
+        let _ = svc.submit_feedback(feedback);
+    }
+
     let active_mode = svc.active_mode();
 
-    let (text, raw_stdout) = match req.mode.as_str() {
+    let (action, text, raw_stdout) = match req.mode.as_str() {
         "action" => {
             let action = svc
                 .action(&req.message)
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("inference failed: {}", e)))?;
             let pretty = serde_json::to_string_pretty(&action)
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize failed: {}", e)))?;
-            (format!("Action JSON:\n{}", pretty), pretty)
+            let text = format!("Action JSON:\n{}", pretty);
+            (action, text.clone(), pretty)
         }
         "generation" => {
             let (action, generated) = svc
@@ -260,13 +354,11 @@ async fn run_chat(
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("inference failed: {}", e)))?;
             let action_json = serde_json::to_string_pretty(&action)
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize failed: {}", e)))?;
-            (
-                format!(
-                    "Action JSON:\n{}\n\nTemplate response:\n{}",
-                    action_json, generated.text
-                ),
-                generated.text,
-            )
+            let text = format!(
+                "Action JSON:\n{}\n\nTemplate response:\n{}",
+                action_json, generated.text
+            );
+            (action, text.clone(), generated.text)
         }
         "codegen" => {
             let (action, code) = svc
@@ -274,14 +366,14 @@ async fn run_chat(
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("inference failed: {}", e)))?;
             let action_json = serde_json::to_string_pretty(&action)
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize failed: {}", e)))?;
-            let text = match code {
+            let text = match &code {
                 Some(code) => format!(
                     "Action JSON:\n{}\n\nGenerated code ({}, {}):\n{}",
                     action_json, code.language, code.kind, code.code
                 ),
                 None => format!("Action JSON:\n{}\n\nNo code output", action_json),
             };
-            (text.clone(), text)
+            (action, text.clone(), text)
         }
         other => {
             return Err((
@@ -290,6 +382,7 @@ async fn run_chat(
             ))
         }
     };
+    svc.record_turn(&req.message, action.target_group_id, &text);
     drop(svc);
     let latency_ms = started.elapsed().as_millis();
     let perf = ChatPerf {

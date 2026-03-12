@@ -306,6 +306,21 @@ Growformer Node (HTTP dev server):
 - Runtime note:
   - `growformer-node` now calls Growformer as a shared library in-process (no CLI subprocess per request).
 
+**Multiple brains (checkpoints)**
+
+You can load several trained brains and switch between them. Each brain is a **full checkpoint**: its own router, action classifier, generation head, codegen head, and group layout. There is **no merging** — inference always uses one active checkpoint; switching brain swaps the entire stack.
+
+- **Routing:** Each brain has its own `LearnedRouter`, `ActionClassifier`, `DimensionManager::main` (groups, embedding library), and generation/codegen heads. When you select a brain, that brain’s router and classifier handle routing and action type; that brain’s heads produce text and code. Heads are conditioned on the **routed group** (group one-hot) so the correct region-specific attractor is used; brains trained with the current `--train-brain` pipeline include this binding. No averaging or merging of parameters across brains.
+- **Loading:**
+  - **Single brain (legacy):** `GROWFORMER_BRAIN_PATH=brain.bin` (or default `brain.bin`) — loads one checkpoint as `"default"`.
+  - **Multiple brains:** `GROWFORMER_BRAIN_DIR=micro-brains` — loads every `*.bin` in that directory; each file is registered under its stem (e.g. `my-brain.bin` → `"my-brain"`, `user-a-brain.bin` → `"user-a"`). The first name (alphabetically) is set active at startup.
+- **API:**
+  - `GET /v1/brains` — returns `{ "brains": ["default", "my-brain", "user-a"], "active": "my-brain" }`.
+  - In `POST /v1/chat`, optional body field `"brain": "user-a"` — uses that checkpoint for the request and sets it active for subsequent requests until changed.
+- **Library:** `LanguageService` has `load_brain(data)` (single default), `load_brain_as(name, data)` (additional named checkpoint), `list_brains()`, `set_active_brain(name)`, and `active_dm()` for inspection. Inference (action, generation, codegen) always uses the active checkpoint.
+
+Example: train or obtain `my-brain.bin` and `user-a-brain.bin`, put both in `micro-brains/`, set `GROWFORMER_BRAIN_DIR=micro-brains`, start the node — then call `GET /v1/brains` and pass `"brain": "user-a"` in the chat body when you want that subject’s stack.
+
 M6 Agent Modes:
 
 - Two modes share one backend:
