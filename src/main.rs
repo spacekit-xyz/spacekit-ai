@@ -6,6 +6,7 @@ use growformer::dimension::{
     MainDimension, VirtualGroup, render_action_template, generate_code_from_action,
     route_language_embedding, GroupGenEnv, action_target_to_type,
 };
+use growformer::spectral::TokenDictionary;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use growformer::types::GroupId;
@@ -2461,18 +2462,43 @@ fn demo_train_brain(
 
     // ---------------------------------------------------------------
     // Stage 1: Train LearnedRouter on bridged embeddings
+    // Oversample minority class to balance support vs coding.
     // ---------------------------------------------------------------
     println!("\n--- Stage 1: LearnedRouter Training ---");
-    let router_samples: Vec<(Vec<f32>, usize)> = bridged_embeddings.iter().zip(samples.iter())
+    let router_samples_raw: Vec<(Vec<f32>, usize)> = bridged_embeddings.iter().zip(samples.iter())
         .map(|(emb, s)| (emb.clone(), group_map(s)))
         .collect();
+    let mut class_counts: HashMap<usize, usize> = HashMap::new();
+    for (_, g) in &router_samples_raw { *class_counts.entry(*g).or_default() += 1; }
+    let max_class_count = class_counts.values().copied().max().unwrap_or(1);
+    let mut router_samples: Vec<(Vec<f32>, usize)> = Vec::new();
+    let mut class_buckets: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, (_, g)) in router_samples_raw.iter().enumerate() {
+        class_buckets.entry(*g).or_default().push(i);
+    }
+    for (&gidx, indices) in &class_buckets {
+        let count = class_counts[&gidx];
+        let oversample = max_class_count / count.max(1);
+        let remainder = max_class_count % count.max(1);
+        for _ in 0..oversample {
+            for &i in indices {
+                router_samples.push(router_samples_raw[i].clone());
+            }
+        }
+        for &i in indices.iter().take(remainder) {
+            router_samples.push(router_samples_raw[i].clone());
+        }
+    }
+    println!("  Router training: {} raw samples, {} after oversampling (balanced)",
+        router_samples_raw.len(), router_samples.len());
+    let router_epochs = (epochs as usize).max(200);
     let (router_loss, router_acc) = svc.dm.train_language_router(
         &router_samples,
-        epochs as usize,
+        router_epochs,
         &mut rng,
         brain_parallel_batch_size(),
     );
-    println!("  Router loss={:.4} accuracy={:.1}%", router_loss, router_acc * 100.0);
+    println!("  Router loss={:.4} accuracy={:.1}% ({} epochs)", router_loss, router_acc * 100.0, router_epochs);
 
     // ---------------------------------------------------------------
     // Stage 2: Train ActionClassifier
@@ -2504,7 +2530,7 @@ fn demo_train_brain(
         (epochs as usize * 50).max(500)
     };
     let k_replicas = (gen_replicas as usize).max(1);
-    println!("\n--- Stages 3+4: Per-Group Generation Envs (parallel) ---");
+    println!("\n--- Stages 3+4: Per-Group Generation Envs (single-pass token prediction) ---");
     println!("  gen_epochs={}, num_groups={}, replicas_per_task={}", gen_epochs, num_groups, k_replicas);
 
     // Partition training data by (group, kind)
@@ -2522,6 +2548,46 @@ fn demo_train_brain(
         }
     }
 
+    // Build per-group dictionaries from each group's own data.
+    // Larger groups get larger dictionaries (2048 max), smaller groups get 1024.
+    use growformer::dimension::group_gen::{bits_for_dict, MAX_TOKENS};
+    let mut gen_dicts: HashMap<usize, TokenDictionary> = HashMap::new();
+    let mut code_dicts: HashMap<usize, TokenDictionary> = HashMap::new();
+    let pairs_threshold_for_large_dict: usize = 100;
+    for (&gidx, pairs) in &gen_by_group {
+        if pairs.is_empty() { continue; }
+        let texts: Vec<&str> = pairs.iter().map(|(_emb, text)| *text).collect();
+        let max_dict = if pairs.len() >= pairs_threshold_for_large_dict { 2048 } else { 1024 };
+        let dict = TokenDictionary::build(&texts, max_dict);
+        let bits = bits_for_dict(dict.len());
+        println!("  gen dict[g{}]: {} tokens from {} texts, {} bits/token, output={}",
+            gidx, dict.len(), texts.len(), bits, MAX_TOKENS * bits);
+        gen_dicts.insert(gidx, dict);
+    }
+    for (&gidx, pairs) in &code_by_group {
+        if pairs.is_empty() { continue; }
+        let texts: Vec<&str> = pairs.iter().map(|(_emb, text)| *text).collect();
+        let max_dict = if pairs.len() >= pairs_threshold_for_large_dict { 2048 } else { 1024 };
+        let dict = TokenDictionary::build(&texts, max_dict);
+        let bits = bits_for_dict(dict.len());
+        println!("  code dict[g{}]: {} tokens from {} texts, {} bits/token, output={}",
+            gidx, dict.len(), texts.len(), bits, MAX_TOKENS * bits);
+        code_dicts.insert(gidx, dict);
+    }
+    // Store first available dict as fallback for service inference
+    if let Some(d) = gen_dicts.values().next() {
+        svc.dm.gen_dictionary = Some(d.clone());
+    }
+    if let Some(d) = code_dicts.values().next() {
+        svc.dm.code_dictionary = Some(d.clone());
+    }
+
+    // Pruning warmup: stop pruning after 30% of training ticks.
+    // Each epoch = num_pairs ticks (one train_tick per sample).
+    // Warmup fraction: 30% — enough for the substrate to self-organize,
+    // then freeze structure so learning doesn't erode capacity.
+    let prune_warmup_frac = 0.3;
+
     // Build task list: K replicas per (group, kind) with different seeds
     struct GenTask<'a> {
         gidx: usize,
@@ -2529,17 +2595,31 @@ fn demo_train_brain(
         replica: usize,
         pairs: &'a [(&'a [f32], &'a str)],
         seed: u64,
+        dictionary: TokenDictionary,
+        prune_stop_tick: u64,
+        task_epochs: usize,
     }
     let mut tasks: Vec<GenTask> = Vec::new();
     let mut base_tasks = 0usize;
     for gidx in 0..num_groups {
         if let Some(p) = gen_by_group.get(&gidx) {
             if !p.is_empty() {
+                let task_epochs = if p.len() > 150 {
+                    (gen_epochs as f64 * 2.0) as usize
+                } else {
+                    gen_epochs
+                };
+                let total_ticks = task_epochs as u64 * p.len() as u64;
+                let stop_tick = (total_ticks as f64 * prune_warmup_frac) as u64;
+                let dict = gen_dicts.get(&gidx).unwrap().clone();
                 for r in 0..k_replicas {
                     tasks.push(GenTask {
                         gidx, kind: "gen", replica: r,
                         pairs: p.as_slice(),
                         seed: 100 + gidx as u64 * 1000 + r as u64,
+                        dictionary: dict.clone(),
+                        prune_stop_tick: stop_tick,
+                        task_epochs,
                     });
                 }
                 base_tasks += 1;
@@ -2547,11 +2627,18 @@ fn demo_train_brain(
         }
         if let Some(p) = code_by_group.get(&gidx) {
             if !p.is_empty() {
+                let task_epochs = gen_epochs;
+                let total_ticks = task_epochs as u64 * p.len() as u64;
+                let stop_tick = (total_ticks as f64 * prune_warmup_frac) as u64;
+                let dict = code_dicts.get(&gidx).unwrap().clone();
                 for r in 0..k_replicas {
                     tasks.push(GenTask {
                         gidx, kind: "code", replica: r,
                         pairs: p.as_slice(),
                         seed: 200 + gidx as u64 * 1000 + r as u64,
+                        dictionary: dict.clone(),
+                        prune_stop_tick: stop_tick,
+                        task_epochs,
                     });
                 }
                 base_tasks += 1;
@@ -2560,6 +2647,7 @@ fn demo_train_brain(
     }
     println!("  {} base tasks × {} replicas = {} total threads",
         base_tasks, k_replicas, tasks.len());
+    println!("  pruning warmup: {:.0}% of training ticks", prune_warmup_frac * 100.0);
     for gidx in 0..num_groups {
         if let Some(p) = gen_by_group.get(&gidx) {
             if !p.is_empty() { println!("  task: group {} gen — {} pairs", gidx, p.len()); }
@@ -2569,33 +2657,51 @@ fn demo_train_brain(
         }
     }
 
-    let log_interval = (gen_epochs / 50).max(1);
     let results: Vec<(usize, &str, usize, f32, GroupGenEnv)> = std::thread::scope(|s| {
         let handles: Vec<_> = tasks.iter().map(|task| {
             s.spawn(move || {
                 let mut task_rng = StdRng::seed_from_u64(task.seed);
-                let mut env = GroupGenEnv::new(&mut task_rng);
-                let mut indices: Vec<usize> = (0..task.pairs.len()).collect();
-                for epoch in 0..gen_epochs {
+                let mut env = GroupGenEnv::new(task.dictionary.clone(), &mut task_rng);
+                env.set_prune_stop_tick(task.prune_stop_tick);
+                let te = task.task_epochs;
+                let log_interval = (te / 50).max(1);
+                println!("    [{} g{} r{}] bits_per_token={} output_dim={} epochs={} prune_stop_tick={}",
+                    task.kind, task.gidx, task.replica,
+                    env.bits_per_token, env.output_dim, te, task.prune_stop_tick);
+                let n_pairs = task.pairs.len();
+                let mut indices: Vec<usize> = (0..n_pairs).collect();
+                let mut sample_losses: Vec<f32> = vec![0.0; n_pairs];
+                let replay_frac = 0.15;
+                let replay_start_epoch = 50;
+                let replay_count = (n_pairs as f32 * replay_frac).ceil() as usize;
+                for epoch in 0..te {
                     indices.shuffle(&mut task_rng);
                     let mut total_loss = 0.0f32;
                     for &i in &indices {
-                        total_loss += env.train_step(task.pairs[i].0, task.pairs[i].1, &mut task_rng);
+                        let l = env.train_step(task.pairs[i].0, task.pairs[i].1, &mut task_rng);
+                        sample_losses[i] = l;
+                        total_loss += l;
                     }
-                    let last_avg = total_loss / task.pairs.len().max(1) as f32;
-                    if epoch % log_interval == 0 || epoch == gen_epochs - 1 {
+                    if epoch >= replay_start_epoch && replay_count > 0 {
+                        let mut ranked: Vec<(usize, f32)> = sample_losses.iter().copied().enumerate().collect();
+                        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                        for &(idx, _loss) in ranked.iter().take(replay_count) {
+                            env.train_step(task.pairs[idx].0, task.pairs[idx].1, &mut task_rng);
+                        }
+                    }
+                    let last_avg = total_loss / n_pairs.max(1) as f32;
+                    if epoch % log_interval == 0 || epoch == te - 1 {
                         if k_replicas > 1 {
                             println!("    [{} g{} r{}] epoch {}/{} loss={:.4} synapses={}",
-                                task.kind, task.gidx, task.replica, epoch, gen_epochs,
+                                task.kind, task.gidx, task.replica, epoch, te,
                                 last_avg, env.total_synapses());
                         } else {
                             println!("    [{} g{}] epoch {}/{} loss={:.4} synapses={}",
-                                task.kind, task.gidx, epoch, gen_epochs,
+                                task.kind, task.gidx, epoch, te,
                                 last_avg, env.total_synapses());
                         }
                     }
                 }
-                // Evaluate final loss on full dataset (forward-only, no training)
                 let mut eval_loss = 0.0f32;
                 for &(cond, target) in task.pairs {
                     eval_loss += env.eval_loss(cond, target);
@@ -2666,7 +2772,7 @@ fn demo_train_brain(
     ];
     for prompt in &test_prompts {
         println!("\n  prompt: {:?}", prompt);
-        if let Ok(action) = svc.dm.route_text_to_action(prompt) {
+        if let Ok(action) = svc.dm.route_text_to_action_stateless(prompt) {
             println!("  action: {:?} (conf={:.2})", action.action_type, action.confidence);
         }
         if let Ok((_, resp)) = svc.generation(prompt) {
@@ -2687,7 +2793,7 @@ fn demo_train_brain(
             ("explain the observer pattern", ActionType::CodingAssist),
         ];
         for (prompt, expected) in &checks {
-            let action = svc.dm.route_text_to_action(prompt).map_err(|e| format!("route_text_to_action failed: {}", e))?;
+            let action = svc.dm.route_text_to_action_stateless(prompt).map_err(|e| format!("route_text_to_action failed: {}", e))?;
             if action.action_type != *expected {
                 return Err(format!(
                     "validate: prompt {:?} expected action {:?}, got {:?}",

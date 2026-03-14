@@ -113,6 +113,10 @@ pub fn prune_three_phase(
             if s.frozen { return true; }
             // Output-adjacent synapses are structurally protected — never pruned
             if output_protected.contains(&s.target) { return true; }
+            // Engram-consolidated synapses are memory traces — never pruned
+            if config.engram_enabled && s.consolidation >= config.engram_prune_threshold {
+                return true;
+            }
 
             let cost = s.metabolic_cost();
             let dormancy = current_tick.saturating_sub(s.last_active as u64);

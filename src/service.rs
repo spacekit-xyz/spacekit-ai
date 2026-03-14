@@ -223,7 +223,7 @@ impl LanguageService {
     pub fn generation(&mut self, text: &str) -> Result<(ActionJson, GeneratedResponse), String> {
         let start = portable_instant();
         let dm = self.active_dm_mut();
-        let action = dm.route_text_to_action(text)?;
+        let action = dm.route_text_to_action_stateless(text)?;
 
         let encoded = dm.language_runtime.encode_and_bridge(text).ok();
         let group_idx = action.target_group_id
@@ -259,7 +259,7 @@ impl LanguageService {
     pub fn codegen(&mut self, text: &str) -> Result<(ActionJson, Option<CodeGeneration>), String> {
         let start = portable_instant();
         let dm = self.active_dm_mut();
-        let action = dm.route_text_to_action(text)?;
+        let action = dm.route_text_to_action_stateless(text)?;
 
         let encoded = dm.language_runtime.encode_and_bridge(text).ok();
         let group_idx = action.target_group_id

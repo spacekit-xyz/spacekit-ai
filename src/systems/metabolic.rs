@@ -31,6 +31,8 @@ pub fn apply_metabolic_pressure(
                 .enumerate()
                 // Never prune synapses targeting the output layer
                 .filter(|(_, s)| !output_protected.contains(&s.target) && !s.frozen)
+                // Engram-consolidated synapses are memory traces — never pruned
+                .filter(|(_, s)| !(config.engram_enabled && s.consolidation >= config.engram_prune_threshold))
                 .map(|(i, s)| (i, s.metabolic_cost()))
                 .collect();
 

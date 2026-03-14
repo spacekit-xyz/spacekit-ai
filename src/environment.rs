@@ -630,6 +630,8 @@ impl NeuralEnvironment {
         let consolidated_ids = self.consolidated_group_ids.clone();
         let layer_of = self.layer_of.clone();
         let dropout_mask = self.dropout_mask.clone();
+        let engram_enabled = self.config.engram_enabled;
+        let engram_lr_scale = self.config.engram_lr_scale;
 
         for layer_idx in (1..n_layers).rev() {
             let curr_layer = self.layers[layer_idx].clone();
@@ -637,7 +639,8 @@ impl NeuralEnvironment {
             let mut prev_deltas: HashMap<NeuronId, f32> = HashMap::new();
 
             // Snapshot: (src_id, src_act, mass, frozen, is_consolidated, weight, syn_snap)
-            let snapshot: Vec<(NeuronId, f32, f32, bool, bool, f32, Vec<(NeuronId, f32)>)> = prev_layer
+            // syn_snap: (target, strength, consolidation) for engram LR scaling
+            let snapshot: Vec<(NeuronId, f32, f32, bool, bool, f32, Vec<(NeuronId, f32, f32)>)> = prev_layer
                 .iter()
                 .filter(|id| dropout_mask.get(id) != Some(&true))
                 .filter_map(|&src_id| {
@@ -646,7 +649,7 @@ impl NeuralEnvironment {
                         .synapses
                         .iter()
                         .filter(|s| curr_layer.contains(&s.target))
-                        .map(|s| (s.target, s.strength))
+                        .map(|s| (s.target, s.strength, s.consolidation))
                         .collect();
                     let is_cons = n
                         .group_id
@@ -676,7 +679,7 @@ impl NeuralEnvironment {
                     };
                     let grad_sum: f32 = syn_snap
                         .iter()
-                        .filter_map(|(tgt_id, str)| {
+                        .filter_map(|(tgt_id, str, _)| {
                             if dropout_mask.get(tgt_id) == Some(&true) {
                                 return None;
                             }
@@ -705,7 +708,7 @@ impl NeuralEnvironment {
                     };
                     let syn_updates: Vec<SynUpdate> = syn_snap
                         .iter()
-                        .filter_map(|(tgt_id, str)| {
+                        .filter_map(|(tgt_id, str, consolidation)| {
                             if dropout_mask.get(tgt_id) == Some(&true) {
                                 return None;
                             }
@@ -714,8 +717,13 @@ impl NeuralEnvironment {
                             if *frozen {
                                 return Some((*tgt_id, *str, false));
                             }
+                            let syn_eff_lr = if engram_enabled {
+                                eff_lr * (1.0 - engram_lr_scale * consolidation).max(0.2)
+                            } else {
+                                eff_lr
+                            };
                             let new_str = (str * (1.0 - weight_decay)
-                                - eff_lr * clipped)
+                                - syn_eff_lr * clipped)
                                 .clamp(-weight_clamp, weight_clamp);
                             Some((*tgt_id, new_str, clipped.abs() > 0.001))
                         })
@@ -759,6 +767,43 @@ impl NeuralEnvironment {
     }
 
     // -------------------------------------------------------------------------
+    // Engram consolidation — protect memory traces
+    // -------------------------------------------------------------------------
+
+    /// Update consolidation for synapses where pre and post both fired this tick.
+    /// Engram-engram synapses accumulate consolidation; high consolidation
+    /// reduces effective LR and grants pruning immunity.
+    fn update_engram_consolidation(&mut self) {
+        if !self.config.engram_enabled {
+            return;
+        }
+        let thresh = self.config.engram_activation_threshold.max(0.01);
+        let inc = self.config.engram_increment;
+        let cap = self.config.engram_cap;
+
+        let fired: std::collections::HashSet<NeuronId> = self.neurons
+            .iter()
+            .filter(|(_, n)| n.activation >= thresh)
+            .map(|(&id, _)| id)
+            .collect();
+
+        for neuron in self.neurons.values_mut() {
+            if neuron.frozen {
+                continue;
+            }
+            let pre_fired = fired.contains(&neuron.id);
+            for syn in neuron.synapses.iter_mut() {
+                if syn.frozen {
+                    continue;
+                }
+                if pre_fired && fired.contains(&syn.target) {
+                    syn.consolidation = (syn.consolidation + inc).min(cap);
+                }
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Training tick (full: forward + backprop + plasticity)
     // -------------------------------------------------------------------------
 
@@ -779,6 +824,11 @@ impl NeuralEnvironment {
     ) -> TickResult {
         // Forward with dropout enabled
         let output = self.forward_pass(input, true, rng);
+
+        // Engram consolidation: tag synapses where pre and post both fired this tick.
+        // Must run before backprop so we use current activations.
+        self.update_engram_consolidation();
+
         let loss   = self.backprop(&output, target);
 
         let fired = get_fired_neurons(&self.neurons, 0.6);

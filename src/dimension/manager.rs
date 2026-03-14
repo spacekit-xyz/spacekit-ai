@@ -19,6 +19,7 @@ use super::action::{ActionJson, ActionType, action_from_routing};
 use super::action_classifier::ActionClassifier;
 use super::generation_head::GenerationHead;
 use super::group_gen::GroupGenEnv;
+use crate::spectral::TokenDictionary;
 use super::embedding::{compute_group_embedding, build_tag_vector, GroupEmbedding, TAG_VECTOR_DIM};
 use super::language::{
     CalibrationDataset, CalibrationReport, CalibrationRequirements, LanguageConfig,
@@ -69,6 +70,10 @@ pub struct DimensionManager {
     pub group_gen_envs: HashMap<usize, GroupGenEnv>,
     #[serde(default)]
     pub group_code_envs: HashMap<usize, GroupGenEnv>,
+    #[serde(default)]
+    pub gen_dictionary: Option<TokenDictionary>,
+    #[serde(default)]
+    pub code_dictionary: Option<TokenDictionary>,
     next_group_id: GroupId,
     low_confidence_streak: u32,
     pub auto_spawn_threshold: f32,
@@ -89,6 +94,8 @@ impl DimensionManager {
             codegen_head: None,
             group_gen_envs: HashMap::new(),
             group_code_envs: HashMap::new(),
+            gen_dictionary: None,
+            code_dictionary: None,
             next_group_id: 0,
             low_confidence_streak: 0,
             auto_spawn_threshold: 0.15,
@@ -624,19 +631,71 @@ impl DimensionManager {
     }
 
     /// Stateless routing for independent single-turn evaluation.
-    pub fn route_text_stateless(&self, text: &str) -> Result<LanguageRoutingDecision, String> {
+    /// Uses the learned router when available (same as route_text but without EMA smoothing).
+    pub fn route_text_stateless(&mut self, text: &str) -> Result<LanguageRoutingDecision, String> {
         let bridged = self.language_runtime.bridge_text_stateless(text)?;
+        let vec = &bridged.routed_vector;
+        let confidence = bridged.confidence;
+
+        let use_router = self.observer.learned_router.as_ref().map_or(false, |r| {
+            r.input_dim == vec.len() && r.num_groups == self.main.group_order.len()
+        });
+
+        if use_router {
+            let router = self.observer.learned_router.as_mut().unwrap();
+            let logits = router.predict_logits(vec);
+            if logits.len() == self.main.group_order.len() {
+                let mut indexed: Vec<(usize, f32)> =
+                    logits.iter().copied().enumerate().collect();
+                indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                let (best_idx, best_logit) = indexed.first().copied().unwrap_or((0, -1e9));
+                let second_logit = indexed.get(1).map(|x| x.1).unwrap_or(-1e9);
+                let margin = best_logit - second_logit;
+                let chosen_group_id = self.main.group_order.get(best_idx).copied();
+                let rejected_as_ood = chosen_group_id.is_none();
+                return Ok(LanguageRoutingDecision {
+                    chosen_group_id: if rejected_as_ood { None } else { chosen_group_id },
+                    best_similarity: best_logit,
+                    second_similarity: second_logit,
+                    margin,
+                    confidence,
+                    rejected_as_ood,
+                });
+            }
+        }
+
         Ok(route_language_embedding(
             &self.main.embedding_library,
-            &bridged.routed_vector,
-            bridged.confidence,
+            vec,
+            confidence,
             self.language_runtime.config.ood_similarity_threshold,
         ))
     }
 
     /// M3 deterministic path: text -> routing -> structured action JSON.
+    /// Uses stateful EMA bridging — suitable for multi-turn conversations.
     pub fn route_text_to_action(&mut self, text: &str) -> Result<ActionJson, String> {
         let routing = self.route_text(text)?;
+        let mut action = action_from_routing(&self.main, &routing, text);
+
+        if let Some(ref clf) = self.action_classifier {
+            if let Ok(bridged) = self.language_runtime.bridge_text_stateless(text) {
+                let (predicted_type, conf) = clf.predict_with_confidence(&bridged.routed_vector);
+                if conf > 0.4 {
+                    action.action_type = predicted_type;
+                    action.confidence = conf;
+                    action.reason = "classified".to_string();
+                }
+            }
+        }
+
+        Ok(action)
+    }
+
+    /// Stateless action routing for independent single-turn prompts.
+    /// No EMA smoothing — each call is independent.
+    pub fn route_text_to_action_stateless(&mut self, text: &str) -> Result<ActionJson, String> {
+        let routing = self.route_text_stateless(text)?;
         let mut action = action_from_routing(&self.main, &routing, text);
 
         if let Some(ref clf) = self.action_classifier {

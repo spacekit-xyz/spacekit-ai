@@ -89,6 +89,12 @@ pub struct Synapse {
 
     /// If true, backprop and plasticity never update this synapse (e.g. input→consolidated pathway).
     pub frozen: bool,
+
+    /// Engram consolidation: accumulates when pre and post neurons co-fire (both in KWTA winners).
+    /// High consolidation = synapse is part of a memory trace; gets reduced LR and pruning immunity.
+    /// Biological analog: engram-engram synapses are stronger and denser (Rajasethupathy et al.).
+    #[serde(default)]
+    pub consolidation: f32,
 }
 
 impl Synapse {
@@ -102,6 +108,7 @@ impl Synapse {
             age: 0,
             last_active: 0,
             frozen: false,
+            consolidation: 0.0,
         }
     }
 
@@ -341,6 +348,36 @@ pub struct EnvironmentConfig {
     /// Enable for binary-target tasks (generation). Default false (MSE, validated
     /// for spiral/MNIST classification).
     pub output_bce: bool,
+
+    // -------------------------------------------------------------------------
+    // Engram-level consolidation (memory trace protection)
+    //
+    // Synapses between co-activated neurons (both in KWTA winners) accumulate
+    // consolidation. High-consolidation synapses: reduced LR (resist overwriting),
+    // pruning immunity. Biological analog: engram-engram synapses are stronger
+    // and denser; memory strength correlates with synaptic connectivity.
+    // -------------------------------------------------------------------------
+    /// Enable engram consolidation. When true, co-activated synapses accumulate
+    /// consolidation and get protected. Use for generation tasks with many patterns.
+    #[serde(default)]
+    pub engram_enabled: bool,
+    /// Activation threshold for "fired" (participated in this forward pass).
+    /// Neurons with activation >= this are considered engram participants.
+    #[serde(default)]
+    pub engram_activation_threshold: f32,
+    /// Per-tick increment when pre and post both fired. Cap at engram_cap.
+    #[serde(default)]
+    pub engram_increment: f32,
+    /// Maximum consolidation value (0.0 to 1.0).
+    #[serde(default)]
+    pub engram_cap: f32,
+    /// At consolidation=1.0, effective LR is scaled by (1 - engram_lr_scale).
+    /// 0.8 means 20% of normal LR for fully consolidated synapses.
+    #[serde(default)]
+    pub engram_lr_scale: f32,
+    /// Synapses with consolidation >= this are never pruned.
+    #[serde(default)]
+    pub engram_prune_threshold: f32,
 }
 
 impl Default for EnvironmentConfig {
@@ -416,6 +453,14 @@ impl Default for EnvironmentConfig {
             lateral_inhibition: 0.0, // disabled by default — set 0.1–0.2 for hidden layers
             lr_decay: 0.0,
             output_bce: false,
+
+            // Engram consolidation — disabled by default; GroupGenEnv enables
+            engram_enabled: false,
+            engram_activation_threshold: 0.1,
+            engram_increment: 0.05,
+            engram_cap: 1.0,
+            engram_lr_scale: 0.8,
+            engram_prune_threshold: 0.4,
         }
     }
 }
