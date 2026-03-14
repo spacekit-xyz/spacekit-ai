@@ -2491,7 +2491,7 @@ fn demo_train_brain(
     }
     println!("  Router training: {} raw samples, {} after oversampling (balanced)",
         router_samples_raw.len(), router_samples.len());
-    let router_epochs = (epochs as usize).max(200);
+    let router_epochs = (epochs as usize).max(500);
     let (router_loss, router_acc) = svc.dm.train_language_router(
         &router_samples,
         router_epochs,
@@ -2512,7 +2512,7 @@ fn demo_train_brain(
             (emb.clone(), at)
         })
         .collect();
-    let (clf_loss, clf_acc) = svc.dm.train_action_classifier(&action_samples, 200, 0.05);
+    let (clf_loss, clf_acc) = svc.dm.train_action_classifier(&action_samples, 500, 0.03);
     println!("  Classifier loss={:.4} accuracy={:.1}%", clf_loss, clf_acc * 100.0);
 
     // ---------------------------------------------------------------
@@ -2769,19 +2769,21 @@ fn demo_train_brain(
         "help me reset my password",
         "implement binary search in Python",
         "explain the observer pattern",
+        "design a microservices architecture in Rust",
+        "my account is locked after too many failed attempts",
     ];
     for prompt in &test_prompts {
         println!("\n  prompt: {:?}", prompt);
         if let Ok(action) = svc.dm.route_text_to_action_stateless(prompt) {
-            println!("  action: {:?} (conf={:.2})", action.action_type, action.confidence);
+            println!("  action: {:?} (conf={:.2}) group={:?}", action.action_type, action.confidence, action.target_group_id);
         }
         if let Ok((_, resp)) = svc.generation(prompt) {
             let r = &resp.text;
-            println!("  gen [{}]: {:?}", resp.template_id, &r[..r.len().min(120)]);
+            println!("  gen [{}]: {:?}", resp.template_id, &r[..r.len().min(200)]);
         }
         if let Ok((_, Some(code))) = svc.codegen(prompt) {
             let c = &code.code;
-            println!("  code [{}]: {:?}", code.kind, &c[..c.len().min(120)]);
+            println!("  code [{}]: {:?}", code.kind, &c[..c.len().min(200)]);
         }
     }
 

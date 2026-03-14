@@ -29,9 +29,9 @@ use crate::spectral::TokenDictionary;
 use crate::types::EnvironmentConfig;
 
 pub const GEN_COND_DIM: usize = 64;
-pub const MAX_TOKENS: usize = 32;
-const GEN_HIDDEN: usize = 128;
-const GEN_K: usize = 32;
+pub const MAX_TOKENS: usize = 64;
+const GEN_HIDDEN: usize = 256;
+const GEN_K: usize = 64;
 
 /// Compute bits needed for a dictionary of the given size.
 pub fn bits_for_dict(dict_len: usize) -> usize {
@@ -246,8 +246,8 @@ fn gen_env_config() -> EnvironmentConfig {
         dropout_rate: 0.05,
         weight_clamp: 8.0,
         growth_radius: 2.0,
-        max_synapses_per_neuron: 120,
-        energy_budget_per_neuron: 15.0,
+        max_synapses_per_neuron: 200,
+        energy_budget_per_neuron: 25.0,
         pruning_threshold: 0.04,
         sigma_inhib: 1.5,
         debye_length: 2.0,
