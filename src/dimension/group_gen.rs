@@ -6,8 +6,8 @@
 //! language output.
 //!
 //! Architecture per group:
-//!   input  = [bridged_embedding(64d), char_context(32 normalized bytes)] = 96d
-//!   hidden = 64 neurons × 2 layers, KWTA k=16 (25% sparse)
+//!   input  = [bridged_embedding(64d), char_context(64 normalized bytes)] = 128d
+//!   hidden = 128 neurons × 2 layers, KWTA k=32 (25% sparse)
 //!   output = 8 neurons (one per bit of ASCII byte)
 //!
 //! Output uses binary encoding: 8 output neurons each predict one bit of the
@@ -22,11 +22,11 @@ use crate::environment::NeuralEnvironment;
 use crate::types::EnvironmentConfig;
 
 pub const GEN_BITS: usize = 8;
-pub const GEN_CONTEXT_LEN: usize = 32;
+pub const GEN_CONTEXT_LEN: usize = 64;
 pub const GEN_COND_DIM: usize = 64;
-const GEN_INPUT_DIM: usize = GEN_COND_DIM + GEN_CONTEXT_LEN; // 96
-const GEN_HIDDEN: usize = 64;
-const GEN_K: usize = 16;
+const GEN_INPUT_DIM: usize = GEN_COND_DIM + GEN_CONTEXT_LEN; // 128
+const GEN_HIDDEN: usize = 128;
+const GEN_K: usize = 32;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct GroupGenEnv {
@@ -90,10 +90,10 @@ impl GroupGenEnv {
     }
 
     /// Teacher-forcing training step through the Growformer substrate.
-    /// Per-character: gradient-only (forward + backprop, includes KWTA + mass dynamics).
-    /// End of sample: one full train_tick triggers pruning, geometry, synapse growth.
-    /// Target is binary-encoded (8 bits per char) — 8 parallel binary classifications
-    /// that match the substrate's validated sigmoid + MSE gradient pathway.
+    /// Full train_tick every character — substrate dynamics (KWTA, mass, pruning,
+    /// geometry, synapse growth) are the learning mechanism, not an optimization
+    /// that can be skipped. Binary-encoded target (8 bits per char) with BCE
+    /// gradient at the output layer.
     pub fn train_step(&mut self, cond: &[f32], target: &str, rng: &mut impl Rng) -> f32 {
         if self.frozen {
             return 0.0;
@@ -105,19 +105,13 @@ impl GroupGenEnv {
 
         let mut context: Vec<u8> = Vec::new();
         let mut total_loss = 0.0f32;
-        let last_idx = target_bytes.len() - 1;
 
-        for (ci, &target_ch) in target_bytes.iter().enumerate() {
+        for &target_ch in &target_bytes {
             let input = Self::build_input(cond, &context);
             let target_bits = Self::byte_to_bits(target_ch);
 
-            if ci == last_idx {
-                let result = self.env.train_tick(&input, &target_bits, rng);
-                total_loss += Self::binary_cross_entropy(&result.output, &target_bits);
-            } else {
-                let loss = self.env.train_tick_gradient_only(&input, &target_bits, rng);
-                total_loss += loss;
-            }
+            let result = self.env.train_tick(&input, &target_bits, rng);
+            total_loss += Self::binary_cross_entropy(&result.output, &target_bits);
 
             context.push(target_ch);
         }
@@ -145,6 +139,24 @@ impl GroupGenEnv {
         }
 
         String::from_utf8_lossy(&output_chars).to_string()
+    }
+
+    /// Evaluate loss without modifying the network.
+    pub fn eval_loss(&mut self, cond: &[f32], target: &str) -> f32 {
+        let target_bytes: Vec<u8> = target.bytes().take(200).collect();
+        if target_bytes.is_empty() {
+            return 0.0;
+        }
+        let mut context: Vec<u8> = Vec::new();
+        let mut total_loss = 0.0f32;
+        for &target_ch in &target_bytes {
+            let input = Self::build_input(cond, &context);
+            let output = self.env.predict(&input);
+            let target_bits = Self::byte_to_bits(target_ch);
+            total_loss += Self::binary_cross_entropy(&output, &target_bits);
+            context.push(target_ch);
+        }
+        total_loss / target_bytes.len() as f32
     }
 
     pub fn freeze(&mut self) {
@@ -180,8 +192,8 @@ fn gen_env_config() -> EnvironmentConfig {
         dropout_rate: 0.05,
         weight_clamp: 8.0,
         growth_radius: 2.0,
-        max_synapses_per_neuron: 80,
-        energy_budget_per_neuron: 10.0,
+        max_synapses_per_neuron: 120,
+        energy_budget_per_neuron: 15.0,
         pruning_threshold: 0.04,
         sigma_inhib: 1.5,
         debye_length: 2.0,

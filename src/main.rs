@@ -212,6 +212,9 @@ struct Args {
     /// Generation epochs for per-group NeuralEnvironment training (0 = auto from brain-epochs × 50).
     #[arg(long, value_name = "N", default_value_t = 0)]
     brain_gen_epochs: u32,
+    /// Parallel replicas per generation task (different seeds, keep best). Scales to more CPU cores.
+    #[arg(long, value_name = "K", default_value_t = 1)]
+    brain_gen_replicas: u32,
     /// Training epochs for brain training (router + classifier).
     #[arg(long, value_name = "N", default_value_t = 30)]
     brain_epochs: u32,
@@ -390,6 +393,7 @@ fn main() {
             max_samples,
             quick_gen_epochs,
             args.brain_gen_epochs,
+            args.brain_gen_replicas,
             args.validate_brain_training,
         ) {
             eprintln!("Failed to train brain: {}", e);
@@ -2398,6 +2402,7 @@ fn demo_train_brain(
     max_samples: usize,
     quick_gen_epochs: u32,
     gen_epochs_override: u32,
+    gen_replicas: u32,
     validate: bool,
 ) -> Result<(), String> {
     println!("=== Full Neural Brain Training ===\n");
@@ -2498,8 +2503,9 @@ fn demo_train_brain(
     } else {
         (epochs as usize * 50).max(500)
     };
+    let k_replicas = (gen_replicas as usize).max(1);
     println!("\n--- Stages 3+4: Per-Group Generation Envs (parallel) ---");
-    println!("  gen_epochs={}, num_groups={}", gen_epochs, num_groups);
+    println!("  gen_epochs={}, num_groups={}, replicas_per_task={}", gen_epochs, num_groups, k_replicas);
 
     // Partition training data by (group, kind)
     let mut gen_by_group: HashMap<usize, Vec<(&[f32], &str)>> = HashMap::new();
@@ -2516,32 +2522,55 @@ fn demo_train_brain(
         }
     }
 
-    // Build task list: (group_idx, kind, data_ref)
+    // Build task list: K replicas per (group, kind) with different seeds
     struct GenTask<'a> {
         gidx: usize,
         kind: &'static str,
+        replica: usize,
         pairs: &'a [(&'a [f32], &'a str)],
         seed: u64,
     }
     let mut tasks: Vec<GenTask> = Vec::new();
+    let mut base_tasks = 0usize;
     for gidx in 0..num_groups {
         if let Some(p) = gen_by_group.get(&gidx) {
             if !p.is_empty() {
-                tasks.push(GenTask { gidx, kind: "gen", pairs: p.as_slice(), seed: 100 + gidx as u64 });
+                for r in 0..k_replicas {
+                    tasks.push(GenTask {
+                        gidx, kind: "gen", replica: r,
+                        pairs: p.as_slice(),
+                        seed: 100 + gidx as u64 * 1000 + r as u64,
+                    });
+                }
+                base_tasks += 1;
             }
         }
         if let Some(p) = code_by_group.get(&gidx) {
             if !p.is_empty() {
-                tasks.push(GenTask { gidx, kind: "code", pairs: p.as_slice(), seed: 200 + gidx as u64 });
+                for r in 0..k_replicas {
+                    tasks.push(GenTask {
+                        gidx, kind: "code", replica: r,
+                        pairs: p.as_slice(),
+                        seed: 200 + gidx as u64 * 1000 + r as u64,
+                    });
+                }
+                base_tasks += 1;
             }
         }
     }
-    for t in &tasks {
-        println!("  task: group {} {} — {} pairs", t.gidx, t.kind, t.pairs.len());
+    println!("  {} base tasks × {} replicas = {} total threads",
+        base_tasks, k_replicas, tasks.len());
+    for gidx in 0..num_groups {
+        if let Some(p) = gen_by_group.get(&gidx) {
+            if !p.is_empty() { println!("  task: group {} gen — {} pairs", gidx, p.len()); }
+        }
+        if let Some(p) = code_by_group.get(&gidx) {
+            if !p.is_empty() { println!("  task: group {} code — {} pairs", gidx, p.len()); }
+        }
     }
 
     let log_interval = (gen_epochs / 50).max(1);
-    let results: Vec<(usize, &str, GroupGenEnv)> = std::thread::scope(|s| {
+    let results: Vec<(usize, &str, usize, f32, GroupGenEnv)> = std::thread::scope(|s| {
         let handles: Vec<_> = tasks.iter().map(|task| {
             s.spawn(move || {
                 let mut task_rng = StdRng::seed_from_u64(task.seed);
@@ -2553,22 +2582,52 @@ fn demo_train_brain(
                     for &i in &indices {
                         total_loss += env.train_step(task.pairs[i].0, task.pairs[i].1, &mut task_rng);
                     }
+                    let last_avg = total_loss / task.pairs.len().max(1) as f32;
                     if epoch % log_interval == 0 || epoch == gen_epochs - 1 {
-                        let avg = total_loss / task.pairs.len().max(1) as f32;
-                        println!("    [{} g{}] epoch {}/{} loss={:.4} synapses={}",
-                            task.kind, task.gidx, epoch, gen_epochs, avg, env.total_synapses());
+                        if k_replicas > 1 {
+                            println!("    [{} g{} r{}] epoch {}/{} loss={:.4} synapses={}",
+                                task.kind, task.gidx, task.replica, epoch, gen_epochs,
+                                last_avg, env.total_synapses());
+                        } else {
+                            println!("    [{} g{}] epoch {}/{} loss={:.4} synapses={}",
+                                task.kind, task.gidx, epoch, gen_epochs,
+                                last_avg, env.total_synapses());
+                        }
                     }
                 }
+                // Evaluate final loss on full dataset (forward-only, no training)
+                let mut eval_loss = 0.0f32;
+                for &(cond, target) in task.pairs {
+                    eval_loss += env.eval_loss(cond, target);
+                }
+                let final_loss = eval_loss / task.pairs.len().max(1) as f32;
                 env.freeze();
-                println!("    [{} g{}] frozen: {} neurons, {} synapses",
-                    task.kind, task.gidx, env.total_neurons(), env.total_synapses());
-                (task.gidx, task.kind, env)
+                println!("    [{} g{} r{}] frozen: {} neurons, {} synapses, eval_loss={:.4}",
+                    task.kind, task.gidx, task.replica,
+                    env.total_neurons(), env.total_synapses(), final_loss);
+                (task.gidx, task.kind, task.replica, final_loss, env)
             })
         }).collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
-    for (gidx, kind, env) in results {
+    // Select best replica per (group, kind) by lowest eval loss
+    let mut best: HashMap<(usize, &str), (f32, GroupGenEnv)> = HashMap::new();
+    for (gidx, kind, replica, loss, env) in results {
+        let key = (gidx, kind);
+        let is_better = match best.get(&key) {
+            Some((prev_loss, _)) => loss < *prev_loss,
+            None => true,
+        };
+        if is_better {
+            if k_replicas > 1 {
+                println!("    [{} g{}] best replica so far: r{} loss={:.4}", kind, gidx, replica, loss);
+            }
+            best.insert(key, (loss, env));
+        }
+    }
+
+    for ((gidx, kind), (_loss, env)) in best {
         match kind {
             "gen" => { svc.dm.group_gen_envs.insert(gidx, env); }
             "code" => { svc.dm.group_code_envs.insert(gidx, env); }
