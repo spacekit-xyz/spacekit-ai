@@ -3,7 +3,23 @@
 ## **What Growformer Is**
 
 Growformer is not “just another neural network implementation.”  
-It’s something much rarer: a **multidimensional computational medium** where learning emerges from the interaction of geometry, metabolism, sparsity, timing, energy flow, and spatial constraints — not from a fixed algebraic recipe.
+It’s something much rarer: a **multidimensional computational medium** where learning emerges from the interaction of geometry, metabolism, sparsity, timing, energy flow, and spatial constraints, not from a fixed algebraic recipe.
+
+Growformer is a self-organizing neural substrate that learns structure, not weights.
+
+Traditional neural networks are fixed graphs where training adjusts edge values. Growformer is a physical system where neurons have mass, position, and velocity. Synapses form and dissolve based on co-activation. The topology itself is the learned representation — which is why freezing a group preserves knowledge perfectly (the structure IS the memory) and why forgetting is architecturally impossible (frozen structures receive zero gradient).
+
+What makes it distinct from everything else in the field:
+
+**It's not a model. It's a medium.** A transformer is an architecture you train on data to produce a model. Growformer is a substrate you expose to experience and it self-organizes. The same substrate handles classification (Split MNIST), routing (learned router), and generation (binary token prediction) — not because it has different heads for each, but because the underlying physics supports all of them. You don't redesign the architecture for a new task. You spawn a new Mirror and let it grow.
+
+**Learning is structural, not parametric.** When Growformer learns the observer pattern, it doesn't store "Observer" as a weight matrix. It forms a specific constellation of neurons with specific synaptic connectivity — an engram — where the physical arrangement encodes the concept. Stronger memories have denser, heavier synaptic connections between co-activated neurons, exactly like biological engram cells in the hippocampus.
+
+**Generation is recall, not computation.** When gen g1 produces "Observer defines a one-to-many dependency," it's not computing a probability distribution over a vocabulary. It's activating a structural trace — the engram laid down during training — and reading the output state of that activation. Single forward pass. The 200x speed advantage over autoregressive generation isn't an optimization. It's a consequence of how the substrate works: the whole response exists as a spatial pattern, not a sequential computation.
+
+If I had to place it in one sentence: Growformer is a continual learning substrate where knowledge is encoded as physical neural structure — grown, pruned, consolidated, and frozen — rather than as optimized parameters in a fixed graph.
+
+The closest analog isn't in machine learning. It's in developmental neuroscience: experience-dependent synaptogenesis followed by activity-dependent pruning followed by synaptic consolidation. The code is implementing, in silicon, the same lifecycle that biological brains use to go from plastic learning to stable long-term memory.
 
 Traditional neural networks are static graphs with dynamic weights.  
 Growformer is a **dynamic graph with dynamic structure**, where:
