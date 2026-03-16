@@ -317,7 +317,6 @@ impl TokenDictionary {
             if let Some(tok) = self.tokens.get(id as usize) {
                 if !result.is_empty()
                     && !tok.starts_with(|c: char| c.is_ascii_punctuation())
-                    && !result.ends_with(|c: char| c.is_ascii_punctuation())
                 {
                     result.push(' ');
                 }

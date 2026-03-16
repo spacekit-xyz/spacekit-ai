@@ -2,6 +2,7 @@ use growformer::dimension::{
     LanguageSample,
     GroupGenEnv, action_target_to_type,
 };
+use growformer::dimension::group_gen::AlgebraicCodebook;
 use growformer::spectral::TokenDictionary;
 use std::collections::HashMap;
 use growformer::service::LanguageService;
@@ -621,6 +622,32 @@ fn demo_train_brain(
             gidx, dict.len(), texts.len(), bits, effective_max_tokens * bits);
         code_dicts.insert(gidx, dict);
     }
+    // Build algebraic codebooks: factorize each group's response space into
+    // archetypes + slots, reducing prediction from ~1900 to ~80-120 bits.
+    let max_archetypes = 16;
+    let mut gen_codebooks: HashMap<usize, AlgebraicCodebook> = HashMap::new();
+    let mut code_codebooks: HashMap<usize, AlgebraicCodebook> = HashMap::new();
+    for (&gidx, pairs) in &gen_by_group {
+        if pairs.is_empty() { continue; }
+        let texts: Vec<&str> = pairs.iter().map(|(_emb, text)| *text).collect();
+        let dict = gen_dicts.get(&gidx).unwrap();
+        let cb = AlgebraicCodebook::build(&texts, dict, max_archetypes);
+        println!("  gen codebook[g{}]: {} archetypes, {} slots max, {} total bits (was {})",
+            gidx, cb.archetypes.len(), cb.max_slot_count, cb.total_bits,
+            effective_max_tokens * bits_for_dict(dict.len()));
+        gen_codebooks.insert(gidx, cb);
+    }
+    for (&gidx, pairs) in &code_by_group {
+        if pairs.is_empty() { continue; }
+        let texts: Vec<&str> = pairs.iter().map(|(_emb, text)| *text).collect();
+        let dict = code_dicts.get(&gidx).unwrap();
+        let cb = AlgebraicCodebook::build(&texts, dict, max_archetypes);
+        println!("  code codebook[g{}]: {} archetypes, {} slots max, {} total bits (was {})",
+            gidx, cb.archetypes.len(), cb.max_slot_count, cb.total_bits,
+            effective_max_tokens * bits_for_dict(dict.len()));
+        code_codebooks.insert(gidx, cb);
+    }
+
     // Store first available dict as fallback for service inference
     if let Some(d) = gen_dicts.values().next() {
         svc.dm.gen_dictionary = Some(d.clone());
@@ -646,6 +673,7 @@ fn demo_train_brain(
         pairs: &'a [(&'a [f32], &'a str)],
         seed: u64,
         dictionary: TokenDictionary,
+        codebook: Option<AlgebraicCodebook>,
         prune_stop_tick: u64,
         task_epochs: usize,
         overrides: Option<growformer::dimension::group_gen::GenEnvOverrides>,
@@ -666,12 +694,14 @@ fn demo_train_brain(
                 let total_ticks = task_epochs as u64 * p.len() as u64;
                 let stop_tick = (total_ticks as f64 * prune_warmup_frac) as u64;
                 let dict = gen_dicts.get(&gidx).unwrap().clone();
+                let cb = gen_codebooks.get(&gidx).cloned();
                 for r in 0..k_replicas {
                     tasks.push(GenTask {
                         gidx, kind: "gen", replica: r,
                         pairs: p.as_slice(),
                         seed: 100 + gidx as u64 * 1000 + r as u64,
                         dictionary: dict.clone(),
+                        codebook: cb.clone(),
                         prune_stop_tick: stop_tick,
                         task_epochs,
                         overrides: gen_overrides.clone(),
@@ -689,12 +719,14 @@ fn demo_train_brain(
                 let total_ticks = task_epochs as u64 * p.len() as u64;
                 let stop_tick = (total_ticks as f64 * prune_warmup_frac) as u64;
                 let dict = code_dicts.get(&gidx).unwrap().clone();
+                let cb = code_codebooks.get(&gidx).cloned();
                 for r in 0..k_replicas {
                     tasks.push(GenTask {
                         gidx, kind: "code", replica: r,
                         pairs: p.as_slice(),
                         seed: 200 + gidx as u64 * 1000 + r as u64,
                         dictionary: dict.clone(),
+                        codebook: cb.clone(),
                         prune_stop_tick: stop_tick,
                         task_epochs,
                         overrides: gen_overrides.clone(),
@@ -723,7 +755,12 @@ fn demo_train_brain(
         let handles: Vec<_> = tasks.iter().map(|task| {
             s.spawn(move || {
                 let mut task_rng = StdRng::seed_from_u64(task.seed);
-                let mut env = if let Some(ov) = &task.overrides {
+                let ov = task.overrides.as_ref();
+                let default_ov = growformer::dimension::group_gen::GenEnvOverrides::default();
+                let ov_ref = ov.unwrap_or(&default_ov);
+                let mut env = if let Some(cb) = task.codebook.clone() {
+                    GroupGenEnv::new_algebraic(task.dictionary.clone(), cb, ov_ref, &mut task_rng)
+                } else if let Some(ov) = &task.overrides {
                     GroupGenEnv::new_with_overrides(task.dictionary.clone(), ov, &mut task_rng)
                 } else {
                     GroupGenEnv::new(task.dictionary.clone(), &mut task_rng)
@@ -731,9 +768,10 @@ fn demo_train_brain(
                 env.set_prune_stop_tick(task.prune_stop_tick);
                 let te = task.task_epochs;
                 let log_interval = (te / 50).max(1);
-                println!("    [{} g{} r{}] bits_per_token={} output_dim={} max_tokens={} epochs={} prune_stop_tick={}{}",
-                    task.kind, task.gidx, task.replica,
-                    env.bits_per_token, env.output_dim, env.max_tokens(), te, task.prune_stop_tick,
+                let mode_str = if env.codebook.is_some() { " ALGEBRAIC" } else { "" };
+                println!("    [{} g{} r{}]{} output_dim={} epochs={} prune_stop_tick={}{}",
+                    task.kind, task.gidx, task.replica, mode_str,
+                    env.output_dim, te, task.prune_stop_tick,
                     if task.es_window > 0 { format!(" early_stop(win={} min_imp={:.4} min_ep={})", task.es_window, task.es_min_imp, task.es_min_ep) } else { String::new() });
                 let n_pairs = task.pairs.len();
                 let mut indices: Vec<usize> = (0..n_pairs).collect();

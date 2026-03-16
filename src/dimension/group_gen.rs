@@ -23,6 +23,7 @@
 
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::environment::NeuralEnvironment;
 use crate::spectral::{TokenDictionary, hamming_parity_bits, hamming_encode, hamming_decode};
@@ -52,15 +53,308 @@ pub fn bits_for_dict(dict_len: usize) -> usize {
     (usize::BITS - max_id.leading_zeros()) as usize
 }
 
+// ---------------------------------------------------------------------------
+// Algebraic Codebook — factored generation via group-theory decomposition
+// ---------------------------------------------------------------------------
+
+/// Bits needed to represent `n` distinct values.
+fn bits_for_count(n: usize) -> usize {
+    if n <= 1 { return 1; }
+    (usize::BITS - (n - 1).leading_zeros()) as usize
+}
+
+/// A variable position in a response archetype.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArchetypeSlot {
+    pub position: usize,
+    pub vocab: Vec<u16>,
+    pub bits: usize,
+}
+
+/// A structural response pattern: fixed tokens + variable slots.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResponseArchetype {
+    pub fixed: Vec<(usize, u16)>,
+    pub slots: Vec<ArchetypeSlot>,
+    pub length: usize,
+}
+
+/// Factored representation of the response space for a group.
+/// Decomposes response prediction from O(max_tokens × bits_per_token) into
+/// O(archetype_bits + num_slots × slot_bits), typically ~80-120 bits
+/// instead of ~1400-1900.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AlgebraicCodebook {
+    pub archetypes: Vec<ResponseArchetype>,
+    pub archetype_bits: usize,
+    pub max_slot_count: usize,
+    pub slot_bit_widths: Vec<usize>,
+    pub total_bits: usize,
+}
+
+impl AlgebraicCodebook {
+    /// Build a codebook from training texts for a single group.
+    /// Clusters responses into archetypes, extracts fixed/variable positions.
+    pub fn build(texts: &[&str], dictionary: &TokenDictionary, max_archetypes: usize) -> Self {
+        let seqs: Vec<Vec<u16>> = texts.iter().map(|t| dictionary.encode(t)).collect();
+        if seqs.is_empty() {
+            return Self::empty();
+        }
+
+        let max_len = seqs.iter().map(|s| s.len()).max().unwrap_or(0);
+        let padded: Vec<Vec<u16>> = seqs.iter().map(|s| {
+            let mut p = s.clone();
+            p.resize(max_len, 0);
+            p
+        }).collect();
+
+        let clusters = Self::cluster_responses(&padded, max_archetypes.min(padded.len()));
+        let archetypes: Vec<ResponseArchetype> = clusters.iter().map(|indices| {
+            let cluster_seqs: Vec<&Vec<u16>> = indices.iter().map(|&i| &padded[i]).collect();
+            Self::extract_archetype(&cluster_seqs, max_len)
+        }).collect();
+
+        let archetype_bits = bits_for_count(archetypes.len().max(1));
+        let max_slot_count = archetypes.iter().map(|a| a.slots.len()).max().unwrap_or(0);
+
+        let mut slot_bit_widths = vec![0usize; max_slot_count];
+        for arch in &archetypes {
+            for (i, slot) in arch.slots.iter().enumerate() {
+                slot_bit_widths[i] = slot_bit_widths[i].max(slot.bits);
+            }
+        }
+
+        let total_bits = archetype_bits + slot_bit_widths.iter().sum::<usize>();
+
+        Self { archetypes, archetype_bits, max_slot_count, slot_bit_widths, total_bits }
+    }
+
+    pub fn empty() -> Self {
+        Self { archetypes: vec![], archetype_bits: 1, max_slot_count: 0, slot_bit_widths: vec![], total_bits: 1 }
+    }
+
+    /// Encode a token sequence into algebraic bits.
+    pub fn encode(&self, token_ids: &[u16]) -> Vec<f32> {
+        let (arch_idx, slot_values) = self.match_best(token_ids);
+        let mut bits = vec![0.0f32; self.total_bits];
+
+        for i in 0..self.archetype_bits {
+            bits[i] = if (arch_idx >> i) & 1 == 1 { 1.0 } else { 0.0 };
+        }
+
+        let mut offset = self.archetype_bits;
+        for (slot_idx, &val) in slot_values.iter().enumerate() {
+            let sbits = self.slot_bit_widths.get(slot_idx).copied().unwrap_or(0);
+            for i in 0..sbits {
+                if offset + i < bits.len() {
+                    bits[offset + i] = if (val >> i) & 1 == 1 { 1.0 } else { 0.0 };
+                }
+            }
+            offset += sbits;
+        }
+        bits
+    }
+
+    /// Decode algebraic bits back to token IDs using nearest-neighbor soft
+    /// decode for both archetype selection and slot filling.
+    pub fn decode(&self, bits: &[f32]) -> Vec<u16> {
+        if self.archetypes.is_empty() {
+            return vec![];
+        }
+
+        // Soft decode archetype: find closest match
+        let arch_bits = &bits[..self.archetype_bits.min(bits.len())];
+        let arch_idx = Self::soft_decode_index(arch_bits, self.archetypes.len());
+        let arch = &self.archetypes[arch_idx];
+
+        let mut tokens = vec![0u16; arch.length];
+        for &(pos, tok) in &arch.fixed {
+            if pos < tokens.len() {
+                tokens[pos] = tok;
+            }
+        }
+
+        let mut offset = self.archetype_bits;
+        for (slot_idx, slot) in arch.slots.iter().enumerate() {
+            let sbits = self.slot_bit_widths.get(slot_idx).copied().unwrap_or(0);
+            let end = (offset + sbits).min(bits.len());
+            let slot_bits = if offset < bits.len() { &bits[offset..end] } else { &[] as &[f32] };
+            let val = Self::soft_decode_index(slot_bits, slot.vocab.len());
+            if slot.position < tokens.len() && val < slot.vocab.len() {
+                tokens[slot.position] = slot.vocab[val];
+            }
+            offset += sbits;
+        }
+
+        while tokens.last() == Some(&0) {
+            tokens.pop();
+        }
+        tokens.retain(|&t| t != 0);
+        tokens
+    }
+
+    /// Nearest-neighbor decode for a small index: try all candidates and
+    /// pick the one whose binary encoding is closest to the raw sigmoids.
+    fn soft_decode_index(bits: &[f32], num_options: usize) -> usize {
+        if num_options <= 1 { return 0; }
+        let nbits = bits_for_count(num_options);
+        let mut best = 0usize;
+        let mut best_dist = f32::MAX;
+        for candidate in 0..num_options {
+            let mut dist = 0.0f32;
+            for i in 0..nbits {
+                let target = if (candidate >> i) & 1 == 1 { 1.0f32 } else { 0.0 };
+                let actual = bits.get(i).copied().unwrap_or(0.0);
+                let d = actual - target;
+                dist += d * d;
+            }
+            if dist < best_dist {
+                best_dist = dist;
+                best = candidate;
+            }
+        }
+        best
+    }
+
+    /// Find the best matching archetype and slot values for a token sequence.
+    /// Scores by (matching fixed) - 2*(mismatching fixed) + (slot hits) to
+    /// prevent a high-fixed-count archetype from stealing texts that belong
+    /// to a different cluster.
+    fn match_best(&self, token_ids: &[u16]) -> (usize, Vec<usize>) {
+        let mut best_arch = 0;
+        let mut best_score = i64::MIN;
+
+        for (idx, arch) in self.archetypes.iter().enumerate() {
+            let mut score: i64 = 0;
+            for &(pos, tok) in &arch.fixed {
+                if token_ids.get(pos).copied() == Some(tok) {
+                    score += 2;
+                } else {
+                    score -= 3;
+                }
+            }
+            for slot in &arch.slots {
+                let actual = token_ids.get(slot.position).copied().unwrap_or(0);
+                if slot.vocab.contains(&actual) {
+                    score += 1;
+                }
+            }
+            if score > best_score {
+                best_score = score;
+                best_arch = idx;
+            }
+        }
+
+        let arch = &self.archetypes[best_arch];
+        let mut slot_values: Vec<usize> = arch.slots.iter().map(|slot| {
+            let actual_tok = token_ids.get(slot.position).copied().unwrap_or(0);
+            slot.vocab.iter().position(|&t| t == actual_tok).unwrap_or(0)
+        }).collect();
+        slot_values.resize(self.max_slot_count, 0);
+
+        (best_arch, slot_values)
+    }
+
+    /// Greedy clustering by positional token overlap.
+    fn cluster_responses(padded: &[Vec<u16>], max_k: usize) -> Vec<Vec<usize>> {
+        let n = padded.len();
+        if n == 0 { return vec![]; }
+        let max_k = max_k.min(n).max(1);
+        if max_k == 1 || n <= 3 {
+            return vec![(0..n).collect()];
+        }
+
+        // Pick medoids: first is index 0, then greedily pick most different
+        let mut medoids = vec![0usize];
+        for _ in 1..max_k {
+            let mut best_idx = 0;
+            let mut best_min_dist = 0usize;
+            for i in 0..n {
+                if medoids.contains(&i) { continue; }
+                let min_overlap = medoids.iter().map(|&m| Self::overlap(&padded[i], &padded[m])).min().unwrap_or(0);
+                let dist = padded[i].len().saturating_sub(min_overlap);
+                if dist > best_min_dist {
+                    best_min_dist = dist;
+                    best_idx = i;
+                }
+            }
+            if best_min_dist == 0 { break; }
+            medoids.push(best_idx);
+        }
+
+        let mut clusters: Vec<Vec<usize>> = vec![vec![]; medoids.len()];
+        for i in 0..n {
+            let mut best_k = 0;
+            let mut best_overlap = 0;
+            for (k, &m) in medoids.iter().enumerate() {
+                let ov = Self::overlap(&padded[i], &padded[m]);
+                if ov > best_overlap {
+                    best_overlap = ov;
+                    best_k = k;
+                }
+            }
+            clusters[best_k].push(i);
+        }
+        clusters.retain(|c| !c.is_empty());
+        clusters
+    }
+
+    fn overlap(a: &[u16], b: &[u16]) -> usize {
+        a.iter().zip(b.iter()).filter(|(x, y)| x == y && **x != 0).count()
+    }
+
+    /// Extract an archetype from a cluster of aligned token sequences.
+    fn extract_archetype(seqs: &[&Vec<u16>], max_len: usize) -> ResponseArchetype {
+        let n = seqs.len().max(1);
+        let length = seqs.iter().map(|s| {
+            s.iter().rposition(|&t| t != 0).map(|p| p + 1).unwrap_or(0)
+        }).max().unwrap_or(0).min(max_len);
+
+        let mut fixed = Vec::new();
+        let mut slots = Vec::new();
+
+        for pos in 0..length {
+            let mut freq: HashMap<u16, usize> = HashMap::new();
+            for seq in seqs {
+                let tok = seq.get(pos).copied().unwrap_or(0);
+                *freq.entry(tok).or_default() += 1;
+            }
+
+            let (&most_common, &count) = freq.iter().max_by_key(|(_, &c)| c).unwrap();
+
+            if count as f32 / n as f32 > 0.5 && most_common != 0 {
+                fixed.push((pos, most_common));
+            } else {
+                let mut vocab: Vec<u16> = freq.keys().copied().filter(|&t| t != 0).collect();
+                vocab.sort();
+                vocab.dedup();
+                if vocab.is_empty() { continue; }
+                let bits = bits_for_count(vocab.len().max(2));
+                slots.push(ArchetypeSlot { position: pos, vocab, bits });
+            }
+        }
+
+        ResponseArchetype { fixed, slots, length }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GroupGenEnv
+// ---------------------------------------------------------------------------
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct GroupGenEnv {
     pub env: NeuralEnvironment,
     pub dictionary: TokenDictionary,
     pub bits_per_token: usize,
-    /// Total bits per token slot including ECC parity bits.
+    /// Total bits per token slot including ECC parity bits (raw binary mode).
     pub coded_bits_per_token: usize,
     pub output_dim: usize,
     pub frozen: bool,
+    /// When present, generation uses algebraic (factored) encoding instead
+    /// of raw binary token prediction. Reduces output from ~1900 to ~80-120 bits.
+    #[serde(default)]
+    pub codebook: Option<AlgebraicCodebook>,
 }
 
 impl GroupGenEnv {
@@ -89,6 +383,39 @@ impl GroupGenEnv {
             coded_bits_per_token,
             output_dim,
             frozen: false,
+            codebook: None,
+        }
+    }
+
+    /// Create an algebraic generation environment. The codebook factorizes
+    /// the response space so the substrate only predicts ~80-120 bits
+    /// (archetype + slot values) instead of ~1400-1900 raw token bits.
+    /// Requires training texts to extract archetypes before construction.
+    pub fn new_algebraic(
+        dictionary: TokenDictionary,
+        codebook: AlgebraicCodebook,
+        ov: &GenEnvOverrides,
+        rng: &mut impl Rng,
+    ) -> Self {
+        let hidden = ov.hidden.unwrap_or(GEN_HIDDEN);
+        let k = ov.k.unwrap_or(GEN_K);
+        let output_dim = codebook.total_bits;
+        let bits_per_token = bits_for_dict(dictionary.len());
+        let coded_bits_per_token = bits_per_token; // not used in algebraic mode
+        let mut config = gen_env_config();
+        config.competitive_k = k.min(hidden / 2);
+        if let Some(ms) = ov.max_synapses { config.max_synapses_per_neuron = ms; }
+        if let Some(eb) = ov.energy_budget { config.energy_budget_per_neuron = eb; }
+        let mut env = NeuralEnvironment::new(config);
+        env.build_layers(&[GEN_COND_DIM, hidden, hidden, output_dim], rng);
+        Self {
+            env,
+            dictionary,
+            bits_per_token,
+            coded_bits_per_token,
+            output_dim,
+            frozen: false,
+            codebook: Some(codebook),
         }
     }
 
@@ -149,9 +476,16 @@ impl GroupGenEnv {
         best_id
     }
 
-    /// Encode a full target text into a flat binary target vector (with ECC).
+    /// Encode a full target text into a flat binary target vector.
+    /// Uses algebraic codebook when present, otherwise raw binary with ECC.
     fn encode_target(&self, text: &str) -> Vec<f32> {
         let token_ids = self.dictionary.encode(text);
+
+        if let Some(ref cb) = self.codebook {
+            return cb.encode(&token_ids);
+        }
+
+        // Raw binary path (with ECC)
         let mut target = vec![0.0f32; self.output_dim];
         let cbpt = self.coded_bits_per_token;
         let max_tok = self.output_dim / cbpt.max(1);
@@ -164,10 +498,16 @@ impl GroupGenEnv {
         target
     }
 
-    /// Decode a flat binary output vector into text via dictionary lookup.
-    /// Pipeline: raw sigmoids → Hamming ECC correction → Gray decode →
-    /// nearest-neighbor soft decode. Stops at EOS or low confidence.
+    /// Decode a flat binary output vector into text.
+    /// Uses algebraic codebook when present, otherwise raw binary pipeline
+    /// (ECC correction → Gray decode → soft decode).
     fn decode_output(&self, output: &[f32]) -> String {
+        if let Some(ref cb) = self.codebook {
+            let ids = cb.decode(output);
+            return self.dictionary.decode(&ids);
+        }
+
+        // Raw binary path
         let dict_size = self.dictionary.len();
         let cbpt = self.coded_bits_per_token;
         let bpt = self.bits_per_token;
@@ -189,13 +529,9 @@ impl GroupGenEnv {
                 break;
             }
 
-            // Step 1: Hard-threshold to get codeword bits for ECC
             let hard_bits: Vec<u8> = slot.iter().map(|&v| if v > 0.5 { 1u8 } else { 0u8 }).collect();
-            // Step 2: Hamming correction on the codeword
             let corrected_data = hamming_decode(&hard_bits, bpt);
-            // Step 3: Reconstruct soft values from corrected data for soft decode
             let corrected_soft: Vec<f32> = corrected_data.iter().map(|&b| b as f32).collect();
-            // Step 4: Soft decode (nearest-neighbor on data bits, Gray-aware)
             let id = Self::bits_to_id_soft(&corrected_soft, &self.dictionary, dict_size, bpt);
 
             if pos >= min_tokens && id == 0 {
@@ -232,7 +568,7 @@ impl GroupGenEnv {
             return 0.0;
         }
         let target_vec = self.encode_target(target);
-        if target_vec.iter().all(|&v| v == 0.0) {
+        if self.codebook.is_none() && target_vec.iter().all(|&v| v == 0.0) {
             return 0.0;
         }
 
@@ -241,17 +577,18 @@ impl GroupGenEnv {
             input[i] = *v;
         }
 
-        // Primary learning tick: full substrate dynamics + content
         let result = self.env.train_tick(&input, &target_vec, rng);
         let loss = Self::binary_cross_entropy(&result.output, &target_vec);
 
-        // Count actual content tokens to find where EOS begins
-        let token_ids = self.dictionary.encode(target);
-        let max_tok = self.output_dim / self.coded_bits_per_token.max(1);
-        let content_tokens = token_ids.len().min(max_tok);
-        if content_tokens < max_tok {
-            let eos_target = vec![0.0f32; self.output_dim];
-            self.env.train_tick_gradient_only(&input, &eos_target, rng);
+        // EOS reinforcement only needed in raw binary mode (not algebraic)
+        if self.codebook.is_none() {
+            let token_ids = self.dictionary.encode(target);
+            let max_tok = self.output_dim / self.coded_bits_per_token.max(1);
+            let content_tokens = token_ids.len().min(max_tok);
+            if content_tokens < max_tok {
+                let eos_target = vec![0.0f32; self.output_dim];
+                self.env.train_tick_gradient_only(&input, &eos_target, rng);
+            }
         }
 
         loss
@@ -271,7 +608,7 @@ impl GroupGenEnv {
     /// Evaluate loss without modifying the network.
     pub fn eval_loss(&mut self, cond: &[f32], target: &str) -> f32 {
         let target_vec = self.encode_target(target);
-        if target_vec.iter().all(|&v| v == 0.0) {
+        if self.codebook.is_none() && target_vec.iter().all(|&v| v == 0.0) {
             return 0.0;
         }
 
@@ -491,5 +828,123 @@ mod tests {
             elapsed.as_millis() as f64 / 100.0,
             total_loss / 100.0
         );
+    }
+
+    // --- Algebraic Codebook Tests ---
+
+    fn support_texts() -> Vec<&'static str> {
+        vec![
+            "To reset your password, go to Settings > Security > Reset password",
+            "To reset your password, navigate to Settings > Security > Change password",
+            "To reset your password, visit Settings and click Security then Reset",
+            "You can change your email in Settings > Profile > Email address",
+            "You can change your email in Settings > Profile > Update email",
+            "You can update your email under Settings > Profile > Email",
+            "Contact support at help@example.com for billing questions",
+            "Contact support at help@example.com for account issues",
+            "Reach out to help@example.com for billing concerns",
+        ]
+    }
+
+    #[test]
+    fn test_codebook_build() {
+        let texts = support_texts();
+        let dict = TokenDictionary::build(&texts, 500);
+        let cb = AlgebraicCodebook::build(&texts, &dict, 8);
+        assert!(!cb.archetypes.is_empty(), "should have at least 1 archetype");
+        assert!(cb.total_bits > 0, "total bits should be > 0");
+        assert!(cb.total_bits < 500, "total bits should be much less than raw binary (was {})", cb.total_bits);
+        println!("codebook: {} archetypes, {} max slots, {} total bits",
+            cb.archetypes.len(), cb.max_slot_count, cb.total_bits);
+        for (i, arch) in cb.archetypes.iter().enumerate() {
+            println!("  arch[{}]: {} fixed, {} slots, len={}",
+                i, arch.fixed.len(), arch.slots.len(), arch.length);
+        }
+    }
+
+    #[test]
+    fn test_codebook_encode_decode_roundtrip() {
+        let texts = support_texts();
+        let dict = TokenDictionary::build(&texts, 500);
+        let cb = AlgebraicCodebook::build(&texts, &dict, 8);
+
+        for &text in &texts {
+            let token_ids = dict.encode(text);
+            let bits = cb.encode(&token_ids);
+            assert_eq!(bits.len(), cb.total_bits, "encoded length mismatch");
+            let decoded_ids = cb.decode(&bits);
+            // Compare token IDs directly (text roundtrip may lose whitespace nuances)
+            assert_eq!(decoded_ids, token_ids,
+                "token ID roundtrip failed for: {}\n  got: {:?}\n  exp: {:?}", text, decoded_ids, token_ids);
+        }
+    }
+
+    #[test]
+    fn test_algebraic_env_smaller_output() {
+        let texts = support_texts();
+        let dict = TokenDictionary::build(&texts, 500);
+        let cb = AlgebraicCodebook::build(&texts, &dict, 8);
+        let raw_output = MAX_TOKENS * bits_for_dict(dict.len());
+        let algebraic_output = cb.total_bits;
+        println!("raw output_dim={}, algebraic output_dim={}, reduction={}x",
+            raw_output, algebraic_output, raw_output / algebraic_output.max(1));
+        assert!(algebraic_output < raw_output / 2,
+            "algebraic should be at least 2x smaller: {} vs {}", algebraic_output, raw_output);
+    }
+
+    #[test]
+    fn test_algebraic_env_train_and_generate() {
+        let texts = support_texts();
+        let dict = TokenDictionary::build(&texts, 500);
+        let cb = AlgebraicCodebook::build(&texts, &dict, 8);
+        let mut rng = StdRng::seed_from_u64(42);
+        let ov = GenEnvOverrides::default();
+        let mut env = GroupGenEnv::new_algebraic(dict, cb, &ov, &mut rng);
+        assert!(env.codebook.is_some());
+
+        let cond = vec![0.1f32; GEN_COND_DIM];
+        let target = "To reset your password, go to Settings > Security > Reset password";
+        let loss = env.train_step(&cond, target, &mut rng);
+        assert!(loss > 0.0, "loss should be positive: {}", loss);
+        let _out = env.generate(&cond, 100, 0.8);
+        println!("generated: {}", _out);
+    }
+
+    #[test]
+    fn test_algebraic_loss_decreases() {
+        let texts = support_texts();
+        let dict = TokenDictionary::build(&texts, 500);
+        let cb = AlgebraicCodebook::build(&texts, &dict, 8);
+        let mut rng = StdRng::seed_from_u64(42);
+        let ov = GenEnvOverrides::default();
+        let mut env = GroupGenEnv::new_algebraic(dict, cb, &ov, &mut rng);
+        let cond = vec![0.1f32; GEN_COND_DIM];
+        let target = "To reset your password, go to Settings > Security > Reset password";
+
+        let loss_0 = env.train_step(&cond, target, &mut rng);
+        for _ in 0..200 {
+            env.train_step(&cond, target, &mut rng);
+        }
+        let loss_200 = env.train_step(&cond, target, &mut rng);
+        println!("algebraic loss: {} -> {}", loss_0, loss_200);
+        assert!(loss_200 < loss_0, "loss should decrease: {} -> {}", loss_0, loss_200);
+    }
+
+    #[test]
+    fn test_algebraic_encode_decode_via_env() {
+        let texts = support_texts();
+        let dict = TokenDictionary::build(&texts, 500);
+        let cb = AlgebraicCodebook::build(&texts, &dict, 8);
+        let mut rng = StdRng::seed_from_u64(42);
+        let ov = GenEnvOverrides::default();
+        let env = GroupGenEnv::new_algebraic(dict.clone(), cb, &ov, &mut rng);
+
+        for &text in &texts {
+            let target = env.encode_target(text);
+            assert_eq!(target.len(), env.output_dim);
+            let decoded = env.decode_output(&target);
+            let expected = dict.decode(&dict.encode(text));
+            assert_eq!(decoded, expected, "env encode/decode roundtrip failed for: {}", text);
+        }
     }
 }
