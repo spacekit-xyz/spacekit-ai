@@ -84,7 +84,7 @@ fn main() {
         } else {
             args.brain_quick_gen_epochs
         };
-        if let Err(e) = demo_train_brain(
+        if let Err(e) = train_brain(
             args.brain_epochs,
             &args.brain_output,
             max_samples,
@@ -416,7 +416,7 @@ fn next_power_of_two_or_round(n: usize) -> usize {
     256
 }
 
-fn demo_train_brain(
+fn train_brain(
     epochs: u32,
     output_path: &str,
     max_samples: usize,
@@ -624,16 +624,25 @@ fn demo_train_brain(
     }
     // Build algebraic codebooks: factorize each group's response space into
     // archetypes + slots, reducing prediction from ~1900 to ~80-120 bits.
-    let max_archetypes = 16;
+    // Scale archetypes with data size: larger groups need more archetypes
+    // to avoid collapsing diverse texts into too few buckets.
+    let base_archetypes = 16usize;
     let mut gen_codebooks: HashMap<usize, AlgebraicCodebook> = HashMap::new();
     let mut code_codebooks: HashMap<usize, AlgebraicCodebook> = HashMap::new();
     for (&gidx, pairs) in &gen_by_group {
         if pairs.is_empty() { continue; }
         let texts: Vec<&str> = pairs.iter().map(|(_emb, text)| *text).collect();
         let dict = gen_dicts.get(&gidx).unwrap();
-        let cb = AlgebraicCodebook::build(&texts, dict, max_archetypes);
-        println!("  gen codebook[g{}]: {} archetypes, {} slots max, {} total bits (was {})",
-            gidx, cb.archetypes.len(), cb.max_slot_count, cb.total_bits,
+        let gen_max_arch = if texts.len() > 150 {
+            base_archetypes * 3  // 48 for large gen groups
+        } else if texts.len() > 50 {
+            base_archetypes * 2  // 32 for medium groups
+        } else {
+            base_archetypes      // 16 for small groups
+        };
+        let cb = AlgebraicCodebook::build(&texts, dict, gen_max_arch);
+        println!("  gen codebook[g{}]: {} archetypes (max={}), {} slots max, {} total bits (was {})",
+            gidx, cb.archetypes.len(), gen_max_arch, cb.max_slot_count, cb.total_bits,
             effective_max_tokens * bits_for_dict(dict.len()));
         gen_codebooks.insert(gidx, cb);
     }
@@ -641,8 +650,9 @@ fn demo_train_brain(
         if pairs.is_empty() { continue; }
         let texts: Vec<&str> = pairs.iter().map(|(_emb, text)| *text).collect();
         let dict = code_dicts.get(&gidx).unwrap();
-        let cb = AlgebraicCodebook::build(&texts, dict, max_archetypes);
-        println!("  code codebook[g{}]: {} archetypes, {} slots max, {} total bits (was {})",
+        let code_max_arch = base_archetypes * 2; // code has more unique structural patterns
+        let cb = AlgebraicCodebook::build_syntax_aware(&texts, dict, code_max_arch);
+        println!("  code codebook[g{}]: {} archetypes, {} slots max, {} total bits (was {}) [SYNTAX-AWARE]",
             gidx, cb.archetypes.len(), cb.max_slot_count, cb.total_bits,
             effective_max_tokens * bits_for_dict(dict.len()));
         code_codebooks.insert(gidx, cb);
@@ -894,8 +904,7 @@ fn demo_train_brain(
         println!("    code[{}]: {} neurons, {} synapses, frozen={}", gidx, env.total_neurons(), env.total_synapses(), env.frozen);
     }
 
-    // Quick inference demo using the service API (goes through trained heads)
-    println!("\n--- Quick Inference Demo ---");
+    println!("\n--- Post-Training Inference Check ---");
     let test_prompts = [
         "help me reset my password",
         "implement binary search in Python",

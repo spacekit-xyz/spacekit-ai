@@ -356,6 +356,99 @@ impl TokenDictionary {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Syntax Role Classification — for syntax-aware codebook construction
+// ---------------------------------------------------------------------------
+
+/// Syntactic role of a token. Used by the syntax-aware codebook to distinguish
+/// structural tokens (always fixed) from content tokens (potential slots).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SyntaxRole {
+    /// Language keyword: def, fn, class, if, else, for, while, return, let, mut, pub, etc.
+    Keyword,
+    /// Structural punctuation: ( ) { } [ ] : ; , . -> => #
+    Structure,
+    /// Operator: = == != < > + - * / % & | ^ ! && || += -= etc.
+    Operator,
+    /// Numeric literal: 0, 1, 42, 3.14, 0xFF
+    Literal,
+    /// Identifier: variable names, function names, type names
+    Identifier,
+}
+
+const KEYWORDS: &[&str] = &[
+    // Python
+    "def", "class", "if", "elif", "else", "for", "while", "return", "import", "from",
+    "try", "except", "finally", "with", "as", "yield", "lambda", "pass", "break",
+    "continue", "in", "not", "and", "or", "is", "None", "True", "False", "self",
+    "raise", "assert", "del", "global", "nonlocal", "async", "await", "print",
+    // Rust
+    "fn", "let", "mut", "pub", "struct", "enum", "impl", "trait", "use", "mod",
+    "crate", "super", "where", "match", "loop", "const", "static", "type", "move",
+    "ref", "unsafe", "extern", "dyn", "Box", "Vec", "String", "Option", "Result",
+    "Some", "Ok", "Err", "println", "macro_rules",
+    // JavaScript/TypeScript
+    "function", "var", "const", "new", "this", "prototype", "extends",
+    "constructor", "export", "default", "typeof", "instanceof", "void",
+    "null", "undefined", "true", "false", "console", "log", "require",
+    // Shared
+    "int", "float", "bool", "str", "char", "void", "static", "final",
+    "abstract", "interface", "override", "virtual", "template", "namespace",
+];
+
+const STRUCTURE_CHARS: &[char] = &[
+    '(', ')', '{', '}', '[', ']', ':', ';', ',', '.', '#', '@',
+];
+
+const OPERATOR_TOKENS: &[&str] = &[
+    "=", "==", "!=", "<", ">", "<=", ">=", "+", "-", "*", "/", "%",
+    "&", "|", "^", "!", "&&", "||", "<<", ">>", "+=", "-=", "*=", "/=",
+    "->", "=>", "::", "..", "..=", "**",
+];
+
+/// Classify a token's syntactic role.
+pub fn syntax_role(token: &str) -> SyntaxRole {
+    if KEYWORDS.contains(&token) {
+        return SyntaxRole::Keyword;
+    }
+    if OPERATOR_TOKENS.contains(&token) {
+        return SyntaxRole::Operator;
+    }
+    if token.len() == 1 {
+        let ch = token.chars().next().unwrap();
+        if STRUCTURE_CHARS.contains(&ch) {
+            return SyntaxRole::Structure;
+        }
+        if ch.is_ascii_digit() {
+            return SyntaxRole::Literal;
+        }
+    }
+    if token.chars().all(|c| c.is_ascii_digit() || c == '.' || c == 'x' || c == 'X'
+        || (c.is_ascii_hexdigit() && token.starts_with("0x")))
+    {
+        return SyntaxRole::Literal;
+    }
+    SyntaxRole::Identifier
+}
+
+/// Classify a sequence of token strings into their syntax roles.
+pub fn syntax_roles(tokens: &[String]) -> Vec<SyntaxRole> {
+    tokens.iter().map(|t| syntax_role(t)).collect()
+}
+
+/// Build a structural signature from token strings: replace identifiers/literals
+/// with role placeholders, keep keywords/structure/operators as-is.
+/// Two code snippets with the same signature have the same syntactic structure.
+pub fn structural_signature(tokens: &[String]) -> Vec<String> {
+    tokens.iter().map(|t| {
+        match syntax_role(t) {
+            SyntaxRole::Keyword | SyntaxRole::Structure | SyntaxRole::Operator => t.clone(),
+            SyntaxRole::Literal => "_LIT_".to_string(),
+            SyntaxRole::Identifier => "_ID_".to_string(),
+        }
+    }).collect()
+}
+
 /// Tokenizer: split on whitespace, separate punctuation (but keep _ as word char).
 pub fn tokenize(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();

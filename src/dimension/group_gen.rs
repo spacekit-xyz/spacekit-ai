@@ -26,7 +26,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::environment::NeuralEnvironment;
-use crate::spectral::{TokenDictionary, hamming_parity_bits, hamming_encode, hamming_decode};
+use crate::spectral::{
+    TokenDictionary, hamming_parity_bits, hamming_encode, hamming_decode,
+    tokenize, syntax_role, structural_signature, SyntaxRole,
+};
 use crate::types::EnvironmentConfig;
 
 pub const GEN_COND_DIM: usize = 64;
@@ -301,6 +304,131 @@ impl AlgebraicCodebook {
 
     fn overlap(a: &[u16], b: &[u16]) -> usize {
         a.iter().zip(b.iter()).filter(|(x, y)| x == y && **x != 0).count()
+    }
+
+    /// Build a syntax-aware codebook for code groups. Instead of pure positional
+    /// overlap, clusters by **structural signature** (keywords + punctuation kept,
+    /// identifiers/literals replaced with role placeholders). Keywords and
+    /// structural punctuation are auto-fixed; only identifiers and literals
+    /// become slots. Dramatically reduces slot count for code.
+    pub fn build_syntax_aware(texts: &[&str], dictionary: &TokenDictionary, max_archetypes: usize) -> Self {
+        if texts.is_empty() {
+            return Self::empty();
+        }
+
+        // Tokenize raw text to get syntax roles alongside dictionary encoding
+        let raw_tokens: Vec<Vec<String>> = texts.iter().map(|t| tokenize(t)).collect();
+        let signatures: Vec<Vec<String>> = raw_tokens.iter().map(|toks| structural_signature(toks)).collect();
+        let seqs: Vec<Vec<u16>> = texts.iter().map(|t| dictionary.encode(t)).collect();
+        let roles: Vec<Vec<SyntaxRole>> = raw_tokens.iter().map(|toks| {
+            toks.iter().map(|t| syntax_role(t)).collect()
+        }).collect();
+
+        // Cluster by structural signature similarity
+        let sig_strings: Vec<String> = signatures.iter().map(|s| s.join(" ")).collect();
+        let mut sig_clusters: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, sig) in sig_strings.iter().enumerate() {
+            sig_clusters.entry(sig.clone()).or_default().push(i);
+        }
+
+        // If too many unique signatures, merge the smallest/most-similar clusters
+        // until we reach max_archetypes. Merges smallest clusters first (preserves
+        // the most common structural patterns as distinct archetypes).
+        let mut cluster_list: Vec<Vec<usize>> = sig_clusters.into_values().collect();
+        cluster_list.sort_by_key(|c| std::cmp::Reverse(c.len()));
+
+        while cluster_list.len() > max_archetypes {
+            // Merge the two smallest clusters
+            let last = cluster_list.pop().unwrap();
+            if let Some(second_last) = cluster_list.last_mut() {
+                second_last.extend(last);
+            } else {
+                cluster_list.push(last);
+                break;
+            }
+            // Re-sort so smallest are at the end
+            cluster_list.sort_by_key(|c| std::cmp::Reverse(c.len()));
+        }
+
+        let max_len = seqs.iter().map(|s| s.len()).max().unwrap_or(0);
+
+        // Extract archetypes using syntax roles
+        let archetypes: Vec<ResponseArchetype> = cluster_list.iter().map(|indices| {
+            let cluster_seqs: Vec<&Vec<u16>> = indices.iter().map(|&i| &seqs[i]).collect();
+            let cluster_roles: Vec<&Vec<SyntaxRole>> = indices.iter().map(|&i| &roles[i]).collect();
+            Self::extract_archetype_syntax(&cluster_seqs, &cluster_roles, max_len)
+        }).collect();
+
+        let archetype_bits = bits_for_count(archetypes.len().max(1));
+        let max_slot_count = archetypes.iter().map(|a| a.slots.len()).max().unwrap_or(0);
+
+        let mut slot_bit_widths = vec![0usize; max_slot_count];
+        for arch in &archetypes {
+            for (i, slot) in arch.slots.iter().enumerate() {
+                slot_bit_widths[i] = slot_bit_widths[i].max(slot.bits);
+            }
+        }
+
+        let total_bits = archetype_bits + slot_bit_widths.iter().sum::<usize>();
+
+        Self { archetypes, archetype_bits, max_slot_count, slot_bit_widths, total_bits }
+    }
+
+    /// Extract an archetype using syntax role awareness. Keywords and structural
+    /// punctuation are always fixed (regardless of frequency). Only identifiers
+    /// and literals at variable positions become slots.
+    fn extract_archetype_syntax(
+        seqs: &[&Vec<u16>],
+        roles: &[&Vec<SyntaxRole>],
+        max_len: usize,
+    ) -> ResponseArchetype {
+        let n = seqs.len().max(1);
+        let length = seqs.iter().map(|s| {
+            s.iter().rposition(|&t| t != 0).map(|p| p + 1).unwrap_or(0)
+        }).max().unwrap_or(0).min(max_len);
+
+        let mut fixed = Vec::new();
+        let mut slots = Vec::new();
+
+        for pos in 0..length {
+            let mut freq: HashMap<u16, usize> = HashMap::new();
+            let mut role_freq: HashMap<SyntaxRole, usize> = HashMap::new();
+            for (si, seq) in seqs.iter().enumerate() {
+                let tok = seq.get(pos).copied().unwrap_or(0);
+                *freq.entry(tok).or_default() += 1;
+                if let Some(role_vec) = roles.get(si) {
+                    if let Some(&role) = role_vec.get(pos) {
+                        *role_freq.entry(role).or_default() += 1;
+                    }
+                }
+            }
+
+            let (&most_common, &count) = freq.iter().max_by_key(|(_, &c)| c).unwrap();
+            let dominant_role = role_freq.iter().max_by_key(|(_, &c)| c).map(|(&r, _)| r);
+
+            // Keywords and structure are ALWAYS fixed if they appear in majority
+            let is_structural = matches!(
+                dominant_role,
+                Some(SyntaxRole::Keyword) | Some(SyntaxRole::Structure) | Some(SyntaxRole::Operator)
+            );
+
+            if is_structural && count as f32 / n as f32 > 0.3 && most_common != 0 {
+                // Structural token: fix even at lower threshold (30% vs 50%)
+                fixed.push((pos, most_common));
+            } else if count as f32 / n as f32 > 0.5 && most_common != 0 {
+                // Non-structural but consistent: also fix
+                fixed.push((pos, most_common));
+            } else {
+                let mut vocab: Vec<u16> = freq.keys().copied().filter(|&t| t != 0).collect();
+                vocab.sort();
+                vocab.dedup();
+                if vocab.is_empty() { continue; }
+                let bits = bits_for_count(vocab.len().max(2));
+                slots.push(ArchetypeSlot { position: pos, vocab, bits });
+            }
+        }
+
+        ResponseArchetype { fixed, slots, length }
     }
 
     /// Extract an archetype from a cluster of aligned token sequences.
@@ -946,5 +1074,104 @@ mod tests {
             let expected = dict.decode(&dict.encode(text));
             assert_eq!(decoded, expected, "env encode/decode roundtrip failed for: {}", text);
         }
+    }
+
+    // --- Syntax-Aware Codebook Tests ---
+
+    fn code_texts() -> Vec<&'static str> {
+        vec![
+            "def binary_search(arr, target): lo, hi = 0, len(arr)-1",
+            "def bubble_sort(arr): n = len(arr)",
+            "def fibonacci(n): if n <= 1: return n",
+            "def factorial(n): if n <= 1: return 1",
+            "def linear_search(arr, target): for i in range(len(arr))",
+            "class Observer: def __init__(self): self._observers = []",
+            "class Subject: def __init__(self): self._state = None",
+            "class Singleton: _instance = None",
+            "fn main() { let x = 42; println!(x); }",
+            "fn helper(n: i32) -> i32 { if n <= 1 { return 1; } n * helper(n-1) }",
+        ]
+    }
+
+    #[test]
+    fn test_syntax_aware_codebook_build() {
+        let texts = code_texts();
+        let dict = TokenDictionary::build(&texts, 500);
+        let cb_stat = AlgebraicCodebook::build(&texts, &dict, 16);
+        let cb_syn = AlgebraicCodebook::build_syntax_aware(&texts, &dict, 16);
+
+        println!("statistical: {} archetypes, {} max slots, {} total bits",
+            cb_stat.archetypes.len(), cb_stat.max_slot_count, cb_stat.total_bits);
+        println!("syntax-aware: {} archetypes, {} max slots, {} total bits",
+            cb_syn.archetypes.len(), cb_syn.max_slot_count, cb_syn.total_bits);
+
+        for (i, arch) in cb_syn.archetypes.iter().enumerate() {
+            println!("  syn arch[{}]: {} fixed, {} slots, len={}",
+                i, arch.fixed.len(), arch.slots.len(), arch.length);
+        }
+
+        // Syntax-aware should have fewer total bits (more fixed tokens from keywords)
+        println!("reduction: statistical={} bits, syntax-aware={} bits",
+            cb_stat.total_bits, cb_syn.total_bits);
+    }
+
+    #[test]
+    fn test_syntax_aware_roundtrip() {
+        let texts = code_texts();
+        let dict = TokenDictionary::build(&texts, 500);
+        let cb = AlgebraicCodebook::build_syntax_aware(&texts, &dict, 16);
+
+        for &text in &texts {
+            let token_ids = dict.encode(text);
+            let bits = cb.encode(&token_ids);
+            assert_eq!(bits.len(), cb.total_bits, "encoded length mismatch for: {}", text);
+            let decoded_ids = cb.decode(&bits);
+            assert_eq!(decoded_ids, token_ids,
+                "syntax-aware roundtrip failed for: {}\n  got: {:?}\n  exp: {:?}", text, decoded_ids, token_ids);
+        }
+    }
+
+    #[test]
+    fn test_syntax_aware_env_train() {
+        let texts = code_texts();
+        let dict = TokenDictionary::build(&texts, 500);
+        let cb = AlgebraicCodebook::build_syntax_aware(&texts, &dict, 16);
+        println!("syntax-aware code env: {} bits (raw would be {})",
+            cb.total_bits, MAX_TOKENS * bits_for_dict(dict.len()));
+        let mut rng = StdRng::seed_from_u64(42);
+        let ov = GenEnvOverrides::default();
+        let mut env = GroupGenEnv::new_algebraic(dict, cb, &ov, &mut rng);
+
+        let cond = vec![0.1f32; GEN_COND_DIM];
+        let target = "def binary_search(arr, target): lo, hi = 0, len(arr)-1";
+        let loss_0 = env.train_step(&cond, target, &mut rng);
+        for _ in 0..200 {
+            env.train_step(&cond, target, &mut rng);
+        }
+        let loss_200 = env.train_step(&cond, target, &mut rng);
+        println!("syntax-aware code loss: {} -> {}", loss_0, loss_200);
+        assert!(loss_200 < loss_0, "loss should decrease: {} -> {}", loss_0, loss_200);
+    }
+
+    #[test]
+    fn test_syntax_role_classification() {
+        use crate::spectral::{syntax_role, SyntaxRole};
+        assert_eq!(syntax_role("def"), SyntaxRole::Keyword);
+        assert_eq!(syntax_role("fn"), SyntaxRole::Keyword);
+        assert_eq!(syntax_role("class"), SyntaxRole::Keyword);
+        assert_eq!(syntax_role("return"), SyntaxRole::Keyword);
+        assert_eq!(syntax_role("if"), SyntaxRole::Keyword);
+        assert_eq!(syntax_role("("), SyntaxRole::Structure);
+        assert_eq!(syntax_role(")"), SyntaxRole::Structure);
+        assert_eq!(syntax_role("{"), SyntaxRole::Structure);
+        assert_eq!(syntax_role(":"), SyntaxRole::Structure);
+        assert_eq!(syntax_role("="), SyntaxRole::Operator);
+        assert_eq!(syntax_role("=="), SyntaxRole::Operator);
+        assert_eq!(syntax_role("->"), SyntaxRole::Operator);
+        assert_eq!(syntax_role("42"), SyntaxRole::Literal);
+        assert_eq!(syntax_role("0"), SyntaxRole::Literal);
+        assert_eq!(syntax_role("binary_search"), SyntaxRole::Identifier);
+        assert_eq!(syntax_role("arr"), SyntaxRole::Identifier);
+        assert_eq!(syntax_role("myVar"), SyntaxRole::Identifier);
     }
 }
