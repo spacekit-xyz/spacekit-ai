@@ -231,12 +231,13 @@ impl LanguageService {
 
         let resp = if let (Some(gidx), Some((_, ref bridged))) = (group_idx, &encoded) {
             if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
-                let generated = env.generate(&bridged.routed_vector, 300, 0.8);
+                let (generated, confidence) = env.generate(&bridged.routed_vector, 300, 0.8);
                 if generated.len() > 5 {
                     GeneratedResponse {
                         text: generated,
                         template_id: format!("growformer_gen_{}", gidx),
                         traceable: false,
+                        confidence,
                     }
                 } else {
                     render_action_template(&action)
@@ -267,7 +268,7 @@ impl LanguageService {
 
         let code = if let (Some(gidx), Some((_, ref bridged))) = (group_idx, &encoded) {
             if let Some(env) = dm.group_code_envs.get_mut(&gidx) {
-                let generated = env.generate(&bridged.routed_vector, 500, 0.7);
+                let (generated, _confidence) = env.generate(&bridged.routed_vector, 500, 0.7);
                 if generated.len() > 5 {
                     let lang = match action.payload {
                         Some(crate::dimension::action::ActionPayload::CodingAssist { ref language_hint, .. }) =>
@@ -316,6 +317,7 @@ impl LanguageService {
                     text: generated,
                     template_id: "neural_gen_legacy".to_string(),
                     traceable: false,
+                    confidence: 1.0,
                 };
             }
         }

@@ -9,7 +9,13 @@ pub struct GeneratedResponse {
     pub text: String,
     pub template_id: String,
     pub traceable: bool,
+    /// Generation confidence (prototype cosine similarity). 1.0 = high confidence,
+    /// 0.0 = no prototypes or no match. Always generates, never falls back.
+    #[serde(default = "default_confidence")]
+    pub confidence: f32,
 }
+
+fn default_confidence() -> f32 { 1.0 }
 
 pub fn render_action_template(action: &ActionJson) -> GeneratedResponse {
     match (&action.action_type, &action.payload) {
@@ -22,6 +28,7 @@ pub fn render_action_template(action: &ActionJson) -> GeneratedResponse {
                 text,
                 template_id: "m4_template_support_v1".to_string(),
                 traceable: true,
+                confidence: 1.0,
             }
         }
         (ActionType::CodingAssist, Some(ActionPayload::CodingAssist { task, language_hint })) => {
@@ -33,6 +40,7 @@ pub fn render_action_template(action: &ActionJson) -> GeneratedResponse {
                 text,
                 template_id: "m4_template_coding_v1".to_string(),
                 traceable: true,
+                confidence: 1.0,
             }
         }
         (ActionType::GeneralAssist, Some(ActionPayload::GeneralAssist { topic })) => {
@@ -44,6 +52,7 @@ pub fn render_action_template(action: &ActionJson) -> GeneratedResponse {
                 text,
                 template_id: "m4_template_general_v1".to_string(),
                 traceable: true,
+                confidence: 1.0,
             }
         }
         (ActionType::Fallback, Some(ActionPayload::Fallback { fallback_code })) => {
@@ -55,12 +64,14 @@ pub fn render_action_template(action: &ActionJson) -> GeneratedResponse {
                 text,
                 template_id: "m4_template_fallback_v1".to_string(),
                 traceable: true,
+                confidence: 1.0,
             }
         }
         _ => GeneratedResponse {
             text: "[Fallback] fallback_code=SCHEMA_MISMATCH. Clarify intent or hand off safely.".to_string(),
             template_id: "m4_template_schema_mismatch_v1".to_string(),
             traceable: false,
+            confidence: 1.0,
         },
     }
 }

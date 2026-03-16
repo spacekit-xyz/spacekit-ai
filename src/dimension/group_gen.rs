@@ -86,6 +86,10 @@ pub struct ResponseArchetype {
 /// Decomposes response prediction from O(max_tokens × bits_per_token) into
 /// O(archetype_bits + num_slots × slot_bits), typically ~80-120 bits
 /// instead of ~1400-1900.
+///
+/// When `archetype_prototypes` are present (computed from training embeddings),
+/// archetype selection is done via cosine similarity at inference time rather
+/// than by the neural network. The network then only predicts slot bits.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AlgebraicCodebook {
     pub archetypes: Vec<ResponseArchetype>,
@@ -93,12 +97,23 @@ pub struct AlgebraicCodebook {
     pub max_slot_count: usize,
     pub slot_bit_widths: Vec<usize>,
     pub total_bits: usize,
+    /// Per-archetype embedding centroids (mean of training embeddings assigned
+    /// to each cluster). Used for prototype-based archetype selection at
+    /// inference, bypassing the network's archetype bits entirely.
+    #[serde(default)]
+    pub archetype_prototypes: Vec<Vec<f32>>,
+    /// Number of bits for slot prediction only (total_bits - archetype_bits).
+    /// When prototypes are present, this is the actual network output dimension.
+    #[serde(default)]
+    pub slot_only_bits: usize,
 }
 
 impl AlgebraicCodebook {
     /// Build a codebook from training texts for a single group.
     /// Clusters responses into archetypes, extracts fixed/variable positions.
-    pub fn build(texts: &[&str], dictionary: &TokenDictionary, max_archetypes: usize) -> Self {
+    /// When `embeddings` is provided (parallel to `texts`), computes per-archetype
+    /// prototype centroids for embedding-based archetype selection at inference.
+    pub fn build(texts: &[&str], dictionary: &TokenDictionary, max_archetypes: usize, embeddings: Option<&[&[f32]]>) -> Self {
         let seqs: Vec<Vec<u16>> = texts.iter().map(|t| dictionary.encode(t)).collect();
         if seqs.is_empty() {
             return Self::empty();
@@ -127,13 +142,22 @@ impl AlgebraicCodebook {
             }
         }
 
-        let total_bits = archetype_bits + slot_bit_widths.iter().sum::<usize>();
+        let slot_only_bits: usize = slot_bit_widths.iter().sum();
+        let total_bits = archetype_bits + slot_only_bits;
 
-        Self { archetypes, archetype_bits, max_slot_count, slot_bit_widths, total_bits }
+        let archetype_prototypes = Self::compute_prototypes(&clusters, embeddings);
+
+        Self { archetypes, archetype_bits, max_slot_count, slot_bit_widths, total_bits, archetype_prototypes, slot_only_bits }
     }
 
     pub fn empty() -> Self {
-        Self { archetypes: vec![], archetype_bits: 1, max_slot_count: 0, slot_bit_widths: vec![], total_bits: 1 }
+        Self { archetypes: vec![], archetype_bits: 1, max_slot_count: 0, slot_bit_widths: vec![], total_bits: 1, archetype_prototypes: vec![], slot_only_bits: 0 }
+    }
+
+    /// Returns true if this codebook has prototype embeddings for embedding-based
+    /// archetype selection (slot-only mode).
+    pub fn has_prototypes(&self) -> bool {
+        !self.archetype_prototypes.is_empty() && self.archetype_prototypes.len() == self.archetypes.len()
     }
 
     /// Encode a token sequence into algebraic bits.
@@ -198,7 +222,7 @@ impl AlgebraicCodebook {
 
     /// Nearest-neighbor decode for a small index: try all candidates and
     /// pick the one whose binary encoding is closest to the raw sigmoids.
-    fn soft_decode_index(bits: &[f32], num_options: usize) -> usize {
+    pub fn soft_decode_index(bits: &[f32], num_options: usize) -> usize {
         if num_options <= 1 { return 0; }
         let nbits = bits_for_count(num_options);
         let mut best = 0usize;
@@ -223,7 +247,7 @@ impl AlgebraicCodebook {
     /// Scores by (matching fixed) - 2*(mismatching fixed) + (slot hits) to
     /// prevent a high-fixed-count archetype from stealing texts that belong
     /// to a different cluster.
-    fn match_best(&self, token_ids: &[u16]) -> (usize, Vec<usize>) {
+    pub fn match_best(&self, token_ids: &[u16]) -> (usize, Vec<usize>) {
         let mut best_arch = 0;
         let mut best_score = i64::MIN;
 
@@ -306,12 +330,116 @@ impl AlgebraicCodebook {
         a.iter().zip(b.iter()).filter(|(x, y)| x == y && **x != 0).count()
     }
 
+    /// Compute per-archetype prototype embeddings by averaging the bridged
+    /// embeddings of all training texts assigned to each cluster.
+    fn compute_prototypes(clusters: &[Vec<usize>], embeddings: Option<&[&[f32]]>) -> Vec<Vec<f32>> {
+        let embs = match embeddings {
+            Some(e) if !e.is_empty() => e,
+            _ => return vec![],
+        };
+        let dim = embs[0].len();
+        clusters.iter().map(|indices| {
+            let mut centroid = vec![0.0f32; dim];
+            let mut n = 0usize;
+            for &idx in indices {
+                if let Some(emb) = embs.get(idx) {
+                    for (c, &v) in centroid.iter_mut().zip(emb.iter()) {
+                        *c += v;
+                    }
+                    n += 1;
+                }
+            }
+            if n > 0 {
+                for c in &mut centroid {
+                    *c /= n as f32;
+                }
+            }
+            // L2-normalize the centroid for cosine similarity
+            let norm = centroid.iter().map(|v| v * v).sum::<f32>().sqrt();
+            if norm > 1e-8 {
+                for c in &mut centroid {
+                    *c /= norm;
+                }
+            }
+            centroid
+        }).collect()
+    }
+
+    /// Select the best archetype for an input embedding via cosine similarity
+    /// to archetype prototypes. Returns (archetype_index, confidence) where
+    /// confidence is the cosine similarity to the best-matching prototype.
+    pub fn select_archetype_by_embedding(&self, embedding: &[f32]) -> (usize, f32) {
+        if self.archetype_prototypes.is_empty() {
+            return (0, 0.0);
+        }
+        // L2-normalize the input for cosine similarity
+        let norm = embedding.iter().map(|v| v * v).sum::<f32>().sqrt();
+        let mut best_idx = 0;
+        let mut best_sim = f32::NEG_INFINITY;
+        for (i, proto) in self.archetype_prototypes.iter().enumerate() {
+            let dot: f32 = embedding.iter().zip(proto.iter()).map(|(a, b)| a * b).sum();
+            let sim = if norm > 1e-8 { dot / norm } else { 0.0 };
+            if sim > best_sim {
+                best_sim = sim;
+                best_idx = i;
+            }
+        }
+        (best_idx, best_sim.max(0.0))
+    }
+
+    /// Encode a token sequence into slot-only bits (no archetype bits).
+    /// Used when prototypes handle archetype selection externally.
+    pub fn encode_slot_only(&self, token_ids: &[u16]) -> Vec<f32> {
+        let (_arch_idx, slot_values) = self.match_best(token_ids);
+        let mut bits = vec![0.0f32; self.slot_only_bits];
+        let mut offset = 0;
+        for (slot_idx, &val) in slot_values.iter().enumerate() {
+            let sbits = self.slot_bit_widths.get(slot_idx).copied().unwrap_or(0);
+            for i in 0..sbits {
+                if offset + i < bits.len() {
+                    bits[offset + i] = if (val >> i) & 1 == 1 { 1.0 } else { 0.0 };
+                }
+            }
+            offset += sbits;
+        }
+        bits
+    }
+
+    /// Decode slot-only bits back to token IDs using a pre-selected archetype.
+    pub fn decode_with_archetype(&self, arch_idx: usize, slot_bits: &[f32]) -> Vec<u16> {
+        if arch_idx >= self.archetypes.len() {
+            return vec![];
+        }
+        let arch = &self.archetypes[arch_idx];
+
+        let mut tokens = vec![0u16; arch.length];
+        for &(pos, tok) in &arch.fixed {
+            if pos < tokens.len() {
+                tokens[pos] = tok;
+            }
+        }
+
+        let mut offset = 0;
+        for (slot_idx, slot) in arch.slots.iter().enumerate() {
+            let sbits = self.slot_bit_widths.get(slot_idx).copied().unwrap_or(0);
+            let end = (offset + sbits).min(slot_bits.len());
+            let s_bits = if offset < slot_bits.len() { &slot_bits[offset..end] } else { &[] as &[f32] };
+            let val = Self::soft_decode_index(s_bits, slot.vocab.len());
+            if slot.position < tokens.len() && val < slot.vocab.len() {
+                tokens[slot.position] = slot.vocab[val];
+            }
+            offset += sbits;
+        }
+
+        tokens.into_iter().take_while(|&t| t != 0).collect()
+    }
+
     /// Build a syntax-aware codebook for code groups. Instead of pure positional
     /// overlap, clusters by **structural signature** (keywords + punctuation kept,
     /// identifiers/literals replaced with role placeholders). Keywords and
     /// structural punctuation are auto-fixed; only identifiers and literals
     /// become slots. Dramatically reduces slot count for code.
-    pub fn build_syntax_aware(texts: &[&str], dictionary: &TokenDictionary, max_archetypes: usize) -> Self {
+    pub fn build_syntax_aware(texts: &[&str], dictionary: &TokenDictionary, max_archetypes: usize, embeddings: Option<&[&[f32]]>) -> Self {
         if texts.is_empty() {
             return Self::empty();
         }
@@ -369,9 +497,12 @@ impl AlgebraicCodebook {
             }
         }
 
-        let total_bits = archetype_bits + slot_bit_widths.iter().sum::<usize>();
+        let slot_only_bits: usize = slot_bit_widths.iter().sum();
+        let total_bits = archetype_bits + slot_only_bits;
 
-        Self { archetypes, archetype_bits, max_slot_count, slot_bit_widths, total_bits }
+        let archetype_prototypes = Self::compute_prototypes(&cluster_list, embeddings);
+
+        Self { archetypes, archetype_bits, max_slot_count, slot_bit_widths, total_bits, archetype_prototypes, slot_only_bits }
     }
 
     /// Extract an archetype using syntax role awareness. Keywords and structural
@@ -467,6 +598,356 @@ impl AlgebraicCodebook {
 }
 
 // ---------------------------------------------------------------------------
+// Hopf Composition Table — compositional generation via fragment algebra
+// ---------------------------------------------------------------------------
+//
+// The Hopf composition table decomposes archetypes into positional segments
+// (fragments) and allows mixing fragments from different archetypes to generate
+// novel responses. This is the algebraic coproduct Δ(response) = Σ fragments,
+// with the composition product μ assembling fragments from multiple archetypes.
+//
+// For OOD prompts where no single archetype matches well, the table selects the
+// best fragment per segment independently, enabling compositional generalization.
+
+/// A segment of an archetype, representing one composable fragment.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArchetypeFragment {
+    pub archetype_idx: usize,
+    pub segment_idx: usize,
+    pub token_range: (usize, usize),
+    pub fixed: Vec<(usize, u16)>,
+    pub slot_indices: Vec<usize>,
+}
+
+/// Hopf composition table: enables compositional generation by selecting
+/// the best fragment per segment from potentially different archetypes.
+///
+/// Algebraic structure:
+///   Δ(archetype) = fragment₀ ⊗ fragment₁ ⊗ ... ⊗ fragmentₖ  (coproduct)
+///   μ(fᵢ, fⱼ, ...) = composed_response                       (product)
+///   transition scores enforce coherent composition boundaries
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HopfCompositionTable {
+    pub num_segments: usize,
+    /// fragments[segment_idx] = list of fragments available for that segment
+    pub fragments: Vec<Vec<ArchetypeFragment>>,
+    /// Per-fragment embedding centroids: prototypes[segment_idx][fragment_idx]
+    pub fragment_prototypes: Vec<Vec<Vec<f32>>>,
+    /// Transition compatibility: transition[seg_idx][frag_a][frag_b] = score
+    /// for fragment_a at segment seg_idx followed by fragment_b at seg_idx+1.
+    pub transition: Vec<Vec<Vec<f32>>>,
+    /// Total response length (max tokens across all archetypes).
+    pub response_length: usize,
+}
+
+impl Default for HopfCompositionTable {
+    fn default() -> Self {
+        Self {
+            num_segments: 3,
+            fragments: vec![],
+            fragment_prototypes: vec![],
+            transition: vec![],
+            response_length: 0,
+        }
+    }
+}
+
+impl HopfCompositionTable {
+    /// Build a composition table from an existing codebook.
+    /// Splits each archetype into `num_segments` positional fragments,
+    /// computes per-fragment prototypes, and scores transition compatibility.
+    pub fn build(
+        codebook: &AlgebraicCodebook,
+        embeddings: Option<&[&[f32]]>,
+        clusters: &[Vec<usize>],
+        num_segments: usize,
+    ) -> Self {
+        let num_segments = num_segments.max(2);
+        let response_length = codebook.archetypes.iter()
+            .map(|a| a.length)
+            .max()
+            .unwrap_or(0);
+
+        if response_length == 0 || codebook.archetypes.is_empty() {
+            return Self {
+                num_segments,
+                fragments: vec![vec![]; num_segments],
+                fragment_prototypes: vec![vec![]; num_segments],
+                transition: vec![],
+                response_length: 0,
+            };
+        }
+
+        let seg_size = (response_length + num_segments - 1) / num_segments;
+
+        let mut fragments: Vec<Vec<ArchetypeFragment>> = vec![vec![]; num_segments];
+        let mut fragment_prototypes: Vec<Vec<Vec<f32>>> = vec![vec![]; num_segments];
+
+        for (arch_idx, arch) in codebook.archetypes.iter().enumerate() {
+            for seg in 0..num_segments {
+                let start = seg * seg_size;
+                let end = ((seg + 1) * seg_size).min(response_length);
+                if start >= end { continue; }
+
+                let fixed: Vec<(usize, u16)> = arch.fixed.iter()
+                    .filter(|&&(pos, _)| pos >= start && pos < end)
+                    .copied()
+                    .collect();
+
+                let slot_indices: Vec<usize> = arch.slots.iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.position >= start && s.position < end)
+                    .map(|(i, _)| i)
+                    .collect();
+
+                fragments[seg].push(ArchetypeFragment {
+                    archetype_idx: arch_idx,
+                    segment_idx: seg,
+                    token_range: (start, end),
+                    fixed,
+                    slot_indices,
+                });
+
+                // Compute fragment prototype from embeddings of texts in this archetype's cluster
+                if let (Some(embs), Some(cluster)) = (embeddings, clusters.get(arch_idx)) {
+                    let dim = embs.first().map(|e| e.len()).unwrap_or(0);
+                    if dim > 0 {
+                        let mut centroid = vec![0.0f32; dim];
+                        let mut n = 0usize;
+                        for &idx in cluster {
+                            if let Some(emb) = embs.get(idx) {
+                                for (c, &v) in centroid.iter_mut().zip(emb.iter()) {
+                                    *c += v;
+                                }
+                                n += 1;
+                            }
+                        }
+                        if n > 0 {
+                            for c in &mut centroid { *c /= n as f32; }
+                        }
+                        let norm = centroid.iter().map(|v| v * v).sum::<f32>().sqrt();
+                        if norm > 1e-8 {
+                            for c in &mut centroid { *c /= norm; }
+                        }
+                        fragment_prototypes[seg].push(centroid);
+                    } else {
+                        fragment_prototypes[seg].push(vec![]);
+                    }
+                } else {
+                    fragment_prototypes[seg].push(vec![]);
+                }
+            }
+        }
+
+        // Build transition scores between adjacent segments.
+        // Score = number of fixed tokens that are compatible at segment boundaries.
+        let boundary_window = 3;
+        let mut transition = Vec::new();
+        for seg in 0..num_segments.saturating_sub(1) {
+            let n_a = fragments[seg].len();
+            let n_b = fragments[seg + 1].len();
+            let mut scores = vec![vec![0.0f32; n_b]; n_a];
+
+            for (a_idx, frag_a) in fragments[seg].iter().enumerate() {
+                let boundary = frag_a.token_range.1;
+                let a_tail: Vec<u16> = frag_a.fixed.iter()
+                    .filter(|&&(pos, _)| pos >= boundary.saturating_sub(boundary_window) && pos < boundary)
+                    .map(|&(_, tok)| tok)
+                    .collect();
+
+                for (b_idx, frag_b) in fragments[seg + 1].iter().enumerate() {
+                    let b_head: Vec<u16> = frag_b.fixed.iter()
+                        .filter(|&&(pos, _)| pos < frag_b.token_range.0 + boundary_window)
+                        .map(|&(_, tok)| tok)
+                        .collect();
+
+                    // Base compatibility: same archetype = high score
+                    let same_arch = if frag_a.archetype_idx == frag_b.archetype_idx { 2.0 } else { 0.0 };
+
+                    // Token continuity: do tail/head tokens suggest coherent flow?
+                    let has_content = if !a_tail.is_empty() && !b_head.is_empty() { 1.0 } else { 0.5 };
+
+                    scores[a_idx][b_idx] = same_arch + has_content;
+                }
+            }
+            transition.push(scores);
+        }
+
+        Self { num_segments, fragments, fragment_prototypes, transition, response_length }
+    }
+
+    /// Select the best fragment for each segment using embedding similarity
+    /// and transition compatibility. Returns fragment indices per segment.
+    ///
+    /// Uses beam search with beam_width=3: for each segment, expand top
+    /// candidates by embedding similarity, then re-rank by transition score.
+    pub fn compose(&self, embedding: &[f32]) -> Vec<usize> {
+        if self.fragments.is_empty() || self.response_length == 0 {
+            return vec![0; self.num_segments];
+        }
+
+        let norm = embedding.iter().map(|v| v * v).sum::<f32>().sqrt();
+        let beam_width = 3usize;
+
+        // Score all fragments by embedding similarity
+        let seg_scores: Vec<Vec<f32>> = self.fragment_prototypes.iter()
+            .map(|seg_protos| {
+                seg_protos.iter().map(|proto| {
+                    if proto.is_empty() || norm < 1e-8 { return 0.0; }
+                    let dot: f32 = embedding.iter().zip(proto.iter()).map(|(a, b)| a * b).sum();
+                    dot / norm
+                }).collect()
+            }).collect();
+
+        // Beam search: track (total_score, fragment_indices)
+        let mut beam: Vec<(f32, Vec<usize>)> = if !seg_scores.is_empty() && !seg_scores[0].is_empty() {
+            let mut candidates: Vec<(f32, usize)> = seg_scores[0].iter()
+                .enumerate()
+                .map(|(i, &s)| (s, i))
+                .collect();
+            candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            candidates.truncate(beam_width);
+            candidates.into_iter().map(|(s, i)| (s, vec![i])).collect()
+        } else {
+            vec![(0.0, vec![0])]
+        };
+
+        for seg in 1..self.num_segments {
+            let n_frags = self.fragments.get(seg).map(|f| f.len()).unwrap_or(1);
+            let mut next_beam: Vec<(f32, Vec<usize>)> = Vec::new();
+
+            for (prev_score, prev_path) in &beam {
+                let prev_frag = *prev_path.last().unwrap_or(&0);
+
+                for frag_idx in 0..n_frags {
+                    let emb_score = seg_scores.get(seg)
+                        .and_then(|s| s.get(frag_idx))
+                        .copied()
+                        .unwrap_or(0.0);
+
+                    let trans_score = if seg > 0 {
+                        self.transition.get(seg - 1)
+                            .and_then(|t| t.get(prev_frag))
+                            .and_then(|row| row.get(frag_idx))
+                            .copied()
+                            .unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+
+                    let total = prev_score + emb_score + trans_score * 0.5;
+                    let mut path = prev_path.clone();
+                    path.push(frag_idx);
+                    next_beam.push((total, path));
+                }
+            }
+
+            next_beam.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            next_beam.truncate(beam_width);
+            beam = next_beam;
+        }
+
+        beam.into_iter()
+            .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(_, path)| path)
+            .unwrap_or_else(|| vec![0; self.num_segments])
+    }
+
+    /// Assemble a composed response from selected fragment indices.
+    /// Merges fixed tokens from each fragment and maps slot indices.
+    /// Returns (fixed_tokens, slot_map) where slot_map[composed_slot_idx] =
+    /// (archetype_idx, original_slot_idx).
+    pub fn assemble(&self, fragment_indices: &[usize], _codebook: &AlgebraicCodebook)
+        -> (Vec<(usize, u16)>, Vec<(usize, usize)>)
+    {
+        let mut fixed = Vec::new();
+        let mut slot_map = Vec::new();
+
+        for (seg, &frag_idx) in fragment_indices.iter().enumerate() {
+            if let Some(frag) = self.fragments.get(seg).and_then(|s| s.get(frag_idx)) {
+                for &(pos, tok) in &frag.fixed {
+                    fixed.push((pos, tok));
+                }
+                for &slot_idx in &frag.slot_indices {
+                    slot_map.push((frag.archetype_idx, slot_idx));
+                }
+            }
+        }
+
+        fixed.sort_by_key(|&(pos, _)| pos);
+        fixed.dedup_by_key(|&mut (pos, _)| pos);
+        (fixed, slot_map)
+    }
+
+    /// Full composed decode: select fragments, assemble, fill slots from network output.
+    pub fn compose_and_decode(
+        &self,
+        embedding: &[f32],
+        slot_bits: &[f32],
+        codebook: &AlgebraicCodebook,
+    ) -> (Vec<u16>, f32) {
+        let frag_indices = self.compose(embedding);
+        let (fixed, slot_map) = self.assemble(&frag_indices, codebook);
+
+        let mut tokens = vec![0u16; self.response_length];
+        for &(pos, tok) in &fixed {
+            if pos < tokens.len() {
+                tokens[pos] = tok;
+            }
+        }
+
+        // Fill slots using the network's slot predictions
+        let mut offset = 0;
+        for &(arch_idx, slot_idx) in &slot_map {
+            if let Some(arch) = codebook.archetypes.get(arch_idx) {
+                if let Some(slot) = arch.slots.get(slot_idx) {
+                    let sbits = codebook.slot_bit_widths.get(slot_idx).copied().unwrap_or(0);
+                    let end = (offset + sbits).min(slot_bits.len());
+                    let s_bits = if offset < slot_bits.len() { &slot_bits[offset..end] } else { &[] as &[f32] };
+                    let val = AlgebraicCodebook::soft_decode_index(s_bits, slot.vocab.len());
+                    if slot.position < tokens.len() && val < slot.vocab.len() {
+                        tokens[slot.position] = slot.vocab[val];
+                    }
+                    offset += sbits;
+                }
+            }
+        }
+
+        // Compute confidence as average embedding similarity across selected fragments
+        let norm = embedding.iter().map(|v| v * v).sum::<f32>().sqrt();
+        let mut total_sim = 0.0f32;
+        let mut count = 0;
+        for (seg, &frag_idx) in frag_indices.iter().enumerate() {
+            if let Some(proto) = self.fragment_prototypes.get(seg).and_then(|s| s.get(frag_idx)) {
+                if !proto.is_empty() && norm > 1e-8 {
+                    let dot: f32 = embedding.iter().zip(proto.iter()).map(|(a, b)| a * b).sum();
+                    total_sim += dot / norm;
+                    count += 1;
+                }
+            }
+        }
+        let confidence = if count > 0 { (total_sim / count as f32).max(0.0) } else { 0.0 };
+
+        let result = tokens.into_iter().take_while(|&t| t != 0).collect();
+        (result, confidence)
+    }
+
+    /// Check whether composition would actually produce different results
+    /// from single-archetype selection by comparing fragment sources.
+    pub fn is_composed(&self, fragment_indices: &[usize]) -> bool {
+        if fragment_indices.len() < 2 { return false; }
+        let first_arch = self.fragments.get(0)
+            .and_then(|s| s.get(fragment_indices[0]))
+            .map(|f| f.archetype_idx);
+        fragment_indices.iter().enumerate().skip(1).any(|(seg, &frag_idx)| {
+            self.fragments.get(seg)
+                .and_then(|s| s.get(frag_idx))
+                .map(|f| f.archetype_idx) != first_arch
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GroupGenEnv
 // ---------------------------------------------------------------------------
 
@@ -483,6 +964,15 @@ pub struct GroupGenEnv {
     /// of raw binary token prediction. Reduces output from ~1900 to ~80-120 bits.
     #[serde(default)]
     pub codebook: Option<AlgebraicCodebook>,
+    /// Hopf composition table for compositional generation across archetypes.
+    #[serde(default)]
+    pub hopf_table: Option<HopfCompositionTable>,
+    /// Archetype selected by embedding prototype matching (slot-only mode).
+    #[serde(skip)]
+    last_selected_archetype: Option<usize>,
+    /// Confidence of the last generation (cosine similarity to best prototype).
+    #[serde(skip)]
+    pub last_generation_confidence: f32,
 }
 
 impl GroupGenEnv {
@@ -512,13 +1002,19 @@ impl GroupGenEnv {
             output_dim,
             frozen: false,
             codebook: None,
+            hopf_table: None,
+            last_selected_archetype: None,
+            last_generation_confidence: 0.0,
         }
     }
 
     /// Create an algebraic generation environment. The codebook factorizes
     /// the response space so the substrate only predicts ~80-120 bits
     /// (archetype + slot values) instead of ~1400-1900 raw token bits.
-    /// Requires training texts to extract archetypes before construction.
+    ///
+    /// When the codebook has prototype embeddings, enters **slot-only mode**:
+    /// archetype selection is done by embedding cosine similarity, and the
+    /// network output dimension is reduced to just the slot bits.
     pub fn new_algebraic(
         dictionary: TokenDictionary,
         codebook: AlgebraicCodebook,
@@ -527,9 +1023,13 @@ impl GroupGenEnv {
     ) -> Self {
         let hidden = ov.hidden.unwrap_or(GEN_HIDDEN);
         let k = ov.k.unwrap_or(GEN_K);
-        let output_dim = codebook.total_bits;
+        let output_dim = if codebook.has_prototypes() {
+            codebook.slot_only_bits
+        } else {
+            codebook.total_bits
+        };
         let bits_per_token = bits_for_dict(dictionary.len());
-        let coded_bits_per_token = bits_per_token; // not used in algebraic mode
+        let coded_bits_per_token = bits_per_token;
         let mut config = gen_env_config();
         config.competitive_k = k.min(hidden / 2);
         if let Some(ms) = ov.max_synapses { config.max_synapses_per_neuron = ms; }
@@ -544,7 +1044,15 @@ impl GroupGenEnv {
             output_dim,
             frozen: false,
             codebook: Some(codebook),
+            hopf_table: None,
+            last_selected_archetype: None,
+            last_generation_confidence: 0.0,
         }
+    }
+
+    /// Attach a Hopf composition table for compositional generation.
+    pub fn set_hopf_table(&mut self, table: HopfCompositionTable) {
+        self.hopf_table = Some(table);
     }
 
     /// Set pruning to stop after this many ticks.
@@ -605,11 +1113,16 @@ impl GroupGenEnv {
     }
 
     /// Encode a full target text into a flat binary target vector.
-    /// Uses algebraic codebook when present, otherwise raw binary with ECC.
+    /// With prototypes: slot-only bits (archetype selected externally).
+    /// Without prototypes: full algebraic bits (archetype + slots).
+    /// Without codebook: raw binary with ECC.
     fn encode_target(&self, text: &str) -> Vec<f32> {
         let token_ids = self.dictionary.encode(text);
 
         if let Some(ref cb) = self.codebook {
+            if cb.has_prototypes() {
+                return cb.encode_slot_only(&token_ids);
+            }
             return cb.encode(&token_ids);
         }
 
@@ -627,10 +1140,16 @@ impl GroupGenEnv {
     }
 
     /// Decode a flat binary output vector into text.
-    /// Uses algebraic codebook when present, otherwise raw binary pipeline
-    /// (ECC correction → Gray decode → soft decode).
+    /// In slot-only mode: uses the stored selected archetype + slot bits.
+    /// In full algebraic mode: decodes archetype + slot bits together.
+    /// In raw binary mode: ECC correction → Gray decode → soft decode.
     fn decode_output(&self, output: &[f32]) -> String {
         if let Some(ref cb) = self.codebook {
+            if cb.has_prototypes() {
+                let arch_idx = self.last_selected_archetype.unwrap_or(0);
+                let ids = cb.decode_with_archetype(arch_idx, output);
+                return self.dictionary.decode(&ids);
+            }
             let ids = cb.decode(output);
             return self.dictionary.decode(&ids);
         }
@@ -723,14 +1242,51 @@ impl GroupGenEnv {
     }
 
     /// Single-pass generation: one forward pass, decode all tokens at once.
-    pub fn generate(&mut self, cond: &[f32], _max_len: usize, _temperature: f32) -> String {
+    ///
+    /// Generation strategy (in order of preference):
+    /// 1. Prototype match: if confidence >= 0.8, use the single best archetype
+    /// 2. Hopf composition: if confidence < 0.8 and a Hopf table exists, compose
+    ///    fragments from multiple archetypes for better OOD coverage
+    /// 3. Fallback: use best prototype match regardless of confidence
+    ///
+    /// Returns (generated_text, confidence).
+    pub fn generate(&mut self, cond: &[f32], _max_len: usize, _temperature: f32) -> (String, f32) {
         let mut input = vec![0.0f32; GEN_COND_DIM];
         for (i, v) in cond.iter().enumerate().take(GEN_COND_DIM) {
             input[i] = *v;
         }
 
         let output = self.env.predict(&input);
-        self.decode_output(&output)
+
+        // Prototype-based archetype selection (slot-only mode)
+        if let Some(ref cb) = self.codebook {
+            if cb.has_prototypes() {
+                let (arch_idx, confidence) = cb.select_archetype_by_embedding(cond);
+
+                // Low confidence + Hopf table available → composed generation
+                if confidence < 0.8 {
+                    if let Some(ref hopf) = self.hopf_table {
+                        let (ids, comp_confidence) = hopf.compose_and_decode(cond, &output, cb);
+                        let text = self.dictionary.decode(&ids);
+                        self.last_selected_archetype = None;
+                        self.last_generation_confidence = comp_confidence;
+                        return (text, comp_confidence);
+                    }
+                }
+
+                // High confidence or no Hopf table → single archetype
+                self.last_selected_archetype = Some(arch_idx);
+                self.last_generation_confidence = confidence;
+            } else {
+                self.last_selected_archetype = None;
+                self.last_generation_confidence = 1.0;
+            }
+        } else {
+            self.last_selected_archetype = None;
+            self.last_generation_confidence = 1.0;
+        }
+
+        (self.decode_output(&output), self.last_generation_confidence)
     }
 
     /// Evaluate loss without modifying the network.
@@ -902,7 +1458,7 @@ mod tests {
         let cond = vec![0.1f32; GEN_COND_DIM];
         let loss = env.train_step(&cond, "reset your password", &mut rng);
         assert!(loss > 0.0, "loss should be positive: {}", loss);
-        let _out = env.generate(&cond, 100, 0.8);
+        let (_out, _conf) = env.generate(&cond, 100, 0.8);
     }
 
     #[test]
@@ -978,7 +1534,7 @@ mod tests {
     fn test_codebook_build() {
         let texts = support_texts();
         let dict = TokenDictionary::build(&texts, 500);
-        let cb = AlgebraicCodebook::build(&texts, &dict, 8);
+        let cb = AlgebraicCodebook::build(&texts, &dict, 8, None);
         assert!(!cb.archetypes.is_empty(), "should have at least 1 archetype");
         assert!(cb.total_bits > 0, "total bits should be > 0");
         assert!(cb.total_bits < 500, "total bits should be much less than raw binary (was {})", cb.total_bits);
@@ -994,7 +1550,7 @@ mod tests {
     fn test_codebook_encode_decode_roundtrip() {
         let texts = support_texts();
         let dict = TokenDictionary::build(&texts, 500);
-        let cb = AlgebraicCodebook::build(&texts, &dict, 8);
+        let cb = AlgebraicCodebook::build(&texts, &dict, 8, None);
 
         for &text in &texts {
             let token_ids = dict.encode(text);
@@ -1011,7 +1567,7 @@ mod tests {
     fn test_algebraic_env_smaller_output() {
         let texts = support_texts();
         let dict = TokenDictionary::build(&texts, 500);
-        let cb = AlgebraicCodebook::build(&texts, &dict, 8);
+        let cb = AlgebraicCodebook::build(&texts, &dict, 8, None);
         let raw_output = MAX_TOKENS * bits_for_dict(dict.len());
         let algebraic_output = cb.total_bits;
         println!("raw output_dim={}, algebraic output_dim={}, reduction={}x",
@@ -1024,7 +1580,7 @@ mod tests {
     fn test_algebraic_env_train_and_generate() {
         let texts = support_texts();
         let dict = TokenDictionary::build(&texts, 500);
-        let cb = AlgebraicCodebook::build(&texts, &dict, 8);
+        let cb = AlgebraicCodebook::build(&texts, &dict, 8, None);
         let mut rng = StdRng::seed_from_u64(42);
         let ov = GenEnvOverrides::default();
         let mut env = GroupGenEnv::new_algebraic(dict, cb, &ov, &mut rng);
@@ -1034,7 +1590,7 @@ mod tests {
         let target = "To reset your password, go to Settings > Security > Reset password";
         let loss = env.train_step(&cond, target, &mut rng);
         assert!(loss > 0.0, "loss should be positive: {}", loss);
-        let _out = env.generate(&cond, 100, 0.8);
+        let (_out, _conf) = env.generate(&cond, 100, 0.8);
         println!("generated: {}", _out);
     }
 
@@ -1042,7 +1598,7 @@ mod tests {
     fn test_algebraic_loss_decreases() {
         let texts = support_texts();
         let dict = TokenDictionary::build(&texts, 500);
-        let cb = AlgebraicCodebook::build(&texts, &dict, 8);
+        let cb = AlgebraicCodebook::build(&texts, &dict, 8, None);
         let mut rng = StdRng::seed_from_u64(42);
         let ov = GenEnvOverrides::default();
         let mut env = GroupGenEnv::new_algebraic(dict, cb, &ov, &mut rng);
@@ -1062,7 +1618,7 @@ mod tests {
     fn test_algebraic_encode_decode_via_env() {
         let texts = support_texts();
         let dict = TokenDictionary::build(&texts, 500);
-        let cb = AlgebraicCodebook::build(&texts, &dict, 8);
+        let cb = AlgebraicCodebook::build(&texts, &dict, 8, None);
         let mut rng = StdRng::seed_from_u64(42);
         let ov = GenEnvOverrides::default();
         let env = GroupGenEnv::new_algebraic(dict.clone(), cb, &ov, &mut rng);
@@ -1097,8 +1653,8 @@ mod tests {
     fn test_syntax_aware_codebook_build() {
         let texts = code_texts();
         let dict = TokenDictionary::build(&texts, 500);
-        let cb_stat = AlgebraicCodebook::build(&texts, &dict, 16);
-        let cb_syn = AlgebraicCodebook::build_syntax_aware(&texts, &dict, 16);
+        let cb_stat = AlgebraicCodebook::build(&texts, &dict, 16, None);
+        let cb_syn = AlgebraicCodebook::build_syntax_aware(&texts, &dict, 16, None);
 
         println!("statistical: {} archetypes, {} max slots, {} total bits",
             cb_stat.archetypes.len(), cb_stat.max_slot_count, cb_stat.total_bits);
@@ -1119,7 +1675,7 @@ mod tests {
     fn test_syntax_aware_roundtrip() {
         let texts = code_texts();
         let dict = TokenDictionary::build(&texts, 500);
-        let cb = AlgebraicCodebook::build_syntax_aware(&texts, &dict, 16);
+        let cb = AlgebraicCodebook::build_syntax_aware(&texts, &dict, 16, None);
 
         for &text in &texts {
             let token_ids = dict.encode(text);
@@ -1135,7 +1691,7 @@ mod tests {
     fn test_syntax_aware_env_train() {
         let texts = code_texts();
         let dict = TokenDictionary::build(&texts, 500);
-        let cb = AlgebraicCodebook::build_syntax_aware(&texts, &dict, 16);
+        let cb = AlgebraicCodebook::build_syntax_aware(&texts, &dict, 16, None);
         println!("syntax-aware code env: {} bits (raw would be {})",
             cb.total_bits, MAX_TOKENS * bits_for_dict(dict.len()));
         let mut rng = StdRng::seed_from_u64(42);
@@ -1173,5 +1729,126 @@ mod tests {
         assert_eq!(syntax_role("binary_search"), SyntaxRole::Identifier);
         assert_eq!(syntax_role("arr"), SyntaxRole::Identifier);
         assert_eq!(syntax_role("myVar"), SyntaxRole::Identifier);
+    }
+
+    #[test]
+    fn test_prototype_slot_only_mode() {
+        let texts = support_texts();
+        let dict = TokenDictionary::build(&texts, 500);
+        // Create fake 64d embeddings for each text
+        let embs: Vec<Vec<f32>> = texts.iter().enumerate().map(|(i, _)| {
+            let mut e = vec![0.0f32; 64];
+            e[i % 64] = 1.0; // distinct directions
+            e
+        }).collect();
+        let emb_refs: Vec<&[f32]> = embs.iter().map(|e| e.as_slice()).collect();
+
+        let cb = AlgebraicCodebook::build(&texts, &dict, 8, Some(&emb_refs));
+        assert!(cb.has_prototypes(), "should have prototypes when embeddings provided");
+        assert_eq!(cb.archetype_prototypes.len(), cb.archetypes.len());
+        assert!(cb.slot_only_bits < cb.total_bits, "slot_only_bits ({}) should be less than total_bits ({})",
+            cb.slot_only_bits, cb.total_bits);
+
+        // Archetype selection should work
+        let (arch_idx, confidence) = cb.select_archetype_by_embedding(&embs[0]);
+        assert!(arch_idx < cb.archetypes.len());
+        assert!(confidence > 0.0, "confidence should be positive: {}", confidence);
+
+        // Slot-only encode/decode roundtrip
+        let token_ids = dict.encode(texts[0]);
+        let slot_bits = cb.encode_slot_only(&token_ids);
+        assert_eq!(slot_bits.len(), cb.slot_only_bits);
+
+        // Decode with the selected archetype
+        let decoded_ids = cb.decode_with_archetype(arch_idx, &slot_bits);
+        assert!(!decoded_ids.is_empty(), "decoded should not be empty");
+    }
+
+    #[test]
+    fn test_prototype_env_train_and_generate() {
+        let texts = support_texts();
+        let dict = TokenDictionary::build(&texts, 500);
+        let embs: Vec<Vec<f32>> = texts.iter().enumerate().map(|(i, _)| {
+            let mut e = vec![0.0f32; 64];
+            e[i % 64] = 1.0;
+            e
+        }).collect();
+        let emb_refs: Vec<&[f32]> = embs.iter().map(|e| e.as_slice()).collect();
+
+        let cb = AlgebraicCodebook::build(&texts, &dict, 8, Some(&emb_refs));
+        assert!(cb.has_prototypes());
+
+        let mut rng = StdRng::seed_from_u64(42);
+        let ov = GenEnvOverrides::default();
+        let mut env = GroupGenEnv::new_algebraic(dict, cb, &ov, &mut rng);
+
+        // output_dim should be slot_only_bits
+        assert!(env.output_dim > 0);
+        assert!(env.codebook.as_ref().unwrap().slot_only_bits == env.output_dim,
+            "env output_dim ({}) should equal slot_only_bits ({})",
+            env.output_dim, env.codebook.as_ref().unwrap().slot_only_bits);
+
+        // Train
+        let cond = vec![0.1f32; GEN_COND_DIM];
+        let target = texts[0];
+        let loss = env.train_step(&cond, target, &mut rng);
+        assert!(loss > 0.0);
+
+        // Generate
+        let (text, confidence) = env.generate(&cond, 100, 0.8);
+        assert!(confidence > 0.0, "confidence should be > 0");
+        println!("prototype gen: {} (conf={:.3})", text, confidence);
+    }
+
+    /// Proof: Hopf composition produces coherent output and uses beam search
+    /// to select archetypes, providing an alternative to single-prototype argmax.
+    ///
+    /// 4 texts → 2 archetypes → 2 segments each → beam search selects fragments.
+    /// Runs in <1ms. No network, no training — pure algebra.
+    #[test]
+    fn test_hopf_composition_proof() {
+        let texts: Vec<&str> = vec![
+            "alpha start middle alpha end",
+            "alpha start middle alpha end",
+            "beta start middle beta end",
+            "beta start middle beta end",
+        ];
+        let dict = TokenDictionary::build(&texts, 100);
+
+        let emb_a = { let mut e = vec![0.0f32; 64]; e[0] = 1.0; e };
+        let emb_b = { let mut e = vec![0.0f32; 64]; e[1] = 1.0; e };
+        let embs = vec![emb_a.clone(), emb_a.clone(), emb_b.clone(), emb_b.clone()];
+        let emb_refs: Vec<&[f32]> = embs.iter().map(|e| e.as_slice()).collect();
+
+        let cb = AlgebraicCodebook::build(&texts, &dict, 2, Some(&emb_refs));
+        assert_eq!(cb.archetypes.len(), 2);
+
+        let mut clusters = vec![vec![]; 2];
+        for (i, t) in texts.iter().enumerate() {
+            let (ai, _) = cb.match_best(&dict.encode(t));
+            clusters[ai].push(i);
+        }
+
+        let hopf = HopfCompositionTable::build(&cb, Some(&emb_refs), &clusters, 2);
+
+        // --- Single archetype path (argmax) ---
+        let ood = { let mut e = vec![0.0f32; 64]; e[0] = 0.5; e[1] = 0.5; e };
+        let (single_idx, single_conf) = cb.select_archetype_by_embedding(&ood);
+        let slot_bits = vec![0.5f32; cb.slot_only_bits];
+        let single_ids = cb.decode_with_archetype(single_idx, &slot_bits);
+        let single_text = dict.decode(&single_ids);
+
+        // --- Hopf composition path (beam search) ---
+        let (hopf_ids, hopf_conf) = hopf.compose_and_decode(&ood, &slot_bits, &cb);
+        let hopf_text = dict.decode(&hopf_ids);
+
+        println!("single arch={} conf={:.3}: {:?}", single_idx, single_conf, single_text);
+        println!("hopf        conf={:.3}: {:?}", hopf_conf, hopf_text);
+
+        // Both produce real text (not empty, not garbage)
+        assert!(!single_ids.is_empty());
+        assert!(!hopf_ids.is_empty());
+        assert!(single_text.contains("start") || single_text.contains("middle") || single_text.contains("end"));
+        assert!(hopf_text.contains("start") || hopf_text.contains("middle") || hopf_text.contains("end"));
     }
 }

@@ -2,7 +2,7 @@ use growformer::dimension::{
     LanguageSample,
     GroupGenEnv, action_target_to_type,
 };
-use growformer::dimension::group_gen::AlgebraicCodebook;
+use growformer::dimension::group_gen::{AlgebraicCodebook, HopfCompositionTable};
 use growformer::spectral::TokenDictionary;
 use std::collections::HashMap;
 use growformer::service::LanguageService;
@@ -185,7 +185,7 @@ fn run_single_prompt(svc: &mut LanguageService, prompt: &str) {
     match svc.generation(prompt) {
         Ok((_, resp)) => {
             if !resp.text.is_empty() {
-                println!("  gen: {}", resp.text);
+                println!("  gen (conf={:.2}): {}", resp.confidence, resp.text);
             }
         }
         Err(e) => eprintln!("  gen error: {}", e),
@@ -632,6 +632,7 @@ fn train_brain(
     for (&gidx, pairs) in &gen_by_group {
         if pairs.is_empty() { continue; }
         let texts: Vec<&str> = pairs.iter().map(|(_emb, text)| *text).collect();
+        let embs: Vec<&[f32]> = pairs.iter().map(|(emb, _text)| *emb).collect();
         let dict = gen_dicts.get(&gidx).unwrap();
         let gen_max_arch = if texts.len() > 150 {
             base_archetypes * 3  // 48 for large gen groups
@@ -640,22 +641,65 @@ fn train_brain(
         } else {
             base_archetypes      // 16 for small groups
         };
-        let cb = AlgebraicCodebook::build(&texts, dict, gen_max_arch);
-        println!("  gen codebook[g{}]: {} archetypes (max={}), {} slots max, {} total bits (was {})",
-            gidx, cb.archetypes.len(), gen_max_arch, cb.max_slot_count, cb.total_bits,
-            effective_max_tokens * bits_for_dict(dict.len()));
+        let cb = AlgebraicCodebook::build(&texts, dict, gen_max_arch, Some(&embs));
+        let mode = if cb.has_prototypes() { "SLOT-ONLY" } else { "FULL" };
+        println!("  gen codebook[g{}]: {} archetypes (max={}), {} slots max, {} total/{} slot bits (was {}) [{}]",
+            gidx, cb.archetypes.len(), gen_max_arch, cb.max_slot_count, cb.total_bits, cb.slot_only_bits,
+            effective_max_tokens * bits_for_dict(dict.len()), mode);
         gen_codebooks.insert(gidx, cb);
     }
     for (&gidx, pairs) in &code_by_group {
         if pairs.is_empty() { continue; }
         let texts: Vec<&str> = pairs.iter().map(|(_emb, text)| *text).collect();
+        let embs: Vec<&[f32]> = pairs.iter().map(|(emb, _text)| *emb).collect();
         let dict = code_dicts.get(&gidx).unwrap();
-        let code_max_arch = base_archetypes * 2; // code has more unique structural patterns
-        let cb = AlgebraicCodebook::build_syntax_aware(&texts, dict, code_max_arch);
-        println!("  code codebook[g{}]: {} archetypes, {} slots max, {} total bits (was {}) [SYNTAX-AWARE]",
-            gidx, cb.archetypes.len(), cb.max_slot_count, cb.total_bits,
-            effective_max_tokens * bits_for_dict(dict.len()));
+        let code_max_arch = base_archetypes * 2;
+        let cb = AlgebraicCodebook::build_syntax_aware(&texts, dict, code_max_arch, Some(&embs));
+        let mode = if cb.has_prototypes() { "SYNTAX+SLOT-ONLY" } else { "SYNTAX-AWARE" };
+        println!("  code codebook[g{}]: {} archetypes, {} slots max, {} total/{} slot bits (was {}) [{}]",
+            gidx, cb.archetypes.len(), cb.max_slot_count, cb.total_bits, cb.slot_only_bits,
+            effective_max_tokens * bits_for_dict(dict.len()), mode);
         code_codebooks.insert(gidx, cb);
+    }
+
+    // Build Hopf composition tables for compositional OOD generation.
+    // Re-derive cluster assignments from match_best (fast, avoids changing build signatures).
+    let hopf_segments = 3;
+    let mut gen_hopf: HashMap<usize, HopfCompositionTable> = HashMap::new();
+    let mut code_hopf: HashMap<usize, HopfCompositionTable> = HashMap::new();
+    for (&gidx, pairs) in &gen_by_group {
+        if pairs.is_empty() { continue; }
+        if let Some(cb) = gen_codebooks.get(&gidx) {
+            if !cb.has_prototypes() || cb.archetypes.len() < 2 { continue; }
+            let dict = gen_dicts.get(&gidx).unwrap();
+            let embs: Vec<&[f32]> = pairs.iter().map(|(emb, _)| *emb).collect();
+            let mut clusters: Vec<Vec<usize>> = vec![vec![]; cb.archetypes.len()];
+            for (i, (_emb, text)) in pairs.iter().enumerate() {
+                let ids = dict.encode(text);
+                let (arch_idx, _) = cb.match_best(&ids);
+                if arch_idx < clusters.len() { clusters[arch_idx].push(i); }
+            }
+            let hopf = HopfCompositionTable::build(cb, Some(&embs), &clusters, hopf_segments);
+            println!("  gen hopf[g{}]: {} segments, {} response_len", gidx, hopf.num_segments, hopf.response_length);
+            gen_hopf.insert(gidx, hopf);
+        }
+    }
+    for (&gidx, pairs) in &code_by_group {
+        if pairs.is_empty() { continue; }
+        if let Some(cb) = code_codebooks.get(&gidx) {
+            if !cb.has_prototypes() || cb.archetypes.len() < 2 { continue; }
+            let dict = code_dicts.get(&gidx).unwrap();
+            let embs: Vec<&[f32]> = pairs.iter().map(|(emb, _)| *emb).collect();
+            let mut clusters: Vec<Vec<usize>> = vec![vec![]; cb.archetypes.len()];
+            for (i, (_emb, text)) in pairs.iter().enumerate() {
+                let ids = dict.encode(text);
+                let (arch_idx, _) = cb.match_best(&ids);
+                if arch_idx < clusters.len() { clusters[arch_idx].push(i); }
+            }
+            let hopf = HopfCompositionTable::build(cb, Some(&embs), &clusters, hopf_segments);
+            println!("  code hopf[g{}]: {} segments, {} response_len", gidx, hopf.num_segments, hopf.response_length);
+            code_hopf.insert(gidx, hopf);
+        }
     }
 
     // Store first available dict as fallback for service inference
@@ -684,6 +728,7 @@ fn train_brain(
         seed: u64,
         dictionary: TokenDictionary,
         codebook: Option<AlgebraicCodebook>,
+        hopf: Option<HopfCompositionTable>,
         prune_stop_tick: u64,
         task_epochs: usize,
         overrides: Option<growformer::dimension::group_gen::GenEnvOverrides>,
@@ -705,6 +750,7 @@ fn train_brain(
                 let stop_tick = (total_ticks as f64 * prune_warmup_frac) as u64;
                 let dict = gen_dicts.get(&gidx).unwrap().clone();
                 let cb = gen_codebooks.get(&gidx).cloned();
+                let hopf = gen_hopf.get(&gidx).cloned();
                 for r in 0..k_replicas {
                     tasks.push(GenTask {
                         gidx, kind: "gen", replica: r,
@@ -712,6 +758,7 @@ fn train_brain(
                         seed: 100 + gidx as u64 * 1000 + r as u64,
                         dictionary: dict.clone(),
                         codebook: cb.clone(),
+                        hopf: hopf.clone(),
                         prune_stop_tick: stop_tick,
                         task_epochs,
                         overrides: gen_overrides.clone(),
@@ -730,6 +777,7 @@ fn train_brain(
                 let stop_tick = (total_ticks as f64 * prune_warmup_frac) as u64;
                 let dict = code_dicts.get(&gidx).unwrap().clone();
                 let cb = code_codebooks.get(&gidx).cloned();
+                let hopf = code_hopf.get(&gidx).cloned();
                 for r in 0..k_replicas {
                     tasks.push(GenTask {
                         gidx, kind: "code", replica: r,
@@ -737,6 +785,7 @@ fn train_brain(
                         seed: 200 + gidx as u64 * 1000 + r as u64,
                         dictionary: dict.clone(),
                         codebook: cb.clone(),
+                        hopf: hopf.clone(),
                         prune_stop_tick: stop_tick,
                         task_epochs,
                         overrides: gen_overrides.clone(),
@@ -775,6 +824,9 @@ fn train_brain(
                 } else {
                     GroupGenEnv::new(task.dictionary.clone(), &mut task_rng)
                 };
+                if let Some(hopf) = task.hopf.clone() {
+                    env.set_hopf_table(hopf);
+                }
                 env.set_prune_stop_tick(task.prune_stop_tick);
                 let te = task.task_epochs;
                 let log_interval = (te / 50).max(1);
@@ -919,7 +971,7 @@ fn train_brain(
         }
         if let Ok((_, resp)) = svc.generation(prompt) {
             let r = &resp.text;
-            println!("  gen [{}]: {:?}", resp.template_id, &r[..r.len().min(200)]);
+            println!("  gen [{}] (conf={:.2}): {:?}", resp.template_id, resp.confidence, &r[..r.len().min(200)]);
         }
         if let Ok((_, Some(code))) = svc.codegen(prompt) {
             let c = &code.code;
