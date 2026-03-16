@@ -95,6 +95,13 @@ pub struct Synapse {
     /// Biological analog: engram-engram synapses are stronger and denser (Rajasethupathy et al.).
     #[serde(default)]
     pub consolidation: f32,
+
+    /// Dendritic branch index on the target neuron (0-based).
+    /// When dendritic_branches > 1, inputs are summed per-branch; the winning branch
+    /// (highest local sum) drives the soma. Gradient flows only through the winning branch.
+    /// Biological analog: compartmentalized dendritic computation.
+    #[serde(default)]
+    pub branch_id: u8,
 }
 
 impl Synapse {
@@ -109,6 +116,7 @@ impl Synapse {
             last_active: 0,
             frozen: false,
             consolidation: 0.0,
+            branch_id: 0,
         }
     }
 
@@ -378,7 +386,30 @@ pub struct EnvironmentConfig {
     /// Synapses with consolidation >= this are never pruned.
     #[serde(default)]
     pub engram_prune_threshold: f32,
+
+    // -------------------------------------------------------------------------
+    // Dendritic branches — compartmentalized input integration
+    //
+    // Each hidden neuron has N dendritic branches. Incoming synapses are assigned
+    // to branches; each branch sums its inputs independently. The soma fires
+    // based on the winning branch (highest local sum). Backprop flows only
+    // through the winning branch's synapses.
+    //
+    // This allows a single neuron to participate in N independent engrams without
+    // interference: branch A detects pattern X, branch B detects pattern Y.
+    // Multiplies effective per-neuron capacity by the branch count.
+    //
+    // Biological analog: dendritic compartments with local nonlinear integration,
+    // branch-specific plasticity, and dendritic spikes.
+    // -------------------------------------------------------------------------
+    /// Number of dendritic branches per hidden neuron.
+    /// 1 = disabled (all synapses on one branch, identical to current behavior).
+    /// 4 = each neuron has 4 independent pattern detectors.
+    #[serde(default = "default_dendritic_branches")]
+    pub dendritic_branches: usize,
 }
+
+fn default_dendritic_branches() -> usize { 1 }
 
 impl Default for EnvironmentConfig {
     fn default() -> Self {
@@ -461,6 +492,9 @@ impl Default for EnvironmentConfig {
             engram_cap: 1.0,
             engram_lr_scale: 0.8,
             engram_prune_threshold: 0.4,
+
+            // Dendritic branches — 1 = disabled (current behavior)
+            dendritic_branches: 1,
         }
     }
 }

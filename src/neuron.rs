@@ -49,6 +49,11 @@ pub struct Neuron {
     /// If true, no plasticity or gradient update may modify this neuron (bias, geometry, mass, synapses).
     /// Set by freeze_consolidated_pathway(); backprop and all plasticity systems skip frozen neurons.
     pub frozen: bool,
+
+    /// Which dendritic branch won during the last forward pass (0-based).
+    /// Used by backprop to route gradient only through the winning branch's synapses.
+    #[serde(default)]
+    pub winning_branch: u8,
 }
 
 impl Neuron {
@@ -69,6 +74,7 @@ impl Neuron {
             group_id: None,
             mirror_partner: None,
             frozen: false,
+            winning_branch: 0,
         }
     }
 
@@ -93,6 +99,17 @@ impl Neuron {
             return false;
         }
         self.synapses.push(Synapse::new(target, strength));
+        true
+    }
+
+    /// Add a new synapse assigned to a specific dendritic branch of the target.
+    pub fn add_synapse_to_branch(&mut self, target: NeuronId, strength: f32, max: usize, branch_id: u8) -> bool {
+        if self.synapses.len() >= max || self.has_synapse_to(target) || target == self.id {
+            return false;
+        }
+        let mut syn = Synapse::new(target, strength);
+        syn.branch_id = branch_id;
+        self.synapses.push(syn);
         true
     }
 

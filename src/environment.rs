@@ -173,11 +173,18 @@ impl NeuralEnvironment {
             };
             let scale = base_scale * attenuation_compensation;
 
+            let n_branches = self.config.dendritic_branches;
+            let is_to_hidden = layer_idx < self.layers.len() - 2;
             for &src in &sources {
                 for &tgt in &targets {
                     let w: f32 = rng.gen_range(-scale..=scale);
                     let neuron = self.neurons.get_mut(&src).unwrap();
-                    neuron.add_synapse(tgt, w, self.config.max_synapses_per_neuron);
+                    if n_branches > 1 && is_to_hidden {
+                        let br = rng.gen_range(0..n_branches) as u8;
+                        neuron.add_synapse_to_branch(tgt, w, self.config.max_synapses_per_neuron, br);
+                    } else {
+                        neuron.add_synapse(tgt, w, self.config.max_synapses_per_neuron);
+                    }
                 }
             }
         }
@@ -253,10 +260,17 @@ impl NeuralEnvironment {
         };
         let scale = base_scale * attenuation_compensation;
 
+        let n_br = self.config.dendritic_branches;
+        let is_hidden_target = layer_idx > 0 && layer_idx < self.layers.len() - 1;
         for &src in &prev_layer {
             let w: f32 = rng.gen_range(-scale..=scale);
             if let Some(n) = self.neurons.get_mut(&src) {
-                n.add_synapse(id, w, self.config.max_synapses_per_neuron);
+                if n_br > 1 && is_hidden_target {
+                    let br = rng.gen_range(0..n_br) as u8;
+                    n.add_synapse_to_branch(id, w, self.config.max_synapses_per_neuron, br);
+                } else {
+                    n.add_synapse(id, w, self.config.max_synapses_per_neuron);
+                }
             }
         }
         for &tgt in &next_layer {
@@ -368,7 +382,8 @@ impl NeuralEnvironment {
                 .filter(|id| self.dropout_mask.get(id) != Some(&true))
                 .filter_map(|id| self.neurons.get(id).map(|n| (*id, n.activation)))
                 .collect();
-            let prev_synapses: HashMap<NeuronId, Vec<(NeuronId, f32)>> = prev_layer
+            let n_branches = self.config.dendritic_branches;
+            let prev_synapses: HashMap<NeuronId, Vec<(NeuronId, f32, u8)>> = prev_layer
                 .iter()
                 .filter_map(|src_id| {
                     let n = self.neurons.get(src_id)?;
@@ -376,7 +391,7 @@ impl NeuralEnvironment {
                         .synapses
                         .iter()
                         .filter(|s| layer_ids.contains(&s.target))
-                        .map(|s| (s.target, s.effective_strength()))
+                        .map(|s| (s.target, s.effective_strength(), s.branch_id))
                         .collect();
                     if targets.is_empty() {
                         None
@@ -386,20 +401,43 @@ impl NeuralEnvironment {
                 })
                 .collect();
 
-            let sums: Vec<(NeuronId, f32)> = crate::maybe_par_iter!(layer_ids)
+            // Per-neuron summation: if dendritic_branches > 1, sum per-branch and pick winner
+            let sums: Vec<(NeuronId, f32, u8)> = crate::maybe_par_iter!(layer_ids)
                 .map(|&nid| {
-                    let sum: f32 = prev_layer
-                        .iter()
-                        .filter_map(|&src_id| {
-                            let act = *prev_act.get(&src_id)?;
-                            let targets = prev_synapses.get(&src_id)?;
-                            targets
-                                .iter()
-                                .find(|(t, _)| *t == nid)
-                                .map(|(_, eff_str)| act * eff_str)
-                        })
-                        .sum();
-                    (nid, sum)
+                    if n_branches <= 1 || is_output {
+                        let sum: f32 = prev_layer
+                            .iter()
+                            .filter_map(|&src_id| {
+                                let act = *prev_act.get(&src_id)?;
+                                let targets = prev_synapses.get(&src_id)?;
+                                targets
+                                    .iter()
+                                    .find(|(t, _, _)| *t == nid)
+                                    .map(|(_, eff_str, _)| act * eff_str)
+                            })
+                            .sum();
+                        (nid, sum, 0u8)
+                    } else {
+                        let mut branch_sums = vec![0.0f32; n_branches];
+                        for &src_id in &prev_layer {
+                            if let Some(act) = prev_act.get(&src_id) {
+                                if let Some(targets) = prev_synapses.get(&src_id) {
+                                    for &(t, eff_str, br) in targets {
+                                        if t == nid {
+                                            let bi = (br as usize) % n_branches;
+                                            branch_sums[bi] += act * eff_str;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let (best_branch, &best_sum) = branch_sums
+                            .iter()
+                            .enumerate()
+                            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                            .unwrap_or((0, &0.0));
+                        (nid, best_sum, best_branch as u8)
+                    }
                 })
                 .collect();
 
@@ -409,7 +447,7 @@ impl NeuralEnvironment {
             } else {
                 self.config.dropout_rate * 0.5
             };
-            for (nid, sum) in sums {
+            for (nid, sum, winning_br) in sums {
                 let would_drop = training
                     && !is_output
                     && dropout_rate > 0.0
@@ -425,6 +463,7 @@ impl NeuralEnvironment {
                     }
                 } else if let Some(n) = self.neurons.get_mut(&nid) {
                     n.activate(sum);
+                    n.winning_branch = winning_br;
                     if n.activation > 0.6 {
                         n.last_fired = self.time;
                     }
@@ -632,6 +671,14 @@ impl NeuralEnvironment {
         let dropout_mask = self.dropout_mask.clone();
         let engram_enabled = self.config.engram_enabled;
         let engram_lr_scale = self.config.engram_lr_scale;
+        let n_branches_bp = self.config.dendritic_branches;
+
+        // Snapshot of winning branch per target neuron (for dendritic backprop gating)
+        let winning_branches: HashMap<NeuronId, u8> = if n_branches_bp > 1 {
+            self.neurons.iter().map(|(&id, n)| (id, n.winning_branch)).collect()
+        } else {
+            HashMap::new()
+        };
 
         for layer_idx in (1..n_layers).rev() {
             let curr_layer = self.layers[layer_idx].clone();
@@ -639,8 +686,8 @@ impl NeuralEnvironment {
             let mut prev_deltas: HashMap<NeuronId, f32> = HashMap::new();
 
             // Snapshot: (src_id, src_act, mass, frozen, is_consolidated, weight, syn_snap)
-            // syn_snap: (target, strength, consolidation) for engram LR scaling
-            let snapshot: Vec<(NeuronId, f32, f32, bool, bool, f32, Vec<(NeuronId, f32, f32)>)> = prev_layer
+            // syn_snap: (target, strength, consolidation, branch_id)
+            let snapshot: Vec<(NeuronId, f32, f32, bool, bool, f32, Vec<(NeuronId, f32, f32, u8)>)> = prev_layer
                 .iter()
                 .filter(|id| dropout_mask.get(id) != Some(&true))
                 .filter_map(|&src_id| {
@@ -649,7 +696,7 @@ impl NeuralEnvironment {
                         .synapses
                         .iter()
                         .filter(|s| curr_layer.contains(&s.target))
-                        .map(|s| (s.target, s.strength, s.consolidation))
+                        .map(|s| (s.target, s.strength, s.consolidation, s.branch_id))
                         .collect();
                     let is_cons = n
                         .group_id
@@ -677,11 +724,16 @@ impl NeuralEnvironment {
                     } else {
                         lr
                     };
+                    // Gradient sum: only through winning branch synapses when dendritic
                     let grad_sum: f32 = syn_snap
                         .iter()
-                        .filter_map(|(tgt_id, str, _)| {
+                        .filter_map(|(tgt_id, str, _, branch_id)| {
                             if dropout_mask.get(tgt_id) == Some(&true) {
                                 return None;
+                            }
+                            if n_branches_bp > 1 {
+                                let wb = winning_branches.get(tgt_id).copied().unwrap_or(0);
+                                if *branch_id != wb { return None; }
                             }
                             let d = deltas.get(tgt_id).copied().unwrap_or(0.0);
                             Some(d * str)
@@ -706,11 +758,18 @@ impl NeuralEnvironment {
                     } else {
                         *weight
                     };
+                    // Synapse weight updates: only update winning branch synapses
                     let syn_updates: Vec<SynUpdate> = syn_snap
                         .iter()
-                        .filter_map(|(tgt_id, str, consolidation)| {
+                        .filter_map(|(tgt_id, str, consolidation, branch_id)| {
                             if dropout_mask.get(tgt_id) == Some(&true) {
                                 return None;
+                            }
+                            if n_branches_bp > 1 {
+                                let wb = winning_branches.get(tgt_id).copied().unwrap_or(0);
+                                if *branch_id != wb {
+                                    return Some((*tgt_id, *str, false));
+                                }
                             }
                             let d = deltas.get(tgt_id).copied().unwrap_or(0.0);
                             let clipped = (d * src_act).clamp(-1.0, 1.0);

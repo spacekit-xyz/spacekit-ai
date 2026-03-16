@@ -64,15 +64,40 @@ pub fn grow_synapses(
 
         candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
+        let n_branches = config.dendritic_branches;
         for (target, dist) in candidates.iter().take(3) {
             if neurons[&id].has_synapse_to(*target) { continue; }
             let base = (1.0 - dist / config.growth_radius).max(0.1);
             let noise: f32 = rng.gen_range(-0.05..0.05);
             let w = (base + noise).clamp(0.05, 0.5);
-            let n = neurons.get_mut(&id).unwrap();
-            if n.add_synapse(*target, w, config.max_synapses_per_neuron) {
-                formed += 1;
-                break;
+            if n_branches > 1 {
+                // Count incoming synapses per branch for this target (read-only scan)
+                let mut branch_counts = vec![0u32; n_branches];
+                for src in neurons.values() {
+                    for s in &src.synapses {
+                        if s.target == *target {
+                            let bi = (s.branch_id as usize) % n_branches;
+                            branch_counts[bi] += 1;
+                        }
+                    }
+                }
+                let best_branch = branch_counts
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, &c)| c)
+                    .map(|(i, _)| i as u8)
+                    .unwrap_or(0);
+                let n = neurons.get_mut(&id).unwrap();
+                if n.add_synapse_to_branch(*target, w, config.max_synapses_per_neuron, best_branch) {
+                    formed += 1;
+                    break;
+                }
+            } else {
+                let n = neurons.get_mut(&id).unwrap();
+                if n.add_synapse(*target, w, config.max_synapses_per_neuron) {
+                    formed += 1;
+                    break;
+                }
             }
         }
     }

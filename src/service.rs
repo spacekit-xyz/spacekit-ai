@@ -196,7 +196,7 @@ impl LanguageService {
     }
 
     /// Returns the DimensionManager used for inference (active named brain or fallback dm).
-    fn active_dm_mut(&mut self) -> &mut DimensionManager {
+    pub fn active_dm_mut(&mut self) -> &mut DimensionManager {
         self.brains
             .get_mut(&self.active_brain)
             .unwrap_or(&mut self.dm)

@@ -14,6 +14,98 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
+// Hamming Error-Correcting Code — single-error correction for token bits
+// ---------------------------------------------------------------------------
+
+/// Compute number of parity bits needed for `data_bits` data bits.
+/// Hamming code: 2^r >= data_bits + r + 1
+pub fn hamming_parity_bits(data_bits: usize) -> usize {
+    let mut r = 1;
+    while (1usize << r) < data_bits + r + 1 {
+        r += 1;
+    }
+    r
+}
+
+/// Encode `data_bits` data bits with Hamming parity bits.
+/// Returns a codeword of length `data_bits + parity_bits`.
+/// Parity bits are at positions that are powers of 2 (1-indexed).
+pub fn hamming_encode(data: &[u8], data_bits: usize) -> Vec<u8> {
+    let r = hamming_parity_bits(data_bits);
+    let total = data_bits + r;
+    let mut codeword = vec![0u8; total];
+
+    // Place data bits in non-power-of-2 positions (1-indexed)
+    let mut di = 0;
+    for pos in 1..=total {
+        if pos.is_power_of_two() {
+            continue;
+        }
+        if di < data_bits {
+            codeword[pos - 1] = if di < data.len() { data[di] } else { 0 };
+        }
+        di += 1;
+    }
+
+    // Compute parity bits
+    for i in 0..r {
+        let parity_pos = 1 << i; // 1, 2, 4, 8, ...
+        let mut parity = 0u8;
+        for pos in 1..=total {
+            if pos & parity_pos != 0 && pos != parity_pos {
+                parity ^= codeword[pos - 1];
+            }
+        }
+        codeword[parity_pos - 1] = parity;
+    }
+
+    codeword
+}
+
+/// Decode a Hamming codeword, correcting up to 1 bit error.
+/// Returns the extracted data bits.
+pub fn hamming_decode(codeword: &[u8], data_bits: usize) -> Vec<u8> {
+    let r = hamming_parity_bits(data_bits);
+    let total = data_bits + r;
+    let len = codeword.len().min(total);
+
+    // Compute syndrome (error position, 1-indexed; 0 = no error)
+    let mut syndrome = 0usize;
+    for i in 0..r {
+        let parity_pos = 1 << i;
+        let mut parity = 0u8;
+        for pos in 1..=len {
+            if pos & parity_pos != 0 {
+                parity ^= if pos - 1 < codeword.len() { codeword[pos - 1] } else { 0 };
+            }
+        }
+        if parity != 0 {
+            syndrome |= parity_pos;
+        }
+    }
+
+    // Correct single-bit error if syndrome is valid
+    let mut corrected: Vec<u8> = codeword.iter().copied().take(total).collect();
+    corrected.resize(total, 0);
+    if syndrome > 0 && syndrome <= total {
+        corrected[syndrome - 1] ^= 1;
+    }
+
+    // Extract data bits from non-power-of-2 positions
+    let mut data = Vec::with_capacity(data_bits);
+    for pos in 1..=total {
+        if pos.is_power_of_two() {
+            continue;
+        }
+        data.push(corrected[pos - 1]);
+        if data.len() >= data_bits {
+            break;
+        }
+    }
+    data
+}
+
+// ---------------------------------------------------------------------------
 // DCT-II / IDCT (orthonormal, pure Rust)
 // ---------------------------------------------------------------------------
 
@@ -79,15 +171,51 @@ pub fn sparse_coeffs(coeffs: &[f32], k: usize) -> Vec<f32> {
 /// End-of-sequence marker ID. Token sequences are padded with this.
 pub const EOS_ID: u16 = 0;
 
+/// Convert binary to Gray code.
+pub fn to_gray(n: u16) -> u16 {
+    n ^ (n >> 1)
+}
+
+/// Convert Gray code back to binary.
+pub fn from_gray(g: u16) -> u16 {
+    let mut n = g;
+    let mut mask = n >> 1;
+    while mask != 0 {
+        n ^= mask;
+        mask >>= 1;
+    }
+    n
+}
+
+/// Semantic cluster tag for a token: first character category.
+/// Used to group tokens so semantically related tokens get adjacent IDs.
+fn semantic_cluster(token: &str) -> u8 {
+    let ch = token.chars().next().unwrap_or(' ');
+    if ch.is_ascii_punctuation() {
+        0
+    } else if ch.is_ascii_digit() {
+        1
+    } else if ch.is_ascii_uppercase() {
+        2
+    } else {
+        // lowercase: cluster by first letter (a-z → 3..28)
+        3 + (ch as u8).wrapping_sub(b'a').min(25)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TokenDictionary {
-    pub tokens: Vec<String>, // ID -> token. Index 0 = <EOS>
+    pub tokens: Vec<String>,
     lookup: HashMap<String, u16>,
+    gray_to_binary: Vec<u16>,
+    binary_to_gray: Vec<u16>,
 }
 
 impl TokenDictionary {
     /// Build from a corpus. Keeps the `max_size` most frequent tokens.
-    /// ID 0 is reserved for <EOS>.
+    /// ID 0 is reserved for <EOS>. Tokens are sorted into semantic clusters
+    /// so similar tokens get adjacent IDs, then Gray coding ensures adjacent
+    /// IDs differ by only 1 bit.
     pub fn build(texts: &[&str], max_size: usize) -> Self {
         let mut freq: HashMap<String, usize> = HashMap::new();
         for text in texts {
@@ -96,18 +224,50 @@ impl TokenDictionary {
             }
         }
         let mut entries: Vec<(String, usize)> = freq.into_iter().collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        // Sort by semantic cluster first, then by frequency within cluster.
+        // This groups related tokens (punctuation, digits, uppercase, lowercase
+        // by first letter) into contiguous ID ranges.
+        entries.sort_by(|a, b| {
+            let ca = semantic_cluster(&a.0);
+            let cb = semantic_cluster(&b.0);
+            ca.cmp(&cb).then(b.1.cmp(&a.1))
+        });
         entries.truncate(max_size.saturating_sub(1));
 
-        let mut tokens = Vec::with_capacity(entries.len() + 1);
+        let dict_size = entries.len() + 1; // +1 for EOS
+        let mut tokens = Vec::with_capacity(dict_size);
         let mut lookup = HashMap::new();
-        tokens.push("<EOS>".to_string()); // ID 0 = end of sequence
+        tokens.push("<EOS>".to_string());
         for (token, _) in entries {
             let id = tokens.len() as u16;
             lookup.insert(token.clone(), id);
             tokens.push(token);
         }
-        Self { tokens, lookup }
+
+        // Build Gray code lookup tables
+        let mut gray_to_binary = vec![0u16; dict_size];
+        let mut binary_to_gray = vec![0u16; dict_size];
+        for i in 0..dict_size as u16 {
+            let g = to_gray(i);
+            if (g as usize) < dict_size {
+                gray_to_binary[g as usize] = i;
+            }
+            binary_to_gray[i as usize] = g;
+        }
+
+        Self { tokens, lookup, gray_to_binary, binary_to_gray }
+    }
+
+    /// The Gray-coded ID for a token's internal index.
+    /// Used by GroupGenEnv for encoding targets.
+    pub fn to_gray_id(&self, id: u16) -> u16 {
+        self.binary_to_gray.get(id as usize).copied().unwrap_or(0)
+    }
+
+    /// Recover internal index from a Gray-coded ID.
+    /// Used by GroupGenEnv for decoding outputs.
+    pub fn from_gray_id(&self, gray_id: u16) -> u16 {
+        self.gray_to_binary.get(gray_id as usize).copied().unwrap_or(0)
     }
 
     pub fn len(&self) -> usize {

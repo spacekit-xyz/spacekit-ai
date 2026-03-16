@@ -15,6 +15,10 @@ name = "growformer"
 path = "src/main.rs"
 
 [[bin]]
+name = "growformer-demos"
+path = "src/demos.rs"
+
+[[bin]]
 name = "growformer-node"
 path = "src/server.rs"
 

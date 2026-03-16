@@ -25,13 +25,23 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::environment::NeuralEnvironment;
-use crate::spectral::TokenDictionary;
+use crate::spectral::{TokenDictionary, hamming_parity_bits, hamming_encode, hamming_decode};
 use crate::types::EnvironmentConfig;
 
 pub const GEN_COND_DIM: usize = 64;
-pub const MAX_TOKENS: usize = 64;
-const GEN_HIDDEN: usize = 256;
-const GEN_K: usize = 64;
+pub const MAX_TOKENS: usize = 128;
+pub const GEN_HIDDEN: usize = 256;
+pub const GEN_K: usize = 64;
+
+/// Overrides for auto-configured training. When `None`, defaults are used.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct GenEnvOverrides {
+    pub max_tokens: Option<usize>,
+    pub hidden: Option<usize>,
+    pub k: Option<usize>,
+    pub max_synapses: Option<usize>,
+    pub energy_budget: Option<f32>,
+}
 
 /// Compute bits needed for a dictionary of the given size.
 pub fn bits_for_dict(dict_len: usize) -> usize {
@@ -47,21 +57,36 @@ pub struct GroupGenEnv {
     pub env: NeuralEnvironment,
     pub dictionary: TokenDictionary,
     pub bits_per_token: usize,
+    /// Total bits per token slot including ECC parity bits.
+    pub coded_bits_per_token: usize,
     pub output_dim: usize,
     pub frozen: bool,
 }
 
 impl GroupGenEnv {
     pub fn new(dictionary: TokenDictionary, rng: &mut impl Rng) -> Self {
+        Self::new_with_overrides(dictionary, &GenEnvOverrides::default(), rng)
+    }
+
+    pub fn new_with_overrides(dictionary: TokenDictionary, ov: &GenEnvOverrides, rng: &mut impl Rng) -> Self {
+        let max_tok = ov.max_tokens.unwrap_or(MAX_TOKENS);
+        let hidden = ov.hidden.unwrap_or(GEN_HIDDEN);
+        let k = ov.k.unwrap_or(GEN_K);
         let bits_per_token = bits_for_dict(dictionary.len());
-        let output_dim = MAX_TOKENS * bits_per_token;
-        let config = gen_env_config();
+        let parity_bits = hamming_parity_bits(bits_per_token);
+        let coded_bits_per_token = bits_per_token + parity_bits;
+        let output_dim = max_tok * coded_bits_per_token;
+        let mut config = gen_env_config();
+        config.competitive_k = k;
+        if let Some(ms) = ov.max_synapses { config.max_synapses_per_neuron = ms; }
+        if let Some(eb) = ov.energy_budget { config.energy_budget_per_neuron = eb; }
         let mut env = NeuralEnvironment::new(config);
-        env.build_layers(&[GEN_COND_DIM, GEN_HIDDEN, GEN_HIDDEN, output_dim], rng);
+        env.build_layers(&[GEN_COND_DIM, hidden, hidden, output_dim], rng);
         Self {
             env,
             dictionary,
             bits_per_token,
+            coded_bits_per_token,
             output_dim,
             frozen: false,
         }
@@ -73,51 +98,88 @@ impl GroupGenEnv {
         self.env.config.prune_stop_tick = tick;
     }
 
-    /// Encode a token ID as binary values (self.bits_per_token width).
+    /// Encode a token ID as Gray-coded + Hamming ECC binary values.
+    /// Gray coding ensures adjacent token IDs differ by only 1 bit.
+    /// Hamming parity bits enable single-error correction at decode time.
     fn id_to_bits(&self, id: u16) -> Vec<f32> {
-        let mut bits = vec![0.0f32; self.bits_per_token];
+        let gray = self.dictionary.to_gray_id(id);
+        let mut data_bits = Vec::with_capacity(self.bits_per_token);
         for i in 0..self.bits_per_token {
-            bits[i] = if (id >> i) & 1 == 1 { 1.0 } else { 0.0 };
+            data_bits.push(if (gray >> i) & 1 == 1 { 1u8 } else { 0u8 });
         }
-        bits
+        let codeword = hamming_encode(&data_bits, self.bits_per_token);
+        codeword.iter().map(|&b| b as f32).collect()
     }
 
-    /// Decode binary values to a token ID, clamped to dict size.
-    fn bits_to_id(bits: &[f32], dict_size: usize) -> u16 {
-        let mut id = 0u16;
+    /// Hard decode: threshold each bit at 0.5, reconstruct Gray code, convert
+    /// back to token ID. Kept as fallback; soft decode is preferred.
+    #[allow(dead_code)]
+    fn bits_to_id_hard(bits: &[f32], dict: &TokenDictionary, dict_size: usize) -> u16 {
+        let mut gray = 0u16;
         for (i, &b) in bits.iter().enumerate() {
             if b > 0.5 {
-                id |= 1 << i;
+                gray |= 1 << i;
             }
         }
+        let id = dict.from_gray_id(gray);
         id.min(dict_size.saturating_sub(1) as u16)
     }
 
-    /// Encode a full target text into a flat binary target vector.
+    /// Soft decode: find the dictionary entry whose Gray-coded binary
+    /// representation is closest to the raw sigmoid outputs (Euclidean
+    /// distance). Tolerates 1-3 bit errors that hard thresholding would
+    /// propagate. With Gray coding, a 1-bit error maps to an adjacent
+    /// (semantically similar) token instead of an arbitrary one.
+    fn bits_to_id_soft(bits: &[f32], dict: &TokenDictionary, dict_size: usize, bpt: usize) -> u16 {
+        let mut best_id = 0u16;
+        let mut best_dist = f32::MAX;
+        for candidate in 0..dict_size as u16 {
+            let gray = dict.to_gray_id(candidate);
+            let mut dist = 0.0f32;
+            for i in 0..bpt {
+                let target_bit = if (gray >> i) & 1 == 1 { 1.0f32 } else { 0.0 };
+                let d = bits.get(i).copied().unwrap_or(0.0) - target_bit;
+                dist += d * d;
+            }
+            if dist < best_dist {
+                best_dist = dist;
+                best_id = candidate;
+            }
+        }
+        best_id
+    }
+
+    /// Encode a full target text into a flat binary target vector (with ECC).
     fn encode_target(&self, text: &str) -> Vec<f32> {
         let token_ids = self.dictionary.encode(text);
         let mut target = vec![0.0f32; self.output_dim];
-        for (pos, &id) in token_ids.iter().take(MAX_TOKENS).enumerate() {
+        let cbpt = self.coded_bits_per_token;
+        let max_tok = self.output_dim / cbpt.max(1);
+        for (pos, &id) in token_ids.iter().take(max_tok).enumerate() {
             let bits = self.id_to_bits(id);
-            let offset = pos * self.bits_per_token;
-            target[offset..offset + self.bits_per_token].copy_from_slice(&bits);
+            let offset = pos * cbpt;
+            let len = bits.len().min(cbpt);
+            target[offset..offset + len].copy_from_slice(&bits[..len]);
         }
         target
     }
 
     /// Decode a flat binary output vector into text via dictionary lookup.
-    /// Stops at EOS (id=0) or when output confidence drops below threshold.
+    /// Pipeline: raw sigmoids → Hamming ECC correction → Gray decode →
+    /// nearest-neighbor soft decode. Stops at EOS or low confidence.
     fn decode_output(&self, output: &[f32]) -> String {
         let dict_size = self.dictionary.len();
+        let cbpt = self.coded_bits_per_token;
         let bpt = self.bits_per_token;
         let mut ids = Vec::new();
+        let max_tok = self.output_dim / cbpt.max(1);
         let min_tokens = 3;
-        for pos in 0..MAX_TOKENS {
-            let offset = pos * bpt;
-            if offset + bpt > output.len() {
+        for pos in 0..max_tok {
+            let offset = pos * cbpt;
+            if offset + cbpt > output.len() {
                 break;
             }
-            let slot = &output[offset..offset + bpt];
+            let slot = &output[offset..offset + cbpt];
 
             let max_confidence = slot
                 .iter()
@@ -127,7 +189,15 @@ impl GroupGenEnv {
                 break;
             }
 
-            let id = Self::bits_to_id(slot, dict_size);
+            // Step 1: Hard-threshold to get codeword bits for ECC
+            let hard_bits: Vec<u8> = slot.iter().map(|&v| if v > 0.5 { 1u8 } else { 0u8 }).collect();
+            // Step 2: Hamming correction on the codeword
+            let corrected_data = hamming_decode(&hard_bits, bpt);
+            // Step 3: Reconstruct soft values from corrected data for soft decode
+            let corrected_soft: Vec<f32> = corrected_data.iter().map(|&b| b as f32).collect();
+            // Step 4: Soft decode (nearest-neighbor on data bits, Gray-aware)
+            let id = Self::bits_to_id_soft(&corrected_soft, &self.dictionary, dict_size, bpt);
+
             if pos >= min_tokens && id == 0 {
                 break;
             }
@@ -177,8 +247,9 @@ impl GroupGenEnv {
 
         // Count actual content tokens to find where EOS begins
         let token_ids = self.dictionary.encode(target);
-        let content_tokens = token_ids.len().min(MAX_TOKENS);
-        if content_tokens < MAX_TOKENS {
+        let max_tok = self.output_dim / self.coded_bits_per_token.max(1);
+        let content_tokens = token_ids.len().min(max_tok);
+        if content_tokens < max_tok {
             let eos_target = vec![0.0f32; self.output_dim];
             self.env.train_tick_gradient_only(&input, &eos_target, rng);
         }
@@ -225,6 +296,10 @@ impl GroupGenEnv {
     pub fn total_neurons(&self) -> usize {
         self.env.neurons.len()
     }
+
+    pub fn max_tokens(&self) -> usize {
+        self.output_dim / self.coded_bits_per_token.max(1)
+    }
 }
 
 fn gen_env_config() -> EnvironmentConfig {
@@ -269,6 +344,7 @@ fn gen_env_config() -> EnvironmentConfig {
         engram_cap: 1.0,
         engram_lr_scale: 0.85,
         engram_prune_threshold: 0.3,
+        dendritic_branches: 1,
         ..EnvironmentConfig::default()
     }
 }
@@ -297,9 +373,15 @@ mod tests {
         let dict = test_dict();
         let mut rng = StdRng::seed_from_u64(42);
         let env = GroupGenEnv::new(dict, &mut rng);
-        for id in 0u16..(env.dictionary.len() as u16) {
-            let bits = env.id_to_bits(id);
-            let back = GroupGenEnv::bits_to_id(&bits, env.dictionary.len());
+        let bpt = env.bits_per_token;
+        let dict_size = env.dictionary.len();
+        for id in 0u16..(dict_size as u16) {
+            let coded_bits = env.id_to_bits(id);
+            // Decode through ECC + soft decode (same pipeline as decode_output)
+            let hard: Vec<u8> = coded_bits.iter().map(|&v| if v > 0.5 { 1u8 } else { 0u8 }).collect();
+            let corrected = hamming_decode(&hard, bpt);
+            let soft: Vec<f32> = corrected.iter().map(|&b| b as f32).collect();
+            let back = GroupGenEnv::bits_to_id_soft(&soft, &env.dictionary, dict_size, bpt);
             assert_eq!(id, back, "roundtrip failed for {}", id);
         }
     }
@@ -332,10 +414,13 @@ mod tests {
     fn test_new_env_topology() {
         let dict = test_dict();
         let expected_bits = bits_for_dict(dict.len());
-        let expected_out = MAX_TOKENS * expected_bits;
+        let expected_parity = hamming_parity_bits(expected_bits);
+        let expected_coded = expected_bits + expected_parity;
+        let expected_out = MAX_TOKENS * expected_coded;
         let mut rng = StdRng::seed_from_u64(42);
         let env = GroupGenEnv::new(dict, &mut rng);
         assert_eq!(env.bits_per_token, expected_bits);
+        assert_eq!(env.coded_bits_per_token, expected_coded);
         assert_eq!(env.output_dim, expected_out);
         assert_eq!(env.env.layers.len(), 4);
         assert_eq!(env.env.layers[0].len(), GEN_COND_DIM);
