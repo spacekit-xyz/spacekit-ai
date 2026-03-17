@@ -108,6 +108,167 @@ pub struct ModeMetrics {
 }
 
 // ---------------------------------------------------------------------------
+// OCEAN Personality Profile
+// ---------------------------------------------------------------------------
+//
+// Each dimension is 0.0–1.0. Affects generation conditioning, Hopf beam
+// scoring, and EMA temporal blending.
+//
+//   O (Openness):         high → creative, exploratory responses
+//   C (Conscientiousness): high → precise, structured responses
+//   E (Extraversion):      high → verbose, enthusiastic responses
+//   A (Agreeableness):     high → supportive, affirming tone
+//   N (Neuroticism):       high → cautious, hedging language
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OceanProfile {
+    pub openness: f32,
+    pub conscientiousness: f32,
+    pub extraversion: f32,
+    pub agreeableness: f32,
+    pub neuroticism: f32,
+}
+
+impl Default for OceanProfile {
+    fn default() -> Self {
+        Self {
+            openness: 0.5,
+            conscientiousness: 0.7,
+            extraversion: 0.5,
+            agreeableness: 0.6,
+            neuroticism: 0.3,
+        }
+    }
+}
+
+impl OceanProfile {
+    /// Balanced professional assistant: precise, friendly, moderately creative.
+    pub fn assistant() -> Self {
+        Self { openness: 0.5, conscientiousness: 0.8, extraversion: 0.5, agreeableness: 0.7, neuroticism: 0.2 }
+    }
+
+    /// Creative brainstormer: highly open, enthusiastic, less rigid.
+    pub fn creative() -> Self {
+        Self { openness: 0.9, conscientiousness: 0.4, extraversion: 0.8, agreeableness: 0.6, neuroticism: 0.3 }
+    }
+
+    /// Precise engineer: structured, careful, low on fluff.
+    pub fn engineer() -> Self {
+        Self { openness: 0.4, conscientiousness: 0.9, extraversion: 0.3, agreeableness: 0.5, neuroticism: 0.2 }
+    }
+
+    /// Cautious analyst: high conscientiousness and neuroticism (hedging).
+    pub fn analyst() -> Self {
+        Self { openness: 0.5, conscientiousness: 0.9, extraversion: 0.3, agreeableness: 0.5, neuroticism: 0.7 }
+    }
+
+    /// Returns the 5-float vector [O, C, E, A, N].
+    pub fn as_vec(&self) -> [f32; 5] {
+        [self.openness, self.conscientiousness, self.extraversion, self.agreeableness, self.neuroticism]
+    }
+
+    /// Modulate a conditioning vector with personality.
+    /// Applies a subtle directional bias in the last 5 dims of the vector,
+    /// scaled so personality is a secondary signal (not overriding content).
+    pub fn condition_vector(&self, cond: &mut [f32]) {
+        let dim = cond.len();
+        if dim < 10 { return; }
+        let ocean = self.as_vec();
+        let scale = 0.15;
+        for (i, &o) in ocean.iter().enumerate() {
+            let idx = dim - 5 + i;
+            cond[idx] += (o - 0.5) * scale;
+        }
+    }
+
+    /// EMA alpha modulation: extraversion increases alpha (faster adaptation),
+    /// conscientiousness decreases it (more memory of prior context).
+    pub fn modulated_ema_alpha(&self, base_alpha: f32) -> f32 {
+        let shift = (self.extraversion - 0.5) * 0.15 - (self.conscientiousness - 0.5) * 0.1;
+        (base_alpha + shift).clamp(0.05, 0.8)
+    }
+
+    /// Hopf beam scoring bias: openness favors cross-archetype fragments,
+    /// conscientiousness favors same-archetype coherence.
+    pub fn hopf_diversity_bonus(&self) -> f32 {
+        (self.openness - self.conscientiousness).clamp(-0.3, 0.3)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Conversation Context (multi-turn)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct ConversationTurn {
+    pub role: TurnRole,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnRole {
+    User,
+    Agent,
+}
+
+/// Rolling conversation context for multi-turn dialogue.
+#[derive(Debug, Clone)]
+pub struct ConversationContext {
+    pub history: Vec<ConversationTurn>,
+    pub max_turns: usize,
+}
+
+impl Default for ConversationContext {
+    fn default() -> Self {
+        Self { history: Vec::new(), max_turns: 20 }
+    }
+}
+
+impl ConversationContext {
+    pub fn push_user(&mut self, text: &str) {
+        self.history.push(ConversationTurn { role: TurnRole::User, text: text.to_string() });
+        self.trim();
+    }
+
+    pub fn push_agent(&mut self, text: &str) {
+        self.history.push(ConversationTurn { role: TurnRole::Agent, text: text.to_string() });
+        self.trim();
+    }
+
+    fn trim(&mut self) {
+        while self.history.len() > self.max_turns * 2 {
+            self.history.remove(0);
+        }
+    }
+
+    pub fn turn_count(&self) -> usize {
+        self.history.iter().filter(|t| t.role == TurnRole::User).count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.history.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.history.clear();
+    }
+
+    /// Format conversation history as context string for the encoder.
+    /// Uses a sliding window of the last N turns to keep embedding focused.
+    pub fn context_window(&self, window: usize) -> String {
+        let recent: Vec<&ConversationTurn> = self.history.iter()
+            .rev().take(window * 2).collect::<Vec<_>>().into_iter().rev().collect();
+        recent.iter()
+            .map(|t| match t.role {
+                TurnRole::User => format!("user: {}", t.text),
+                TurnRole::Agent => format!("agent: {}", t.text),
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Continuum: feedback and turn context (train-while-on; see docs/CONTINUUM.md)
 // ---------------------------------------------------------------------------
 
@@ -158,6 +319,10 @@ pub struct LanguageService {
     /// Agent identity for "who are you" responses.
     pub agent_name: String,
     pub agent_creator: String,
+    /// OCEAN personality profile — conditions generation and conversation style.
+    pub personality: OceanProfile,
+    /// Multi-turn conversation context.
+    pub conversation: ConversationContext,
 }
 
 impl LanguageService {
@@ -179,6 +344,8 @@ impl LanguageService {
             last_turn: None,
             agent_name: "Growformer".to_string(),
             agent_creator: "swtch.ai".to_string(),
+            personality: OceanProfile::assistant(),
+            conversation: ConversationContext::default(),
         })
     }
 
@@ -199,6 +366,8 @@ impl LanguageService {
             last_turn: None,
             agent_name: "Growformer".to_string(),
             agent_creator: "swtch.ai".to_string(),
+            personality: OceanProfile::assistant(),
+            conversation: ConversationContext::default(),
         })
     }
 
@@ -269,6 +438,7 @@ impl LanguageService {
             return Ok((action, self.identity_response()));
         }
 
+        let personality = self.personality.clone();
         let dm = self.active_dm_mut();
         let action = dm.route_text_to_action_stateless(text)?;
 
@@ -277,10 +447,19 @@ impl LanguageService {
             .and_then(|gid| dm.main.group_order.iter().position(|&g| g == gid));
 
         let resp = if let Some((_, ref bridged)) = encoded {
-            let routed = &bridged.routed_vector;
+            // Apply OCEAN personality conditioning to the routed vector
+            let mut conditioned = bridged.routed_vector.clone();
+            personality.condition_vector(&mut conditioned);
+            let routed = &conditioned;
 
             // --- Level 3: Check episodic memory for cached composition ---
             let _cached_groups = Self::retrieve_cached_composition(dm, routed);
+
+            // Apply OCEAN Hopf diversity bonus to all gen envs
+            let div_bonus = personality.hopf_diversity_bonus();
+            for env in dm.group_gen_envs.values_mut() {
+                env.diversity_bonus = div_bonus;
+            }
 
             // --- Level 1: Competitive multi-head inference ---
             // If we have a cached composition, prioritize those groups.
@@ -360,6 +539,46 @@ impl LanguageService {
 
         self.record_latency(start);
         Ok((action, resp))
+    }
+
+    /// Conversational generation: uses conversation context + personality.
+    /// Tracks multi-turn history and applies EMA modulation based on OCEAN.
+    pub fn converse(&mut self, user_text: &str) -> Result<(ActionJson, GeneratedResponse), String> {
+        self.conversation.push_user(user_text);
+
+        // Modulate EMA alpha based on personality before encoding
+        let base_alpha = self.active_dm().language_runtime.config.ema_alpha;
+        let modulated_alpha = self.personality.modulated_ema_alpha(base_alpha);
+        self.active_dm_mut().language_runtime.smoother.alpha = modulated_alpha;
+
+        // Build context-augmented prompt: recent history + current message.
+        // The EMA smoother in the bridge already blends temporal context,
+        // but explicit history prepending improves semantic grounding.
+        let context_prompt = if self.conversation.turn_count() > 1 {
+            let ctx = self.conversation.context_window(3);
+            format!("{} | user: {}", ctx, user_text)
+        } else {
+            user_text.to_string()
+        };
+
+        let (action, resp) = self.generation(&context_prompt)?;
+
+        self.conversation.push_agent(&resp.text);
+
+        // Store turn context for Continuum feedback
+        self.last_turn = Some(TurnContext {
+            message: user_text.to_string(),
+            group_id: action.target_group_id,
+            output: resp.text.clone(),
+        });
+
+        Ok((action, resp))
+    }
+
+    /// Reset conversation context (new session).
+    pub fn reset_conversation(&mut self) {
+        self.conversation.clear();
+        self.active_dm_mut().language_runtime.smoother.reset();
     }
 
     pub fn codegen(&mut self, text: &str) -> Result<(ActionJson, Option<CodeGeneration>), String> {

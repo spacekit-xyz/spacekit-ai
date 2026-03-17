@@ -153,27 +153,7 @@ fn run_inference(brain_path: &str, prompt: Option<&str>) -> Result<(), String> {
         return Ok(());
     }
 
-    println!("\nInteractive mode. Type a prompt and press Enter. Ctrl+C to exit.\n");
-    let stdin = std::io::stdin();
-    loop {
-        eprint!("> ");
-        let _ = std::io::Write::flush(&mut std::io::stderr());
-        let mut line = String::new();
-        match stdin.read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) => {
-                let trimmed = line.trim();
-                if trimmed.is_empty() { continue; }
-                if trimmed == "quit" || trimmed == "exit" { break; }
-                run_single_prompt(&mut svc, trimmed);
-                println!();
-            }
-            Err(e) => {
-                eprintln!("Read error: {}", e);
-                break;
-            }
-        }
-    }
+    run_conversation_repl(&mut svc);
 
     Ok(())
 }
@@ -201,6 +181,174 @@ fn run_single_prompt(svc: &mut LanguageService, prompt: &str) {
         }
         Ok((_, None)) => {}
         Err(e) => eprintln!("  code error: {}", e),
+    }
+}
+
+fn run_conversation_repl(svc: &mut LanguageService) {
+    let ocean = svc.personality.as_vec();
+    println!("\n=== Growformer Conversation REPL ===");
+    println!("  Agent: {} (by {})", svc.agent_name, svc.agent_creator);
+    println!("  Personality [O={:.1} C={:.1} E={:.1} A={:.1} N={:.1}]",
+        ocean[0], ocean[1], ocean[2], ocean[3], ocean[4]);
+    println!();
+    println!("Commands:");
+    println!("  /personality <preset>   Switch: assistant, creative, engineer, analyst");
+    println!("  /ocean O C E A N        Set custom OCEAN values (0.0-1.0)");
+    println!("  /reset                  Clear conversation history");
+    println!("  /history                Show conversation history");
+    println!("  /single <prompt>        Single-shot (no conversation context)");
+    println!("  /status                 Show brain + personality info");
+    println!("  quit | exit             Exit");
+    println!();
+
+    let stdin = std::io::stdin();
+    loop {
+        eprint!("[turn {}] > ", svc.conversation.turn_count() + 1);
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+        let mut line = String::new();
+        match stdin.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() { continue; }
+                if trimmed == "quit" || trimmed == "exit" { break; }
+
+                if let Some(cmd) = trimmed.strip_prefix('/') {
+                    handle_repl_command(svc, cmd);
+                    continue;
+                }
+
+                match svc.converse(trimmed) {
+                    Ok((action, resp)) => {
+                        if let Some(gid) = action.target_group_id {
+                            eprint!("  [route: {:?} g={} conf={:.2}] ",
+                                action.action_type, gid, action.confidence);
+                        }
+                        println!();
+                        if !resp.text.is_empty() {
+                            println!("  {} (conf={:.2})", resp.text, resp.confidence);
+                        }
+
+                        match svc.codegen(trimmed) {
+                            Ok((_, Some(code))) if !code.code.is_empty() => {
+                                println!("  code [{}]: {}", code.kind, code.code);
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(e) => eprintln!("  error: {}", e),
+                }
+                println!();
+            }
+            Err(e) => {
+                eprintln!("Read error: {}", e);
+                break;
+            }
+        }
+    }
+}
+
+fn handle_repl_command(svc: &mut LanguageService, cmd: &str) {
+    use growformer::service::OceanProfile;
+
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    match parts.first().copied() {
+        Some("personality") | Some("p") => {
+            match parts.get(1).copied() {
+                Some("assistant") => {
+                    svc.personality = OceanProfile::assistant();
+                    println!("  Personality: assistant (balanced, professional)");
+                }
+                Some("creative") => {
+                    svc.personality = OceanProfile::creative();
+                    println!("  Personality: creative (open, enthusiastic)");
+                }
+                Some("engineer") => {
+                    svc.personality = OceanProfile::engineer();
+                    println!("  Personality: engineer (precise, structured)");
+                }
+                Some("analyst") => {
+                    svc.personality = OceanProfile::analyst();
+                    println!("  Personality: analyst (cautious, thorough)");
+                }
+                _ => {
+                    println!("  Usage: /personality <assistant|creative|engineer|analyst>");
+                }
+            }
+            let v = svc.personality.as_vec();
+            println!("  [O={:.1} C={:.1} E={:.1} A={:.1} N={:.1}]", v[0], v[1], v[2], v[3], v[4]);
+        }
+        Some("ocean") => {
+            if parts.len() == 6 {
+                let vals: Vec<f32> = parts[1..6].iter()
+                    .filter_map(|s| s.parse::<f32>().ok())
+                    .collect();
+                if vals.len() == 5 {
+                    svc.personality = OceanProfile {
+                        openness: vals[0].clamp(0.0, 1.0),
+                        conscientiousness: vals[1].clamp(0.0, 1.0),
+                        extraversion: vals[2].clamp(0.0, 1.0),
+                        agreeableness: vals[3].clamp(0.0, 1.0),
+                        neuroticism: vals[4].clamp(0.0, 1.0),
+                    };
+                    let v = svc.personality.as_vec();
+                    println!("  Custom OCEAN: [O={:.1} C={:.1} E={:.1} A={:.1} N={:.1}]",
+                        v[0], v[1], v[2], v[3], v[4]);
+                } else {
+                    println!("  Usage: /ocean 0.5 0.7 0.5 0.6 0.3");
+                }
+            } else {
+                let v = svc.personality.as_vec();
+                println!("  Current: [O={:.1} C={:.1} E={:.1} A={:.1} N={:.1}]", v[0], v[1], v[2], v[3], v[4]);
+                println!("  Usage: /ocean <O> <C> <E> <A> <N>  (each 0.0-1.0)");
+            }
+        }
+        Some("reset") => {
+            svc.reset_conversation();
+            println!("  Conversation cleared.");
+        }
+        Some("history") | Some("h") => {
+            if svc.conversation.is_empty() {
+                println!("  (no conversation history)");
+            } else {
+                for (i, turn) in svc.conversation.history.iter().enumerate() {
+                    let role = match turn.role {
+                        growformer::service::TurnRole::User => "user",
+                        growformer::service::TurnRole::Agent => "agent",
+                    };
+                    let display = if turn.text.len() > 80 {
+                        format!("{}...", &turn.text[..77])
+                    } else {
+                        turn.text.clone()
+                    };
+                    println!("  [{}] {}: {}", i + 1, role, display);
+                }
+            }
+        }
+        Some("single") | Some("s") => {
+            let prompt = parts[1..].join(" ");
+            if prompt.is_empty() {
+                println!("  Usage: /single <prompt text>");
+            } else {
+                run_single_prompt(svc, &prompt);
+            }
+        }
+        Some("status") => {
+            let dm = svc.active_dm();
+            println!("  Agent: {} (by {})", svc.agent_name, svc.agent_creator);
+            let v = svc.personality.as_vec();
+            println!("  Personality: [O={:.1} C={:.1} E={:.1} A={:.1} N={:.1}]", v[0], v[1], v[2], v[3], v[4]);
+            println!("  Conversation turns: {}", svc.conversation.turn_count());
+            println!("  EMA alpha: {:.2} (base) -> {:.2} (modulated)",
+                dm.language_runtime.config.ema_alpha,
+                svc.personality.modulated_ema_alpha(dm.language_runtime.config.ema_alpha));
+            println!("  Hopf diversity bonus: {:.2}", svc.personality.hopf_diversity_bonus());
+            println!("  Groups: {}, Gen envs: {}, Code envs: {}",
+                dm.main.group_order.len(), dm.group_gen_envs.len(), dm.group_code_envs.len());
+        }
+        _ => {
+            println!("  Unknown command. Available: /personality, /ocean, /reset, /history, /single, /status");
+        }
     }
 }
 

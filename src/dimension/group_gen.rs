@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use crate::environment::NeuralEnvironment;
 use crate::spectral::{
     TokenDictionary, hamming_parity_bits, hamming_encode, hamming_decode,
-    tokenize, syntax_role, structural_signature, SyntaxRole,
+    tokenize, syntax_role, structural_signature, SyntaxRole, E8Lattice,
 };
 use crate::types::EnvironmentConfig;
 
@@ -365,14 +365,24 @@ impl AlgebraicCodebook {
         }).collect()
     }
 
-    /// Select the best archetype for an input embedding via cosine similarity
-    /// to archetype prototypes. Returns (archetype_index, confidence) where
-    /// confidence is the cosine similarity to the best-matching prototype.
+    /// Select the best archetype for an input embedding.
+    ///
+    /// Uses E8 lattice decoding when the embedding is 64d (decomposes into
+    /// 8 × 8d E8 subspaces for provably optimal quantization). Falls back
+    /// to cosine similarity for other dimensions.
+    ///
+    /// Returns (archetype_index, confidence).
     pub fn select_archetype_by_embedding(&self, embedding: &[f32]) -> (usize, f32) {
         if self.archetype_prototypes.is_empty() {
             return (0, 0.0);
         }
-        // L2-normalize the input for cosine similarity
+
+        // E8 lattice decoding for 64d embeddings (8 × 8d subspaces)
+        if embedding.len() >= 16 && embedding.len() % 8 == 0 {
+            return E8Lattice::select_archetype(embedding, &self.archetype_prototypes);
+        }
+
+        // Fallback: cosine similarity scan for non-standard dimensions
         let norm = embedding.iter().map(|v| v * v).sum::<f32>().sqrt();
         let mut best_idx = 0;
         let mut best_sim = f32::NEG_INFINITY;
@@ -739,11 +749,11 @@ impl HopfCompositionTable {
             }
         }
 
-        // Build transition scores between adjacent segments using the
-        // Pattern Compatibility Index: cosine similarity between archetype
-        // prototypes replaces the same-archetype bonus. This allows Hopf to
-        // compose fragments from semantically related but DIFFERENT archetypes
-        // (e.g., microservices opening + proxy body + event-driven closing).
+        // Build transition scores between adjacent segments using the E8 lattice
+        // compatibility score. The E8 root inner product provides algebraically exact
+        // compatibility between archetype prototypes — related patterns (observer ↔
+        // event-driven, proxy ↔ microservices) score high; unrelated patterns score
+        // low. Same-archetype gets a small coherence bonus on top.
         let boundary_window = 3;
         let mut transition = Vec::new();
         for seg in 0..num_segments.saturating_sub(1) {
@@ -758,7 +768,6 @@ impl HopfCompositionTable {
                     .map(|&(_, tok)| tok)
                     .collect();
 
-                // Get archetype prototype for fragment A
                 let proto_a = codebook.archetype_prototypes.get(frag_a.archetype_idx);
 
                 for (b_idx, frag_b) in fragments[seg + 1].iter().enumerate() {
@@ -767,22 +776,18 @@ impl HopfCompositionTable {
                         .map(|&(_, tok)| tok)
                         .collect();
 
-                    // Pattern Compatibility Index: cosine similarity between
-                    // archetype prototypes. Related patterns (observer ↔ event-driven,
-                    // proxy ↔ microservices) score high; unrelated patterns score low.
-                    // Same-archetype gets a small coherence bonus on top.
+                    // E8 lattice compatibility score: uses root inner product
+                    // between archetype prototypes quantized to E8 subspaces.
+                    // Returns [0, 3] with algebraically exact structure.
                     let compatibility = match (proto_a, codebook.archetype_prototypes.get(frag_b.archetype_idx)) {
                         (Some(pa), Some(pb)) if !pa.is_empty() && !pb.is_empty() => {
-                            let dot: f32 = pa.iter().zip(pb.iter()).map(|(a, b)| a * b).sum();
-                            let na = pa.iter().map(|v| v * v).sum::<f32>().sqrt();
-                            let nb = pb.iter().map(|v| v * v).sum::<f32>().sqrt();
-                            if na > 1e-8 && nb > 1e-8 { (dot / (na * nb)).max(0.0) * 2.0 } else { 0.5 }
+                            E8Lattice::compatibility_score(pa, pb)
                         }
                         _ => 0.5,
                     };
 
-                    let same_arch_bonus = if frag_a.archetype_idx == frag_b.archetype_idx { 0.5 } else { 0.0 };
-                    let has_content = if !a_tail.is_empty() && !b_head.is_empty() { 0.5 } else { 0.25 };
+                    let same_arch_bonus = if frag_a.archetype_idx == frag_b.archetype_idx { 0.3 } else { 0.0 };
+                    let has_content = if !a_tail.is_empty() && !b_head.is_empty() { 0.3 } else { 0.15 };
 
                     scores[a_idx][b_idx] = compatibility + same_arch_bonus + has_content;
                 }
@@ -798,7 +803,11 @@ impl HopfCompositionTable {
     ///
     /// Uses beam search with beam_width=3: for each segment, expand top
     /// candidates by embedding similarity, then re-rank by transition score.
-    pub fn compose(&self, embedding: &[f32]) -> Vec<usize> {
+    ///
+    /// `diversity_bonus` (from OCEAN personality): positive values favor
+    /// cross-archetype composition, negative values favor same-archetype
+    /// coherence. Range: [-0.3, 0.3]. Pass 0.0 for neutral.
+    pub fn compose_with_personality(&self, embedding: &[f32], diversity_bonus: f32) -> Vec<usize> {
         if self.fragments.is_empty() || self.response_length == 0 {
             return vec![0; self.num_segments];
         }
@@ -852,7 +861,25 @@ impl HopfCompositionTable {
                         0.0
                     };
 
-                    let total = prev_score + emb_score + trans_score * 0.5;
+                    // OCEAN personality modulation: openness boosts cross-archetype,
+                    // conscientiousness boosts same-archetype transitions.
+                    let personality_mod = if seg > 0 {
+                        let prev_arch = self.fragments.get(seg - 1)
+                            .and_then(|f| f.get(prev_frag))
+                            .map(|f| f.archetype_idx);
+                        let curr_arch = self.fragments.get(seg)
+                            .and_then(|f| f.get(frag_idx))
+                            .map(|f| f.archetype_idx);
+                        match (prev_arch, curr_arch) {
+                            (Some(a), Some(b)) if a != b => diversity_bonus,
+                            (Some(a), Some(b)) if a == b => -diversity_bonus,
+                            _ => 0.0,
+                        }
+                    } else {
+                        0.0
+                    };
+
+                    let total = prev_score + emb_score + trans_score * 0.5 + personality_mod;
                     let mut path = prev_path.clone();
                     path.push(frag_idx);
                     next_beam.push((total, path));
@@ -868,6 +895,11 @@ impl HopfCompositionTable {
             .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(_, path)| path)
             .unwrap_or_else(|| vec![0; self.num_segments])
+    }
+
+    /// Compose with neutral personality (no diversity bias).
+    pub fn compose(&self, embedding: &[f32]) -> Vec<usize> {
+        self.compose_with_personality(embedding, 0.0)
     }
 
     /// Assemble a composed response from selected fragment indices.
@@ -897,13 +929,24 @@ impl HopfCompositionTable {
     }
 
     /// Full composed decode: select fragments, assemble, fill slots from network output.
+    /// `diversity_bonus` from OCEAN personality (0.0 for neutral).
     pub fn compose_and_decode(
         &self,
         embedding: &[f32],
         slot_bits: &[f32],
         codebook: &AlgebraicCodebook,
     ) -> (Vec<u16>, f32) {
-        let frag_indices = self.compose(embedding);
+        self.compose_and_decode_with_personality(embedding, slot_bits, codebook, 0.0)
+    }
+
+    pub fn compose_and_decode_with_personality(
+        &self,
+        embedding: &[f32],
+        slot_bits: &[f32],
+        codebook: &AlgebraicCodebook,
+        diversity_bonus: f32,
+    ) -> (Vec<u16>, f32) {
+        let frag_indices = self.compose_with_personality(embedding, diversity_bonus);
         let (fixed, slot_map) = self.assemble(&frag_indices, codebook);
 
         let mut tokens = vec![0u16; self.response_length];
@@ -990,6 +1033,10 @@ pub struct GroupGenEnv {
     /// Confidence of the last generation (cosine similarity to best prototype).
     #[serde(skip)]
     pub last_generation_confidence: f32,
+    /// OCEAN personality diversity bonus for Hopf beam scoring.
+    /// Positive = favor cross-archetype mixing; negative = favor coherence.
+    #[serde(skip)]
+    pub diversity_bonus: f32,
 }
 
 impl GroupGenEnv {
@@ -1022,6 +1069,7 @@ impl GroupGenEnv {
             hopf_table: None,
             last_selected_archetype: None,
             last_generation_confidence: 0.0,
+            diversity_bonus: 0.0,
         }
     }
 
@@ -1064,6 +1112,7 @@ impl GroupGenEnv {
             hopf_table: None,
             last_selected_archetype: None,
             last_generation_confidence: 0.0,
+            diversity_bonus: 0.0,
         }
     }
 
@@ -1283,7 +1332,9 @@ impl GroupGenEnv {
                 // Low confidence + Hopf table available → composed generation
                 if confidence < 0.9 {
                     if let Some(ref hopf) = self.hopf_table {
-                        let (ids, comp_confidence) = hopf.compose_and_decode(cond, &output, cb);
+                        let (ids, comp_confidence) = hopf.compose_and_decode_with_personality(
+                            cond, &output, cb, self.diversity_bonus
+                        );
                         let text = self.dictionary.decode(&ids);
                         self.last_selected_archetype = None;
                         self.last_generation_confidence = comp_confidence;

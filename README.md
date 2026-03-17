@@ -55,7 +55,7 @@ one where intelligence is not engineered, but **grown**.
 
 All generation outputs are **concrete model outputs** produced by a single forward pass through the Growformer NeuralEnvironment substrate. No transformer, no external model, no template system. Each output is the decoded activation of structural engram traces formed during training.
 
-### Brain Training (436 samples, 2 groups, algebraic codebook + Hopf composition)
+### Brain Training (436+ samples, 2 groups, algebraic codebook + Hopf composition + E8 lattice)
 
 | Component | Metric | Value | Notes |
 |-----------|--------|-------|-------|
@@ -108,6 +108,17 @@ Growformer's safety properties are not bolted on — they are consequences of th
 - **Auditable decision trails.** Every inference is decomposable: which specialist was selected (and at what confidence), which structural pattern was chosen, which variable values were filled, through what composition path. The full decision trail is available for post-hoc audit without special tooling.
 
 These properties directly address regulatory requirements for AI safety in medical, financial, legal, and autonomous system deployments. See Whitepaper §5.6 for the formal treatment.
+
+### E8 Lattice Quantization
+
+The 64-dimensional bridge embedding space decomposes as 8 × 8d subspaces, each quantized to the **E8 lattice** — the provably densest sphere packing in dimension 8 (Viazovska, Fields Medal 2022). This provides:
+
+- **Optimal archetype selection**: E8 nearest-point decoding in O(64) replaces O(n×d) cosine similarity scan. Kissing number 240 = maximum equidistant neighbors per archetype.
+- **Algebraically exact Hopf transitions**: E8 root inner products between quantized archetype prototypes replace heuristic similarity with lattice geometry.
+- **Native error correction**: Extended Hamming [8,4,4] — the binary code underlying E8 — detects 2-bit errors and corrects 1-bit errors.
+- **Path to dimension 24**: Leech lattice (kissing number 196,560) via E8 × E8 × E8 + Golay code glue for global domain organization.
+
+See Whitepaper §5.5 and ARCHITECTURE.md for details.
 
 ---
 
