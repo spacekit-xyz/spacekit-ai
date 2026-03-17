@@ -155,6 +155,9 @@ pub struct LanguageService {
     context_snippets: Vec<String>,
     /// Last turn (message, routing, output) for feedback association; see CONTINUUM.md.
     last_turn: Option<TurnContext>,
+    /// Agent identity for "who are you" responses.
+    pub agent_name: String,
+    pub agent_creator: String,
 }
 
 impl LanguageService {
@@ -174,6 +177,8 @@ impl LanguageService {
             handoff_log: Vec::new(),
             context_snippets: Vec::new(),
             last_turn: None,
+            agent_name: "Growformer".to_string(),
+            agent_creator: "swtch.ai".to_string(),
         })
     }
 
@@ -192,6 +197,8 @@ impl LanguageService {
             handoff_log: Vec::new(),
             context_snippets: Vec::new(),
             last_turn: None,
+            agent_name: "Growformer".to_string(),
+            agent_creator: "swtch.ai".to_string(),
         })
     }
 
@@ -220,8 +227,48 @@ impl LanguageService {
         result
     }
 
+    /// Agent identity configuration. Set at startup or per-brain.
+    /// Used for "who are you" / "what are you" type queries.
+    pub fn set_identity(&mut self, name: &str, creator: &str) {
+        self.agent_name = name.to_string();
+        self.agent_creator = creator.to_string();
+    }
+
+    fn is_identity_query(text: &str) -> bool {
+        let lower = text.to_lowercase();
+        let patterns = [
+            "who are you", "what are you", "who r u", "what is your name",
+            "introduce yourself", "tell me about yourself", "what's your name",
+            "your name", "who made you", "who created you", "who built you",
+        ];
+        patterns.iter().any(|p| lower.contains(p))
+    }
+
+    fn identity_response(&self) -> GeneratedResponse {
+        let text = format!(
+            "I am {}, a Growformer Agent by {}. I'm a self-organizing neural substrate \
+             that learns structure, not weights — my knowledge is encoded as physical \
+             neural structure grown, pruned, consolidated, and frozen during training. \
+             I generate responses in a single forward pass through my neural environment.",
+            self.agent_name, self.agent_creator
+        );
+        GeneratedResponse {
+            text,
+            template_id: "identity".to_string(),
+            traceable: false,
+            confidence: 1.0,
+        }
+    }
+
     pub fn generation(&mut self, text: &str) -> Result<(ActionJson, GeneratedResponse), String> {
         let start = portable_instant();
+
+        if Self::is_identity_query(text) {
+            let action = self.active_dm_mut().route_text_to_action_stateless(text)?;
+            self.record_latency(start);
+            return Ok((action, self.identity_response()));
+        }
+
         let dm = self.active_dm_mut();
         let action = dm.route_text_to_action_stateless(text)?;
 
@@ -229,18 +276,76 @@ impl LanguageService {
         let group_idx = action.target_group_id
             .and_then(|gid| dm.main.group_order.iter().position(|&g| g == gid));
 
-        let resp = if let (Some(gidx), Some((_, ref bridged))) = (group_idx, &encoded) {
-            if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
-                let (generated, confidence) = env.generate(&bridged.routed_vector, 300, 0.8);
-                if generated.len() > 5 {
-                    GeneratedResponse {
-                        text: generated,
-                        template_id: format!("growformer_gen_{}", gidx),
-                        traceable: false,
-                        confidence,
+        let resp = if let Some((_, ref bridged)) = encoded {
+            let routed = &bridged.routed_vector;
+
+            // --- Level 3: Check episodic memory for cached composition ---
+            let _cached_groups = Self::retrieve_cached_composition(dm, routed);
+
+            // --- Level 1: Competitive multi-head inference ---
+            // If we have a cached composition, prioritize those groups.
+            // Otherwise run the routed group first; if confidence < 0.8, try all
+            // other gen envs and pick the highest-confidence result.
+            let primary = group_idx.and_then(|gidx| {
+                dm.group_gen_envs.get_mut(&gidx).map(|env| {
+                    let (text, conf) = env.generate(routed, 300, 0.8);
+                    (text, conf, gidx)
+                })
+            });
+
+            let (best_text, best_conf, best_gidx) = match primary {
+                Some((ref t, conf, gidx)) if conf >= 0.9 && t.len() > 5 => {
+                    (t.clone(), conf, gidx)
+                }
+                primary_result => {
+                    let mut all_candidates: Vec<(String, f32, usize)> = Vec::new();
+                    if let Some((t, c, g)) = primary_result {
+                        all_candidates.push((t, c, g));
                     }
-                } else {
-                    render_action_template(&action)
+
+                    let other_keys: Vec<usize> = dm.group_gen_envs.keys()
+                        .filter(|&&k| Some(k) != group_idx)
+                        .copied().collect();
+                    for gidx in other_keys {
+                        if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
+                            let (t, c) = env.generate(routed, 300, 0.8);
+                            if t.len() > 5 {
+                                all_candidates.push((t, c, gidx));
+                            }
+                        }
+                    }
+
+                    // Level 1: pick highest confidence single response
+                    let (mut best_t, mut best_c, mut best_g) = all_candidates.iter()
+                        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                        .map(|(t, c, g)| (t.clone(), *c, *g))
+                        .unwrap_or_else(|| (String::new(), -1.0, 0));
+
+                    // Level 2: if best single response has sub-optimal confidence,
+                    // try cross-group sentence composition (we're already in the
+                    // competitive path because primary conf < 0.9)
+                    if best_c < 0.9 {
+                        if let Some((composed, comp_conf, comp_g)) = Self::cross_group_compose(&all_candidates) {
+                            best_t = composed;
+                            best_c = comp_conf;
+                            best_g = comp_g;
+
+                            // Level 3: cache this composition for future retrieval
+                            let involved: Vec<usize> = all_candidates.iter().map(|(_, _, g)| *g).collect();
+                            Self::cache_composition(dm, routed, &involved, comp_conf);
+                        }
+                    }
+
+                    (best_t, best_c, best_g)
+                }
+            };
+
+            if best_text.len() > 5 {
+                GeneratedResponse {
+                    text: best_text,
+                    template_id: format!("growformer_gen_{}", best_gidx),
+                    traceable: false,
+                    confidence: best_conf,
                 }
             } else if let Some(ref head) = dm.generation_head {
                 Self::legacy_gen_from_encoded(head, &encoded, &action, &dm.main.group_order)
@@ -266,23 +371,54 @@ impl LanguageService {
         let group_idx = action.target_group_id
             .and_then(|gid| dm.main.group_order.iter().position(|&g| g == gid));
 
-        let code = if let (Some(gidx), Some((_, ref bridged))) = (group_idx, &encoded) {
-            if let Some(env) = dm.group_code_envs.get_mut(&gidx) {
-                let (generated, _confidence) = env.generate(&bridged.routed_vector, 500, 0.7);
-                if generated.len() > 5 {
-                    let lang = match action.payload {
-                        Some(crate::dimension::action::ActionPayload::CodingAssist { ref language_hint, .. }) =>
-                            language_hint.clone(),
-                        _ => "python".to_string(),
-                    };
-                    Some(CodeGeneration {
-                        language: lang,
-                        code: generated,
-                        kind: format!("growformer_code_{}", gidx),
-                    })
-                } else {
-                    generate_code_from_action(&action, text)
+        let code = if let Some((_, ref bridged)) = encoded {
+            let routed = &bridged.routed_vector;
+            let lang = match action.payload {
+                Some(crate::dimension::action::ActionPayload::CodingAssist { ref language_hint, .. }) =>
+                    language_hint.clone(),
+                _ => "python".to_string(),
+            };
+
+            // --- Level 1: Competitive multi-head inference for code ---
+            let primary = group_idx.and_then(|gidx| {
+                dm.group_code_envs.get_mut(&gidx).map(|env| {
+                    let (code, conf) = env.generate(routed, 500, 0.7);
+                    (code, conf, gidx)
+                })
+            });
+
+            let (best_code, _best_conf, best_gidx) = match primary {
+                Some((ref c, conf, gidx)) if conf >= 0.9 && c.len() > 5 => {
+                    (c.clone(), conf, gidx)
                 }
+                primary_result => {
+                    let (mut best_c, mut best_cf, mut best_g) = primary_result
+                        .map(|(c, cf, g)| (c, cf, g))
+                        .unwrap_or_else(|| (String::new(), -1.0, 0));
+
+                    let other_keys: Vec<usize> = dm.group_code_envs.keys()
+                        .filter(|&&k| Some(k) != group_idx)
+                        .copied().collect();
+                    for gidx in other_keys {
+                        if let Some(env) = dm.group_code_envs.get_mut(&gidx) {
+                            let (c, cf) = env.generate(routed, 500, 0.7);
+                            if cf > best_cf && c.len() > 5 {
+                                best_c = c;
+                                best_cf = cf;
+                                best_g = gidx;
+                            }
+                        }
+                    }
+                    (best_c, best_cf, best_g)
+                }
+            };
+
+            if best_code.len() > 5 {
+                Some(CodeGeneration {
+                    language: lang,
+                    code: best_code,
+                    kind: format!("growformer_code_{}", best_gidx),
+                })
             } else if let Some(ref head) = dm.codegen_head {
                 Self::legacy_code_from_encoded(head, &encoded, &action, text, &dm.main.group_order)
             } else {
@@ -296,6 +432,116 @@ impl LanguageService {
 
         self.record_latency(start);
         Ok((action, code))
+    }
+
+    /// Level 3: Store a successful generation composition in episodic memory
+    /// for zero-shot retrieval on similar future prompts.
+    fn cache_composition(dm: &mut DimensionManager, embedding: &[f32], group_ids: &[usize], confidence: f32) {
+        use crate::dimension::composition::Episode;
+        let gids: Vec<u32> = group_ids.iter().map(|&g| g as u32).collect();
+        let n = gids.len().max(1);
+        let blend_weights = vec![1.0 / n as f32; n];
+        dm.episodic_memory.store(Episode {
+            input_signature: embedding.to_vec(),
+            group_ids: gids,
+            blend_weights,
+            accuracy: confidence,
+            residual: 1.0 - confidence,
+        });
+    }
+
+    /// Level 3: Try to retrieve a cached composition from episodic memory.
+    /// Returns the group indices and blend weights if a similar prompt was seen before.
+    fn retrieve_cached_composition(dm: &DimensionManager, embedding: &[f32]) -> Option<Vec<usize>> {
+        dm.episodic_memory.retrieve(embedding, 0.90).map(|ep| {
+            ep.group_ids.iter().map(|&g| g as usize).collect()
+        })
+    }
+
+    /// Level 2: Cross-group text composition.
+    /// When no single group produces a high-confidence response, compose the best
+    /// sentence-level segments from all available group responses.
+    fn cross_group_compose(candidates: &[(String, f32, usize)]) -> Option<(String, f32, usize)> {
+        if candidates.len() < 2 {
+            return None;
+        }
+
+        // Split each candidate into sentences
+        let segmented: Vec<(Vec<&str>, f32, usize)> = candidates.iter()
+            .filter(|(t, _, _)| t.len() > 5)
+            .map(|(text, conf, gidx)| {
+                let sentences: Vec<&str> = text.split(". ")
+                    .map(|s| s.trim())
+                    .filter(|s| s.len() > 3)
+                    .collect();
+                (sentences, *conf, *gidx)
+            })
+            .filter(|(sents, _, _)| !sents.is_empty())
+            .collect();
+
+        if segmented.is_empty() { return None; }
+
+        // Find the maximum number of sentence positions
+        let max_sents = segmented.iter().map(|(s, _, _)| s.len()).max().unwrap_or(0);
+        if max_sents == 0 { return None; }
+
+        // For each sentence position, pick the best sentence (longest meaningful
+        // content weighted by confidence). This selects the most informative
+        // fragment from any group at each position.
+        let mut composed = Vec::new();
+        let mut best_source: Option<usize> = None;
+        let mut total_conf = 0.0f32;
+        let mut count = 0;
+
+        for pos in 0..max_sents {
+            let mut best_sent = "";
+            let mut best_score = -1.0f32;
+            let mut best_gidx = 0;
+
+            for (sents, conf, gidx) in &segmented {
+                if let Some(sent) = sents.get(pos) {
+                    let word_count = sent.split_whitespace().count() as f32;
+                    let score = word_count * conf;
+                    if score > best_score {
+                        best_score = score;
+                        best_sent = sent;
+                        best_gidx = *gidx;
+                    }
+                }
+            }
+
+            if !best_sent.is_empty() {
+                composed.push(best_sent.to_string());
+                if best_source.is_none() { best_source = Some(best_gidx); }
+                total_conf += best_score;
+                count += 1;
+            }
+        }
+
+        if composed.is_empty() { return None; }
+
+        let text = composed.join(". ");
+        let avg_conf = if count > 0 { total_conf / count as f32 } else { 0.0 };
+        let source_gidx = best_source.unwrap_or(0);
+
+        // Quality gate: reject if the composed text is mostly punctuation/symbols
+        let alpha_count = text.chars().filter(|c| c.is_alphabetic() || c.is_whitespace()).count();
+        let total_chars = text.len().max(1);
+        let alpha_ratio = alpha_count as f32 / total_chars as f32;
+        if alpha_ratio < 0.7 {
+            return None;
+        }
+
+        // Only use composition if it's meaningfully different from the best single candidate
+        let best_single = candidates.iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        if let Some((best_text, best_conf, _)) = best_single {
+            if text == *best_text || avg_conf <= *best_conf {
+                return None;
+            }
+        }
+
+        Some((text, avg_conf.min(1.0), source_gidx))
     }
 
     fn legacy_gen_from_encoded(

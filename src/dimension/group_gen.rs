@@ -739,8 +739,11 @@ impl HopfCompositionTable {
             }
         }
 
-        // Build transition scores between adjacent segments.
-        // Score = number of fixed tokens that are compatible at segment boundaries.
+        // Build transition scores between adjacent segments using the
+        // Pattern Compatibility Index: cosine similarity between archetype
+        // prototypes replaces the same-archetype bonus. This allows Hopf to
+        // compose fragments from semantically related but DIFFERENT archetypes
+        // (e.g., microservices opening + proxy body + event-driven closing).
         let boundary_window = 3;
         let mut transition = Vec::new();
         for seg in 0..num_segments.saturating_sub(1) {
@@ -755,19 +758,33 @@ impl HopfCompositionTable {
                     .map(|&(_, tok)| tok)
                     .collect();
 
+                // Get archetype prototype for fragment A
+                let proto_a = codebook.archetype_prototypes.get(frag_a.archetype_idx);
+
                 for (b_idx, frag_b) in fragments[seg + 1].iter().enumerate() {
                     let b_head: Vec<u16> = frag_b.fixed.iter()
                         .filter(|&&(pos, _)| pos < frag_b.token_range.0 + boundary_window)
                         .map(|&(_, tok)| tok)
                         .collect();
 
-                    // Base compatibility: same archetype = high score
-                    let same_arch = if frag_a.archetype_idx == frag_b.archetype_idx { 2.0 } else { 0.0 };
+                    // Pattern Compatibility Index: cosine similarity between
+                    // archetype prototypes. Related patterns (observer ↔ event-driven,
+                    // proxy ↔ microservices) score high; unrelated patterns score low.
+                    // Same-archetype gets a small coherence bonus on top.
+                    let compatibility = match (proto_a, codebook.archetype_prototypes.get(frag_b.archetype_idx)) {
+                        (Some(pa), Some(pb)) if !pa.is_empty() && !pb.is_empty() => {
+                            let dot: f32 = pa.iter().zip(pb.iter()).map(|(a, b)| a * b).sum();
+                            let na = pa.iter().map(|v| v * v).sum::<f32>().sqrt();
+                            let nb = pb.iter().map(|v| v * v).sum::<f32>().sqrt();
+                            if na > 1e-8 && nb > 1e-8 { (dot / (na * nb)).max(0.0) * 2.0 } else { 0.5 }
+                        }
+                        _ => 0.5,
+                    };
 
-                    // Token continuity: do tail/head tokens suggest coherent flow?
-                    let has_content = if !a_tail.is_empty() && !b_head.is_empty() { 1.0 } else { 0.5 };
+                    let same_arch_bonus = if frag_a.archetype_idx == frag_b.archetype_idx { 0.5 } else { 0.0 };
+                    let has_content = if !a_tail.is_empty() && !b_head.is_empty() { 0.5 } else { 0.25 };
 
-                    scores[a_idx][b_idx] = same_arch + has_content;
+                    scores[a_idx][b_idx] = compatibility + same_arch_bonus + has_content;
                 }
             }
             transition.push(scores);
@@ -1244,8 +1261,8 @@ impl GroupGenEnv {
     /// Single-pass generation: one forward pass, decode all tokens at once.
     ///
     /// Generation strategy (in order of preference):
-    /// 1. Prototype match: if confidence >= 0.8, use the single best archetype
-    /// 2. Hopf composition: if confidence < 0.8 and a Hopf table exists, compose
+    /// 1. Prototype match: if confidence >= 0.9, use the single best archetype
+    /// 2. Hopf composition: if confidence < 0.9 and a Hopf table exists, compose
     ///    fragments from multiple archetypes for better OOD coverage
     /// 3. Fallback: use best prototype match regardless of confidence
     ///
@@ -1264,7 +1281,7 @@ impl GroupGenEnv {
                 let (arch_idx, confidence) = cb.select_archetype_by_embedding(cond);
 
                 // Low confidence + Hopf table available → composed generation
-                if confidence < 0.8 {
+                if confidence < 0.9 {
                     if let Some(ref hopf) = self.hopf_table {
                         let (ids, comp_confidence) = hopf.compose_and_decode(cond, &output, cb);
                         let text = self.dictionary.decode(&ids);

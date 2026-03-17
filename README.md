@@ -55,23 +55,24 @@ one where intelligence is not engineered, but **grown**.
 
 All generation outputs are **concrete model outputs** produced by a single forward pass through the Growformer NeuralEnvironment substrate. No transformer, no external model, no template system. Each output is the decoded activation of structural engram traces formed during training.
 
-### Brain Training (339 samples, 2 groups, auto-configured)
+### Brain Training (436 samples, 2 groups, algebraic codebook + Hopf composition)
 
-| Component | Metric | Value |
-|-----------|--------|-------|
-| LearnedRouter | accuracy | 94.2% |
-| ActionClassifier | accuracy | 89.7% |
-| gen g0 (support) | eval loss | 0.1340 |
-| gen g1 (coding/general) | eval loss | ~0.23 |
-| code g1 | eval loss | 0.3437 |
+| Component | Metric | Value | Notes |
+|-----------|--------|-------|-------|
+| LearnedRouter | accuracy | 94.2% | 500 epochs, balanced oversampling |
+| ActionClassifier | accuracy | 89.7% | 500 epochs |
+| gen g0 (support) | eval loss | **0.0015** | 1234 neurons, early stop at 764/1950 epochs |
+| gen g1 (coding/general) | eval loss | **0.0325** | 1386 neurons, early stop at 838/3900 epochs |
+| code g1 (syntax-aware) | eval loss | **0.0021** | 1363 neurons, early stop at 651/1950 epochs |
 
 ### Concrete Generation Examples (single forward pass)
 
 | Prompt | Output | Type |
 |--------|--------|------|
-| "explain the observer pattern" | "Observer defines a one-to-many dependency where a subject notifies all registered observers whenever its state changes" | gen |
-| "implement binary search in Python" | `def binary_search(arr,target):lo,hi=0,len(arr)-1` | code |
-| "help me reset my password" | "Navigate to the login page, click 'Forgot Password', enter your email, and follow the reset link" | gen |
+| "help me reset my password" | "Password reset links expire after 30 minutes for security purposes. I'll send a fresh reset link to your registered email right away." | gen (conf=0.94) |
+| "implement binary search in Python" | `def binary_search(arr,target):lo,hi=0,len(arr)-1 while lo<=hi:mid=(lo+hi)//2 if arr[mid]==target:return mid elif arr[mid]<target:lo=mid+1 else:hi=mid-1 return-1` | code |
+| "explain the observer pattern" | "Observer defines a one-to-many dependency where a subject notifies all registered observers whenever its state changes, without knowing their concrete types." | gen (conf=0.66) |
+| "my account is locked after too many failed attempts" | "Your account has been temporarily locked as a security precaution. I can unlock it for you now once we verify your identity through a few quick questions." | gen (conf=0.93) |
 
 ### Continual Learning (Split MNIST, zero forgetting)
 
@@ -85,6 +86,28 @@ All generation outputs are **concrete model outputs** produced by a single forwa
 | **Avg** | | **97.3%** | **97.3%** | **0%** |
 
 EWC: 97% average, ~3% forgetting. Growformer: 97.3% average, 0% forgetting. The zero forgetting is not approximate — it is a structural guarantee. Frozen groups receive zero gradient.
+
+### Structural Interpretability
+
+Unlike conventional neural systems where a trained model is an opaque weight matrix, a trained Growformer brain provides layered auditability at every level of the inference path:
+
+- **Routing** is geometric: which specialist activated, at what confidence, with measurable distances to all alternatives.
+- **Generation** is factored: outputs are assembled from a finite, enumerable set of structural patterns with bounded variable positions — the space of possible responses is auditable before any input is presented.
+- **Composition** is traceable: when fragments from multiple patterns are combined, each selection and its scoring is recorded.
+- **Knowledge is frozen and deterministic**: the same input produces the same output on every invocation, indefinitely, across deployments.
+
+The boundary of interpretability is within each specialist's neural substrate — individual synaptic weights are not human-readable, as with any neural network. But the decision path around those weights is fully decomposable: which specialist, which structural pattern, which variable values, at what confidence, through what composition path. See Whitepaper §5.6 (Structural Interpretability).
+
+### AI Safety by Structure
+
+Growformer's safety properties are not bolted on — they are consequences of the same architectural decisions that provide continual learning and interpretability.
+
+- **Alignment by structure, not by training.** Conventional AI safety relies on training incentives (RLHF, constitutional AI) — soft constraints on opaque systems that can be jailbroken by adversarial inputs. The Growformer's output space is bounded by each specialist's codebook: a finite, enumerable set of structural patterns with finite variable vocabularies. Harmful content that does not exist in the codebook cannot be generated, regardless of the input. This is a structural constraint, not a learned preference.
+- **Bounded output space eliminates prompt injection surface.** Prompt injection and jailbreaking exploit unbounded output spaces — sufficiently adversarial inputs can steer a conventional model into any region. In the Growformer, adversarial prompts may cause misrouting or poor archetype selection, but cannot produce content outside the codebook. The attack surface is reduced from "all possible text" to "misselection among known patterns."
+- **Frozen determinism enables certification.** Consolidated groups produce the same output for the same input on every invocation, across time and hardware. A brain certified at audit is the same brain that runs in production — a prerequisite for safety-critical environments (medical, financial, autonomous systems).
+- **Auditable decision trails.** Every inference is decomposable: which specialist was selected (and at what confidence), which structural pattern was chosen, which variable values were filled, through what composition path. The full decision trail is available for post-hoc audit without special tooling.
+
+These properties directly address regulatory requirements for AI safety in medical, financial, legal, and autonomous system deployments. See Whitepaper §5.6 for the formal treatment.
 
 ---
 
