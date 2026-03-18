@@ -407,6 +407,31 @@ pub struct EnvironmentConfig {
     /// 4 = each neuron has 4 independent pattern detectors.
     #[serde(default = "default_dendritic_branches")]
     pub dendritic_branches: usize,
+
+    // -------------------------------------------------------------------------
+    // Ephaptic field — non-synaptic group-level communication
+    //
+    // Each group maintains a field vector (EMA of hidden-layer activations).
+    // Before each forward pass, the field is injected as a bias into hidden
+    // neurons of that group. After each forward pass, the field is updated.
+    //
+    // This provides immediate pattern availability: the first time a group
+    // sees a pattern, the field captures it. On the next input, every neuron
+    // in the group receives a bias toward the correct activation — before any
+    // synapse has changed. Three-stage memory: field (instant) → synaptic
+    // plasticity (epochs) → engram consolidation (permanent).
+    //
+    // Biological analog: ephaptic coupling — electromagnetic fields from
+    // neural activity influence nearby neurons without synaptic connections.
+    // -------------------------------------------------------------------------
+    /// EMA decay for the ephaptic field. 0.0 = disabled.
+    /// 0.9 = long memory (~10 samples), 0.5 = short memory (~2 samples).
+    #[serde(default)]
+    pub ephaptic_field_alpha: f32,
+    /// Strength of field bias injection into hidden neurons.
+    /// 0.0 = disabled. 0.05–0.2 is a reasonable starting range.
+    #[serde(default)]
+    pub ephaptic_field_strength: f32,
 }
 
 fn default_dendritic_branches() -> usize { 1 }
@@ -495,6 +520,10 @@ impl Default for EnvironmentConfig {
 
             // Dendritic branches — 1 = disabled (current behavior)
             dendritic_branches: 1,
+
+            // Ephaptic field — disabled by default
+            ephaptic_field_alpha: 0.0,
+            ephaptic_field_strength: 0.0,
         }
     }
 }

@@ -45,6 +45,8 @@ pub struct GenEnvOverrides {
     pub k: Option<usize>,
     pub max_synapses: Option<usize>,
     pub energy_budget: Option<f32>,
+    pub ephaptic_alpha: Option<f32>,
+    pub ephaptic_strength: Option<f32>,
 }
 
 /// Compute bits needed for a dictionary of the given size.
@@ -413,6 +415,57 @@ impl AlgebraicCodebook {
             offset += sbits;
         }
         bits
+    }
+
+    /// Measure how well the network's raw output agrees with a specific archetype.
+    /// Returns a score in [0, 1] where 1 = perfect agreement.
+    ///
+    /// This catches the case where geometric confidence (embedding similarity)
+    /// is high but the network output doesn't match the archetype's structure.
+    /// When the network hasn't learned this archetype's pattern, the output
+    /// bits will be incoherent relative to the archetype's slot vocabulary,
+    /// producing low coherence even though the embedding was close.
+    pub fn output_coherence(&self, arch_idx: usize, output_bits: &[f32]) -> f32 {
+        if arch_idx >= self.archetypes.len() || output_bits.is_empty() {
+            return 0.0;
+        }
+        let arch = &self.archetypes[arch_idx];
+
+        // When there are no variable slots, the archetype template determines
+        // the entire output — the network's bits are irrelevant
+        if self.slot_only_bits == 0 || arch.slots.is_empty() {
+            return 1.0;
+        }
+
+        let check_len = self.slot_only_bits.min(output_bits.len());
+        if check_len == 0 {
+            return 0.0;
+        }
+
+        let slot_bits = &output_bits[..check_len];
+
+        // Check 1: bit decisiveness — well-trained outputs have bits
+        // near 0.0 or 1.0 (decisive), while garbage outputs cluster around 0.5
+        let mut decisive_count = 0usize;
+        for &b in slot_bits {
+            let dist_from_half = (b - 0.5).abs();
+            if dist_from_half > 0.15 {
+                decisive_count += 1;
+            }
+        }
+        let decisiveness = decisive_count as f32 / slot_bits.len() as f32;
+
+        // Check 2: decoded token validity — do the decoded slot values
+        // produce actual content tokens?
+        let decoded = self.decode_with_archetype(arch_idx, slot_bits);
+        let non_zero = decoded.iter().filter(|&&t| t != 0).count();
+        let content_ratio = if arch.length > 0 {
+            non_zero as f32 / arch.length as f32
+        } else {
+            0.0
+        };
+
+        (decisiveness * 0.6 + content_ratio * 0.4).min(1.0)
     }
 
     /// Decode slot-only bits back to token IDs using a pre-selected archetype.
@@ -1056,6 +1109,8 @@ impl GroupGenEnv {
         config.competitive_k = k;
         if let Some(ms) = ov.max_synapses { config.max_synapses_per_neuron = ms; }
         if let Some(eb) = ov.energy_budget { config.energy_budget_per_neuron = eb; }
+        if let Some(a)  = ov.ephaptic_alpha { config.ephaptic_field_alpha = a; }
+        if let Some(s)  = ov.ephaptic_strength { config.ephaptic_field_strength = s; }
         let mut env = NeuralEnvironment::new(config);
         env.build_layers(&[GEN_COND_DIM, hidden, hidden, output_dim], rng);
         Self {
@@ -1099,6 +1154,8 @@ impl GroupGenEnv {
         config.competitive_k = k.min(hidden / 2);
         if let Some(ms) = ov.max_synapses { config.max_synapses_per_neuron = ms; }
         if let Some(eb) = ov.energy_budget { config.energy_budget_per_neuron = eb; }
+        if let Some(a)  = ov.ephaptic_alpha { config.ephaptic_field_alpha = a; }
+        if let Some(s)  = ov.ephaptic_strength { config.ephaptic_field_strength = s; }
         let mut env = NeuralEnvironment::new(config);
         env.build_layers(&[GEN_COND_DIM, hidden, hidden, output_dim], rng);
         Self {
@@ -1310,10 +1367,15 @@ impl GroupGenEnv {
     /// Single-pass generation: one forward pass, decode all tokens at once.
     ///
     /// Generation strategy (in order of preference):
-    /// 1. Prototype match: if confidence >= 0.9, use the single best archetype
-    /// 2. Hopf composition: if confidence < 0.9 and a Hopf table exists, compose
-    ///    fragments from multiple archetypes for better OOD coverage
+    /// 1. Prototype match with coherence check: if geometric confidence >= 0.9
+    ///    AND output coherence >= 0.5, use the single best archetype
+    /// 2. Hopf composition: if effective confidence < 0.9 and a Hopf table
+    ///    exists, compose fragments from multiple archetypes
     /// 3. Fallback: use best prototype match regardless of confidence
+    ///
+    /// The coherence check catches the case where the embedding is
+    /// geometrically close to an archetype (high similarity) but the
+    /// network output doesn't match the archetype's structure (garbage).
     ///
     /// Returns (generated_text, confidence).
     pub fn generate(&mut self, cond: &[f32], _max_len: usize, _temperature: f32) -> (String, f32) {
@@ -1324,13 +1386,18 @@ impl GroupGenEnv {
 
         let output = self.env.predict(&input);
 
-        // Prototype-based archetype selection (slot-only mode)
         if let Some(ref cb) = self.codebook {
             if cb.has_prototypes() {
-                let (arch_idx, confidence) = cb.select_archetype_by_embedding(cond);
+                let (arch_idx, geometric_conf) = cb.select_archetype_by_embedding(cond);
 
-                // Low confidence + Hopf table available → composed generation
-                if confidence < 0.9 {
+                // Secondary check: does the network output actually agree
+                // with this archetype? High geometric confidence + low
+                // coherence = the embedding is close but the content is wrong.
+                let coherence = cb.output_coherence(arch_idx, &output);
+                let effective_conf = geometric_conf * coherence;
+
+                // Hopf composition when effective confidence is insufficient
+                if effective_conf < 0.9 {
                     if let Some(ref hopf) = self.hopf_table {
                         let (ids, comp_confidence) = hopf.compose_and_decode_with_personality(
                             cond, &output, cb, self.diversity_bonus
@@ -1342,9 +1409,8 @@ impl GroupGenEnv {
                     }
                 }
 
-                // High confidence or no Hopf table → single archetype
                 self.last_selected_archetype = Some(arch_idx);
-                self.last_generation_confidence = confidence;
+                self.last_generation_confidence = effective_conf;
             } else {
                 self.last_selected_archetype = None;
                 self.last_generation_confidence = 1.0;
@@ -1355,6 +1421,24 @@ impl GroupGenEnv {
         }
 
         (self.decode_output(&output), self.last_generation_confidence)
+    }
+
+    /// Generate and return an 8d E8 contribution vector alongside the text.
+    /// The contribution vector captures the group's "semantic direction" for
+    /// this input in the E8 lattice — used for algebraic group blending.
+    pub fn generate_with_e8(
+        &mut self, cond: &[f32], _max_len: usize, _temperature: f32,
+    ) -> (String, f32, [f32; 8]) {
+        let (text, conf) = self.generate(cond, _max_len, _temperature);
+
+        // Project the first 8 dims of the conditioning vector to E8
+        // This captures the group's contribution in a lattice-quantized space
+        let mut raw = [0.0f32; 8];
+        for i in 0..8.min(cond.len()) {
+            raw[i] = cond[i];
+        }
+        let e8_point = E8Lattice::nearest_point(&raw);
+        (text, conf, e8_point)
     }
 
     /// Evaluate loss without modifying the network.
@@ -1434,8 +1518,280 @@ fn gen_env_config() -> EnvironmentConfig {
         engram_lr_scale: 0.85,
         engram_prune_threshold: 0.3,
         dendritic_branches: 1,
+        // Ephaptic field: group-level EMA provides immediate pattern availability.
+        // alpha=0.85 gives ~7-sample memory; strength=0.1 adds gentle bias.
+        ephaptic_field_alpha: 0.85,
+        ephaptic_field_strength: 0.1,
         ..EnvironmentConfig::default()
     }
+}
+
+// ---------------------------------------------------------------------------
+// E8 Quantum Composition Space — U_q(E8) group blending in 8 dimensions
+// ---------------------------------------------------------------------------
+//
+// Quantum group deformation of the E8 composition space. The parameter q
+// controls non-commutativity: at q=1 (classical limit) the blend is
+// symmetric; at q≠1 the input embedding biases which group "leads" the
+// composition via the R-matrix braiding operator.
+//
+//   1. Each group produces an 8d E8 lattice point (its "contribution vector")
+//   2. q is computed from the input embedding's asymmetry across groups
+//   3. The R-matrix braids contributions: R(g_i, g_j) ≠ R(g_j, g_i) when q≠1
+//   4. The braided blend is E8-quantized to the nearest lattice point
+//   5. Sentence scoring uses R-matrix weights for non-commutative ordering
+//
+// E8's 240 kissing neighbors × continuous q parameter provide a rich
+// composition manifold where architectural and implementation details
+// interleave in a context-dependent order.
+
+/// A group's contribution to the E8 composition space.
+#[derive(Debug, Clone)]
+pub struct E8Contribution {
+    pub group_idx: usize,
+    pub lattice_point: [f32; 8],
+    pub text: String,
+    pub confidence: f32,
+}
+
+/// Compute the deformation parameter q from an input embedding and
+/// group contributions. q measures how asymmetrically the input
+/// relates to the contributing groups:
+///   q ≈ 1.0 → input is equidistant from all groups (classical/symmetric)
+///   q > 1.0 → input is biased toward the first/primary group
+///   q < 1.0 → input is biased toward secondary groups
+///
+/// Derived from the ratio of E8 compatibility scores between the
+/// input's lattice projection and each group's lattice point.
+pub fn compute_q(input_embedding: &[f32], contributions: &[E8Contribution]) -> f32 {
+    if contributions.len() < 2 {
+        return 1.0;
+    }
+
+    // Project input to 8d E8
+    let mut raw = [0.0f32; 8];
+    for i in 0..8.min(input_embedding.len()) {
+        raw[i] = input_embedding[i];
+    }
+    let input_e8 = E8Lattice::nearest_point(&raw);
+
+    // Compute compatibility with each contribution
+    let scores: Vec<f32> = contributions.iter()
+        .map(|c| E8Lattice::compatibility_score_8d(&input_e8, &c.lattice_point))
+        .collect();
+
+    let max_score = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let min_score = scores.iter().cloned().fold(f32::INFINITY, f32::min);
+
+    if max_score - min_score < 0.01 {
+        return 1.0; // Equidistant → classical
+    }
+
+    // q = ratio of best to second-best compatibility
+    // Clamped to [0.3, 3.0] to avoid extreme deformations
+    let mut sorted = scores.clone();
+    sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let q = sorted[0] / sorted[1].max(0.01);
+    q.clamp(0.3, 3.0)
+}
+
+/// R-matrix: the braiding operator for quantum group composition.
+/// R(a, b) controls how contribution a interleaves with contribution b.
+///
+/// When q=1: R(a,b) = R(b,a) (symmetric, classical limit)
+/// When q>1: R(a,b) > R(b,a) for the preferred contribution a
+///
+/// The R-matrix is derived from E8 root inner products deformed by q.
+pub fn r_matrix(
+    a: &E8Contribution,
+    b: &E8Contribution,
+    q: f32,
+) -> f32 {
+    let compat = E8Lattice::compatibility_score_8d(&a.lattice_point, &b.lattice_point);
+    // Classical compatibility scaled by q-deformation:
+    // when q > 1, contribution a (the "leader") gets boosted
+    let q_factor = if a.confidence >= b.confidence {
+        q.powf(0.5) // Leader boost
+    } else {
+        q.powf(-0.5) // Follower discount
+    };
+    compat * q_factor * a.confidence.max(0.01)
+}
+
+/// Quantum-deformed E8 blend: non-commutative composition of group
+/// contributions. The R-matrix determines how much each group leads
+/// the final blend based on the deformation parameter q.
+pub fn e8_blend_quantum(
+    contributions: &[E8Contribution],
+    q: f32,
+) -> [f32; 8] {
+    if contributions.is_empty() {
+        return [0.0f32; 8];
+    }
+    if contributions.len() == 1 {
+        return contributions[0].lattice_point;
+    }
+
+    // Compute R-matrix weights: each contribution's total braiding score
+    // against all others, deformed by q
+    let mut weights = vec![0.0f32; contributions.len()];
+    for (i, ci) in contributions.iter().enumerate() {
+        for (j, cj) in contributions.iter().enumerate() {
+            if i == j { continue; }
+            weights[i] += r_matrix(ci, cj, q);
+        }
+    }
+
+    // Normalize weights
+    let total: f32 = weights.iter().sum::<f32>().max(0.01);
+    for w in &mut weights {
+        *w /= total;
+    }
+
+    // Weighted blend → E8 quantize
+    let mut blended = [0.0f32; 8];
+    for (c, &w) in contributions.iter().zip(weights.iter()) {
+        for i in 0..8 {
+            blended[i] += c.lattice_point[i] * w;
+        }
+    }
+
+    E8Lattice::nearest_point(&blended)
+}
+
+/// Classical E8 blend (q=1 limit). Confidence-proportional weighted average.
+pub fn e8_blend(contributions: &[E8Contribution]) -> [f32; 8] {
+    e8_blend_quantum(contributions, 1.0)
+}
+
+/// Compute the E8 compatibility between a blended point and each
+/// contribution, returning scores in [0, 3].
+pub fn e8_contribution_scores(
+    blended: &[f32; 8],
+    contributions: &[E8Contribution],
+) -> Vec<(usize, f32)> {
+    contributions.iter().map(|c| {
+        let score = E8Lattice::compatibility_score_8d(blended, &c.lattice_point);
+        (c.group_idx, score)
+    }).collect()
+}
+
+/// Select the best text from contributions based on E8 compatibility
+/// with the blended lattice point. Returns (text, confidence, group_idx).
+pub fn e8_select_best(
+    blended: &[f32; 8],
+    contributions: &[E8Contribution],
+) -> Option<(String, f32, usize)> {
+    if contributions.is_empty() { return None; }
+
+    let scores = e8_contribution_scores(blended, contributions);
+    scores.iter()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|&(gidx, score)| {
+            let c = contributions.iter().find(|c| c.group_idx == gidx).unwrap();
+            (c.text.clone(), c.confidence * (score / 3.0), c.group_idx)
+        })
+}
+
+/// Quantum-deformed sentence composition. The R-matrix determines how
+/// sentences from different groups interleave:
+/// - High q: sentences from the "leader" group appear first and score higher
+/// - q ≈ 1: symmetric scoring (classical limit)
+/// - Low q: secondary groups contribute more prominently
+pub fn e8_compose_sentences(
+    blended: &[f32; 8],
+    contributions: &[E8Contribution],
+    max_sentences: usize,
+) -> (String, f32) {
+    e8_compose_sentences_quantum(blended, contributions, max_sentences, 1.0)
+}
+
+/// Full quantum composition with explicit q parameter.
+pub fn e8_compose_sentences_quantum(
+    blended: &[f32; 8],
+    contributions: &[E8Contribution],
+    max_sentences: usize,
+    q: f32,
+) -> (String, f32) {
+    if contributions.is_empty() { return (String::new(), 0.0); }
+
+    #[derive(Clone)]
+    struct ScoredSentence {
+        text: String,
+        score: f32,
+        group: usize,
+        position: usize,
+    }
+
+    // Compute per-group R-matrix weights (how much each group "leads")
+    let mut group_weights: Vec<f32> = vec![0.0; contributions.len()];
+    for (i, ci) in contributions.iter().enumerate() {
+        for (j, cj) in contributions.iter().enumerate() {
+            if i == j { continue; }
+            group_weights[i] += r_matrix(ci, cj, q);
+        }
+    }
+    let total_w: f32 = group_weights.iter().sum::<f32>().max(0.01);
+    for w in &mut group_weights { *w /= total_w; }
+
+    let mut all_sentences: Vec<ScoredSentence> = Vec::new();
+
+    for (ci, c) in contributions.iter().enumerate() {
+        let compat = E8Lattice::compatibility_score_8d(blended, &c.lattice_point);
+        let r_weight = group_weights[ci];
+        for (pos, sent) in c.text.split(". ").enumerate() {
+            let trimmed = sent.trim();
+            if trimmed.len() > 10 {
+                let alpha_count = trimmed.chars().filter(|ch| ch.is_alphabetic()).count();
+                let alpha_ratio = alpha_count as f32 / trimmed.len().max(1) as f32;
+                if alpha_ratio > 0.5 {
+                    // Score = R-matrix weight × E8 compatibility × confidence × quality
+                    // The R-matrix weight is the quantum deformation: it biases
+                    // toward the "leader" group when q > 1
+                    let score = r_weight * compat * c.confidence * alpha_ratio;
+                    all_sentences.push(ScoredSentence {
+                        text: trimmed.to_string(),
+                        score,
+                        group: c.group_idx,
+                        position: pos,
+                    });
+                }
+            }
+        }
+    }
+
+    all_sentences.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+    let selected: Vec<&ScoredSentence> = all_sentences.iter().take(max_sentences).collect();
+    if selected.is_empty() {
+        return (String::new(), 0.0);
+    }
+
+    // Order selected sentences: leader group's sentences first (by position),
+    // then follower group's sentences (by position). This is the non-commutative
+    // braiding — the leader sets the structure, the follower fills in details.
+    let leader_group = contributions.iter()
+        .enumerate()
+        .max_by(|(i, _), (j, _)| group_weights[*i].partial_cmp(&group_weights[*j]).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(_, c)| c.group_idx)
+        .unwrap_or(0);
+
+    let mut leader_sents: Vec<&ScoredSentence> = selected.iter()
+        .filter(|s| s.group == leader_group).copied().collect();
+    let mut follower_sents: Vec<&ScoredSentence> = selected.iter()
+        .filter(|s| s.group != leader_group).copied().collect();
+
+    leader_sents.sort_by_key(|s| s.position);
+    follower_sents.sort_by_key(|s| s.position);
+
+    let mut ordered: Vec<&str> = Vec::new();
+    ordered.extend(leader_sents.iter().map(|s| s.text.as_str()));
+    ordered.extend(follower_sents.iter().map(|s| s.text.as_str()));
+
+    let avg_score = selected.iter().map(|s| s.score).sum::<f32>() / selected.len() as f32;
+    let text = ordered.join(". ");
+
+    (text, avg_score)
 }
 
 #[cfg(test)]
@@ -1547,6 +1903,40 @@ mod tests {
             "loss should decrease: {} -> {}",
             loss_0,
             loss_100
+        );
+    }
+
+    #[test]
+    fn test_ephaptic_field_accelerates_convergence() {
+        let dict = test_dict();
+        let cond = vec![0.1f32; GEN_COND_DIM];
+        let target = "reset your password";
+        let steps = 60;
+
+        // Baseline: ephaptic field disabled
+        let mut rng_b = StdRng::seed_from_u64(42);
+        let mut ov = GenEnvOverrides::default();
+        ov.ephaptic_alpha = Some(0.0);
+        ov.ephaptic_strength = Some(0.0);
+        let mut baseline = GroupGenEnv::new_with_overrides(dict.clone(), &ov, &mut rng_b);
+        let mut loss_baseline = 0.0;
+        for _ in 0..steps {
+            loss_baseline = baseline.train_step(&cond, target, &mut rng_b);
+        }
+
+        // Field-enabled (default gen config: alpha=0.85, strength=0.1)
+        let mut rng_f = StdRng::seed_from_u64(42);
+        let mut env = GroupGenEnv::new(dict, &mut rng_f);
+        let mut loss_field = 0.0;
+        for _ in 0..steps {
+            loss_field = env.train_step(&cond, target, &mut rng_f);
+        }
+
+        println!("after {} steps — baseline: {:.4}, field: {:.4}", steps, loss_baseline, loss_field);
+        assert!(
+            loss_field < loss_baseline,
+            "ephaptic field should converge faster: field={:.4} vs baseline={:.4}",
+            loss_field, loss_baseline,
         );
     }
 
@@ -1918,5 +2308,144 @@ mod tests {
         assert!(!hopf_ids.is_empty());
         assert!(single_text.contains("start") || single_text.contains("middle") || single_text.contains("end"));
         assert!(hopf_text.contains("start") || hopf_text.contains("middle") || hopf_text.contains("end"));
+    }
+
+    #[test]
+    fn test_output_coherence_gates_hopf() {
+        // Use varied texts within each archetype to create actual variable slots
+        let texts: Vec<&str> = vec![
+            "microservices decompose systems into bounded context services",
+            "microservices separate apps into independent bounded contexts",
+            "observer pattern notifies all registered subscribers on change",
+            "observer pattern alerts every subscribed listener on update",
+        ];
+        let dict = TokenDictionary::build(&texts, 200);
+
+        let emb_micro = { let mut e = vec![0.0f32; 64]; e[0] = 1.0; e[2] = 0.5; e };
+        let emb_obs = { let mut e = vec![0.0f32; 64]; e[1] = 1.0; e[3] = 0.5; e };
+        let embs = vec![emb_micro.clone(), emb_micro.clone(), emb_obs.clone(), emb_obs.clone()];
+        let emb_refs: Vec<&[f32]> = embs.iter().map(|e| e.as_slice()).collect();
+
+        let cb = AlgebraicCodebook::build(&texts, &dict, 2, Some(&emb_refs));
+        assert!(cb.has_prototypes());
+        println!("slot_only_bits={} archetypes={}", cb.slot_only_bits, cb.archetypes.len());
+        for (i, a) in cb.archetypes.iter().enumerate() {
+            println!("  arch[{}]: fixed={} slots={} len={}", i, a.fixed.len(), a.slots.len(), a.length);
+        }
+
+        // Simulate incoherent output bits (all 0.5 = maximally indecisive)
+        let garbage_output = vec![0.5f32; cb.slot_only_bits.max(32)];
+        let (arch_idx, geometric_conf) = cb.select_archetype_by_embedding(&emb_micro);
+        let coherence = cb.output_coherence(arch_idx, &garbage_output);
+        let effective = geometric_conf * coherence;
+
+        println!("geometric={:.3} coherence={:.3} effective={:.3}",
+                 geometric_conf, coherence, effective);
+
+        // Geometric confidence should be high (close embedding match)
+        assert!(geometric_conf > 0.8, "geometric should be high: {}", geometric_conf);
+        // Coherence should be low (indecisive bits = garbage)
+        assert!(coherence < 0.5, "coherence should detect garbage: {}", coherence);
+        // Effective confidence should drop below 0.9, triggering Hopf
+        assert!(effective < 0.9, "effective should trigger Hopf: {}", effective);
+
+        // Conversely, decisive bits should have high coherence
+        let decisive_output: Vec<f32> = (0..cb.slot_only_bits.max(32))
+            .map(|i| if i % 2 == 0 { 0.95 } else { 0.05 })
+            .collect();
+        let coherence_good = cb.output_coherence(arch_idx, &decisive_output);
+        println!("decisive coherence={:.3}", coherence_good);
+        assert!(coherence_good > 0.5, "decisive bits should be coherent: {}", coherence_good);
+    }
+
+    #[test]
+    fn test_e8_composition_space() {
+        let c1 = E8Contribution {
+            group_idx: 0,
+            lattice_point: E8Lattice::nearest_point(&[1.5, 1.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            text: "Microservices decompose systems into bounded contexts. Each service owns its data store.".to_string(),
+            confidence: 0.7,
+        };
+        let c2 = E8Contribution {
+            group_idx: 1,
+            lattice_point: E8Lattice::nearest_point(&[0.0, 0.0, 1.5, 1.5, 0.0, 0.0, 0.0, 0.0]),
+            text: "Use API Gateway as a proxy for routing. Apply Circuit Breaker for resilience.".to_string(),
+            confidence: 0.6,
+        };
+
+        println!("c1 lattice: {:?}", c1.lattice_point);
+        println!("c2 lattice: {:?}", c2.lattice_point);
+
+        // Classical blend (q=1)
+        let blended = e8_blend(&[c1.clone(), c2.clone()]);
+        println!("classical blend: {:?}", blended);
+
+        let (composed, score) = e8_compose_sentences(&blended, &[c1.clone(), c2.clone()], 3);
+        println!("classical composed: {} (score={:.3})", composed, score);
+        assert!(!composed.is_empty(), "composition should not be empty");
+        assert!(score > 0.0, "score should be positive");
+
+        // Best selection should return a result
+        let best = e8_select_best(&blended, &[c1.clone(), c2.clone()]);
+        assert!(best.is_some());
+        assert!(best.unwrap().1 > 0.0);
+    }
+
+    #[test]
+    fn test_quantum_deformation() {
+        let c1 = E8Contribution {
+            group_idx: 0,
+            lattice_point: E8Lattice::nearest_point(&[2.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            text: "Decompose into independently deployable services. Apply hexagonal architecture internally.".to_string(),
+            confidence: 0.8,
+        };
+        let c2 = E8Contribution {
+            group_idx: 1,
+            lattice_point: E8Lattice::nearest_point(&[0.0, 0.0, 2.0, 2.0, 0.0, 0.0, 0.0, 0.0]),
+            text: "Use tokio for async runtime in Rust. Define trait interfaces for service boundaries.".to_string(),
+            confidence: 0.5,
+        };
+
+        // Compute q from an embedding biased toward c1
+        let biased_embedding = vec![1.5f32, 1.5, 0.2, 0.2, 0.0, 0.0, 0.0, 0.0];
+        let q = compute_q(&biased_embedding, &[c1.clone(), c2.clone()]);
+        println!("q (biased toward c1): {:.3}", q);
+        assert!(q > 1.0, "q should favor c1: {}", q);
+
+        // Quantum blend should differ from classical
+        let classical = e8_blend_quantum(&[c1.clone(), c2.clone()], 1.0);
+        let quantum = e8_blend_quantum(&[c1.clone(), c2.clone()], q);
+        println!("classical blend: {:?}", classical);
+        println!("quantum blend:   {:?}", quantum);
+
+        // Quantum sentence composition: leader (c1) should appear first
+        let (q_composed, q_score) = e8_compose_sentences_quantum(
+            &quantum, &[c1.clone(), c2.clone()], 4, q,
+        );
+        println!("quantum composed (q={:.2}): {} (score={:.3})", q, q_composed, q_score);
+        assert!(!q_composed.is_empty());
+
+        // With q > 1, c1 (the leader with higher confidence) should dominate
+        // The composed text should start with c1's content
+        assert!(q_composed.starts_with("Decompose") || q_composed.starts_with("Apply"),
+            "leader group should contribute first: {}", q_composed);
+
+        // R-matrix should be asymmetric: R(c1, c2) > R(c2, c1) when q > 1
+        let r12 = r_matrix(&c1, &c2, q);
+        let r21 = r_matrix(&c2, &c1, q);
+        println!("R(c1,c2)={:.3} R(c2,c1)={:.3}", r12, r21);
+        assert!(r12 > r21, "R-matrix should favor the leader: R12={} R21={}", r12, r21);
+
+        // At q=1, R-matrix should still respect confidence ordering
+        // but without the deformation boost
+        let r12_classical = r_matrix(&c1, &c2, 1.0);
+        let r21_classical = r_matrix(&c2, &c1, 1.0);
+        println!("R_classical(c1,c2)={:.3} R_classical(c2,c1)={:.3}", r12_classical, r21_classical);
+        // The asymmetry at q>1 should be larger than at q=1
+        let asym_quantum = (r12 - r21).abs();
+        let asym_classical = (r12_classical - r21_classical).abs();
+        println!("asymmetry: quantum={:.3} classical={:.3}", asym_quantum, asym_classical);
+        assert!(asym_quantum >= asym_classical,
+            "quantum deformation should increase asymmetry");
     }
 }

@@ -109,16 +109,23 @@ Growformer's safety properties are not bolted on — they are consequences of th
 
 These properties directly address regulatory requirements for AI safety in medical, financial, legal, and autonomous system deployments. See Whitepaper §5.6 for the formal treatment.
 
-### E8 Lattice Quantization
+### Two-Level Lattice Hierarchy (E8 + Leech)
 
-The 64-dimensional bridge embedding space decomposes as 8 × 8d subspaces, each quantized to the **E8 lattice** — the provably densest sphere packing in dimension 8 (Viazovska, Fields Medal 2022). This provides:
+A mathematically optimal quantization hierarchy using the two provably densest sphere packings:
 
-- **Optimal archetype selection**: E8 nearest-point decoding in O(64) replaces O(n×d) cosine similarity scan. Kissing number 240 = maximum equidistant neighbors per archetype.
-- **Algebraically exact Hopf transitions**: E8 root inner products between quantized archetype prototypes replace heuristic similarity with lattice geometry.
-- **Native error correction**: Extended Hamming [8,4,4] — the binary code underlying E8 — detects 2-bit errors and corrects 1-bit errors.
-- **Path to dimension 24**: Leech lattice (kissing number 196,560) via E8 × E8 × E8 + Golay code glue for global domain organization.
+**E8 lattice (dimension 8, local)** — the 64d bridge embedding decomposes as 8 × 8d subspaces, each quantized to the E8 lattice (Viazovska, Fields Medal 2022):
+- Optimal archetype selection: O(64) nearest-point decode, kissing number 240
+- Algebraically exact Hopf transitions: E8 root inner products replace heuristic cosine similarity
+- Native error correction: Extended Hamming [8,4,4] — 2-bit detection, 1-bit correction
 
-See Whitepaper §5.5 and ARCHITECTURE.md for details.
+**Leech lattice (dimension 24, global)** — the densest sphere packing in 24d (Cohn et al., 2017), constructed from 3×E8 + Golay code glue:
+- **ProjectModel**: Hybrid embedding pipeline (structural AST-lite + semantic hash projection + relational graph + git co-change + test/quality + pattern fingerprint) maps files, functions, types, and modules to 24d Leech-quantized embeddings
+- **CodeAnalyzer** parses 8 languages (Rust, Python, TypeScript, JavaScript, Go, C, C++, Java); auto-indexes sub-entities (functions, types) from declarations
+- **GitHistory** populates edit-correlation channel from `git log` when `.git` is present
+- Context-aware generation: nearest-neighbor queries condition the brain on related codebase entities
+- Native error correction: Extended Golay [24,12,8] — 3-bit correction, 4-bit detection
+
+REPL: `/index <path>` to index a project (auto-loads git history when `.git` found), `/project [file]` to query related entities. See Whitepaper §5.5 and ARCHITECTURE.md for details.
 
 ---
 
@@ -598,6 +605,39 @@ The network’s structure is an **output** of training, not just its weights.
 
 The next step in the biological record is a mouse hippocampus: 10 cubic millimeters over five years.  
 The next step here is a reverse adjacency index and a recurrent layer.
+
+---
+
+## **Quantum Biology and Neural Communication**
+
+Recent experimental evidence has established that quantum effects operate at functional scales in biological systems. Quantum coherence in photosynthetic light-harvesting complexes (Fleming et al., 2007), radical-pair entanglement in avian magnetoreception, and proton tunneling in enzyme catalysis all demonstrate that the "too warm and wet" objection to biological quantum mechanics is empirically false.
+
+In neuroscience, three hypotheses extend this to neural communication:
+
+**Penrose-Hameroff (Orchestrated Objective Reduction):** Quantum computations in microtubules within neurons, where wavefunction collapse produces discrete moments of cognition. Bandyopadhyay's lab has measured resonance frequencies in microtubules consistent with this theory.
+
+**Fisher (Posner molecules):** Phosphorus nuclear spins in calcium phosphate clusters serve as neural qubits with coherence times of hours to days — the most physically rigorous proposal, under active experimental testing.
+
+**Electromagnetic toroidal coherence:** Neurons generate electromagnetic fields when they fire. Neural assemblies — groups of co-firing neurons — produce larger-scale fields that naturally adopt **toroidal geometry** (any current loop generates a toroidal magnetic field). A toroidal field is self-contained: it doesn't radiate efficiently outward, which means it could **maintain quantum coherence** by shielding entangled states from environmental decoherence. If neurons within a toroidal field region share entangled electromagnetic states, this provides a **non-electrical communication channel** — information transfer that doesn't depend on synaptic transmission or axonal conduction. This would explain:
+
+- **The binding problem**: How distributed neural activity across separate brain regions becomes unified experience. Non-local correlations from shared entangled states within toroidal field regions provide binding without signal propagation delay.
+- **Speed of cognitive processes**: Certain cognitive phenomena (gestalt perception, insight, rapid pattern recognition) occur faster than synaptic transmission chains can account for. Electromagnetic field-mediated quantum correlations operate at the speed of light within the field region.
+- **Neural synchrony**: Large-scale neural oscillations (gamma, theta) may reflect the coherent electromagnetic field dynamics of toroidal regions rather than purely synaptic network effects.
+
+**Connection to Growformer's architecture:** The mathematical structures in the Growformer map directly onto this picture:
+
+| Biological hypothesis | Growformer implementation |
+|---|---|
+| Toroidal field region (coherent neural assembly) | Group (structurally isolated specialist with internal coherence) |
+| Entangled states within a field region | Engram consolidation (frozen synaptic traces that deterministically influence output) |
+| Non-commutative quantum field interactions between regions | Non-commutative multi-specialist composition (leader/follower ordering) |
+| Field isolation between distant assemblies | Mirror/Main isolation (no gradient path, no shared substrate) |
+| Superposition before measurement | Pre-composition state (all specialists contribute before deformation resolves ordering) |
+| Wavefunction collapse to definite outcome | Deformation parameter resolves which specialist leads the response |
+
+The Growformer uses the mathematics of quantum theory — deformed algebras, non-commutative composition, braiding — without claiming to simulate physical quantum mechanics. But if biological neural computation is fundamentally quantum (operating through electromagnetic toroidal coherence rather than purely synaptic signaling), then Growformer's algebraic framework may be closer to the right abstraction than classical neural networks. Classical NNs assume neurons are classical processors connected by classical signals. If neurons are quantum processors connected by entangled electromagnetic fields, you need non-commutative algebras to model them correctly.
+
+This remains a research hypothesis. The experimental evidence for quantum effects in biology is established; the extension to neural communication via toroidal electromagnetic coherence is theoretically motivated but not yet experimentally confirmed. What is notable is that the mathematical structures required to model such a system — the same structures the Growformer already implements for engineering reasons — would be the correct formalism if the hypothesis proves true.
 
 ---
 

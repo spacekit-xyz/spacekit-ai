@@ -64,6 +64,10 @@ struct Args {
     /// Prompt text for single-shot inference. Omit for interactive mode.
     #[arg(long, value_name = "TEXT")]
     prompt: Option<String>,
+
+    /// Retrain only the gen env for a specific group index (loads existing brain, retrains one group, re-exports).
+    #[arg(long, value_name = "GROUP_IDX")]
+    retrain_gen: Option<usize>,
 }
 
 fn main() {
@@ -97,6 +101,21 @@ fn main() {
             eprintln!("Failed to train brain: {}", e);
             std::process::exit(1);
         }
+    } else if let Some(group_idx) = args.retrain_gen {
+        println!("=============================================================");
+        println!("  Growformer — Retrain Gen Group {}", group_idx);
+        println!("=============================================================\n");
+        if let Err(e) = retrain_single_gen(
+            group_idx,
+            &args.brain,
+            &args.brain_output,
+            args.brain_gen_epochs,
+            args.brain_gen_replicas,
+            args.auto,
+        ) {
+            eprintln!("Retrain failed: {}", e);
+            std::process::exit(1);
+        }
     } else if args.infer {
         if let Err(e) = run_inference(&args.brain, args.prompt.as_deref()) {
             eprintln!("Inference failed: {}", e);
@@ -105,12 +124,289 @@ fn main() {
     } else {
         println!("Growformer — train and run specialized neural brains\n");
         println!("Usage:");
-        println!("  Train:  cargo run --release -- --train-brain [--auto]");
-        println!("  Infer:  cargo run --release -- --infer [--prompt \"your question\"]");
-        println!("  Demos:  cargo run --bin growformer-demos -- --help");
+        println!("  Train:     cargo run --release -- --train-brain [--auto]");
+        println!("  Retrain:   cargo run --release -- --retrain-gen 1 [--auto]");
+        println!("  Infer:     cargo run --release -- --infer [--prompt \"your question\"]");
+        println!("  Demos:     cargo run --bin growformer-demos -- --help");
         println!("\nRun with --help for all options.");
         std::process::exit(1);
     }
+}
+
+// =============================================================================
+// Retrain a single gen group: loads existing brain, retrains one group, re-exports
+// =============================================================================
+
+fn retrain_single_gen(
+    target_group: usize,
+    brain_path: &str,
+    output_path: &str,
+    gen_epochs_override: u32,
+    gen_replicas: u32,
+    auto: bool,
+) -> Result<(), String> {
+    let data = std::fs::read(brain_path)
+        .map_err(|e| format!("Failed to read {}: {}", brain_path, e))?;
+
+    let mut svc = LanguageService::new_default()?;
+    svc.load_brain(&data)?;
+    println!("Loaded brain from {} ({} KB)", brain_path, data.len() / 1024);
+
+    let dm = svc.active_dm();
+    let num_groups = dm.main.group_order.len();
+    println!("  Groups: {}, gen envs: {:?}", num_groups, dm.group_gen_envs.keys().collect::<Vec<_>>());
+
+    if !dm.group_gen_envs.contains_key(&target_group) {
+        return Err(format!("Group {} not found in brain (available: {:?})",
+            target_group, dm.group_gen_envs.keys().collect::<Vec<_>>()));
+    }
+
+    // Load training data
+    let samples = load_all_m5_training_data()?;
+    println!("Loaded {} training samples", samples.len());
+
+    let group_map = |s: &LanguageSample| -> usize {
+        match s.action_target.as_deref() {
+            Some("support") | Some("general") => 0,
+            Some("coding") => 1,
+            _ => 0,
+        }
+    };
+
+    // Embed only the target group's gen data
+    println!("\n--- Computing embeddings for group {} ---", target_group);
+    let runtime = &svc.dm.language_runtime;
+    let mut gen_pairs: Vec<(Vec<f32>, String)> = Vec::new();
+    for s in &samples {
+        if group_map(s) != target_group { continue; }
+        if let Some(r) = s.expected_response.as_deref() {
+            match runtime.encode_and_bridge(&s.text) {
+                Ok((_raw, bridged)) => {
+                    gen_pairs.push((bridged.routed_vector, r.to_string()));
+                }
+                Err(_) => {
+                    gen_pairs.push((vec![0.0; 64], r.to_string()));
+                }
+            }
+        }
+    }
+    println!("  {} gen samples for group {}", gen_pairs.len(), target_group);
+
+    if gen_pairs.is_empty() {
+        return Err(format!("No gen training data for group {}", target_group));
+    }
+
+    // Auto-config
+    let auto_cfg = if auto {
+        let profile = profile_training_data(&samples, &group_map, num_groups);
+        Some(auto_configure(&profile))
+    } else {
+        None
+    };
+
+    let gen_epochs: usize = if gen_epochs_override > 0 {
+        gen_epochs_override as usize
+    } else if let Some(ac) = &auto_cfg {
+        ac.gen_epochs
+    } else {
+        1500
+    };
+    let k_replicas = if let Some(ac) = &auto_cfg { ac.replicas } else { (gen_replicas as usize).max(1) };
+    let gen_overrides = auto_cfg.as_ref().map(|ac| {
+        growformer::dimension::group_gen::GenEnvOverrides {
+            max_tokens: Some(ac.max_tokens),
+            hidden: Some(ac.gen_hidden),
+            k: Some(ac.gen_k),
+            max_synapses: Some(ac.max_synapses),
+            energy_budget: Some(ac.energy_budget),
+            ..Default::default()
+        }
+    });
+
+    let early_stop_window = auto_cfg.as_ref().map(|ac| ac.early_stop_window).unwrap_or(0);
+    let early_stop_min_imp = auto_cfg.as_ref().map(|ac| ac.early_stop_min_improvement).unwrap_or(0.0);
+    let early_stop_min_ep = auto_cfg.as_ref().map(|ac| ac.early_stop_min_epochs).unwrap_or(0);
+
+    // Build dictionary, codebook, Hopf table for the target group
+    use growformer::dimension::group_gen::{bits_for_dict, MAX_TOKENS};
+    let effective_max_tokens = gen_overrides.as_ref().and_then(|o| o.max_tokens).unwrap_or(MAX_TOKENS);
+
+    let texts: Vec<&str> = gen_pairs.iter().map(|(_, t)| t.as_str()).collect();
+    let embs: Vec<&[f32]> = gen_pairs.iter().map(|(e, _)| e.as_slice()).collect();
+
+    let max_dict = if texts.len() >= 100 { 2048 } else { 1024 };
+    let dict = TokenDictionary::build(&texts, max_dict);
+    let bits = bits_for_dict(dict.len());
+    println!("  dict: {} tokens from {} texts, {} bits/token, output={}",
+        dict.len(), texts.len(), bits, effective_max_tokens * bits);
+
+    let base_archetypes = 16usize;
+    let gen_max_arch = if texts.len() > 150 {
+        base_archetypes * 6
+    } else if texts.len() > 50 {
+        base_archetypes * 2
+    } else {
+        base_archetypes
+    };
+    let cb = AlgebraicCodebook::build(&texts, &dict, gen_max_arch, Some(&embs));
+    let mode = if cb.has_prototypes() { "SLOT-ONLY" } else { "FULL" };
+    println!("  codebook: {} archetypes (max={}), {} slots max, {} total/{} slot bits [{}]",
+        cb.archetypes.len(), gen_max_arch, cb.max_slot_count, cb.total_bits, cb.slot_only_bits, mode);
+
+    // Build Hopf composition table
+    let hopf_segments = 3;
+    let hopf = if cb.has_prototypes() && cb.archetypes.len() >= 2 {
+        let seqs: Vec<Vec<u16>> = texts.iter().map(|t| dict.encode(t)).collect();
+        let mut clusters = vec![vec![]; cb.archetypes.len()];
+        for (i, seq) in seqs.iter().enumerate() {
+            let (ai, _) = cb.match_best(seq);
+            clusters[ai].push(i);
+        }
+        clusters.retain(|c| !c.is_empty());
+        let hopf = HopfCompositionTable::build(&cb, Some(&embs), &clusters, hopf_segments);
+        println!("  Hopf table: {} fragments, {} transition entries",
+            hopf.fragments.len(), hopf.transition.len());
+        Some(hopf)
+    } else {
+        None
+    };
+
+    // Train replicas
+    println!("\n--- Training gen g{} ({} epochs, {} replicas) ---",
+        target_group, gen_epochs, k_replicas);
+
+    let mut best_env: Option<GroupGenEnv> = None;
+    let mut best_loss = f32::MAX;
+
+    let log_interval = gen_epochs / 25 + 1;
+    let replay_frac = 0.15;
+    let replay_start_epoch = 50;
+
+    for replica in 0..k_replicas as usize {
+        let mut task_rng = StdRng::seed_from_u64(42 + replica as u64 * 1000 + target_group as u64 * 100);
+        let ov = gen_overrides.clone().unwrap_or_default();
+        let mut env = GroupGenEnv::new_algebraic(dict.clone(), cb.clone(), &ov, &mut task_rng);
+        if let Some(ref h) = hopf {
+            env.hopf_table = Some(h.clone());
+        }
+
+        let n_pairs = gen_pairs.len();
+        let mut indices: Vec<usize> = (0..n_pairs).collect();
+        let mut sample_losses: Vec<f32> = vec![0.0; n_pairs];
+        let replay_count = (n_pairs as f32 * replay_frac).ceil() as usize;
+        let mut loss_history: Vec<f32> = Vec::new();
+        let mut stopped_early = false;
+
+        for epoch in 0..gen_epochs {
+            indices.shuffle(&mut task_rng);
+            let mut total_loss = 0.0f32;
+
+            for &idx in &indices {
+                let l = env.train_step(&gen_pairs[idx].0, &gen_pairs[idx].1, &mut task_rng);
+                sample_losses[idx] = l;
+                total_loss += l;
+            }
+
+            // Priority replay: re-train on highest-loss samples
+            if epoch >= replay_start_epoch && replay_count > 0 {
+                let mut ranked: Vec<(usize, f32)> = sample_losses.iter().copied().enumerate().collect();
+                ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                for &(idx, _) in ranked.iter().take(replay_count) {
+                    env.train_step(&gen_pairs[idx].0, &gen_pairs[idx].1, &mut task_rng);
+                }
+            }
+
+            let last_avg = total_loss / n_pairs.max(1) as f32;
+            loss_history.push(last_avg);
+
+            // Early stopping (with min loss floor)
+            if early_stop_window > 0 && epoch >= early_stop_min_ep && loss_history.len() >= early_stop_window {
+                let recent = &loss_history[loss_history.len() - early_stop_window..];
+                let old_avg = recent[..early_stop_window / 2].iter().sum::<f32>() / (early_stop_window / 2) as f32;
+                let new_avg = recent[early_stop_window / 2..].iter().sum::<f32>() / (early_stop_window - early_stop_window / 2) as f32;
+                let improvement = (old_avg - new_avg) / old_avg.max(1e-8);
+                if improvement < early_stop_min_imp && new_avg < 0.02 {
+                    println!("    [gen g{} r{}] early stop at epoch {}/{}: loss={:.4} improvement={:.5}",
+                        target_group, replica, epoch, gen_epochs, last_avg, improvement);
+                    stopped_early = true;
+                    break;
+                }
+                if improvement < early_stop_min_imp && new_avg >= 0.02 && epoch % log_interval == 0 {
+                    println!("    [gen g{} r{}] epoch {}/{}: plateau (imp={:.5}) but loss={:.4} > 0.02, continuing...",
+                        target_group, replica, epoch, gen_epochs, improvement, new_avg);
+                }
+            }
+
+            if epoch % log_interval == 0 || epoch == gen_epochs - 1 {
+                println!("    [gen g{} r{}] epoch {}/{} loss={:.4} synapses={}",
+                    target_group, replica, epoch, gen_epochs, last_avg, env.env.total_synapses());
+            }
+        }
+
+        let actual_epochs = loss_history.len();
+        if stopped_early {
+            println!("    [gen g{} r{}] converged after {} of {} epochs", target_group, replica, actual_epochs, gen_epochs);
+        }
+
+        // Eval loss
+        let mut eval_loss = 0.0f32;
+        for i in 0..n_pairs {
+            eval_loss += env.eval_loss(&gen_pairs[i].0, &gen_pairs[i].1);
+        }
+        eval_loss /= n_pairs.max(1) as f32;
+
+        env.freeze();
+        println!("    [gen g{} r{}] frozen: {} neurons, {} synapses, eval_loss={:.4}",
+            target_group, replica, env.env.layers.iter().map(|l| l.len()).sum::<usize>(),
+            env.env.total_synapses(), eval_loss);
+
+        if eval_loss < best_loss {
+            best_loss = eval_loss;
+            best_env = Some(env);
+            println!("    [gen g{}] best replica so far: r{} loss={:.4}", target_group, replica, eval_loss);
+        }
+    }
+
+    // Replace the gen env in the brain
+    let dm = svc.active_dm_mut();
+    if let Some(env) = best_env {
+        dm.group_gen_envs.insert(target_group, env);
+        println!("\n  Replaced gen env for group {} (eval_loss={:.4})", target_group, best_loss);
+    } else {
+        return Err("No successful replica".to_string());
+    }
+
+    // Re-export
+    println!("\n--- Exporting Brain ---");
+    let brain_bytes = svc.export_brain()?;
+    let size_kb = brain_bytes.len() / 1024;
+    std::fs::write(output_path, &brain_bytes).map_err(|e| format!("write failed: {}", e))?;
+    println!("Brain exported: {} ({} KB)", output_path, size_kb);
+
+    // Quick inference check
+    println!("\n--- Post-Retrain Inference Check ---\n");
+    let test_prompts = [
+        "help me reset my password",
+        "implement binary search in Python",
+        "explain the observer pattern",
+        "design a microservices architecture in Rust",
+        "my account is locked after too many failed attempts",
+    ];
+    for prompt in &test_prompts {
+        match svc.generation(prompt) {
+            Ok((action, resp)) => {
+                println!("  prompt: {:?}", prompt);
+                println!("  action: {:?} (conf={:.2}) group={:?}",
+                    action.action_type, action.confidence, action.target_group_id);
+                println!("  gen [{}] (conf={:.2}): {:?}\n",
+                    resp.template_id, resp.confidence,
+                    &resp.text[..resp.text.len().min(200)]);
+            }
+            Err(e) => println!("  {:?} → ERROR: {}\n", prompt, e),
+        }
+    }
+
+    Ok(())
 }
 
 // =============================================================================
@@ -198,6 +494,8 @@ fn run_conversation_repl(svc: &mut LanguageService) {
     println!("  /history                Show conversation history");
     println!("  /single <prompt>        Single-shot (no conversation context)");
     println!("  /status                 Show brain + personality info");
+    println!("  /index <path>           Index project directory into Leech lattice");
+    println!("  /project [file]         Show project model / related entities");
     println!("  quit | exit             Exit");
     println!();
 
@@ -345,9 +643,92 @@ fn handle_repl_command(svc: &mut LanguageService, cmd: &str) {
             println!("  Hopf diversity bonus: {:.2}", svc.personality.hopf_diversity_bonus());
             println!("  Groups: {}, Gen envs: {}, Code envs: {}",
                 dm.main.group_order.len(), dm.group_gen_envs.len(), dm.group_code_envs.len());
+            println!("  Project: {}", svc.project_status());
+        }
+        Some("index") => {
+            let path = parts.get(1).copied().unwrap_or(".");
+            let path_buf = std::path::Path::new(path);
+            if !path_buf.exists() {
+                println!("  Path not found: {}", path_buf.display());
+            } else {
+                let mut count = 0usize;
+                index_directory(svc, path_buf, &mut count);
+                println!("  Indexed {} files (hybrid AST-lite + semantic + relational)", count);
+
+                // Try to load git history for edit correlation
+                let git_dir = find_git_root(path_buf);
+                if let Some(ref git_root) = git_dir {
+                    match std::process::Command::new("git")
+                        .args(["log", "--name-only", "--pretty=format:---", "-200"])
+                        .current_dir(git_root)
+                        .output()
+                    {
+                        Ok(output) if output.status.success() => {
+                            let log = String::from_utf8_lossy(&output.stdout);
+                            svc.load_git_history(&log);
+                            println!("  Loaded git history for edit correlation");
+                        }
+                        _ => {
+                            println!("  (no git history available — dims 12-15 will be zero)");
+                        }
+                    }
+                }
+
+                println!("  {}", svc.project_status());
+            }
+        }
+        Some("project") => {
+            if svc.project_model.entity_count() == 0 {
+                println!("  No project indexed. Use /index <path> first.");
+            } else {
+                println!("  {}", svc.project_status());
+                if let Some(query_path) = parts.get(1).copied() {
+                    let related = svc.project_model.context_for_file(query_path, 5);
+                    if related.is_empty() {
+                        println!("  No related entities found for: {}", query_path);
+                    } else {
+                        println!("  Related to {}:", query_path);
+                        for e in &related {
+                            println!("    {:?} {} ({})", e.kind, e.name, e.path);
+                        }
+                    }
+                }
+            }
         }
         _ => {
-            println!("  Unknown command. Available: /personality, /ocean, /reset, /history, /single, /status");
+            println!("  Unknown command. Available:");
+            println!("    /personality, /ocean, /reset, /history, /single, /status");
+            println!("    /index <path>, /project [file]");
+        }
+    }
+}
+
+fn find_git_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut dir = if start.is_file() { start.parent()? } else { start };
+    loop {
+        if dir.join(".git").exists() { return Some(dir.to_path_buf()); }
+        dir = dir.parent()?;
+    }
+}
+
+fn index_directory(svc: &mut LanguageService, dir: &std::path::Path, count: &mut usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with('.') || name == "target" || name == "node_modules" { continue; }
+            index_directory(svc, &path, count);
+        } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            let indexable = matches!(ext, "rs" | "py" | "ts" | "tsx" | "js" | "jsx" |
+                "go" | "c" | "cpp" | "h" | "hpp" | "java" | "rb" | "toml" | "yaml" | "yml" | "md");
+            if indexable {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    let path_str = path.to_string_lossy();
+                    svc.index_file(&path_str, &content);
+                    *count += 1;
+                }
+            }
         }
     }
 }
@@ -725,6 +1106,7 @@ fn train_brain(
             k: Some(ac.gen_k),
             max_synapses: Some(ac.max_synapses),
             energy_budget: Some(ac.energy_budget),
+            ..Default::default()
         }
     });
     println!("\n--- Stages 3+4: Per-Group Generation Envs (single-pass token prediction) ---");
@@ -785,7 +1167,7 @@ fn train_brain(
         let embs: Vec<&[f32]> = pairs.iter().map(|(emb, _text)| *emb).collect();
         let dict = gen_dicts.get(&gidx).unwrap();
         let gen_max_arch = if texts.len() > 150 {
-            base_archetypes * 3  // 48 for large gen groups
+            base_archetypes * 6  // 96 for large gen groups — more archetypes = more fixed tokens = fewer slots to predict
         } else if texts.len() > 50 {
             base_archetypes * 2  // 32 for medium groups
         } else {
@@ -1014,17 +1396,23 @@ fn train_brain(
                     let last_avg = total_loss / n_pairs.max(1) as f32;
                     loss_history.push(last_avg);
 
-                    // Early stopping: check if loss has plateaued
+                    // Early stopping: check if loss has plateaued.
+                    // Don't stop if absolute loss is still above 0.02 — the model
+                    // hasn't learned enough content for archetype differentiation.
                     if task.es_window > 0 && epoch >= task.es_min_ep && loss_history.len() >= task.es_window {
                         let recent = &loss_history[loss_history.len() - task.es_window..];
                         let old_avg = recent[..task.es_window / 2].iter().sum::<f32>() / (task.es_window / 2) as f32;
                         let new_avg = recent[task.es_window / 2..].iter().sum::<f32>() / (task.es_window - task.es_window / 2) as f32;
                         let improvement = (old_avg - new_avg) / old_avg.max(1e-8);
-                        if improvement < task.es_min_imp {
+                        if improvement < task.es_min_imp && new_avg < 0.02 {
                             println!("    [{} g{} r{}] early stop at epoch {}/{}: loss={:.4} improvement={:.5} < {:.4}",
                                 task.kind, task.gidx, task.replica, epoch, te, last_avg, improvement, task.es_min_imp);
                             stopped_early = true;
                             break;
+                        }
+                        if improvement < task.es_min_imp && new_avg >= 0.02 {
+                            println!("    [{} g{} r{}] epoch {}/{}: plateau (imp={:.5}) but loss={:.4} > 0.02, continuing...",
+                                task.kind, task.gidx, task.replica, epoch, te, improvement, new_avg);
                         }
                     }
 

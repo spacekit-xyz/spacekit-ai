@@ -12,6 +12,7 @@ use crate::dimension::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::dimension::EncoderPreset;
+use crate::spectral::{ProjectModel, EntityKind, HybridEmbedder};
 use crate::types::{EnvironmentConfig, GroupId, Sample};
 
 // ---------------------------------------------------------------------------
@@ -323,6 +324,8 @@ pub struct LanguageService {
     pub personality: OceanProfile,
     /// Multi-turn conversation context.
     pub conversation: ConversationContext,
+    /// Leech-lattice spatial index of the project (files, symbols, patterns).
+    pub project_model: ProjectModel,
 }
 
 impl LanguageService {
@@ -346,6 +349,7 @@ impl LanguageService {
             agent_creator: "swtch.ai".to_string(),
             personality: OceanProfile::assistant(),
             conversation: ConversationContext::default(),
+            project_model: ProjectModel::new(),
         })
     }
 
@@ -368,6 +372,7 @@ impl LanguageService {
             agent_creator: "swtch.ai".to_string(),
             personality: OceanProfile::assistant(),
             conversation: ConversationContext::default(),
+            project_model: ProjectModel::new(),
         })
     }
 
@@ -461,25 +466,29 @@ impl LanguageService {
                 env.diversity_bonus = div_bonus;
             }
 
-            // --- Level 1: Competitive multi-head inference ---
-            // If we have a cached composition, prioritize those groups.
-            // Otherwise run the routed group first; if confidence < 0.8, try all
-            // other gen envs and pick the highest-confidence result.
+            // --- Level 1: Competitive multi-head inference with E8 composition ---
+            // Run routed group first. If effective confidence < 0.9, run all
+            // groups, collect E8 contribution vectors, and blend in E8 space.
+            use crate::dimension::group_gen::{
+                E8Contribution, e8_blend_quantum, e8_compose_sentences_quantum,
+                e8_select_best, compute_q,
+            };
+
             let primary = group_idx.and_then(|gidx| {
                 dm.group_gen_envs.get_mut(&gidx).map(|env| {
-                    let (text, conf) = env.generate(routed, 300, 0.8);
-                    (text, conf, gidx)
+                    let (text, conf, e8) = env.generate_with_e8(routed, 300, 0.8);
+                    E8Contribution { group_idx: gidx, lattice_point: e8, text, confidence: conf }
                 })
             });
 
             let (best_text, best_conf, best_gidx) = match primary {
-                Some((ref t, conf, gidx)) if conf >= 0.9 && t.len() > 5 => {
-                    (t.clone(), conf, gidx)
+                Some(ref c) if c.confidence >= 0.9 && c.text.len() > 5 => {
+                    (c.text.clone(), c.confidence, c.group_idx)
                 }
                 primary_result => {
-                    let mut all_candidates: Vec<(String, f32, usize)> = Vec::new();
-                    if let Some((t, c, g)) = primary_result {
-                        all_candidates.push((t, c, g));
+                    let mut contributions: Vec<E8Contribution> = Vec::new();
+                    if let Some(c) = primary_result {
+                        contributions.push(c);
                     }
 
                     let other_keys: Vec<usize> = dm.group_gen_envs.keys()
@@ -487,35 +496,51 @@ impl LanguageService {
                         .copied().collect();
                     for gidx in other_keys {
                         if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
-                            let (t, c) = env.generate(routed, 300, 0.8);
-                            if t.len() > 5 {
-                                all_candidates.push((t, c, gidx));
+                            let (text, conf, e8) = env.generate_with_e8(routed, 300, 0.8);
+                            if text.len() > 5 {
+                                contributions.push(E8Contribution {
+                                    group_idx: gidx, lattice_point: e8, text, confidence: conf,
+                                });
                             }
                         }
                     }
 
-                    // Level 1: pick highest confidence single response
-                    let (mut best_t, mut best_c, mut best_g) = all_candidates.iter()
-                        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                        .map(|(t, c, g)| (t.clone(), *c, *g))
-                        .unwrap_or_else(|| (String::new(), -1.0, 0));
+                    if contributions.is_empty() {
+                        (String::new(), -1.0, 0)
+                    } else if contributions.len() == 1 {
+                        let c = &contributions[0];
+                        (c.text.clone(), c.confidence, c.group_idx)
+                    } else {
+                        // Quantum group composition: compute deformation
+                        // parameter q from input embedding asymmetry, then
+                        // use R-matrix braided blend for non-commutative composition
+                        let q = compute_q(routed, &contributions);
+                        let blended = e8_blend_quantum(&contributions, q);
 
-                    // Level 2: if best single response has sub-optimal confidence,
-                    // try cross-group sentence composition (we're already in the
-                    // competitive path because primary conf < 0.9)
-                    if best_c < 0.9 {
-                        if let Some((composed, comp_conf, comp_g)) = Self::cross_group_compose(&all_candidates) {
-                            best_t = composed;
-                            best_c = comp_conf;
-                            best_g = comp_g;
+                        // Level 1: E8-scored selection of best single response
+                        let (mut best_t, mut best_c, mut best_g) =
+                            e8_select_best(&blended, &contributions)
+                                .unwrap_or_else(|| (String::new(), -1.0, 0));
 
-                            // Level 3: cache this composition for future retrieval
-                            let involved: Vec<usize> = all_candidates.iter().map(|(_, _, g)| *g).collect();
-                            Self::cache_composition(dm, routed, &involved, comp_conf);
+                        // Level 2: quantum sentence composition — the R-matrix
+                        // determines which group leads the response structure
+                        if best_c < 0.9 {
+                            let (composed, comp_conf) =
+                                e8_compose_sentences_quantum(&blended, &contributions, 4, q);
+                            if !composed.is_empty() && comp_conf > best_c {
+                                best_t = composed;
+                                best_c = comp_conf;
+                                best_g = contributions[0].group_idx;
+
+                                // Level 3: cache this quantum composition
+                                let involved: Vec<usize> = contributions.iter()
+                                    .map(|c| c.group_idx).collect();
+                                Self::cache_composition(dm, routed, &involved, comp_conf);
+                            }
                         }
-                    }
 
-                    (best_t, best_c, best_g)
+                        (best_t, best_c, best_g)
+                    }
                 }
             };
 
@@ -579,6 +604,72 @@ impl LanguageService {
     pub fn reset_conversation(&mut self) {
         self.conversation.clear();
         self.active_dm_mut().language_runtime.smoother.reset();
+    }
+
+    // -------------------------------------------------------------------
+    // ProjectModel — Leech-lattice spatial index for project context
+    // -------------------------------------------------------------------
+
+    /// Index a file using the full hybrid embedding pipeline.
+    /// Parses structure (AST-lite), extracts call graph, imports, metrics,
+    /// and auto-indexes sub-entities (functions, types).
+    pub fn index_file(&mut self, path: &str, content: &str) {
+        self.project_model.index_file_hybrid(path, content);
+    }
+
+    /// Index a function/symbol into the project model.
+    pub fn index_symbol(&mut self, path: &str, name: &str, body: &str) {
+        let emb = ProjectModel::embed_symbol(path, name, body);
+        self.project_model.add_entity(EntityKind::Function, name, path, emb);
+    }
+
+    /// Load git history for edit correlation (dims 12-15).
+    /// Call after indexing files. Pass output of:
+    ///   `git log --name-only --pretty=format:"---"`
+    pub fn load_git_history(&mut self, log_output: &str) {
+        self.project_model.load_git_history(log_output);
+    }
+
+    /// Get Leech-quantized context conditioning for a file.
+    pub fn project_context_for_file(&self, path: &str) -> Vec<f32> {
+        let emb = HybridEmbedder::embed_file(path, "");
+        self.project_model.context_conditioning(&emb, 5)
+    }
+
+    /// Generate with project context: augments the generation conditioning
+    /// with the Leech-quantized context of related project entities.
+    pub fn generation_with_context(
+        &mut self,
+        text: &str,
+        context_file: Option<&str>,
+    ) -> Result<(ActionJson, GeneratedResponse), String> {
+        if let Some(path) = context_file {
+            if self.project_model.entity_count() > 0 {
+                let ctx = self.project_context_for_file(path);
+                let related = self.project_model.context_for_file(path, 3);
+                if !related.is_empty() {
+                    let context_hint = related.iter()
+                        .map(|e| format!("{:?} {} ({})", e.kind, e.name, e.path))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let augmented = format!("[context: {}] {}", context_hint, text);
+                    let _ = ctx;
+                    return self.generation(&augmented);
+                }
+            }
+        }
+        self.generation(text)
+    }
+
+    pub fn project_status(&self) -> String {
+        let summary = self.project_model.summary();
+        if summary.total_entities == 0 {
+            "No project indexed".to_string()
+        } else {
+            let git = if summary.has_git_history { ", git history loaded" } else { "" };
+            format!("{} entities ({} files, {} functions, {} types{})",
+                summary.total_entities, summary.files, summary.functions, summary.types, git)
+        }
     }
 
     pub fn codegen(&mut self, text: &str) -> Result<(ActionJson, Option<CodeGeneration>), String> {
@@ -680,6 +771,7 @@ impl LanguageService {
     /// Level 2: Cross-group text composition.
     /// When no single group produces a high-confidence response, compose the best
     /// sentence-level segments from all available group responses.
+    #[allow(dead_code)] // Legacy Level 2; replaced by E8 composition for generation
     fn cross_group_compose(candidates: &[(String, f32, usize)]) -> Option<(String, f32, usize)> {
         if candidates.len() < 2 {
             return None;

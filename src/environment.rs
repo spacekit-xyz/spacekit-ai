@@ -38,6 +38,11 @@ pub struct NeuralEnvironment {
     /// Current effective learning rate — starts at config.learning_rate,
     /// annealed each epoch via set_epoch() when lr_decay > 0.
     pub current_lr: f32,
+
+    /// Ephaptic field: per-hidden-layer EMA of activations.
+    /// Index i corresponds to self.layers[i] (only populated for hidden layers).
+    /// Provides immediate pattern availability without synaptic changes.
+    ephaptic_fields: Vec<Vec<f32>>,
 }
 
 impl NeuralEnvironment {
@@ -58,6 +63,7 @@ impl NeuralEnvironment {
             input_ids: HashSet::new(),
             consolidated_group_ids: HashSet::new(),
             current_lr: lr,
+            ephaptic_fields: Vec::new(),
         }
     }
 
@@ -462,7 +468,15 @@ impl NeuralEnvironment {
                         n.activation = 0.0;
                     }
                 } else if let Some(n) = self.neurons.get_mut(&nid) {
-                    n.activate(sum);
+                    let field_bias = if !is_output && self.config.ephaptic_field_strength > 0.0 {
+                        self.ephaptic_fields.get(layer_idx)
+                            .and_then(|fv| {
+                                let idx = layer_ids.iter().position(|&id| id == nid)?;
+                                fv.get(idx).copied()
+                            })
+                            .unwrap_or(0.0) * self.config.ephaptic_field_strength
+                    } else { 0.0 };
+                    n.activate(sum + field_bias);
                     n.winning_branch = winning_br;
                     if n.activation > 0.6 {
                         n.last_fired = self.time;
@@ -609,6 +623,29 @@ impl NeuralEnvironment {
                         if let Some(n) = self.neurons.get_mut(nid) {
                             n.activation *= 0.02; // losers keep 2% — enough for gradient, not enough to win
                         }
+                    }
+                }
+            }
+        }
+
+        // --- Ephaptic field update ---
+        // After the full forward pass, update each hidden layer's field from activations.
+        // The field is an EMA that captures "what this layer just saw" and persists
+        // across inputs, providing immediate pattern availability on subsequent passes.
+        if self.config.ephaptic_field_alpha > 0.0 && self.layers.len() > 2 {
+            let alpha = self.config.ephaptic_field_alpha;
+            if self.ephaptic_fields.len() < self.layers.len() {
+                self.ephaptic_fields.resize(self.layers.len(), Vec::new());
+            }
+            for layer_idx in 1..self.layers.len() - 1 {
+                let layer_ids = &self.layers[layer_idx];
+                let field = &mut self.ephaptic_fields[layer_idx];
+                if field.len() != layer_ids.len() {
+                    field.resize(layer_ids.len(), 0.0);
+                }
+                for (pos, &nid) in layer_ids.iter().enumerate() {
+                    if let Some(n) = self.neurons.get(&nid) {
+                        field[pos] = alpha * field[pos] + (1.0 - alpha) * n.activation;
                     }
                 }
             }
