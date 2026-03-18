@@ -7,14 +7,15 @@ use crate::types::GroupId;
 
 use super::action::ActionType;
 
-pub const NUM_ACTION_TYPES: usize = 4;
+pub const NUM_ACTION_TYPES: usize = 5;
 
 fn action_type_index(at: &ActionType) -> usize {
     match at {
         ActionType::SupportTicket => 0,
         ActionType::CodingAssist => 1,
         ActionType::GeneralAssist => 2,
-        ActionType::Fallback => 3,
+        ActionType::ToolCall => 3,
+        ActionType::Fallback => 4,
     }
 }
 
@@ -45,6 +46,7 @@ fn index_to_action_type(idx: usize) -> ActionType {
         0 => ActionType::SupportTicket,
         1 => ActionType::CodingAssist,
         2 => ActionType::GeneralAssist,
+        3 => ActionType::ToolCall,
         _ => ActionType::Fallback,
     }
 }

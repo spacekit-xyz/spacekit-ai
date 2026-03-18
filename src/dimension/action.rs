@@ -12,6 +12,7 @@ pub enum ActionType {
     SupportTicket,
     CodingAssist,
     GeneralAssist,
+    ToolCall,
     Fallback,
 }
 
@@ -40,6 +41,10 @@ pub enum ActionPayload {
     GeneralAssist {
         topic: String,
     },
+    ToolCall {
+        tool_name: String,
+        arguments: std::collections::HashMap<String, String>,
+    },
     Fallback {
         fallback_code: String,
     },
@@ -53,6 +58,7 @@ impl ActionJson {
             (ActionType::SupportTicket, Some(ActionPayload::SupportTicket { .. }))
                 | (ActionType::CodingAssist, Some(ActionPayload::CodingAssist { .. }))
                 | (ActionType::GeneralAssist, Some(ActionPayload::GeneralAssist { .. }))
+                | (ActionType::ToolCall, Some(ActionPayload::ToolCall { .. }))
                 | (ActionType::Fallback, Some(ActionPayload::Fallback { .. }))
         )
     }
@@ -128,6 +134,10 @@ fn payload_for_action_type(action_type: ActionType, lower: &str) -> Option<Actio
         ActionType::GeneralAssist => Some(ActionPayload::GeneralAssist {
             topic: infer_topic(lower),
         }),
+        ActionType::ToolCall => Some(ActionPayload::ToolCall {
+            tool_name: infer_tool_name(lower),
+            arguments: std::collections::HashMap::new(),
+        }),
         ActionType::Fallback => Some(ActionPayload::Fallback {
             fallback_code: "UNSPECIFIED".to_string(),
         }),
@@ -135,6 +145,27 @@ fn payload_for_action_type(action_type: ActionType, lower: &str) -> Option<Actio
 }
 
 fn infer_action_type_from_text(text: &str) -> Option<ActionType> {
+    let tool_terms = [
+        "calculate",
+        "compute",
+        "search for",
+        "look up",
+        "find information",
+        "run this",
+        "execute this",
+        "eval this",
+        "run the code",
+        "execute the code",
+        "read file",
+        "show file",
+        "read the file",
+        "show me the file",
+    ];
+    let tool_hits = tool_terms.iter().filter(|t| text.contains(**t)).count();
+    if tool_hits > 0 {
+        return Some(ActionType::ToolCall);
+    }
+
     let support_terms = [
         "account",
         "login",
@@ -184,6 +215,22 @@ fn infer_action_type_from_text(text: &str) -> Option<ActionType> {
         Some(ActionType::CodingAssist)
     } else {
         Some(ActionType::SupportTicket)
+    }
+}
+
+fn infer_tool_name(text: &str) -> String {
+    if text.contains("calculate") || text.contains("compute") {
+        "calculator".to_string()
+    } else if text.contains("search for") || text.contains("look up") || text.contains("find information") {
+        "web_search".to_string()
+    } else if text.contains("run this") || text.contains("execute this") || text.contains("eval this")
+        || text.contains("run the code") || text.contains("execute the code") {
+        "code_runner".to_string()
+    } else if text.contains("read file") || text.contains("show file")
+        || text.contains("read the file") || text.contains("show me the file") {
+        "file_reader".to_string()
+    } else {
+        "unknown".to_string()
     }
 }
 
@@ -268,6 +315,75 @@ mod tests {
     use crate::types::EnvironmentConfig;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
+
+    #[test]
+    fn tool_call_detected_from_text() {
+        let result = infer_action_type_from_text("calculate 347 * 892");
+        assert_eq!(result, Some(ActionType::ToolCall));
+
+        let result = infer_action_type_from_text("search for rust async patterns");
+        assert_eq!(result, Some(ActionType::ToolCall));
+
+        let result = infer_action_type_from_text("run this python script please");
+        assert_eq!(result, Some(ActionType::ToolCall));
+
+        let result = infer_action_type_from_text("read file src/main.rs");
+        assert_eq!(result, Some(ActionType::ToolCall));
+
+        // "observer" contains "server" (a coding term), so this routes to CodingAssist
+        let result = infer_action_type_from_text("explain the observer pattern");
+        assert_eq!(result, Some(ActionType::CodingAssist));
+
+        let result = infer_action_type_from_text("what is the meaning of life");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn tool_call_action_is_valid() {
+        let action = ActionJson {
+            action_type: ActionType::ToolCall,
+            target_group_id: None,
+            group_task_name: None,
+            confidence: 1.0,
+            margin: 1.0,
+            reason: "tool_match".to_string(),
+            payload: Some(ActionPayload::ToolCall {
+                tool_name: "calculator".to_string(),
+                arguments: std::collections::HashMap::from([
+                    ("expression".to_string(), "2+2".to_string()),
+                ]),
+            }),
+        };
+        assert!(action.is_valid());
+        assert_eq!(action.action_type, ActionType::ToolCall);
+    }
+
+    #[test]
+    fn tool_call_payload_from_type() {
+        let payload = payload_for_action_type(ActionType::ToolCall, "calculate 100 / 5");
+        match payload {
+            Some(ActionPayload::ToolCall { tool_name, .. }) => {
+                assert_eq!(tool_name, "calculator");
+            }
+            _ => panic!("expected ToolCall payload"),
+        }
+    }
+
+    #[test]
+    fn ood_with_tool_keywords_routes_to_tool() {
+        let main = MainDimension::new();
+        let routing = LanguageRoutingDecision {
+            chosen_group_id: None,
+            best_similarity: 0.0,
+            second_similarity: 0.0,
+            margin: 0.0,
+            confidence: 0.2,
+            rejected_as_ood: true,
+        };
+        let a = action_from_routing(&main, &routing, "calculate 2 + 2");
+        assert_eq!(a.action_type, ActionType::ToolCall);
+        assert!(a.is_valid());
+    }
 
     #[test]
     fn ood_routing_yields_fallback() {

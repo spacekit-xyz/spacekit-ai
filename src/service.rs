@@ -10,9 +10,11 @@ use crate::dimension::{
     DimensionManager, DimensionManagerConfig, EpisodicSummary, GeneratedResponse, GenerationHead,
     LanguageConfig, LanguageRoutingDecision, LanguageSample,
 };
+use crate::dimension::action::{ActionType, ActionPayload};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::dimension::EncoderPreset;
 use crate::spectral::{ProjectModel, EntityKind, HybridEmbedder};
+use crate::dimension::tool::{ToolRegistry, ToolSchema, ToolCallInfo, ToolResult};
 use crate::types::{EnvironmentConfig, GroupId, Sample};
 
 // ---------------------------------------------------------------------------
@@ -326,6 +328,8 @@ pub struct LanguageService {
     pub conversation: ConversationContext,
     /// Leech-lattice spatial index of the project (files, symbols, patterns).
     pub project_model: ProjectModel,
+    /// Tool registry — schemas for external tool invocation.
+    pub tool_registry: ToolRegistry,
 }
 
 impl LanguageService {
@@ -350,6 +354,7 @@ impl LanguageService {
             personality: OceanProfile::assistant(),
             conversation: ConversationContext::default(),
             project_model: ProjectModel::new(),
+            tool_registry: ToolRegistry::with_builtins(),
         })
     }
 
@@ -373,6 +378,7 @@ impl LanguageService {
             personality: OceanProfile::assistant(),
             conversation: ConversationContext::default(),
             project_model: ProjectModel::new(),
+            tool_registry: ToolRegistry::with_builtins(),
         })
     }
 
@@ -441,6 +447,32 @@ impl LanguageService {
             let action = self.active_dm_mut().route_text_to_action_stateless(text)?;
             self.record_latency(start);
             return Ok((action, self.identity_response()));
+        }
+
+        // Tool call interception: if the registry matches a tool, return a
+        // ToolCall action with the call info. The caller executes the tool
+        // and optionally calls generation_with_tool_result for a composed response.
+        if let Some(tool_call) = self.tool_registry.match_tool(text) {
+            let action = ActionJson {
+                action_type: ActionType::ToolCall,
+                target_group_id: None,
+                group_task_name: None,
+                confidence: 1.0,
+                margin: 1.0,
+                reason: "tool_match".to_string(),
+                payload: Some(ActionPayload::ToolCall {
+                    tool_name: tool_call.tool_name.clone(),
+                    arguments: tool_call.arguments.clone(),
+                }),
+            };
+            let resp = GeneratedResponse {
+                text: format!("[tool_call: {}] Awaiting execution.", tool_call.tool_name),
+                template_id: "tool_call_pending".to_string(),
+                traceable: true,
+                confidence: 1.0,
+            };
+            self.record_latency(start);
+            return Ok((action, resp));
         }
 
         let personality = self.personality.clone();
@@ -670,6 +702,38 @@ impl LanguageService {
             format!("{} entities ({} files, {} functions, {} types{})",
                 summary.total_entities, summary.files, summary.functions, summary.types, git)
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Tool registry — external tool invocation
+    // -------------------------------------------------------------------
+
+    pub fn register_tool(&mut self, schema: ToolSchema) {
+        self.tool_registry.register(schema);
+    }
+
+    /// Check if a prompt triggers a tool call. If so, returns the tool call info
+    /// without running generation — the caller is responsible for executing the
+    /// tool and optionally calling `generation_with_tool_result` to produce a
+    /// response that incorporates the tool output.
+    pub fn try_tool_call(&self, text: &str) -> Option<ToolCallInfo> {
+        self.tool_registry.match_tool(text)
+    }
+
+    /// Generate a response that incorporates a tool execution result.
+    /// The tool output is prepended as context, giving the generation substrate
+    /// access to the tool's answer.
+    pub fn generation_with_tool_result(
+        &mut self,
+        original_text: &str,
+        tool_result: &ToolResult,
+    ) -> Result<(ActionJson, GeneratedResponse), String> {
+        let augmented = if tool_result.success {
+            format!("[tool_result: {} = {}] {}", tool_result.tool_name, tool_result.output, original_text)
+        } else {
+            format!("[tool_error: {} = {}] {}", tool_result.tool_name, tool_result.output, original_text)
+        };
+        self.generation(&augmented)
     }
 
     pub fn codegen(&mut self, text: &str) -> Result<(ActionJson, Option<CodeGeneration>), String> {

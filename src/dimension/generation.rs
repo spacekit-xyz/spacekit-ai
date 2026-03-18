@@ -55,6 +55,22 @@ pub fn render_action_template(action: &ActionJson) -> GeneratedResponse {
                 confidence: 1.0,
             }
         }
+        (ActionType::ToolCall, Some(ActionPayload::ToolCall { tool_name, arguments })) => {
+            let args_str = arguments.iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let text = format!(
+                "[ToolCall] tool={} args={{{}}}. Awaiting tool execution result.",
+                tool_name, args_str
+            );
+            GeneratedResponse {
+                text,
+                template_id: "m4_template_tool_call_v1".to_string(),
+                traceable: true,
+                confidence: 1.0,
+            }
+        }
         (ActionType::Fallback, Some(ActionPayload::Fallback { fallback_code })) => {
             let text = format!(
                 "[Fallback] fallback_code={}. Clarify intent or hand off safely.",

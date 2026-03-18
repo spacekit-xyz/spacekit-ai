@@ -42,6 +42,7 @@ pub struct NeuralEnvironment {
     /// Ephaptic field: per-hidden-layer EMA of activations.
     /// Index i corresponds to self.layers[i] (only populated for hidden layers).
     /// Provides immediate pattern availability without synaptic changes.
+    #[serde(default)]
     ephaptic_fields: Vec<Vec<f32>>,
 }
 

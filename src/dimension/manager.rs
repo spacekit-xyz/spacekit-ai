@@ -425,7 +425,8 @@ impl DimensionManager {
                 ActionType::SupportTicket => 0,
                 ActionType::CodingAssist => 1,
                 ActionType::GeneralAssist => 2,
-                ActionType::Fallback => 3,
+                ActionType::ToolCall => 3,
+                ActionType::Fallback => 4,
             };
             by_class[idx].push(i);
         }

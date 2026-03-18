@@ -17,6 +17,7 @@ pub mod promotion;
 pub mod router;
 pub mod observer;
 pub mod manager;
+pub mod tool;
 
 pub use composition::{EpisodicMemory, Episode, VirtualGroup};
 pub use action::{ActionJson, ActionType, action_from_routing};
@@ -38,3 +39,4 @@ pub use action_classifier::{ActionClassifier, action_target_to_type, action_type
 pub use generation_head::GenerationHead;
 pub use group_gen::GroupGenEnv;
 pub use manager::{DimensionManager, DimensionManagerConfig, GroupSummary, MirrorSummary, EpisodicSummary, CheckpointSizeSummary};
+pub use tool::{ToolSchema, ToolParam, ParamType, ToolRegistry, ToolCallInfo, ToolResult};
