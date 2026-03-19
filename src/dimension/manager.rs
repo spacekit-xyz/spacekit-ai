@@ -25,6 +25,7 @@ use super::language::{
     CalibrationDataset, CalibrationReport, CalibrationRequirements, GroupAdapter, LanguageConfig,
     LanguageRoutingDecision, LanguageRuntime, route_language_embedding,
 };
+use crate::clifford::GroupRotor;
 use super::main_dim::MainDimension;
 use super::mirror_dim::{MirrorDimension, EpochResult};
 use super::observer::GlobalObserver;
@@ -76,6 +77,8 @@ pub struct DimensionManager {
     pub code_dictionary: Option<TokenDictionary>,
     #[serde(default)]
     pub group_adapters: HashMap<usize, GroupAdapter>,
+    #[serde(default)]
+    pub group_rotors: HashMap<usize, GroupRotor>,
     next_group_id: GroupId,
     low_confidence_streak: u32,
     pub auto_spawn_threshold: f32,
@@ -99,6 +102,7 @@ impl DimensionManager {
             gen_dictionary: None,
             code_dictionary: None,
             group_adapters: HashMap::new(),
+            group_rotors: HashMap::new(),
             next_group_id: 0,
             low_confidence_streak: 0,
             auto_spawn_threshold: 0.15,
@@ -112,6 +116,22 @@ impl DimensionManager {
         match self.group_adapters.get(&group_idx) {
             Some(adapter) if h_raw.len() == adapter.raw_dim => adapter.adapt(z_shared, h_raw),
             _ => z_shared.to_vec(),
+        }
+    }
+
+    /// Apply per-group Clifford rotor to condition from raw encoder vector.
+    /// Falls back to the linear adapter path if no rotor exists for this group.
+    pub fn adapt_for_group_clifford(
+        &self,
+        group_idx: usize,
+        z_shared: &[f32],
+        h_raw: &[f32],
+        target_dim: usize,
+    ) -> Vec<f32> {
+        if let Some(rotor) = self.group_rotors.get(&group_idx) {
+            rotor.condition(h_raw, target_dim)
+        } else {
+            self.adapt_for_group(group_idx, z_shared, h_raw)
         }
     }
 

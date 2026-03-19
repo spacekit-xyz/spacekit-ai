@@ -30,6 +30,7 @@ pub use language::{
     EncoderPreset, EmaSmoother, GroupAdapter, HashingLanguageEncoder, LanguageBridge, LanguageConfig,
     LanguageEncoder, LanguageRoutingDecision, LanguageRuntime, LanguageSample, route_language_embedding,
 };
+pub use crate::clifford::GroupRotor;
 pub use main_dim::{MainDimension, FrozenGroupEnv};
 pub use mirror_dim::{MirrorDimension, EpochResult};
 pub use promotion::{PromotionGateConfig, PromotionDecision, evaluate_promotion, promote};

@@ -423,6 +423,87 @@ pub fn embed_bridge_vector(v: &[f32]) -> Multivector {
     result
 }
 
+/// Trainable per-group rotor with SPSA-based learning.
+/// Wraps a Rotor (28 bivector parameters) with training state.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroupRotor {
+    pub bivector: Vec<f32>,  // 28 trainable parameters
+    pub frozen: bool,
+    pub l2_weight: f32,
+}
+
+impl GroupRotor {
+    pub fn new() -> Self {
+        Self {
+            bivector: vec![0.0f32; 28],
+            frozen: false,
+            l2_weight: 1e-4,
+        }
+    }
+
+    pub fn rotor(&self) -> Rotor {
+        Rotor::from_bivector(&self.bivector)
+    }
+
+    /// Full Clifford conditioning pipeline:
+    /// raw 768d → embed into Cl(8) → rotate by group rotor → extract flat vector.
+    pub fn condition(&self, h_raw: &[f32], target_dim: usize) -> Vec<f32> {
+        let mv = embed_bridge_vector(h_raw);
+        let rotor = self.rotor();
+        let rotated = apply_group_rotor(&mv, &rotor);
+        extract_conditioning(&rotated, target_dim)
+    }
+
+    /// SPSA training step: perturb all 28 bivector params simultaneously,
+    /// evaluate loss in both directions, estimate gradient, update.
+    /// `loss_fn` takes a conditioning vector and returns a scalar loss.
+    pub fn train_step_spsa<F>(&mut self, h_raw: &[f32], target_dim: usize, mut loss_fn: F, lr: f32)
+    where
+        F: FnMut(&[f32]) -> f32,
+    {
+        if self.frozen { return; }
+        let eps = 0.02f32;
+        let mut perturb = vec![0.0f32; 28];
+        let mut seed = self.bivector.iter().map(|b| (b * 1000.0) as u64).sum::<u64>().wrapping_add(7);
+        for p in perturb.iter_mut() {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            *p = if seed % 2 == 0 { 1.0 } else { -1.0 };
+        }
+
+        // Evaluate loss with +perturbation
+        let mut bv_plus = self.bivector.clone();
+        let mut bv_minus = self.bivector.clone();
+        for i in 0..28 {
+            bv_plus[i] += eps * perturb[i];
+            bv_minus[i] -= eps * perturb[i];
+        }
+
+        let r_plus = Rotor::from_bivector(&bv_plus);
+        let mv = embed_bridge_vector(h_raw);
+        let cond_plus = extract_conditioning(&apply_group_rotor(&mv, &r_plus), target_dim);
+
+        let r_minus = Rotor::from_bivector(&bv_minus);
+        let cond_minus = extract_conditioning(&apply_group_rotor(&mv, &r_minus), target_dim);
+
+        let l_plus = loss_fn(&cond_plus);
+        let l_minus = loss_fn(&cond_minus);
+        let scale = (l_plus - l_minus) / (2.0 * eps);
+
+        for i in 0..28 {
+            let grad = scale / perturb[i] + self.l2_weight * self.bivector[i];
+            self.bivector[i] -= lr * grad;
+        }
+    }
+
+    pub fn freeze(&mut self) {
+        self.frozen = true;
+    }
+
+    pub fn param_count() -> usize {
+        28
+    }
+}
+
 /// Extract routing score: the scalar part of the geometric product of two multivectors.
 /// Higher values = more aligned in Cl(8) space.
 pub fn geometric_similarity(a: &Multivector, b: &Multivector) -> f32 {
@@ -450,6 +531,95 @@ pub fn extract_conditioning(mv: &Multivector, target_dim: usize) -> Vec<f32> {
     // Pad or truncate to target_dim
     out.resize(target_dim, 0.0);
     out
+}
+
+// ---------------------------------------------------------------------------
+// Understanding primitives — grade-separated reasoning over Cl(8)
+// ---------------------------------------------------------------------------
+
+/// Extract the *structural fingerprint* of a multivector: grade-2 bivector
+/// components that encode pairwise feature relationships, independent of
+/// the specific content (grade-1).  Two inputs about different topics but
+/// with the same relational structure will have similar fingerprints.
+pub fn structural_fingerprint(mv: &Multivector) -> [f32; 28] {
+    let mut fp = [0.0f32; 28];
+    fp.copy_from_slice(mv.grade(2));
+    fp
+}
+
+/// Cosine similarity in bivector (grade-2) space only.
+/// Measures whether two inputs share the same *structure* regardless of
+/// surface content.  Used for understanding-based routing: a novel topic
+/// routes to the group whose training data shares its relational pattern.
+pub fn structural_similarity(a: &Multivector, b: &Multivector) -> f32 {
+    let fa = structural_fingerprint(a);
+    let fb = structural_fingerprint(b);
+    let dot: f32 = fa.iter().zip(fb.iter()).map(|(x, y)| x * y).sum();
+    let na: f32 = fa.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = fb.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na < 1e-10 || nb < 1e-10 { return 0.0; }
+    dot / (na * nb)
+}
+
+/// Abstraction: project a multivector to grade-2+, zeroing grade-0 and
+/// grade-1.  The result retains relational/structural information while
+/// discarding topic-specific features.  Two inputs that are "about the
+/// same kind of thing" collapse to nearby points.
+pub fn abstract_mv(mv: &Multivector) -> Multivector {
+    let mut result = mv.clone();
+    result.components[GRADE_OFFSETS[0]] = 0.0;
+    for i in GRADE_OFFSETS[1]..GRADE_OFFSETS[1] + GRADE_DIMS[1] {
+        result.components[i] = 0.0;
+    }
+    result
+}
+
+/// Cross-domain transfer: given a source rotor (learned on domain A) and a
+/// target rotor (learned on domain B), compute the *transfer rotor* that
+/// maps A-structure to B-structure.  Applying this to a novel input from
+/// domain A produces a conditioning vector appropriate for domain B's
+/// generation head — analogical reasoning via rotor composition.
+///
+/// transfer = R_target · R_source^{-1}
+/// For unit rotors, R^{-1} = R̃ (reverse).
+pub fn transfer_rotor(source: &Rotor, target: &Rotor) -> Rotor {
+    let s_mv = source.to_multivector();
+    let t_mv = target.to_multivector();
+    let s_rev = s_mv.reverse();
+    let transfer_mv = t_mv.geo(&s_rev);
+    // Extract even-grade components back into a Rotor
+    let mut r = Rotor::identity();
+    r.components[0] = transfer_mv.components[GRADE_OFFSETS[0]];
+    for i in 0..28 {
+        r.components[1 + i] = transfer_mv.components[GRADE_OFFSETS[2] + i];
+    }
+    for i in 0..70 {
+        r.components[29 + i] = transfer_mv.components[GRADE_OFFSETS[4] + i];
+    }
+    for i in 0..28 {
+        r.components[99 + i] = transfer_mv.components[GRADE_OFFSETS[6] + i];
+    }
+    r.components[127] = transfer_mv.components[GRADE_OFFSETS[8]];
+    r
+}
+
+/// Understanding-aware conditioning: embed the raw input, separate content
+/// (grade-1) from structure (grade-2), apply the group rotor to structure
+/// only, then recombine.  This preserves topic-specific signal while
+/// adapting relational structure per-group — the system "understands" the
+/// structural pattern and adapts it, rather than transforming blindly.
+pub fn condition_with_understanding(
+    h_raw: &[f32],
+    rotor: &Rotor,
+    target_dim: usize,
+) -> (Vec<f32>, [f32; 28]) {
+    let mv = embed_bridge_vector(h_raw);
+    let content = mv.grade_project(1);
+    let structure = abstract_mv(&mv);
+    let rotated_structure = apply_group_rotor(&structure, rotor);
+    let combined = content.add(&rotated_structure);
+    let fingerprint = structural_fingerprint(&combined);
+    (extract_conditioning(&combined, target_dim), fingerprint)
 }
 
 #[cfg(test)]
@@ -624,5 +794,99 @@ mod tests {
         // Grade-2 projection should only have bivector
         assert!(grade2.scalar_part().abs() < 1e-6);
         assert!(grade2.grade(1).iter().all(|&x| x.abs() < 1e-6));
+    }
+
+    #[test]
+    fn test_structural_fingerprint_is_grade2() {
+        let v: Vec<f32> = (0..128).map(|i| (i as f32 * 0.03).sin()).collect();
+        let mv = embed_bridge_vector(&v);
+        let fp = structural_fingerprint(&mv);
+        assert_eq!(fp.len(), 28);
+        assert!(fp.iter().any(|&x| x.abs() > 0.001), "fingerprint should be non-trivial");
+    }
+
+    #[test]
+    fn test_structural_similarity_same_structure() {
+        // Two inputs with same structure but different magnitude
+        let v1: Vec<f32> = (0..128).map(|i| (i as f32 * 0.05).sin()).collect();
+        let v2: Vec<f32> = (0..128).map(|i| (i as f32 * 0.05).sin() * 2.0).collect();
+        let mv1 = embed_bridge_vector(&v1);
+        let mv2 = embed_bridge_vector(&v2);
+        let sim = structural_similarity(&mv1, &mv2);
+        assert!(sim > 0.9, "same-structure inputs should have high structural similarity: {}", sim);
+    }
+
+    #[test]
+    fn test_structural_similarity_different_structure() {
+        // Sparse: only first block has signal
+        let mut v1 = vec![0.0f32; 128];
+        for i in 0..8 { v1[i] = (i as f32 + 1.0) * 0.5; }
+        // Dense: all blocks have signal with varying magnitudes
+        let v2: Vec<f32> = (0..128).map(|i| ((i as f32 * 0.37).cos()) * (1.0 + (i / 8) as f32)).collect();
+        let mv1 = embed_bridge_vector(&v1);
+        let mv2 = embed_bridge_vector(&v2);
+        let sim = structural_similarity(&mv1, &mv2);
+        // Single-block vs multi-block should produce different wedge structure
+        assert!(sim < 0.95, "sparse vs dense inputs should have distinct structural similarity: {}", sim);
+    }
+
+    #[test]
+    fn test_abstract_mv_zeroes_content() {
+        let v: Vec<f32> = (0..128).map(|i| (i as f32 * 0.02).sin()).collect();
+        let mv = embed_bridge_vector(&v);
+        let abs = abstract_mv(&mv);
+        assert!(abs.scalar_part().abs() < 1e-10, "abstraction should zero grade-0");
+        assert!(abs.grade(1).iter().all(|&x| x.abs() < 1e-10), "abstraction should zero grade-1");
+        assert!(abs.grade(2).iter().any(|&x| x.abs() > 0.001), "abstraction should preserve grade-2");
+    }
+
+    #[test]
+    fn test_transfer_rotor_identity_roundtrip() {
+        let bv = [0.1f32, -0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                   0.0, 0.0, 0.0, 0.0, 0.0, 0.08, 0.0, 0.0, 0.0,
+                   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let r = Rotor::from_bivector(&bv);
+        let id = Rotor::identity();
+        let t = transfer_rotor(&id, &r);
+        // Transfer from identity to R should ≈ R
+        let v = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let direct = r.rotate_vector(&v);
+        let via_transfer = t.rotate_vector(&v);
+        for i in 0..8 {
+            assert!((direct[i] - via_transfer[i]).abs() < 0.15,
+                "transfer from identity should approximate source rotor: dim {} {} vs {}",
+                i, direct[i], via_transfer[i]);
+        }
+    }
+
+    #[test]
+    fn test_condition_with_understanding_produces_output() {
+        let h_raw: Vec<f32> = (0..768).map(|i| (i as f32 * 0.007).sin()).collect();
+        let bv = [0.05f32; 28];
+        let r = Rotor::from_bivector(&bv);
+        let (cond, fp) = condition_with_understanding(&h_raw, &r, 128);
+        assert_eq!(cond.len(), 128);
+        assert!(cond.iter().any(|&x| x.abs() > 0.001), "conditioning should be non-trivial");
+        assert!(fp.iter().any(|&x| x.abs() > 0.001), "fingerprint should be non-trivial");
+    }
+
+    #[test]
+    fn test_understanding_preserves_content_adapts_structure() {
+        let h_raw: Vec<f32> = (0..768).map(|i| (i as f32 * 0.007).sin()).collect();
+        let id = Rotor::identity();
+        let bv = [0.2f32, -0.1, 0.15, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                   0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0,
+                   0.0, 0.0, 0.0, -0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let r = Rotor::from_bivector(&bv);
+        let (cond_id, fp_id) = condition_with_understanding(&h_raw, &id, 128);
+        let (cond_r, fp_r) = condition_with_understanding(&h_raw, &r, 128);
+        // Same input: grade-1 content should be identical (first 8 components)
+        for i in 0..8 {
+            assert!((cond_id[i] - cond_r[i]).abs() < 1e-4,
+                "content (grade-1) should be preserved: dim {} {} vs {}", i, cond_id[i], cond_r[i]);
+        }
+        // Structure (fingerprint) should differ due to rotor
+        let fp_diff: f32 = fp_id.iter().zip(fp_r.iter()).map(|(a, b)| (a - b).abs()).sum();
+        assert!(fp_diff > 0.01, "structural fingerprint should change under non-identity rotor: diff={}", fp_diff);
     }
 }

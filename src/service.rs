@@ -11,6 +11,7 @@ use crate::dimension::{
     LanguageConfig, LanguageRoutingDecision, LanguageSample,
 };
 use crate::dimension::language::DEFAULT_BRIDGE_DIM;
+use crate::dimension::group_gen::GEN_COND_DIM;
 use crate::dimension::action::{ActionType, ActionPayload};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::dimension::EncoderPreset;
@@ -529,7 +530,7 @@ impl LanguageService {
             };
 
             let primary = group_idx.and_then(|gidx| {
-                let adapted = dm.adapt_for_group(gidx, &conditioned, h_raw);
+                let adapted = dm.adapt_for_group_clifford(gidx, &conditioned, h_raw, GEN_COND_DIM);
                 dm.group_gen_envs.get_mut(&gidx).map(|env| {
                     let (text, conf, e8) = env.generate_with_e8(&adapted, 300, 0.8);
                     E8Contribution { group_idx: gidx, lattice_point: e8, text, confidence: conf }
@@ -550,7 +551,7 @@ impl LanguageService {
                         .filter(|&&k| Some(k) != group_idx)
                         .copied().collect();
                     for gidx in other_keys {
-                        let adapted = dm.adapt_for_group(gidx, &conditioned, h_raw);
+                        let adapted = dm.adapt_for_group_clifford(gidx, &conditioned, h_raw, GEN_COND_DIM);
                         if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
                             let (text, conf, e8) = env.generate_with_e8(&adapted, 300, 0.8);
                             if text.len() > 5 {
@@ -847,7 +848,7 @@ impl LanguageService {
 
             // --- Level 1: Competitive multi-head inference for code ---
             let primary = group_idx.and_then(|gidx| {
-                let adapted = dm.adapt_for_group(gidx, base_cond, h_raw);
+                let adapted = dm.adapt_for_group_clifford(gidx, base_cond, h_raw, GEN_COND_DIM);
                 dm.group_code_envs.get_mut(&gidx).map(|env| {
                     let (code, conf) = env.generate(&adapted, 500, 0.7);
                     (code, conf, gidx)
@@ -867,7 +868,7 @@ impl LanguageService {
                         .filter(|&&k| Some(k) != group_idx)
                         .copied().collect();
                     for gidx in other_keys {
-                        let adapted = dm.adapt_for_group(gidx, base_cond, h_raw);
+                        let adapted = dm.adapt_for_group_clifford(gidx, base_cond, h_raw, GEN_COND_DIM);
                         if let Some(env) = dm.group_code_envs.get_mut(&gidx) {
                             let (c, cf) = env.generate(&adapted, 500, 0.7);
                             if cf > best_cf && c.len() > 5 {
@@ -1126,7 +1127,7 @@ impl LanguageService {
                             let group_idx = dm.main.group_order.iter()
                                 .position(|&g| g == group_id);
                             if let Some(gidx) = group_idx {
-                                let adapted = dm.adapt_for_group(gidx, embedding, h_raw);
+                                let adapted = dm.adapt_for_group_clifford(gidx, embedding, h_raw, GEN_COND_DIM);
                                 if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
                                     let was_frozen = env.frozen;
                                     env.frozen = false;

@@ -3,6 +3,7 @@ use growformer::dimension::{
     GroupGenEnv, action_target_to_type,
 };
 use growformer::dimension::language::DEFAULT_BRIDGE_DIM;
+use growformer::clifford::GroupRotor;
 use growformer::dimension::group_gen::{AlgebraicCodebook, HopfCompositionTable};
 use growformer::dimension::paramecium::InfraciliaryLattice;
 use growformer::spectral::TokenDictionary;
@@ -1527,6 +1528,7 @@ fn train_brain(
         pairs: &'a [(&'a [f32], &'a str)],
         raw_vecs: &'a [&'a [f32]],
         adapter: GroupAdapter,
+        rotor: GroupRotor,
         novelty: Vec<f32>,
         seed: u64,
         dictionary: TokenDictionary,
@@ -1564,6 +1566,7 @@ fn train_brain(
                         pairs: p.as_slice(),
                         raw_vecs: raw,
                         adapter: adapter.clone(),
+                        rotor: GroupRotor::new(),
                         novelty: nov.clone(),
                         seed: 100 + gidx as u64 * 1000 + r as u64,
                         dictionary: dict.clone(),
@@ -1599,6 +1602,7 @@ fn train_brain(
                         pairs: p.as_slice(),
                         raw_vecs: raw,
                         adapter: adapter.clone(),
+                        rotor: GroupRotor::new(),
                         novelty: nov.clone(),
                         seed: 200 + gidx as u64 * 1000 + r as u64,
                         dictionary: dict.clone(),
@@ -1628,10 +1632,11 @@ fn train_brain(
         }
     }
 
-    let results: Vec<(usize, &str, usize, f32, GroupGenEnv, GroupAdapter)> = std::thread::scope(|s| {
+    let results: Vec<(usize, &str, usize, f32, GroupGenEnv, GroupAdapter, GroupRotor)> = std::thread::scope(|s| {
         let handles: Vec<_> = tasks.iter().map(|task| {
             s.spawn(move || {
                 let mut adapter = task.adapter.clone();
+                let mut rotor = task.rotor.clone();
                 let mut task_rng = StdRng::seed_from_u64(task.seed);
                 let ov = task.overrides.as_ref();
                 let default_ov = growformer::dimension::group_gen::GenEnvOverrides::default();
@@ -1725,6 +1730,12 @@ fn train_brain(
                                 let scale = (l_plus - l_minus) / (2.0 * eps);
                                 let grad: Vec<f32> = perturb.iter().map(|&p| scale / p).collect();
                                 adapter.train_step(raw, &grad, adapter_lr);
+                            }
+
+                            // Train Clifford rotor via SPSA on the same sample
+                            if epoch >= adapter_warmup && !rotor.frozen {
+                                let cond_dim = cond.len();
+                                rotor.train_step_spsa(raw, cond_dim, |c| env.eval_loss(c, task.pairs[i].1), adapter_lr);
                             }
                         }
                     }
@@ -1855,38 +1866,41 @@ fn train_brain(
                 let final_loss = eval_loss / task.pairs.len().max(1) as f32;
                 env.freeze();
                 adapter.freeze();
-                println!("    [{} g{} r{}] frozen: {} neurons, {} synapses, eval_loss={:.4}, adapter_params={}",
+                rotor.freeze();
+                println!("    [{} g{} r{}] frozen: {} neurons, {} synapses, eval_loss={:.4}, adapter_params={}, rotor_params={}",
                     task.kind, task.gidx, task.replica,
-                    env.total_neurons(), env.total_synapses(), final_loss, adapter.param_count());
-                (task.gidx, task.kind, task.replica, final_loss, env, adapter)
+                    env.total_neurons(), env.total_synapses(), final_loss,
+                    adapter.param_count(), GroupRotor::param_count());
+                (task.gidx, task.kind, task.replica, final_loss, env, adapter, rotor)
             })
         }).collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
     // Select best replica per (group, kind) by lowest eval loss
-    let mut best: HashMap<(usize, &str), (f32, GroupGenEnv, GroupAdapter)> = HashMap::new();
-    for (gidx, kind, replica, loss, env, adapter) in results {
+    let mut best: HashMap<(usize, &str), (f32, GroupGenEnv, GroupAdapter, GroupRotor)> = HashMap::new();
+    for (gidx, kind, replica, loss, env, adapter, rotor) in results {
         let key = (gidx, kind);
         let is_better = match best.get(&key) {
-            Some((prev_loss, _, _)) => loss < *prev_loss,
+            Some((prev_loss, _, _, _)) => loss < *prev_loss,
             None => true,
         };
         if is_better {
             if k_replicas > 1 {
                 println!("    [{} g{}] best replica so far: r{} loss={:.4}", kind, gidx, replica, loss);
             }
-            best.insert(key, (loss, env, adapter));
+            best.insert(key, (loss, env, adapter, rotor));
         }
     }
 
-    for ((gidx, kind), (_loss, env, adapter)) in best {
+    for ((gidx, kind), (_loss, env, adapter, rotor)) in best {
         match kind {
             "gen" => { svc.dm.group_gen_envs.insert(gidx, env); }
             "code" => { svc.dm.group_code_envs.insert(gidx, env); }
             _ => {}
         }
         svc.dm.group_adapters.insert(gidx, adapter);
+        svc.dm.group_rotors.insert(gidx, rotor);
     }
 
     // ---------------------------------------------------------------
