@@ -111,6 +111,11 @@ impl NeuralEnvironment {
         self.next_neuron_id = self.neurons.keys().max().copied().unwrap_or(0).wrapping_add(1);
     }
 
+    /// Number of neurons in the input layer (first layer), or `None` if no layers built.
+    pub fn input_layer_size(&self) -> Option<usize> {
+        self.layers.first().map(|l| l.len())
+    }
+
     pub fn build_layers(&mut self, layer_sizes: &[usize], rng: &mut impl Rng) {
         self.layers.clear();
         self.layer_of.clear();

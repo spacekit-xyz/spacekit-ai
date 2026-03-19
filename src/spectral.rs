@@ -2212,20 +2212,107 @@ pub fn from_gray(g: u16) -> u16 {
     n
 }
 
-/// Semantic cluster tag for a token: first character category.
-/// Used to group tokens so semantically related tokens get adjacent IDs.
-fn semantic_cluster(token: &str) -> u8 {
-    let ch = token.chars().next().unwrap_or(' ');
-    if ch.is_ascii_punctuation() {
-        0
-    } else if ch.is_ascii_digit() {
-        1
-    } else if ch.is_ascii_uppercase() {
-        2
-    } else {
-        // lowercase: cluster by first letter (a-z → 3..28)
-        3 + (ch as u8).wrapping_sub(b'a').min(25)
+/// Build co-occurrence vectors from tokenized texts, then return a permutation
+/// that orders tokens so semantically related ones get adjacent positions.
+///
+/// Each token gets a vector of how often it co-occurs with every other token
+/// within a context window. Cosine similarity on these vectors captures
+/// distributional semantics (words in similar contexts are similar).
+/// A greedy nearest-neighbor chain then arranges tokens so similar ones
+/// are adjacent — meaning 1-bit Gray code errors land on related words.
+fn semantic_order(token_list: &[String], texts: &[&str], window: usize) -> Vec<usize> {
+    let n = token_list.len();
+    if n <= 2 { return (0..n).collect(); }
+
+    let tok_idx: HashMap<&str, usize> = token_list.iter().enumerate()
+        .map(|(i, t)| (t.as_str(), i)).collect();
+
+    // Build co-occurrence matrix (sparse, stored as dense for simplicity with n <= 2048)
+    let mut cooc = vec![vec![0u32; n]; n];
+    for text in texts {
+        let tokens = tokenize(text);
+        let ids: Vec<usize> = tokens.iter()
+            .filter_map(|t| tok_idx.get(t.as_str()).copied())
+            .collect();
+        for (i, &a) in ids.iter().enumerate() {
+            let end = (i + window + 1).min(ids.len());
+            for &b in &ids[i + 1..end] {
+                if a != b {
+                    cooc[a][b] += 1;
+                    cooc[b][a] += 1;
+                }
+            }
+        }
     }
+
+    // Compute norms for cosine similarity
+    let norms: Vec<f32> = cooc.iter()
+        .map(|row| {
+            let s: f64 = row.iter().map(|&v| (v as f64) * (v as f64)).sum();
+            s.sqrt() as f32
+        })
+        .collect();
+
+    // Cosine similarity between two tokens
+    let cosine = |a: usize, b: usize| -> f32 {
+        if norms[a] < 1e-9 || norms[b] < 1e-9 { return 0.0; }
+        let dot: f64 = cooc[a].iter().zip(cooc[b].iter())
+            .map(|(&x, &y)| x as f64 * y as f64).sum();
+        (dot / (norms[a] as f64 * norms[b] as f64)) as f32
+    };
+
+    // Greedy nearest-neighbor chain: start from most connected token,
+    // always pick the most similar unvisited token next.
+    let mut visited = vec![false; n];
+    let mut order = Vec::with_capacity(n);
+
+    // Punctuation and special tokens go first (stable prefix)
+    let mut punct_ids: Vec<usize> = (0..n)
+        .filter(|&i| {
+            let ch = token_list[i].chars().next().unwrap_or(' ');
+            ch.is_ascii_punctuation() || token_list[i].chars().all(|c| c.is_ascii_digit())
+        })
+        .collect();
+    punct_ids.sort_by(|&a, &b| token_list[a].cmp(&token_list[b]));
+    for &pid in &punct_ids {
+        order.push(pid);
+        visited[pid] = true;
+    }
+
+    // Start chain from the token with highest total co-occurrence
+    let start = (0..n)
+        .filter(|i| !visited[*i])
+        .max_by_key(|&i| norms[i] as u64)
+        .unwrap_or(0);
+    if !visited[start] {
+        order.push(start);
+        visited[start] = true;
+    }
+
+    // Greedy walk
+    while order.len() < n {
+        let last = *order.last().unwrap();
+        let mut best_idx = usize::MAX;
+        let mut best_sim = -1.0f32;
+        for j in 0..n {
+            if visited[j] { continue; }
+            let sim = cosine(last, j);
+            if sim > best_sim {
+                best_sim = sim;
+                best_idx = j;
+            }
+        }
+        if best_idx == usize::MAX { break; }
+        order.push(best_idx);
+        visited[best_idx] = true;
+    }
+
+    // Pick up any remaining (disconnected tokens with zero co-occurrence)
+    for i in 0..n {
+        if !visited[i] { order.push(i); }
+    }
+
+    order
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2238,9 +2325,11 @@ pub struct TokenDictionary {
 
 impl TokenDictionary {
     /// Build from a corpus. Keeps the `max_size` most frequent tokens.
-    /// ID 0 is reserved for <EOS>. Tokens are sorted into semantic clusters
+    /// ID 0 is reserved for <EOS>. Tokens are ordered by distributional
+    /// semantics (co-occurrence vectors + greedy nearest-neighbor chain)
     /// so similar tokens get adjacent IDs, then Gray coding ensures adjacent
-    /// IDs differ by only 1 bit.
+    /// IDs differ by only 1 bit — making generation errors land on
+    /// semantically related words instead of garbage.
     pub fn build(texts: &[&str], max_size: usize) -> Self {
         let mut freq: HashMap<String, usize> = HashMap::new();
         for text in texts {
@@ -2249,21 +2338,19 @@ impl TokenDictionary {
             }
         }
         let mut entries: Vec<(String, usize)> = freq.into_iter().collect();
-        // Sort by semantic cluster first, then by frequency within cluster.
-        // This groups related tokens (punctuation, digits, uppercase, lowercase
-        // by first letter) into contiguous ID ranges.
-        entries.sort_by(|a, b| {
-            let ca = semantic_cluster(&a.0);
-            let cb = semantic_cluster(&b.0);
-            ca.cmp(&cb).then(b.1.cmp(&a.1))
-        });
+        entries.sort_by(|a, b| b.1.cmp(&a.1));
         entries.truncate(max_size.saturating_sub(1));
+
+        // Build semantic ordering from co-occurrence in the corpus
+        let token_list: Vec<String> = entries.iter().map(|(t, _)| t.clone()).collect();
+        let perm = semantic_order(&token_list, texts, 5);
 
         let dict_size = entries.len() + 1; // +1 for EOS
         let mut tokens = Vec::with_capacity(dict_size);
         let mut lookup = HashMap::new();
         tokens.push("<EOS>".to_string());
-        for (token, _) in entries {
+        for &idx in &perm {
+            let token = entries[idx].0.clone();
             let id = tokens.len() as u16;
             lookup.insert(token.clone(), id);
             tokens.push(token);

@@ -85,11 +85,19 @@ impl ToolRegistry {
 
     /// Match a prompt against registered tool triggers.
     /// Returns the best-matching tool and extracted arguments, or None.
+    /// Calculator requires a numeric signal (digit or arithmetic operator) to avoid
+    /// false positives on phrases like "what is the factory method pattern".
     pub fn match_tool(&self, text: &str) -> Option<ToolCallInfo> {
         let lower = text.to_ascii_lowercase();
+        let has_numeric_signal = lower.chars().any(|c| c.is_ascii_digit())
+            || lower.contains('*') || lower.contains('+') || lower.contains('/')
+            || lower.contains(" minus ") || lower.contains(" plus ") || lower.contains(" times ");
         let mut best: Option<(usize, &ToolSchema)> = None;
 
         for schema in &self.tools {
+            if schema.name == "calculator" && !has_numeric_signal {
+                continue;
+            }
             let hits = schema.triggers.iter()
                 .filter(|t| lower.contains(t.as_str()))
                 .count();

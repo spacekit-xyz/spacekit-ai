@@ -47,6 +47,10 @@ pub struct GenEnvOverrides {
     pub energy_budget: Option<f32>,
     pub ephaptic_alpha: Option<f32>,
     pub ephaptic_strength: Option<f32>,
+    /// Override conditioning dimension (bridge output). Defaults to GEN_COND_DIM (64).
+    /// Set to 128 for expanded context capacity on new training runs.
+    #[serde(default)]
+    pub cond_dim: Option<usize>,
 }
 
 /// Compute bits needed for a dictionary of the given size.
@@ -68,6 +72,64 @@ fn bits_for_count(n: usize) -> usize {
     (usize::BITS - (n - 1).leading_zeros()) as usize
 }
 
+/// Find the last bit position in the output where the network is decisive.
+/// Scans the output in chunks — when a chunk's average decisiveness drops
+/// below threshold, that's the content boundary (bits past this point are
+/// noise from untrained trailing archetype positions).
+fn output_content_boundary(output: &[f32]) -> usize {
+    if output.is_empty() { return 0; }
+    let chunk_size = 8;
+    let threshold = 0.06;
+    let mut last_decisive_end = 0;
+    let mut consecutive_weak = 0;
+
+    for start in (0..output.len()).step_by(chunk_size) {
+        let end = (start + chunk_size).min(output.len());
+        let chunk = &output[start..end];
+        let avg_decisiveness: f32 = chunk.iter()
+            .map(|&v| (v - 0.5).abs())
+            .sum::<f32>() / chunk.len() as f32;
+
+        if avg_decisiveness > threshold {
+            last_decisive_end = end;
+            consecutive_weak = 0;
+        } else {
+            consecutive_weak += 1;
+            if consecutive_weak >= 3 {
+                break;
+            }
+        }
+    }
+    last_decisive_end
+}
+
+/// Truncate text at the last complete sentence boundary within approximately
+/// `max_tokens` worth of content. A sentence boundary is a `.` `!` or `?`
+/// followed by a space. This prevents trailing tokens from distant archetype
+/// cluster members from contaminating the output.
+fn truncate_at_sentence(text: &str, max_tokens: usize) -> String {
+    let approx_char_limit = max_tokens * 6;
+    if text.len() <= approx_char_limit {
+        return text.to_string();
+    }
+    let search_region = &text[..text.len().min(approx_char_limit + 100)];
+    let mut last_boundary = 0;
+    for (i, _) in search_region.match_indices(". ") {
+        if i <= approx_char_limit { last_boundary = i + 1; }
+    }
+    for (i, _) in search_region.match_indices("! ") {
+        if i <= approx_char_limit && i + 1 > last_boundary { last_boundary = i + 1; }
+    }
+    for (i, _) in search_region.match_indices("? ") {
+        if i <= approx_char_limit && i + 1 > last_boundary { last_boundary = i + 1; }
+    }
+    if last_boundary > 0 {
+        text[..last_boundary].trim().to_string()
+    } else {
+        text.to_string()
+    }
+}
+
 /// A variable position in a response archetype.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ArchetypeSlot {
@@ -82,6 +144,11 @@ pub struct ResponseArchetype {
     pub fixed: Vec<(usize, u16)>,
     pub slots: Vec<ArchetypeSlot>,
     pub length: usize,
+    /// Median content length of training samples in this archetype's cluster.
+    /// Used to truncate decoded output and avoid trailing tokens from longer
+    /// samples that share the same archetype.
+    #[serde(default)]
+    pub median_content_length: usize,
 }
 
 /// Factored representation of the response space for a group.
@@ -482,19 +549,55 @@ impl AlgebraicCodebook {
             }
         }
 
+        // Measure per-slot decisiveness: how far the network output bits are
+        // from 0.5. Decisive bits = the network was trained on this position.
+        // Indecisive bits = the position is past the content boundary for the
+        // matched sample (noise from distant samples in the same cluster).
+        let mut last_decisive_pos: usize = 0;
+        let mut consecutive_indecisive: usize = 0;
         let mut offset = 0;
         for (slot_idx, slot) in arch.slots.iter().enumerate() {
             let sbits = self.slot_bit_widths.get(slot_idx).copied().unwrap_or(0);
             let end = (offset + sbits).min(slot_bits.len());
             let s_bits = if offset < slot_bits.len() { &slot_bits[offset..end] } else { &[] as &[f32] };
+
+            let decisiveness: f32 = if s_bits.is_empty() { 0.0 } else {
+                s_bits.iter().map(|&v| (v - 0.5).abs()).sum::<f32>() / s_bits.len() as f32
+            };
+
             let val = Self::soft_decode_index(s_bits, slot.vocab.len());
             if slot.position < tokens.len() && val < slot.vocab.len() {
                 tokens[slot.position] = slot.vocab[val];
             }
+
+            if decisiveness > 0.05 {
+                last_decisive_pos = slot.position + 1;
+                consecutive_indecisive = 0;
+            } else {
+                consecutive_indecisive += 1;
+            }
             offset += sbits;
         }
 
-        tokens.into_iter().take_while(|&t| t != 0).collect()
+        // Content boundary: if we have decisive slots, truncate after the
+        // last one (plus a small margin for trailing fixed tokens like periods).
+        // If the archetype stores median_content_length, use that as a cap.
+        let slot_bound = if last_decisive_pos > 0 && consecutive_indecisive >= 2 {
+            last_decisive_pos + 3
+        } else {
+            arch.length
+        };
+        let median_bound = if arch.median_content_length > 0 {
+            arch.median_content_length + 2
+        } else {
+            arch.length
+        };
+        let truncate_at = slot_bound.min(median_bound).min(arch.length);
+
+        tokens.into_iter()
+            .take(truncate_at)
+            .take_while(|&t| t != 0)
+            .collect()
     }
 
     /// Build a syntax-aware codebook for code groups. Instead of pure positional
@@ -622,15 +725,19 @@ impl AlgebraicCodebook {
             }
         }
 
-        ResponseArchetype { fixed, slots, length }
+        ResponseArchetype { fixed, slots, length, median_content_length: length }
     }
 
     /// Extract an archetype from a cluster of aligned token sequences.
+    /// Uses the **median** sample length so trailing content from the longest
+    /// samples doesn't pollute the archetype with irrelevant fixed tokens.
     fn extract_archetype(seqs: &[&Vec<u16>], max_len: usize) -> ResponseArchetype {
         let n = seqs.len().max(1);
-        let length = seqs.iter().map(|s| {
+        let mut lengths: Vec<usize> = seqs.iter().map(|s| {
             s.iter().rposition(|&t| t != 0).map(|p| p + 1).unwrap_or(0)
-        }).max().unwrap_or(0).min(max_len);
+        }).collect();
+        lengths.sort();
+        let length = lengths[lengths.len() / 2].min(max_len);
 
         let mut fixed = Vec::new();
         let mut slots = Vec::new();
@@ -656,7 +763,8 @@ impl AlgebraicCodebook {
             }
         }
 
-        ResponseArchetype { fixed, slots, length }
+        let median_content_length = length;
+        ResponseArchetype { fixed, slots, length, median_content_length }
     }
 }
 
@@ -1101,6 +1209,7 @@ impl GroupGenEnv {
         let max_tok = ov.max_tokens.unwrap_or(MAX_TOKENS);
         let hidden = ov.hidden.unwrap_or(GEN_HIDDEN);
         let k = ov.k.unwrap_or(GEN_K);
+        let cond_dim = ov.cond_dim.unwrap_or(GEN_COND_DIM);
         let bits_per_token = bits_for_dict(dictionary.len());
         let parity_bits = hamming_parity_bits(bits_per_token);
         let coded_bits_per_token = bits_per_token + parity_bits;
@@ -1112,7 +1221,7 @@ impl GroupGenEnv {
         if let Some(a)  = ov.ephaptic_alpha { config.ephaptic_field_alpha = a; }
         if let Some(s)  = ov.ephaptic_strength { config.ephaptic_field_strength = s; }
         let mut env = NeuralEnvironment::new(config);
-        env.build_layers(&[GEN_COND_DIM, hidden, hidden, output_dim], rng);
+        env.build_layers(&[cond_dim, hidden, hidden, output_dim], rng);
         Self {
             env,
             dictionary,
@@ -1143,6 +1252,7 @@ impl GroupGenEnv {
     ) -> Self {
         let hidden = ov.hidden.unwrap_or(GEN_HIDDEN);
         let k = ov.k.unwrap_or(GEN_K);
+        let cond_dim = ov.cond_dim.unwrap_or(GEN_COND_DIM);
         let output_dim = if codebook.has_prototypes() {
             codebook.slot_only_bits
         } else {
@@ -1157,7 +1267,7 @@ impl GroupGenEnv {
         if let Some(a)  = ov.ephaptic_alpha { config.ephaptic_field_alpha = a; }
         if let Some(s)  = ov.ephaptic_strength { config.ephaptic_field_strength = s; }
         let mut env = NeuralEnvironment::new(config);
-        env.build_layers(&[GEN_COND_DIM, hidden, hidden, output_dim], rng);
+        env.build_layers(&[cond_dim, hidden, hidden, output_dim], rng);
         Self {
             env,
             dictionary,
@@ -1270,8 +1380,24 @@ impl GroupGenEnv {
         if let Some(ref cb) = self.codebook {
             if cb.has_prototypes() {
                 let arch_idx = self.last_selected_archetype.unwrap_or(0);
+                let arch = &cb.archetypes[arch_idx];
                 let ids = cb.decode_with_archetype(arch_idx, output);
-                return self.dictionary.decode(&ids);
+                let text = self.dictionary.decode(&ids);
+
+                // Distance-based truncation: archetype clusters can include
+                // trailing fixed tokens from longer, more distant samples.
+                // The median_content_length (set during training) is the
+                // primary bound. For older brains without it, fall back to
+                // sentence-boundary truncation at 80% of archetype length.
+                let bound = if arch.median_content_length > 0 {
+                    arch.median_content_length + 2
+                } else {
+                    (arch.length * 4) / 5
+                };
+                if ids.len() > bound {
+                    return truncate_at_sentence(&text, bound);
+                }
+                return text;
             }
             let ids = cb.decode(output);
             return self.dictionary.decode(&ids);
@@ -1342,8 +1468,9 @@ impl GroupGenEnv {
             return 0.0;
         }
 
-        let mut input = vec![0.0f32; GEN_COND_DIM];
-        for (i, v) in cond.iter().enumerate().take(GEN_COND_DIM) {
+        let input_dim = self.env.input_layer_size().unwrap_or(GEN_COND_DIM);
+        let mut input = vec![0.0f32; input_dim];
+        for (i, v) in cond.iter().enumerate().take(input_dim) {
             input[i] = *v;
         }
 
@@ -1379,8 +1506,9 @@ impl GroupGenEnv {
     ///
     /// Returns (generated_text, confidence).
     pub fn generate(&mut self, cond: &[f32], _max_len: usize, _temperature: f32) -> (String, f32) {
-        let mut input = vec![0.0f32; GEN_COND_DIM];
-        for (i, v) in cond.iter().enumerate().take(GEN_COND_DIM) {
+        let input_dim = self.env.input_layer_size().unwrap_or(GEN_COND_DIM);
+        let mut input = vec![0.0f32; input_dim];
+        for (i, v) in cond.iter().enumerate().take(input_dim) {
             input[i] = *v;
         }
 
@@ -1448,8 +1576,9 @@ impl GroupGenEnv {
             return 0.0;
         }
 
-        let mut input = vec![0.0f32; GEN_COND_DIM];
-        for (i, v) in cond.iter().enumerate().take(GEN_COND_DIM) {
+        let input_dim = self.env.input_layer_size().unwrap_or(GEN_COND_DIM);
+        let mut input = vec![0.0f32; input_dim];
+        for (i, v) in cond.iter().enumerate().take(input_dim) {
             input[i] = *v;
         }
 

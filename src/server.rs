@@ -166,6 +166,7 @@ async fn main() {
         .route("/v1/acceptance", get(acceptance))
         .route("/v1/mode", post(set_mode))
         .route("/v1/brain/save", post(brain_save))
+        .route("/v1/feedback", post(feedback))
         .layer(cors)
         .with_state(state.clone());
 
@@ -228,6 +229,17 @@ async fn brain_save(
     svc.set_active_brain(&prev_active);
     std::fs::write(&path, &bytes).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(json!({ "ok": true, "path": path, "bytes": bytes.len() })))
+}
+
+async fn feedback(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<Feedback>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    authorize(&headers, &state)?;
+    let mut svc = state.service.lock().await;
+    svc.submit_feedback(&req).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn acceptance(

@@ -100,15 +100,31 @@ impl ActionClassifier {
             }
             *hj = acc.tanh();
         }
-        let mut logits = vec![0.0f32; NUM_ACTION_TYPES];
+        let out_dim = self.b2.len().max(NUM_ACTION_TYPES);
+        let mut logits = vec![0.0f32; out_dim];
         for (o, lo) in logits.iter_mut().enumerate() {
-            let mut acc = self.b2[o];
-            for (j, &hj) in h.iter().enumerate() {
-                acc += self.w2[o][j] * hj;
+            let bias = self.b2.get(o).copied().unwrap_or(0.0);
+            let mut acc = bias;
+            if let Some(row) = self.w2.get(o) {
+                for (j, &hj) in h.iter().enumerate() {
+                    if j < row.len() {
+                        acc += row[j] * hj;
+                    }
+                }
             }
             *lo = acc;
         }
         (h, logits)
+    }
+
+    /// Expand output layer if a checkpoint was saved with fewer action types.
+    pub fn ensure_output_dim(&mut self) {
+        while self.w2.len() < NUM_ACTION_TYPES {
+            self.w2.push(vec![0.0; self.hidden_dim]);
+        }
+        while self.b2.len() < NUM_ACTION_TYPES {
+            self.b2.push(0.0);
+        }
     }
 
     pub fn predict(&self, x: &[f32]) -> ActionType {
@@ -181,7 +197,8 @@ impl ActionClassifier {
 pub fn action_target_to_type(target: &str) -> ActionType {
     match target {
         "support" => ActionType::SupportTicket,
-        "coding" => ActionType::CodingAssist,
+        "coding" | "patterns" => ActionType::CodingAssist,
+        "reasoning" => ActionType::GeneralAssist,
         "safety" => ActionType::Fallback,
         _ => ActionType::GeneralAssist,
     }

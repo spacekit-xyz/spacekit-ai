@@ -37,7 +37,7 @@ Growformer is a **dynamic graph with dynamic structure**, where:
 Instead of forcing intelligence into a rigid architecture, Growformer simulates an **ecosystem** of interacting forces.  
 Learning is not a single update rule — it is the emergent behavior of six coupled systems:
 
-1. **Weight dynamics** (backprop)  
+1. **Weight dynamics** (local error-driven plasticity)  
 2. **Geometry** (neurons drift toward correlated partners)  
 3. **Timing** (STDP)  
 4. **Metabolic cost** (energy‑driven pruning)  
@@ -55,24 +55,29 @@ one where intelligence is not engineered, but **grown**.
 
 All generation outputs are **concrete model outputs** produced by a single forward pass through the Growformer NeuralEnvironment substrate. No transformer, no external model, no template system. Each output is the decoded activation of structural engram traces formed during training.
 
-### Brain Training (436+ samples, 2 groups, algebraic codebook + Hopf composition + E8 lattice)
+### Brain Training (357 samples, 2 groups, semantic dictionary + algebraic codebook + Hopf composition + E8 lattice)
 
 | Component | Metric | Value | Notes |
 |-----------|--------|-------|-------|
 | LearnedRouter | accuracy | 94.2% | 500 epochs, balanced oversampling |
 | ActionClassifier | accuracy | 89.7% | 500 epochs |
-| gen g0 (support) | eval loss | **0.0015** | 1234 neurons, early stop at 764/1950 epochs |
-| gen g1 (coding/general) | eval loss | **0.0325** | 1386 neurons, early stop at 838/3900 epochs |
-| code g1 (syntax-aware) | eval loss | **0.0021** | 1363 neurons, early stop at 651/1950 epochs |
+| gen g0 (support) | eval loss | **0.0015** | 1229 neurons, early stop at 764/1950 epochs |
+| gen g1 (coding/patterns) | eval loss | **0.0054** | 1244 neurons, 206K synapses, early stop 688/1950 epochs |
+| code g1 (syntax-aware) | eval loss | **0.0021** | 1375 neurons, 249K synapses, early stop 651/1950 |
+| Brain size (full) | | **113 MB** | 2 groups, router, classifier, gen + code envs |
+| Brain size (micro) | | **18 MB** | Deployable agent: browser, mobile, IoT, edge |
+| Tool detection | | **4 built-in tools** | calculator, code_runner, file_reader, web_search |
 
 ### Concrete Generation Examples (single forward pass)
 
 | Prompt | Output | Type |
 |--------|--------|------|
-| "help me reset my password" | "Password reset links expire after 30 minutes for security purposes. I'll send a fresh reset link to your registered email right away." | gen (conf=0.94) |
-| "implement binary search in Python" | `def binary_search(arr,target):lo,hi=0,len(arr)-1 while lo<=hi:mid=(lo+hi)//2 if arr[mid]==target:return mid elif arr[mid]<target:lo=mid+1 else:hi=mid-1 return-1` | code |
-| "explain the observer pattern" | "Observer defines a one-to-many dependency where a subject notifies all registered observers whenever its state changes, without knowing their concrete types." | gen (conf=0.66) |
+| "help me reset my password" | "Password reset links expire after 30 minutes for security purposes. I'll send a fresh reset link to your registered email right away." | gen (conf=0.97) |
+| "explain the observer pattern" | "Observer defines a one-to-many dependency where a subject notifies all registered observers whenever its state changes, without knowing their concrete types. This decouples the event source from its consumers, making it easy to add or remove listeners." | gen (conf=0.92) |
 | "my account is locked after too many failed attempts" | "Your account has been temporarily locked as a security precaution. I can unlock it for you now once we verify your identity through a few quick questions." | gen (conf=0.93) |
+| "who are you" | "I am Growformer, a Growformer Agent by swtch.ai. I'm a self-organizing neural substrate that learns structure, not weights — my knowledge is encoded as physical neural structure grown, pruned, consolidated, and frozen during training." | gen (conf=1.00) |
+| "calculate 347 * 892" | [tool: calculator] 309324 → "The result of 347 × 892 is 309,324." | tool call |
+| "implement binary search in Python" | `def binary_search(arr,target):lo,hi=0,len(arr)-1 while lo<=hi:mid=(lo+hi)//2 if arr[mid]==target:return mid elif arr[mid]<target:lo=mid+1 else:hi=mid-1 return-1` | code (correct) |
 
 ### Continual Learning (Split MNIST, zero forgetting)
 
@@ -127,6 +132,38 @@ A mathematically optimal quantization hierarchy using the two provably densest s
 
 REPL: `/index <path>` to index a project (auto-loads git history when `.git` found), `/project [file]` to query related entities. See Whitepaper §5.5 and ARCHITECTURE.md for details.
 
+### Semantic Token Dictionary (Implemented)
+
+The `TokenDictionary` orders vocabulary tokens using **distributional semantics** rather than alphabetical clustering:
+
+1. **Co-occurrence vectors** — for each token, a vector of co-occurrence counts with every other token within a 5-token context window across the training corpus
+2. **Greedy nearest-neighbor chain** — tokens are arranged so the most semantically similar token is always adjacent (cosine similarity on co-occurrence vectors)
+3. **Gray coding** — adjacent tokens differ by exactly 1 bit
+
+This means a 1-bit error in the algebraic generation lands on a **semantically related word** instead of garbage. "build" is adjacent to "construct" and "create", not "binary" (which happens to share a first letter). The result: Observer pattern generation went from conf 0.57 (wrong pattern, garbled) to **conf 0.92** (correct, fully legible) after switching from first-character clustering to semantic ordering.
+
+### Tool-Use Agent (Implemented)
+
+The REPL is a working **text-based agent** that routes between conversation (g0) and inline tool execution:
+
+| Tool | Trigger | Execution |
+|------|---------|-----------|
+| `calculator` | "calculate 347 * 892" | Recursive-descent arithmetic parser |
+| `file_reader` | "read file src/main.rs" | `std::fs::read_to_string` with 50-line preview |
+| `code_runner` | "run this python: print(sum(range(100)))" | `std::process::Command` with stdout capture |
+| `web_search` | "search for rust async patterns" | Stub (returns query acknowledgment) |
+
+Tool results are fed back through `generation_with_tool_result` for a g0-quality conversational wrapper. The `ToolRegistry` supports custom tool registration for domain-specific agents.
+
+### Base Agent + Custom Training (18 MB deployable brain)
+
+The micro-brain at **18 MB** is small enough for browser (WASM), mobile, IoT, and edge deployment. The architecture supports a **base-agent-plus-augmentation** model:
+
+1. **Ship the base brain** — g0 conversation, tool routing, identity (18 MB)
+2. **Users train domain groups** on their own data — the structural isolation guarantees the base remains pristine
+3. **Zero forgetting** — new groups grow alongside frozen base engrams; user training cannot corrupt base capabilities
+4. **Export the augmented brain** — compact because only new structure is added
+
 ---
 
 ## **Origin**
@@ -168,13 +205,14 @@ growformer/
     ├── types.rs             — Vec3, Synapse, NeuronGroup, EnvironmentConfig
     ├── neuron.rs            — Neuron struct with all 6 dimensions
     ├── environment.rs       — NeuralEnvironment: forward pass, backprop, training
-    ├── spectral.rs          — TokenDictionary for binary token prediction
+    ├── spectral.rs          — TokenDictionary (semantic co-occurrence ordering + Gray coding)
     ├── service.rs           — LanguageService: high-level API for all operations
     ├── dimension/
     │   ├── group_gen.rs     — Per-group generation (GroupGenEnv, binary token prediction)
     │   ├── manager.rs       — DimensionManager: routing, classification, generation
     │   ├── language.rs      — Language encoder bridge (all-MiniLM-L6-v2 → 64d)
-    │   └── action.rs        — Intent-to-action mapping
+    │   ├── action.rs        — Intent-to-action mapping
+    │   └── tool.rs          — Tool use: schema, registry, matching for external tool invocation
     └── systems/
         ├── metabolic.rs     — System 1: Cost-driven synapse pruning
         ├── growth.rs        — System 2: Proximity-based synapse formation

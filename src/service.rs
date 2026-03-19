@@ -199,6 +199,16 @@ impl OceanProfile {
 }
 
 // ---------------------------------------------------------------------------
+// Continuum: online learning constants
+// ---------------------------------------------------------------------------
+
+/// Number of training steps per feedback event (small to avoid forgetting).
+const CONTINUUM_STEPS: usize = 3;
+
+/// Auto-checkpoint interval: save brain to disk every N feedback events.
+const CONTINUUM_CHECKPOINT_INTERVAL: u64 = 50;
+
+// ---------------------------------------------------------------------------
 // Conversation Context (multi-turn)
 // ---------------------------------------------------------------------------
 
@@ -219,11 +229,13 @@ pub enum TurnRole {
 pub struct ConversationContext {
     pub history: Vec<ConversationTurn>,
     pub max_turns: usize,
+    /// How many recent turns to include in the conditioning prompt for inference.
+    pub context_window_size: usize,
 }
 
 impl Default for ConversationContext {
     fn default() -> Self {
-        Self { history: Vec::new(), max_turns: 20 }
+        Self { history: Vec::new(), max_turns: 50, context_window_size: 8 }
     }
 }
 
@@ -330,6 +342,8 @@ pub struct LanguageService {
     pub project_model: ProjectModel,
     /// Tool registry — schemas for external tool invocation.
     pub tool_registry: ToolRegistry,
+    /// Continuum: count of feedback events since startup (for auto-checkpoint).
+    continuum_feedback_count: u64,
 }
 
 impl LanguageService {
@@ -355,6 +369,7 @@ impl LanguageService {
             conversation: ConversationContext::default(),
             project_model: ProjectModel::new(),
             tool_registry: ToolRegistry::with_builtins(),
+            continuum_feedback_count: 0,
         })
     }
 
@@ -379,6 +394,7 @@ impl LanguageService {
             conversation: ConversationContext::default(),
             project_model: ProjectModel::new(),
             tool_registry: ToolRegistry::with_builtins(),
+            continuum_feedback_count: 0,
         })
     }
 
@@ -612,7 +628,7 @@ impl LanguageService {
         // The EMA smoother in the bridge already blends temporal context,
         // but explicit history prepending improves semantic grounding.
         let context_prompt = if self.conversation.turn_count() > 1 {
-            let ctx = self.conversation.context_window(3);
+            let ctx = self.conversation.context_window(self.conversation.context_window_size);
             format!("{} | user: {}", ctx, user_text)
         } else {
             user_text.to_string()
@@ -997,22 +1013,80 @@ impl LanguageService {
         });
     }
 
-    /// Consume feedback for the last turn. Training step not yet implemented; for now only clears last_turn when outcome indicates learning.
+    /// Consume feedback for the last turn. Runs online training steps when
+    /// outcome is Reject or Correct, per CONTINUUM.md spec.
     pub fn submit_feedback(&mut self, feedback: &Feedback) -> Result<(), String> {
-        let _ = self.last_turn.take();
+        let turn = match self.last_turn.take() {
+            Some(t) => t,
+            None => return Ok(()),
+        };
         match feedback.outcome {
-            FeedbackOutcome::Accept => {}
+            FeedbackOutcome::Accept => {
+                self.continuum_feedback_count += 1;
+            }
             FeedbackOutcome::Reject | FeedbackOutcome::Correct => {
-                // TODO(CONTINUUM): run one or a few training steps (router / head) with small LR; see docs/CONTINUUM.md
+                self.continuum_feedback_count += 1;
+                let dm = self.active_dm_mut();
+
+                let encoded = dm.language_runtime.encode_and_bridge(&turn.message).ok();
+                if let Some((_, ref bridged)) = encoded {
+                    let embedding = &bridged.routed_vector;
+
+                    // 1. Router correction: reinforce or correct group routing
+                    if let Some(group_id) = turn.group_id {
+                        let mut rng = StdRng::from_entropy();
+                        if let Some(ref mut router) = dm.observer.learned_router {
+                            for _ in 0..CONTINUUM_STEPS {
+                                router.train_step(embedding, group_id, &mut rng);
+                            }
+                        }
+                    }
+
+                    // 2. Generation head correction: if correction text provided, train on it
+                    if let Some(ref correction) = feedback.correction {
+                        if let Some(group_id) = turn.group_id {
+                            let group_idx = dm.main.group_order.iter()
+                                .position(|&g| g == group_id);
+                            if let Some(gidx) = group_idx {
+                                if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
+                                    let was_frozen = env.frozen;
+                                    env.frozen = false;
+                                    let mut rng = StdRng::from_entropy();
+                                    for _ in 0..CONTINUUM_STEPS {
+                                        env.train_step(embedding, correction, &mut rng);
+                                    }
+                                    env.frozen = was_frozen;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
+
+        self.maybe_auto_checkpoint();
         Ok(())
+    }
+
+    /// Auto-save brain to disk after every N feedback events.
+    fn maybe_auto_checkpoint(&self) {
+        if self.continuum_feedback_count > 0
+            && self.continuum_feedback_count % CONTINUUM_CHECKPOINT_INTERVAL == 0
+        {
+            if let Ok(bytes) = self.export_brain() {
+                let path = "brain_continuum.bin";
+                let _ = std::fs::write(path, bytes);
+            }
+        }
     }
 
     /// Load a brain as the default checkpoint (replaces current default / single-brain behavior).
     pub fn load_brain(&mut self, data: &[u8]) -> Result<(), String> {
-        let dm: DimensionManager =
+        let mut dm: DimensionManager =
             crate::systems::checkpoint::deserialize_checkpoint_from_bytes(data)?;
+        if let Some(ref mut clf) = dm.action_classifier {
+            clf.ensure_output_dim();
+        }
         let groups: Vec<_> = dm.main.group_order.clone();
         if let Some(&gid) = groups.first() {
             self.support_gid = gid;
@@ -1027,8 +1101,11 @@ impl LanguageService {
 
     /// Load an additional brain under a name. Use `set_active_brain(name)` to switch to it.
     pub fn load_brain_as(&mut self, name: &str, data: &[u8]) -> Result<(), String> {
-        let dm: DimensionManager =
+        let mut dm: DimensionManager =
             crate::systems::checkpoint::deserialize_checkpoint_from_bytes(data)?;
+        if let Some(ref mut clf) = dm.action_classifier {
+            clf.ensure_output_dim();
+        }
         self.brains.insert(name.to_string(), dm);
         Ok(())
     }
