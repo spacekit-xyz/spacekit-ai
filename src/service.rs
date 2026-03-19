@@ -1391,7 +1391,7 @@ pub fn build_language_demo_manager(
     let gle_checkpoint_weights = parse_csv_env_f32("GROWFORMER_GLE_WEIGHTS");
     let config = LanguageConfig {
         encoder: EncoderPreset::BertClass,
-        bridge_output_dim: 64,
+        bridge_output_dim: DEFAULT_BRIDGE_DIM,
         ema_alpha,
         ood_similarity_threshold: 0.15,
         gle_http_endpoint: std::env::var("GROWFORMER_GLE_HTTP_ENDPOINT").ok(),

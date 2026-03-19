@@ -2,7 +2,7 @@
 //!
 //! This module provides:
 //! - deterministic text encoder presets (default MiniLM-sized 384-d vectors),
-//! - a globally calibrated 384->64 bridge with layer norm + confidence head,
+//! - a globally calibrated bridge (384->128d default) with layer norm + confidence head,
 //! - EMA smoothing for multi-turn routing stability,
 //! - objective routing outputs (winner, margin, OOD reject).
 
@@ -1119,7 +1119,7 @@ mod tests {
 
     #[test]
     fn language_routing_rejects_ood() {
-        let decision = route_language_embedding(&[], &[0.0; 64], 0.5, 0.2);
+        let decision = route_language_embedding(&[], &vec![0.0; DEFAULT_BRIDGE_DIM], 0.5, 0.2);
         assert!(decision.rejected_as_ood);
         assert!(decision.chosen_group_id.is_none());
     }

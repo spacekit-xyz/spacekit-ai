@@ -572,7 +572,7 @@ impl DimensionManager {
         self.language_runtime.calibrate(dataset, requirements)
     }
 
-    /// Attach a calibrated 64-d language routing vector to an existing group.
+    /// Attach a calibrated language routing vector to an existing group.
     pub fn set_group_language_vector(
         &mut self,
         group_id: GroupId,

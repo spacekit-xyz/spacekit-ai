@@ -44,7 +44,7 @@ pub struct CiliumNode {
 pub struct BehavioralProgram {
     /// Centroid embedding in bridge space (for gradient sensing / selection).
     pub centroid: Vec<f32>,
-    /// E8-quantized centroid (8 × 8d lattice points = 64d).
+    /// E8-quantized centroid (n/8 × 8d lattice points).
     pub lattice_signature: Vec<f32>,
     /// The response token sequence this program produces.
     pub token_sequence: Vec<u16>,
@@ -567,7 +567,8 @@ mod tests {
     }
 
     fn test_embedding(seed: f32) -> Vec<f32> {
-        (0..64).map(|i| ((i as f32 + seed) * 0.1).sin()).collect()
+        (0..crate::dimension::language::DEFAULT_BRIDGE_DIM)
+            .map(|i| ((i as f32 + seed) * 0.1).sin()).collect()
     }
 
     #[test]

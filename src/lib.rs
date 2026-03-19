@@ -32,6 +32,7 @@ macro_rules! maybe_par_iter_mut {
     };
 }
 
+pub mod clifford;
 pub mod dimension;
 pub mod environment;
 #[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]

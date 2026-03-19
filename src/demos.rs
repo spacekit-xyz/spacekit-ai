@@ -2063,7 +2063,7 @@ fn build_language_demo_manager(ema_alpha: f32) -> (DimensionManager, GroupId, Gr
     let gle_checkpoint_weights = parse_csv_env_f32("GROWFORMER_GLE_WEIGHTS");
     dm.configure_language(LanguageConfig {
         encoder: EncoderPreset::BertClass,
-        bridge_output_dim: 64,
+        bridge_output_dim: growformer::dimension::language::DEFAULT_BRIDGE_DIM,
         ema_alpha,
         ood_similarity_threshold: 0.15,
         gle_http_endpoint: std::env::var("GROWFORMER_GLE_HTTP_ENDPOINT").ok(),

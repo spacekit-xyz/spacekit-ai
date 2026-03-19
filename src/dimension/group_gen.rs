@@ -6,7 +6,7 @@
 //! token IDs and predicts all tokens in a SINGLE forward pass.
 //!
 //! Architecture per group:
-//!   input  = bridged_embedding (64d)
+//!   input  = bridged_embedding (GEN_COND_DIM)
 //!   hidden = 128 neurons × 2 layers, KWTA k=32 (25% sparse)
 //!   output = MAX_TOKENS × bits_per_token neurons (adaptive to dict size)
 //!
@@ -32,7 +32,7 @@ use crate::spectral::{
 };
 use crate::types::EnvironmentConfig;
 
-pub const GEN_COND_DIM: usize = 64;
+pub const GEN_COND_DIM: usize = 128;
 pub const MAX_TOKENS: usize = 128;
 pub const GEN_HIDDEN: usize = 256;
 pub const GEN_K: usize = 64;
@@ -47,8 +47,7 @@ pub struct GenEnvOverrides {
     pub energy_budget: Option<f32>,
     pub ephaptic_alpha: Option<f32>,
     pub ephaptic_strength: Option<f32>,
-    /// Override conditioning dimension (bridge output). Defaults to GEN_COND_DIM (64).
-    /// Set to 128 for expanded context capacity on new training runs.
+    /// Override conditioning dimension (bridge output). Defaults to GEN_COND_DIM.
     #[serde(default)]
     pub cond_dim: Option<usize>,
 }
@@ -436,9 +435,9 @@ impl AlgebraicCodebook {
 
     /// Select the best archetype for an input embedding.
     ///
-    /// Uses E8 lattice decoding when the embedding is 64d (decomposes into
-    /// 8 × 8d E8 subspaces for provably optimal quantization). Falls back
-    /// to cosine similarity for other dimensions.
+    /// Uses E8 lattice decoding when the embedding is a multiple of 8d
+    /// (decomposes into n/8 × 8d E8 subspaces for provably optimal quantization).
+    /// Falls back to cosine similarity for non-aligned dimensions.
     ///
     /// Returns (archetype_index, confidence).
     pub fn select_archetype_by_embedding(&self, embedding: &[f32]) -> (usize, f32) {
@@ -446,7 +445,7 @@ impl AlgebraicCodebook {
             return (0, 0.0);
         }
 
-        // E8 lattice decoding for 64d embeddings (8 × 8d subspaces)
+        // E8 lattice decoding for embeddings aligned to 8d subspaces
         if embedding.len() >= 16 && embedding.len() % 8 == 0 {
             return E8Lattice::select_archetype(embedding, &self.archetype_prototypes);
         }
@@ -2324,10 +2323,9 @@ mod tests {
     fn test_prototype_slot_only_mode() {
         let texts = support_texts();
         let dict = TokenDictionary::build(&texts, 500);
-        // Create fake 64d embeddings for each text
         let embs: Vec<Vec<f32>> = texts.iter().enumerate().map(|(i, _)| {
-            let mut e = vec![0.0f32; 64];
-            e[i % 64] = 1.0; // distinct directions
+            let mut e = vec![0.0f32; GEN_COND_DIM];
+            e[i % GEN_COND_DIM] = 1.0;
             e
         }).collect();
         let emb_refs: Vec<&[f32]> = embs.iter().map(|e| e.as_slice()).collect();
@@ -2358,8 +2356,8 @@ mod tests {
         let texts = support_texts();
         let dict = TokenDictionary::build(&texts, 500);
         let embs: Vec<Vec<f32>> = texts.iter().enumerate().map(|(i, _)| {
-            let mut e = vec![0.0f32; 64];
-            e[i % 64] = 1.0;
+            let mut e = vec![0.0f32; GEN_COND_DIM];
+            e[i % GEN_COND_DIM] = 1.0;
             e
         }).collect();
         let emb_refs: Vec<&[f32]> = embs.iter().map(|e| e.as_slice()).collect();
@@ -2404,8 +2402,8 @@ mod tests {
         ];
         let dict = TokenDictionary::build(&texts, 100);
 
-        let emb_a = { let mut e = vec![0.0f32; 64]; e[0] = 1.0; e };
-        let emb_b = { let mut e = vec![0.0f32; 64]; e[1] = 1.0; e };
+        let emb_a = { let mut e = vec![0.0f32; GEN_COND_DIM]; e[0] = 1.0; e };
+        let emb_b = { let mut e = vec![0.0f32; GEN_COND_DIM]; e[1] = 1.0; e };
         let embs = vec![emb_a.clone(), emb_a.clone(), emb_b.clone(), emb_b.clone()];
         let emb_refs: Vec<&[f32]> = embs.iter().map(|e| e.as_slice()).collect();
 
@@ -2421,7 +2419,7 @@ mod tests {
         let hopf = HopfCompositionTable::build(&cb, Some(&emb_refs), &clusters, 2);
 
         // --- Single archetype path (argmax) ---
-        let ood = { let mut e = vec![0.0f32; 64]; e[0] = 0.5; e[1] = 0.5; e };
+        let ood = { let mut e = vec![0.0f32; GEN_COND_DIM]; e[0] = 0.5; e[1] = 0.5; e };
         let (single_idx, single_conf) = cb.select_archetype_by_embedding(&ood);
         let slot_bits = vec![0.5f32; cb.slot_only_bits];
         let single_ids = cb.decode_with_archetype(single_idx, &slot_bits);
@@ -2452,8 +2450,8 @@ mod tests {
         ];
         let dict = TokenDictionary::build(&texts, 200);
 
-        let emb_micro = { let mut e = vec![0.0f32; 64]; e[0] = 1.0; e[2] = 0.5; e };
-        let emb_obs = { let mut e = vec![0.0f32; 64]; e[1] = 1.0; e[3] = 0.5; e };
+        let emb_micro = { let mut e = vec![0.0f32; GEN_COND_DIM]; e[0] = 1.0; e[2] = 0.5; e };
+        let emb_obs = { let mut e = vec![0.0f32; GEN_COND_DIM]; e[1] = 1.0; e[3] = 0.5; e };
         let embs = vec![emb_micro.clone(), emb_micro.clone(), emb_obs.clone(), emb_obs.clone()];
         let emb_refs: Vec<&[f32]> = embs.iter().map(|e| e.as_slice()).collect();
 

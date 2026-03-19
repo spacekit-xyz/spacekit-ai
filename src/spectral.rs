@@ -116,7 +116,7 @@ pub fn hamming_decode(codeword: &[u8], data_bits: usize) -> Vec<u8> {
 //   - Automorphism group: |W(E8)| = 696,729,600
 //   - Related code: extended Hamming [8,4,4]
 //
-// The 64d bridge embedding decomposes as 8 × 8d E8 subspaces, giving
+// The bridge embedding decomposes as n/8 × 8d E8 subspaces, giving
 // provably optimal quantization and algebraically exact compatibility scores.
 
 /// E8 lattice: nearest-lattice-point decoding and root system operations.
@@ -191,11 +191,14 @@ impl E8Lattice {
         a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum()
     }
 
-    /// Quantize a 64d vector by decomposing into 8 × 8d E8 subspaces.
-    /// Returns 8 lattice points (one per subspace) as a flat 64-element vector.
+    /// Quantize an n-dimensional vector by decomposing into ⌈n/8⌉ × 8d E8 subspaces.
+    /// Returns lattice points as a flat vector matching the input length (padded up to next multiple of 8).
     pub fn quantize_64d(x: &[f32]) -> Vec<f32> {
-        let mut result = vec![0.0f32; 64];
-        for sub in 0..8 {
+        let n = x.len().max(8);
+        let num_blocks = (n + 7) / 8;
+        let out_len = num_blocks * 8;
+        let mut result = vec![0.0f32; out_len];
+        for sub in 0..num_blocks {
             let offset = sub * 8;
             let mut block = [0.0f32; 8];
             for i in 0..8 {
@@ -206,11 +209,12 @@ impl E8Lattice {
                 result[offset + i] = lattice_point[i];
             }
         }
+        result.truncate(x.len());
         result
     }
 
     /// Compute the quantization distance (sum of squared errors across all
-    /// 8 subspaces). Lower = better match to lattice structure.
+    /// E8 subspaces). Lower = better match to lattice structure.
     pub fn quantization_distance(x: &[f32]) -> f32 {
         let quantized = Self::quantize_64d(x);
         x.iter().zip(quantized.iter())
@@ -2879,6 +2883,20 @@ mod tests {
 
         // Each 8d block should be a valid E8 lattice point
         for sub in 0..8 {
+            let offset = sub * 8;
+            let block: Vec<f32> = q[offset..offset+8].to_vec();
+            let is_integer = block.iter().all(|v| (v - v.round()).abs() < 1e-6);
+            let is_half_int = block.iter().all(|v| (v - (v - 0.5).round() - 0.5).abs() < 1e-6);
+            assert!(is_integer || is_half_int, "block {} should be E8: {:?}", sub, block);
+        }
+    }
+
+    #[test]
+    fn test_e8_quantize_128d() {
+        let x: Vec<f32> = (0..128).map(|i| (i as f32) * 0.05).collect();
+        let q = E8Lattice::quantize_64d(&x);
+        assert_eq!(q.len(), 128);
+        for sub in 0..16 {
             let offset = sub * 8;
             let block: Vec<f32> = q[offset..offset+8].to_vec();
             let is_integer = block.iter().all(|v| (v - v.round()).abs() < 1e-6);

@@ -2,7 +2,7 @@
   "runtime": {
     "config": {
       "encoder": "BertClass",
-      "bridge_output_dim": 64,
+      "bridge_output_dim": 128,
       "ema_alpha": 0.2,
       "ood_similarity_threshold": 0.15,
       "gle_http_endpoint": null,
@@ -13,7 +13,7 @@
     },
     "bridge": {
       "input_dim": 384,
-      "output_dim": 64,
+      "output_dim": 128,
       "projection": [
         [
           0.16666667,

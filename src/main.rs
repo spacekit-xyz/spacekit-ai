@@ -1705,19 +1705,25 @@ fn train_brain(
                         sample_losses[i] = l;
                         total_loss += l;
 
-                        // Train adapter via finite-difference gradient after warmup
+                        // Train adapter via SPSA (2 evals instead of dim-many)
                         if let Some(raw) = h_raw {
                             if epoch >= adapter_warmup && !adapter.frozen {
-                                let base_loss = l;
-                                let delta = adapter.forward(raw);
-                                let eps = 0.01f32;
-                                let mut grad = vec![0.0f32; delta.len()];
-                                for d in 0..delta.len() {
-                                    let mut perturbed = cond.clone();
-                                    perturbed[d] += eps;
-                                    let l_plus = env.eval_loss(&perturbed, task.pairs[i].1);
-                                    grad[d] = (l_plus - base_loss) / eps;
+                                let dim = cond.len();
+                                let eps = 0.02f32;
+                                let mut perturb = vec![0.0f32; dim];
+                                for p in perturb.iter_mut() {
+                                    *p = if rand::Rng::gen_bool(&mut task_rng, 0.5) { 1.0 } else { -1.0 };
                                 }
+                                let mut c_plus = cond.clone();
+                                let mut c_minus = cond.clone();
+                                for d in 0..dim {
+                                    c_plus[d] += eps * perturb[d];
+                                    c_minus[d] -= eps * perturb[d];
+                                }
+                                let l_plus = env.eval_loss(&c_plus, task.pairs[i].1);
+                                let l_minus = env.eval_loss(&c_minus, task.pairs[i].1);
+                                let scale = (l_plus - l_minus) / (2.0 * eps);
+                                let grad: Vec<f32> = perturb.iter().map(|&p| scale / p).collect();
                                 adapter.train_step(raw, &grad, adapter_lr);
                             }
                         }
