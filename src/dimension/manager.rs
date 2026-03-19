@@ -348,7 +348,7 @@ impl DimensionManager {
             return (0.0, 0.0);
         }
         let input_dim = samples[0].0.len();
-        let hidden = 64.min(input_dim);
+        let hidden = (input_dim * 2).min(128);
         let mut router = LearnedRouter::new(input_dim, num_groups, hidden, rng);
         let mut indices: Vec<usize> = (0..samples.len()).collect();
         let mut last_loss = 0.0f32;
@@ -415,7 +415,7 @@ impl DimensionManager {
             return (0.0, 0.0);
         }
         let input_dim = samples[0].0.len();
-        let mut clf = ActionClassifier::new(input_dim, 48);
+        let mut clf = ActionClassifier::new(input_dim, 64);
 
         // Group indices by class for balanced sampling
         use super::action_classifier::NUM_ACTION_TYPES;

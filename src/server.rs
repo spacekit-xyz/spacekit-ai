@@ -387,10 +387,16 @@ async fn run_chat(
             };
             (action, text.clone(), text)
         }
+        "paramecium" => {
+            let (action, resp) = svc
+                .paramecium_respond(&req.message)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("paramecium failed: {}", e)))?;
+            (action, resp.text.clone(), resp.text)
+        }
         other => {
             return Err((
                 StatusCode::BAD_REQUEST,
-                format!("unsupported mode '{}'; use action|generation|codegen", other),
+                format!("unsupported mode '{}'; use action|generation|codegen|paramecium", other),
             ))
         }
     };

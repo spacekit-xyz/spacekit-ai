@@ -2,7 +2,9 @@ use growformer::dimension::{
     LanguageSample,
     GroupGenEnv, action_target_to_type,
 };
+use growformer::dimension::language::DEFAULT_BRIDGE_DIM;
 use growformer::dimension::group_gen::{AlgebraicCodebook, HopfCompositionTable};
+use growformer::dimension::paramecium::InfraciliaryLattice;
 use growformer::spectral::TokenDictionary;
 use std::collections::HashMap;
 use growformer::service::LanguageService;
@@ -187,7 +189,7 @@ fn retrain_single_gen(
                     gen_pairs.push((bridged.routed_vector, r.to_string()));
                 }
                 Err(_) => {
-                    gen_pairs.push((vec![0.0; 64], r.to_string()));
+                    gen_pairs.push((vec![0.0; DEFAULT_BRIDGE_DIM], r.to_string()));
                 }
             }
         }
@@ -645,6 +647,7 @@ fn run_conversation_repl(svc: &mut LanguageService) {
     println!("  /status                 Show brain + personality info");
     println!("  /index <path>           Index project directory into Leech lattice");
     println!("  /project [file]         Show project model / related entities");
+    println!("  /paramecium <prompt>    Lattice-only inference (no neural substrate)");
     println!("  quit | exit             Exit");
     println!();
 
@@ -870,10 +873,36 @@ fn handle_repl_command(svc: &mut LanguageService, cmd: &str) {
                 }
             }
         }
+        Some("paramecium") | Some("pm") => {
+            let prompt = parts[1..].join(" ");
+            if prompt.is_empty() {
+                let status = if svc.paramecium.is_some() {
+                    let p = svc.paramecium.as_ref().unwrap();
+                    format!("{} programs, {} bytes", p.program_count(), p.memory_bytes())
+                } else {
+                    "not built yet (will auto-build on first use)".to_string()
+                };
+                println!("  Paramecium: {}", status);
+                println!("  Usage: /paramecium <prompt>  or  /pm <prompt>");
+            } else {
+                match svc.paramecium_respond(&prompt) {
+                    Ok((action, resp)) => {
+                        println!("  [paramecium: {} conf={:.2}]", action.reason, action.confidence);
+                        println!();
+                        if !resp.text.is_empty() {
+                            println!("  {}", resp.text);
+                        } else {
+                            println!("  (empty response — lattice may need more programs)");
+                        }
+                    }
+                    Err(e) => eprintln!("  paramecium error: {}", e),
+                }
+            }
+        }
         _ => {
             println!("  Unknown command. Available:");
             println!("    /personality, /ocean, /reset, /history, /single, /status");
-            println!("    /index <path>, /project [file]");
+            println!("    /index <path>, /project [file], /paramecium <prompt>");
         }
     }
 }
@@ -1064,8 +1093,8 @@ fn auto_configure(profile: &DataProfile) -> AutoConfig {
     let gen_epochs = (base_epochs as f64 * imbalance_mult) as usize;
 
     // Router/classifier: scale with number of classes
-    let router_epochs = (profile.num_groups * 150).clamp(300, 1000);
-    let classifier_epochs = (profile.num_groups * 120).clamp(300, 800);
+    let router_epochs = (profile.num_groups * 250).clamp(600, 1500);
+    let classifier_epochs = (profile.num_groups * 200).clamp(500, 1200);
     let classifier_lr = if profile.total_samples > 300 { 0.02 } else { 0.03 };
 
     let max_synapses = if est_output > 800 { 250 } else { 200 };
@@ -1151,7 +1180,7 @@ fn train_brain(
 
     let mut svc = LanguageService::new_default()?;
 
-    // Compute both raw (384-dim) and bridged (64-dim) embeddings.
+    // Compute both raw and bridged embeddings.
     // Bridged vectors for routing/classification; raw vectors for generation conditioning.
     // When the `parallel` feature is enabled, embedding computation runs in parallel across cores.
     println!("\n--- Computing embeddings ---");
@@ -1169,13 +1198,49 @@ fn train_brain(
             }
             Err(_) => {
                 raw_embeddings.push(vec![0.0; 384]);
-                bridged_embeddings.push(vec![0.0; 64]);
+                bridged_embeddings.push(vec![0.0; DEFAULT_BRIDGE_DIM]);
             }
         }
     }
     let raw_dim = raw_embeddings.first().map_or(384, |e| e.len());
-    let bridge_dim = bridged_embeddings.first().map_or(64, |e| e.len());
+    let bridge_dim = bridged_embeddings.first().map_or(DEFAULT_BRIDGE_DIM, |e| e.len());
     println!("  {} samples: raw={}d, bridged={}d", samples.len(), raw_dim, bridge_dim);
+
+    // ---------------------------------------------------------------
+    // Paramecium pre-training: build lattice from embeddings to provide
+    // curriculum signals and group-discovery diagnostics for training.
+    // ---------------------------------------------------------------
+    println!("\n--- Paramecium Pre-Training Lattice ---");
+    let fallback_dict = svc.dm.gen_dictionary.clone()
+        .unwrap_or_else(|| TokenDictionary::build(
+            &samples.iter().filter_map(|s| s.expected_response.as_deref()).collect::<Vec<_>>(),
+            1024,
+        ));
+    let mut pre_lattice = InfraciliaryLattice::new(fallback_dict.clone());
+    let lattice_pairs: Vec<(Vec<f32>, String)> = bridged_embeddings.iter()
+        .zip(samples.iter())
+        .filter_map(|(emb, s)| {
+            s.expected_response.as_deref().map(|r| (emb.clone(), r.to_string()))
+        })
+        .collect();
+    pre_lattice.develop(&lattice_pairs, 0.85);
+    println!("  lattice programs: {} from {} samples", pre_lattice.program_count(), lattice_pairs.len());
+    println!("  lattice memory: {} bytes", pre_lattice.memory_bytes());
+
+    let (discovered_groups, _assignments) = pre_lattice.discover_groups(&bridged_embeddings, 0.85);
+    println!("  discovered natural clusters: {} (hand-labeled groups: {})",
+        discovered_groups, svc.dm.main.group_order.len());
+
+    let novelty_scores: Vec<f32> = bridged_embeddings.iter()
+        .map(|emb| {
+            let (conf, _) = pre_lattice.novelty_score(emb);
+            conf
+        })
+        .collect();
+    let avg_novelty: f32 = novelty_scores.iter().sum::<f32>() / novelty_scores.len().max(1) as f32;
+    let min_novelty = novelty_scores.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max_novelty = novelty_scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    println!("  novelty scores: avg={:.3} min={:.3} max={:.3}", avg_novelty, min_novelty, max_novelty);
 
     let num_groups = svc.dm.main.group_order.len();
     let group_map = |s: &LanguageSample| -> usize {
@@ -1191,16 +1256,16 @@ fn train_brain(
     // ---------------------------------------------------------------
     // Auto-configuration: profile data and derive parameters
     // ---------------------------------------------------------------
-    let auto_cfg = if auto {
+    let (auto_cfg, data_profile) = if auto {
         let profile = profile_training_data(&samples, &group_map, num_groups.max(1));
         for (gidx, gp) in &profile.groups {
             println!("  group {}: gen={} code={} max_resp_tok={} max_code_tok={} avg_resp_tok={:.0} intents={}",
                 gidx, gp.gen_count, gp.code_count, gp.max_response_tokens,
                 gp.max_code_tokens, gp.avg_response_tokens, gp.unique_intents);
         }
-        Some(auto_configure(&profile))
+        (Some(auto_configure(&profile)), Some(profile))
     } else {
-        None
+        (None, None)
     };
 
     // ---------------------------------------------------------------
@@ -1262,7 +1327,7 @@ fn train_brain(
     // ---------------------------------------------------------------
     // Stages 3+4: Per-group generation envs (Growformer substrate)
     // Each group gets its own NeuralEnvironment for text AND code generation.
-    // Conditioning = bridged_embedding (64d) — routing already selected the group.
+    // Conditioning = bridged_embedding — routing already selected the group.
     // All groups train in parallel (structurally isolated, no shared state).
     // ---------------------------------------------------------------
     let num_groups = svc.dm.main.group_order.len().max(1);
@@ -1289,17 +1354,22 @@ fn train_brain(
     println!("\n--- Stages 3+4: Per-Group Generation Envs (single-pass token prediction) ---");
     println!("  gen_epochs={}, num_groups={}, replicas_per_task={}", gen_epochs, num_groups, k_replicas);
 
-    // Partition training data by (group, kind)
+    // Partition training data by (group, kind), carrying novelty scores per sample.
     let mut gen_by_group: HashMap<usize, Vec<(&[f32], &str)>> = HashMap::new();
+    let mut gen_novelty_by_group: HashMap<usize, Vec<f32>> = HashMap::new();
     let mut code_by_group: HashMap<usize, Vec<(&[f32], &str)>> = HashMap::new();
-    for (bridged, s) in bridged_embeddings.iter().zip(samples.iter()) {
+    let mut code_novelty_by_group: HashMap<usize, Vec<f32>> = HashMap::new();
+    for (i, (bridged, s)) in bridged_embeddings.iter().zip(samples.iter()).enumerate() {
         let gidx = group_map(s);
+        let nov = novelty_scores.get(i).copied().unwrap_or(0.0);
         if let Some(r) = s.expected_response.as_deref() {
             gen_by_group.entry(gidx).or_default().push((bridged.as_slice(), r));
+            gen_novelty_by_group.entry(gidx).or_default().push(nov);
         }
         if let Some(c) = s.expected_code.as_deref() {
             if !c.is_empty() && c != "null" {
                 code_by_group.entry(gidx).or_default().push((bridged.as_slice(), c));
+                code_novelty_by_group.entry(gidx).or_default().push(nov);
             }
         }
     }
@@ -1343,10 +1413,14 @@ fn train_brain(
         let texts: Vec<&str> = pairs.iter().map(|(_emb, text)| *text).collect();
         let embs: Vec<&[f32]> = pairs.iter().map(|(emb, _text)| *emb).collect();
         let dict = gen_dicts.get(&gidx).unwrap();
-        let gen_max_arch = if texts.len() > 150 {
-            base_archetypes * 6  // 96 for large gen groups — more archetypes = more fixed tokens = fewer slots to predict
-        } else if texts.len() > 50 {
-            base_archetypes * 2  // 32 for medium groups
+        let intent_count = data_profile.as_ref()
+            .and_then(|p| p.groups.get(&gidx))
+            .map(|g| g.unique_intents)
+            .unwrap_or(0);
+        let gen_max_arch = if texts.len() > 150 || intent_count > 40 {
+            base_archetypes * 6  // 96 for large/high-diversity groups
+        } else if texts.len() > 50 || intent_count > 12 {
+            base_archetypes * 3  // 48 for medium groups or high intent diversity
         } else {
             base_archetypes      // 16 for small groups
         };
@@ -1434,6 +1508,7 @@ fn train_brain(
         kind: &'static str,
         replica: usize,
         pairs: &'a [(&'a [f32], &'a str)],
+        novelty: Vec<f32>,
         seed: u64,
         dictionary: TokenDictionary,
         codebook: Option<AlgebraicCodebook>,
@@ -1460,10 +1535,12 @@ fn train_brain(
                 let dict = gen_dicts.get(&gidx).unwrap().clone();
                 let cb = gen_codebooks.get(&gidx).cloned();
                 let hopf = gen_hopf.get(&gidx).cloned();
+                let nov = gen_novelty_by_group.get(&gidx).cloned().unwrap_or_default();
                 for r in 0..k_replicas {
                     tasks.push(GenTask {
                         gidx, kind: "gen", replica: r,
                         pairs: p.as_slice(),
+                        novelty: nov.clone(),
                         seed: 100 + gidx as u64 * 1000 + r as u64,
                         dictionary: dict.clone(),
                         codebook: cb.clone(),
@@ -1480,17 +1557,20 @@ fn train_brain(
             }
         }
         if let Some(p) = code_by_group.get(&gidx) {
-            if !p.is_empty() {
+            let min_code_samples = 10;
+            if p.len() >= min_code_samples {
                 let task_epochs = gen_epochs;
                 let total_ticks = task_epochs as u64 * p.len() as u64;
                 let stop_tick = (total_ticks as f64 * prune_warmup_frac) as u64;
                 let dict = code_dicts.get(&gidx).unwrap().clone();
                 let cb = code_codebooks.get(&gidx).cloned();
                 let hopf = code_hopf.get(&gidx).cloned();
+                let nov = code_novelty_by_group.get(&gidx).cloned().unwrap_or_default();
                 for r in 0..k_replicas {
                     tasks.push(GenTask {
                         gidx, kind: "code", replica: r,
                         pairs: p.as_slice(),
+                        novelty: nov.clone(),
                         seed: 200 + gidx as u64 * 1000 + r as u64,
                         dictionary: dict.clone(),
                         codebook: cb.clone(),
@@ -1551,12 +1631,36 @@ fn train_brain(
                 let replay_start_epoch = 50;
                 let replay_count = (n_pairs as f32 * replay_frac).ceil() as usize;
 
+                // Paramecium curriculum: sort by ascending novelty (hardest-first).
+                // In early epochs the model has no loss signal, so the lattice's
+                // pre-training novelty scores drive sample ordering instead.
+                let novelty_curriculum_end = replay_start_epoch;
+                let mut novelty_order: Vec<usize> = (0..n_pairs).collect();
+                if !task.novelty.is_empty() && task.novelty.len() == n_pairs {
+                    novelty_order.sort_by(|&a, &b| {
+                        task.novelty[a].partial_cmp(&task.novelty[b])
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                }
+
                 // Convergence monitor state
                 let mut loss_history: Vec<f32> = Vec::new();
+                let mut eval_loss_history: Vec<f32> = Vec::new();
+                let eval_check_interval = task.es_window.max(50);
+                let mut best_eval_loss = f32::INFINITY;
                 let mut stopped_early = false;
 
                 for epoch in 0..te {
-                    indices.shuffle(&mut task_rng);
+                    if epoch < novelty_curriculum_end && !task.novelty.is_empty() && task.novelty.len() == n_pairs {
+                        // Curriculum phase: present novel (hard) samples first, then familiar.
+                        // Add jitter so it's not identical every epoch.
+                        let jitter = (epoch as f32 * 0.1).sin().abs();
+                        let split = ((n_pairs as f32) * jitter * 0.3) as usize;
+                        indices[..split].copy_from_slice(&novelty_order[..split.min(n_pairs)]);
+                        indices[split..].shuffle(&mut task_rng);
+                    } else {
+                        indices.shuffle(&mut task_rng);
+                    }
                     let mut total_loss = 0.0f32;
                     for &i in &indices {
                         let l = env.train_step(task.pairs[i].0, task.pairs[i].1, &mut task_rng);
@@ -1564,32 +1668,92 @@ fn train_brain(
                         total_loss += l;
                     }
                     if epoch >= replay_start_epoch && replay_count > 0 {
-                        let mut ranked: Vec<(usize, f32)> = sample_losses.iter().copied().enumerate().collect();
+                        // Once loss data is available, use both loss ranking and novelty:
+                        // blend loss-based priority with novelty-based priority.
+                        let mut ranked: Vec<(usize, f32)> = sample_losses.iter().copied().enumerate()
+                            .map(|(idx, loss)| {
+                                let nov_weight = if idx < task.novelty.len() {
+                                    1.0 - task.novelty[idx]
+                                } else {
+                                    0.0
+                                };
+                                (idx, loss + nov_weight * 0.1)
+                            })
+                            .collect();
                         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                        for &(idx, _loss) in ranked.iter().take(replay_count) {
+                        for &(idx, _score) in ranked.iter().take(replay_count) {
                             env.train_step(task.pairs[idx].0, task.pairs[idx].1, &mut task_rng);
                         }
                     }
                     let last_avg = total_loss / n_pairs.max(1) as f32;
                     loss_history.push(last_avg);
 
-                    // Early stopping: check if loss has plateaued.
-                    // Don't stop if absolute loss is still above 0.02 — the model
-                    // hasn't learned enough content for archetype differentiation.
+                    // Early stopping: two conditions can trigger a stop.
+                    //
+                    // 1. Soft stop: loss plateaued AND below an adaptive floor.
+                    //    Floor scales with output dimension — a 352-bit prediction task
+                    //    can't reach the same absolute loss as a 140-bit task.
+                    //    Floor = 0.02 * (output_dim / 140), clamped to [0.02, 0.15].
+                    //
+                    // 2. Hard stop: loss hasn't improved for 2× the early-stop window,
+                    //    regardless of absolute value. The task is stuck.
+                    let es_loss_floor = (0.02 * (env.output_dim as f32 / 140.0)).clamp(0.02, 0.15);
+                    let hard_plateau_window = task.es_window * 2;
                     if task.es_window > 0 && epoch >= task.es_min_ep && loss_history.len() >= task.es_window {
                         let recent = &loss_history[loss_history.len() - task.es_window..];
                         let old_avg = recent[..task.es_window / 2].iter().sum::<f32>() / (task.es_window / 2) as f32;
                         let new_avg = recent[task.es_window / 2..].iter().sum::<f32>() / (task.es_window - task.es_window / 2) as f32;
                         let improvement = (old_avg - new_avg) / old_avg.max(1e-8);
-                        if improvement < task.es_min_imp && new_avg < 0.02 {
-                            println!("    [{} g{} r{}] early stop at epoch {}/{}: loss={:.4} improvement={:.5} < {:.4}",
-                                task.kind, task.gidx, task.replica, epoch, te, last_avg, improvement, task.es_min_imp);
+                        if improvement < task.es_min_imp && new_avg < es_loss_floor {
+                            println!("    [{} g{} r{}] early stop at epoch {}/{}: loss={:.4} improvement={:.5} < {:.4} (floor={:.3})",
+                                task.kind, task.gidx, task.replica, epoch, te, last_avg, improvement, task.es_min_imp, es_loss_floor);
                             stopped_early = true;
                             break;
                         }
-                        if improvement < task.es_min_imp && new_avg >= 0.02 {
-                            println!("    [{} g{} r{}] epoch {}/{}: plateau (imp={:.5}) but loss={:.4} > 0.02, continuing...",
-                                task.kind, task.gidx, task.replica, epoch, te, improvement, new_avg);
+                        if improvement < task.es_min_imp && loss_history.len() >= hard_plateau_window {
+                            let far_back = &loss_history[loss_history.len() - hard_plateau_window..];
+                            let far_old = far_back[..hard_plateau_window / 2].iter().sum::<f32>() / (hard_plateau_window / 2) as f32;
+                            let far_new = far_back[hard_plateau_window / 2..].iter().sum::<f32>() / (hard_plateau_window - hard_plateau_window / 2) as f32;
+                            let long_improvement = (far_old - far_new) / far_old.max(1e-8);
+                            if long_improvement < task.es_min_imp {
+                                println!("    [{} g{} r{}] hard plateau stop at epoch {}/{}: loss={:.4} no improvement over {} epochs (floor={:.3})",
+                                    task.kind, task.gidx, task.replica, epoch, te, last_avg, hard_plateau_window, es_loss_floor);
+                                stopped_early = true;
+                                break;
+                            }
+                        }
+                        if improvement < task.es_min_imp && new_avg >= es_loss_floor {
+                            println!("    [{} g{} r{}] epoch {}/{}: plateau (imp={:.5}) but loss={:.4} > floor {:.3}, continuing...",
+                                task.kind, task.gidx, task.replica, epoch, te, improvement, new_avg, es_loss_floor);
+                        }
+                    }
+
+                    // Eval-loss divergence check: detect overfitting by comparing
+                    // train loss trend against periodic eval loss snapshots.
+                    if task.es_window > 0 && epoch >= task.es_min_ep
+                        && epoch % eval_check_interval == 0 && epoch > 0
+                    {
+                        let mut eval_sum = 0.0f32;
+                        for &(cond, target) in task.pairs {
+                            eval_sum += env.eval_loss(cond, target);
+                        }
+                        let eval_avg = eval_sum / n_pairs.max(1) as f32;
+                        eval_loss_history.push(eval_avg);
+                        if eval_avg < best_eval_loss {
+                            best_eval_loss = eval_avg;
+                        }
+                        if eval_loss_history.len() >= 3 {
+                            let recent_eval = eval_loss_history[eval_loss_history.len() - 1];
+                            let prev_eval = eval_loss_history[eval_loss_history.len() - 2];
+                            let older_eval = eval_loss_history[eval_loss_history.len() - 3];
+                            let eval_rising = recent_eval > prev_eval && prev_eval > older_eval;
+                            let train_falling = last_avg < loss_history[loss_history.len().saturating_sub(eval_check_interval + 1)];
+                            if eval_rising && train_falling && recent_eval > best_eval_loss * 1.3 {
+                                println!("    [{} g{} r{}] overfit stop at epoch {}/{}: train={:.4} eval={:.4} (best_eval={:.4}, rising for {} checks)",
+                                    task.kind, task.gidx, task.replica, epoch, te, last_avg, recent_eval, best_eval_loss, eval_loss_history.len());
+                                stopped_early = true;
+                                break;
+                            }
                         }
                     }
 
@@ -1647,6 +1811,17 @@ fn train_brain(
             "code" => { svc.dm.group_code_envs.insert(gidx, env); }
             _ => {}
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Build final paramecium from trained codebooks.
+    // This captures the learned archetype structure so the lattice is
+    // available for curriculum-guided continuum learning at runtime.
+    // ---------------------------------------------------------------
+    println!("\n--- Building Post-Training Paramecium ---");
+    svc.build_paramecium();
+    if let Some(ref pm) = svc.paramecium {
+        println!("  programs: {}, memory: {} bytes", pm.program_count(), pm.memory_bytes());
     }
 
     // ---------------------------------------------------------------

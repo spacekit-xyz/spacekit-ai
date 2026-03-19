@@ -16,7 +16,7 @@ use super::embedding::{cosine_similarity, GroupEmbedding};
 use crate::types::GroupId;
 
 pub const DEFAULT_ENCODER_DIM: usize = 384;
-pub const DEFAULT_BRIDGE_DIM: usize = 64;
+pub const DEFAULT_BRIDGE_DIM: usize = 128;
 pub const DEFAULT_EMA_ALPHA: f32 = 0.2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -948,7 +948,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bridge_projects_to_64_with_confidence() {
+    fn bridge_projects_to_default_dim_with_confidence() {
         let encoder = HashingLanguageEncoder::new(EncoderPreset::MiniLmL6V2);
         let mut bridge = LanguageBridge::new(encoder.output_dim(), DEFAULT_BRIDGE_DIM);
         let dataset = CalibrationDataset {
@@ -977,7 +977,7 @@ mod tests {
             .expect("calibrate");
         let x = encoder.encode("route to support");
         let out = bridge.project(&x).expect("project");
-        assert_eq!(out.routed_vector.len(), 64);
+        assert_eq!(out.routed_vector.len(), DEFAULT_BRIDGE_DIM);
         assert!(out.confidence >= 0.0 && out.confidence <= 1.0);
     }
 

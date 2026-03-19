@@ -390,10 +390,12 @@ mod tests {
         use crate::dimension::{LanguageConfig, LanguageRuntime};
         use std::fs;
 
+        use crate::dimension::language::DEFAULT_BRIDGE_DIM;
+
         let runtime = LanguageRuntime::new(LanguageConfig::default());
         let mut vectors = HashMap::new();
-        vectors.insert(0u32, vec![0.1f32; 64]);
-        vectors.insert(1u32, vec![0.2f32; 64]);
+        vectors.insert(0u32, vec![0.1f32; DEFAULT_BRIDGE_DIM]);
+        vectors.insert(1u32, vec![0.2f32; DEFAULT_BRIDGE_DIM]);
 
         let path = std::env::temp_dir().join("growformer_language_checkpoint_test.json");
         let path_str = path.to_str().expect("temp path");
@@ -403,7 +405,7 @@ mod tests {
         let (loaded_runtime, loaded_vectors) = load_language_checkpoint(path_str);
         assert_eq!(loaded_runtime.config.bridge_output_dim, runtime.config.bridge_output_dim);
         assert_eq!(loaded_vectors.len(), vectors.len());
-        assert_eq!(loaded_vectors.get(&0).map(|v| v.len()), Some(64));
+        assert_eq!(loaded_vectors.get(&0).map(|v| v.len()), Some(DEFAULT_BRIDGE_DIM));
 
         fs::remove_file(path_str).ok();
     }

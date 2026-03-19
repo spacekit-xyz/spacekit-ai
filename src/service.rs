@@ -10,11 +10,13 @@ use crate::dimension::{
     DimensionManager, DimensionManagerConfig, EpisodicSummary, GeneratedResponse, GenerationHead,
     LanguageConfig, LanguageRoutingDecision, LanguageSample,
 };
+use crate::dimension::language::DEFAULT_BRIDGE_DIM;
 use crate::dimension::action::{ActionType, ActionPayload};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::dimension::EncoderPreset;
 use crate::spectral::{ProjectModel, EntityKind, HybridEmbedder};
 use crate::dimension::tool::{ToolRegistry, ToolSchema, ToolCallInfo, ToolResult};
+use crate::dimension::paramecium::InfraciliaryLattice;
 use crate::types::{EnvironmentConfig, GroupId, Sample};
 
 // ---------------------------------------------------------------------------
@@ -25,6 +27,9 @@ use crate::types::{EnvironmentConfig, GroupId, Sample};
 pub enum AgentMode {
     ContextFile,
     MicroBrain,
+    /// Paramecium mode: lattice-only inference, no neural substrate.
+    /// Kilobyte-scale, zero synapses, wave-based program selection.
+    Paramecium,
 }
 
 impl Default for AgentMode {
@@ -344,6 +349,8 @@ pub struct LanguageService {
     pub tool_registry: ToolRegistry,
     /// Continuum: count of feedback events since startup (for auto-checkpoint).
     continuum_feedback_count: u64,
+    /// Paramecium: lattice-only inference engine (optional, built from brain).
+    pub paramecium: Option<InfraciliaryLattice>,
 }
 
 impl LanguageService {
@@ -370,6 +377,7 @@ impl LanguageService {
             project_model: ProjectModel::new(),
             tool_registry: ToolRegistry::with_builtins(),
             continuum_feedback_count: 0,
+            paramecium: None,
         })
     }
 
@@ -395,6 +403,7 @@ impl LanguageService {
             project_model: ProjectModel::new(),
             tool_registry: ToolRegistry::with_builtins(),
             continuum_feedback_count: 0,
+            paramecium: None,
         })
     }
 
@@ -652,6 +661,74 @@ impl LanguageService {
     pub fn reset_conversation(&mut self) {
         self.conversation.clear();
         self.active_dm_mut().language_runtime.smoother.reset();
+    }
+
+    // -------------------------------------------------------------------
+    // Paramecium — lattice-only sub-neuronal inference
+    // -------------------------------------------------------------------
+
+    /// Build a paramecium lattice from the active brain's codebook and dictionary.
+    /// Extracts archetype centroids and token sequences from all gen envs.
+    pub fn build_paramecium(&mut self) {
+        let dm = self.active_dm();
+        let mut archetypes: Vec<(Vec<u16>, Vec<f32>)> = Vec::new();
+
+        for (_gidx, env) in &dm.group_gen_envs {
+            if let Some(ref cb) = env.codebook {
+                for (arch_idx, arch) in cb.archetypes.iter().enumerate() {
+                    let centroid = cb.archetype_prototypes.get(arch_idx)
+                        .cloned()
+                        .unwrap_or_else(|| vec![0.0; DEFAULT_BRIDGE_DIM]);
+                    let mut tokens: Vec<u16> = arch.fixed.iter().map(|&(_, t)| t).collect();
+                    tokens.truncate(arch.median_content_length.max(arch.length).max(1));
+                    archetypes.push((tokens, centroid));
+                }
+            }
+        }
+
+        let dict = dm.group_gen_envs.values().next()
+            .map(|e| e.dictionary.clone())
+            .unwrap_or_else(|| crate::spectral::TokenDictionary::build(&[""], 256));
+
+        let lattice = InfraciliaryLattice::from_codebook(dict, &archetypes);
+        self.paramecium = Some(lattice);
+    }
+
+    /// Paramecium inference: lattice-only, no neural substrate.
+    /// Falls back to standard generation if no paramecium is built.
+    pub fn paramecium_respond(&mut self, text: &str) -> Result<(ActionJson, GeneratedResponse), String> {
+        let start = portable_instant();
+
+        if self.paramecium.is_none() {
+            self.build_paramecium();
+        }
+
+        let dm = self.active_dm_mut();
+        let encoded = dm.language_runtime.encode_and_bridge(text)?;
+        let embedding = &encoded.1.routed_vector;
+
+        let lattice = self.paramecium.as_mut()
+            .ok_or_else(|| "paramecium not initialized".to_string())?;
+        let pr = lattice.respond(embedding);
+
+        let action = ActionJson {
+            action_type: ActionType::GeneralAssist,
+            target_group_id: None,
+            group_task_name: Some("paramecium".to_string()),
+            confidence: pr.confidence,
+            margin: pr.confidence,
+            reason: format!("program_{} wave_e={:.3}", pr.program_idx, pr.wave_energy),
+            payload: None,
+        };
+        let resp = GeneratedResponse {
+            text: pr.text,
+            template_id: format!("paramecium_{}", pr.program_idx),
+            traceable: true,
+            confidence: pr.confidence,
+        };
+
+        self.record_latency(start);
+        Ok((action, resp))
     }
 
     // -------------------------------------------------------------------
@@ -1338,18 +1415,29 @@ pub fn build_language_demo_manager_with_config(
     };
     let mut dm = DimensionManager::new(config);
 
-    dm.spawn_mirror("support", 100)
-        .ok_or_else(|| "failed to spawn support mirror".to_string())?;
-    dm.spawn_mirror("coding", 101)
-        .ok_or_else(|| "failed to spawn coding mirror".to_string())?;
+    // 4 groups: support/general, patterns, coding, reasoning
+    let mirror_names = ["support", "patterns", "coding", "reasoning"];
+    let mirror_seeds = [100u64, 102, 101, 103];
+    for (name, seed) in mirror_names.iter().zip(mirror_seeds.iter()) {
+        dm.spawn_mirror(name, *seed)
+            .ok_or_else(|| format!("failed to spawn {} mirror", name))?;
+    }
     let cal_support = generate_spiral_data(50, &mut data_rng);
-    let cal_coding = generate_concentric_circles_data(50, &mut data_rng);
+    let cal_patterns = generate_concentric_circles_data(50, &mut data_rng);
+    let cal_coding = generate_spiral_data(50, &mut data_rng);
+    let cal_reasoning = generate_concentric_circles_data(50, &mut data_rng);
     let support_gid = dm
         .force_promote("support", &cal_support)
         .ok_or_else(|| "failed to promote support mirror".to_string())?;
+    let _patterns_gid = dm
+        .force_promote("patterns", &cal_patterns)
+        .ok_or_else(|| "failed to promote patterns mirror".to_string())?;
     let coding_gid = dm
         .force_promote("coding", &cal_coding)
         .ok_or_else(|| "failed to promote coding mirror".to_string())?;
+    let _reasoning_gid = dm
+        .force_promote("reasoning", &cal_reasoning)
+        .ok_or_else(|| "failed to promote reasoning mirror".to_string())?;
 
     dm.configure_language(lang_config);
 
@@ -1362,6 +1450,8 @@ pub fn build_language_demo_manager_with_config(
 
     let mut support_prompts = Vec::new();
     let mut coding_prompts = Vec::new();
+    let mut patterns_prompts = Vec::new();
+    let mut reasoning_prompts = Vec::new();
     for i in 0..200 {
         support_prompts.push(format!(
             "customer support account login password reset billing help ticket {}",
@@ -1369,6 +1459,14 @@ pub fn build_language_demo_manager_with_config(
         ));
         support_prompts.push(format!(
             "help desk cannot access account needs recovery and verification {}",
+            i
+        ));
+        patterns_prompts.push(format!(
+            "design pattern observer factory strategy singleton architecture {}",
+            i
+        ));
+        patterns_prompts.push(format!(
+            "explain the adapter pattern and when to use dependency injection {}",
             i
         ));
         coding_prompts.push(format!(
@@ -1379,9 +1477,19 @@ pub fn build_language_demo_manager_with_config(
             "debug c segmentation fault stack trace pointer module {}",
             i
         ));
+        reasoning_prompts.push(format!(
+            "what is the square root of explain how gravity works why {}",
+            i
+        ));
+        reasoning_prompts.push(format!(
+            "solve the equation prove that calculate the derivative of {}",
+            i
+        ));
     }
     dm.set_group_language_vector_from_texts(support_gid, &support_prompts)?;
+    dm.set_group_language_vector_from_texts(_patterns_gid, &patterns_prompts)?;
     dm.set_group_language_vector_from_texts(coding_gid, &coding_prompts)?;
+    dm.set_group_language_vector_from_texts(_reasoning_gid, &reasoning_prompts)?;
 
     Ok((dm, support_gid, coding_gid, report))
 }
