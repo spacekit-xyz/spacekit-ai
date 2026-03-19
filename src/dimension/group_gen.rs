@@ -1564,6 +1564,33 @@ impl GroupGenEnv {
         (self.decode_output(&output), self.last_generation_confidence)
     }
 
+    /// Generate using a pre-selected archetype index from the ArchetypeBrain,
+    /// bypassing the codebook's cosine similarity selection.
+    pub fn generate_with_archetype(
+        &mut self, cond: &[f32], arch_idx: usize, arch_conf: f32,
+        _max_len: usize, _temperature: f32,
+    ) -> (String, f32) {
+        let input_dim = self.env.input_layer_size().unwrap_or(GEN_COND_DIM);
+        let mut input = vec![0.0f32; input_dim];
+        for (i, v) in cond.iter().enumerate().take(input_dim) {
+            input[i] = *v;
+        }
+        let output = self.env.predict(&input);
+
+        if let Some(ref cb) = self.codebook {
+            if cb.has_prototypes() && arch_idx < cb.archetypes.len() {
+                let coherence = cb.output_coherence(arch_idx, &output);
+                let effective_conf = arch_conf * coherence;
+                self.last_selected_archetype = Some(arch_idx);
+                self.last_generation_confidence = effective_conf;
+                return (self.decode_output(&output), effective_conf);
+            }
+        }
+        self.last_selected_archetype = None;
+        self.last_generation_confidence = arch_conf;
+        (self.decode_output(&output), arch_conf)
+    }
+
     /// Generate and return an 8d E8 contribution vector alongside the text.
     /// The contribution vector captures the group's "semantic direction" for
     /// this input in the E8 lattice — used for algebraic group blending.

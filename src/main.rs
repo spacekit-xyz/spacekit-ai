@@ -1392,11 +1392,14 @@ fn train_brain(
     println!("  per-group adapters: {} groups, rank={}, {}d->{}d, {} params total",
         group_adapters.len(), DEFAULT_ADAPTER_RANK, raw_dim, bridge_dim, adapter_params);
 
-    // Stage 2.5: Understanding Layer — train topic + verb classifiers from
-    // (raw_embedding, semantic_intent) pairs, then freeze.
-    println!("\n--- Stage 2.5: Training Understanding Layer ---");
+    // Stage 2.5: Understanding Layer + MetaBrain — train MicroBrain classifiers
+    // for topic/verb/action, then build MetaBrain coordinator. Freeze all.
+    println!("\n--- Stage 2.5: Training Understanding Layer + MetaBrain ---");
     {
         use growformer::understanding::UnderstandingLayer;
+        use growformer::micro_brain::MetaBrain;
+        use growformer::dimension::action_classifier::NUM_ACTION_TYPES;
+
         let understanding_samples: Vec<(&[f32], &str)> = raw_embeddings.iter()
             .zip(samples.iter())
             .map(|(raw, s)| (raw.as_slice(), s.semantic_intent.as_str()))
@@ -1404,11 +1407,93 @@ fn train_brain(
         if understanding_samples.is_empty() {
             println!("  [skip] no understanding samples");
         } else {
-            let mut ul = UnderstandingLayer::build(&understanding_samples, raw_dim);
+            let mut ul = UnderstandingLayer::build_with_micro_brains(&understanding_samples, raw_dim);
             ul.freeze();
-            println!("  understanding layer: {} topics, {} verbs, frozen=true",
+            println!("  understanding layer: {} topics, {} verbs, micro-brains=true, frozen=true",
                 ul.topic_count(), ul.verb_count());
+
+            // Build MetaBrain with micro-brains sized for the actual vocabulary
+            let mut mb_rng = rand::rngs::StdRng::seed_from_u64(314);
+            let mut mb = MetaBrain::build(
+                raw_dim,
+                ul.topic_count(),
+                ul.topic_names.clone(),
+                ul.topic_embeddings.clone(),
+                ul.verb_embeddings.clone(),
+                NUM_ACTION_TYPES,
+                &mut mb_rng,
+            );
+
+            // Train action brain from action_samples
+            println!("  training action brain...");
+            let action_epochs = 300;
+            for epoch in 0..action_epochs {
+                let mut total_loss = 0.0f32;
+                for (emb, at) in &action_samples {
+                    let target_idx = match at {
+                        growformer::dimension::action::ActionType::SupportTicket => 0,
+                        growformer::dimension::action::ActionType::CodingAssist => 1,
+                        growformer::dimension::action::ActionType::GeneralAssist => 2,
+                        growformer::dimension::action::ActionType::ToolCall => 3,
+                        growformer::dimension::action::ActionType::Fallback => 4,
+                    };
+                    total_loss += mb.action_brain.train_step(emb, target_idx, &mut mb_rng);
+                }
+                if epoch % 100 == 0 || epoch == action_epochs - 1 {
+                    println!("    [meta/action] epoch {}/{} loss={:.4}",
+                        epoch, action_epochs, total_loss / action_samples.len().max(1) as f32);
+                }
+            }
+
+            // Train topic + verb brains from understanding samples
+            println!("  training topic + verb brains...");
+            let mut topic_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            for (i, name) in ul.topic_names.iter().enumerate() {
+                topic_map.insert(name.clone(), i);
+            }
+            let verb_map: std::collections::HashMap<String, usize> = ul.verb_names.iter().enumerate()
+                .map(|(i, v)| (v.clone(), i)).collect();
+
+            for epoch in 0..300 {
+                let mut tl = 0.0f32;
+                let mut vl = 0.0f32;
+                for &(raw, intent) in &understanding_samples {
+                    if let Some(&idx) = topic_map.get(intent) {
+                        tl += mb.topic_brain.train_step(raw, idx, &mut mb_rng);
+                    }
+                    let verb = growformer::understanding::intent_to_verb(intent);
+                    if let Some(&idx) = verb_map.get(verb) {
+                        vl += mb.verb_brain.train_step(raw, idx, &mut mb_rng);
+                    }
+                }
+                if epoch % 100 == 0 || epoch == 299 {
+                    let n = understanding_samples.len().max(1) as f32;
+                    println!("    [meta/topic+verb] epoch {}/300 topic_loss={:.4} verb_loss={:.4}",
+                        epoch, tl / n, vl / n);
+                }
+            }
+
+            // Train coordinator: target is the adapted conditioning vectors
+            println!("  training coordinator...");
+            for epoch in 0..200 {
+                let mut cl = 0.0f32;
+                for (raw, bridged) in raw_embeddings.iter().zip(bridged_embeddings.iter()) {
+                    let mut target = bridged.clone();
+                    target.resize(growformer::dimension::group_gen::GEN_COND_DIM, 0.0);
+                    cl += mb.train_coordinator_step(raw, &target);
+                }
+                if epoch % 50 == 0 || epoch == 199 {
+                    println!("    [meta/coordinator] epoch {}/200 loss={:.4}",
+                        epoch, cl / raw_embeddings.len().max(1) as f32);
+                }
+            }
+
+            mb.freeze();
+            println!("  MetaBrain: frozen, topic_brain={}cls verb_brain={}cls action_brain={}cls",
+                mb.topic_brain.output_dim, mb.verb_brain.output_dim, mb.action_brain.output_dim);
+
             svc.dm.understanding = Some(ul);
+            svc.dm.meta_brain = Some(mb);
         }
     }
 
@@ -1529,6 +1614,33 @@ fn train_brain(
     }
     if let Some(d) = code_dicts.values().next() {
         svc.dm.code_dictionary = Some(d.clone());
+    }
+
+    // Seed ArchetypeBrain from all groups' codebook prototypes.
+    // One program per (group_idx, archetype_idx) across all groups.
+    {
+        use growformer::micro_brain::ArchetypeBrain;
+        let mut archetype_entries: Vec<(usize, usize, Vec<f32>, Vec<u16>)> = Vec::new();
+        for (&gidx, cb) in &gen_codebooks {
+            if !cb.has_prototypes() { continue; }
+            if gen_dicts.get(&gidx).is_none() { continue; }
+            for (ai, arch) in cb.archetypes.iter().enumerate() {
+                let proto = cb.archetype_prototypes.get(ai)
+                    .cloned().unwrap_or_else(|| vec![0.0f32; bridge_dim]);
+                let tokens: Vec<u16> = arch.fixed.iter()
+                    .map(|&(_, tok)| tok).collect();
+                archetype_entries.push((gidx, ai, proto, tokens));
+            }
+        }
+        if !archetype_entries.is_empty() {
+            let ref_dict = gen_dicts.values().next().unwrap().clone();
+            let ab = ArchetypeBrain::build(&archetype_entries, ref_dict);
+            println!("\n  ArchetypeBrain: {} programs across {} groups",
+                ab.program_count(), gen_codebooks.len());
+            if let Some(ref mut mb) = svc.dm.meta_brain {
+                mb.archetype_brain = Some(ab);
+            }
+        }
     }
 
     // Pruning warmup: stop pruning after 30% of training ticks.
@@ -1730,7 +1842,7 @@ fn train_brain(
                         };
                         if let Some(raw) = h_raw {
                             if let Some(ref ul) = understanding_layer {
-                                let uv = ul.conditioning_vector(raw);
+                                let uv = ul.conditioning_vector_shared(raw);
                                 cond.extend_from_slice(&uv);
                             }
                         }

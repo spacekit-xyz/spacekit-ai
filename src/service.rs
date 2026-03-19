@@ -523,15 +523,39 @@ impl LanguageService {
         }
 
         let resp = if let Some((ref h_raw, ref bridged)) = encoded {
-            if let Some(ref ul) = dm.understanding {
-                if !ul.is_empty() {
-                    let (_, _, topic, verb) = ul.classify(h_raw);
-                    println!("  [understanding] topic={}, verb={}", topic, verb);
-                }
-            }
             // Apply OCEAN personality conditioning to the routed vector
             let mut conditioned = bridged.routed_vector.clone();
             personality.condition_vector(&mut conditioned);
+
+            // --- MetaBrain path: unified routing + conditioning + archetype selection ---
+            let meta_result = if let Some(ref mut mb) = dm.meta_brain {
+                if mb.is_ready() {
+                    let r = mb.process(h_raw, &conditioned);
+                    println!("  [meta-brain] topic={}, verb={}, action={:?}, conf={:.3}",
+                        r.topic, r.verb, r.action, r.confidence);
+                    if r.group_idx.is_some() { group_idx = r.group_idx; }
+                    Some(r)
+                } else { None }
+            } else {
+                if let Some(ref mut ul) = dm.understanding {
+                    if !ul.is_empty() {
+                        let (_, _, topic, verb) = ul.classify(h_raw);
+                        println!("  [understanding] topic={}, verb={}", topic, verb);
+                    }
+                }
+                None
+            };
+
+            // Use MetaBrain conditioning when available, else fall back to Clifford path
+            let gen_conditioning = if let Some(ref mr) = meta_result {
+                mr.conditioning.clone()
+            } else if let Some(gidx) = group_idx {
+                dm.adapt_for_group_clifford(gidx, &conditioned, h_raw, GEN_COND_DIM)
+            } else {
+                let mut c = conditioned.clone();
+                c.resize(GEN_COND_DIM, 0.0);
+                c
+            };
 
             // --- Level 3: Check episodic memory for cached composition ---
             let _cached_groups = Self::retrieve_cached_composition(dm, &conditioned);
@@ -548,13 +572,34 @@ impl LanguageService {
                 e8_select_best, compute_q,
             };
 
-            let primary = group_idx.and_then(|gidx| {
-                let adapted = dm.adapt_for_group_clifford(gidx, &conditioned, h_raw, GEN_COND_DIM);
-                dm.group_gen_envs.get_mut(&gidx).map(|env| {
-                    let (text, conf, e8) = env.generate_with_e8(&adapted, 300, 0.8);
-                    E8Contribution { group_idx: gidx, lattice_point: e8, text, confidence: conf }
+            // Use MetaBrain archetype selection when available
+            let primary = if let Some(ref mr) = meta_result {
+                if let (Some(gidx), Some(aidx)) = (mr.group_idx, mr.archetype_idx) {
+                    dm.group_gen_envs.get_mut(&gidx).map(|env| {
+                        let (text, conf) = env.generate_with_archetype(
+                            &gen_conditioning, aidx, mr.confidence, 300, 0.8,
+                        );
+                        let mut e8 = [0.0f32; 8];
+                        for i in 0..8.min(gen_conditioning.len()) { e8[i] = gen_conditioning[i]; }
+                        E8Contribution { group_idx: gidx, lattice_point: e8, text, confidence: conf }
+                    })
+                } else {
+                    group_idx.and_then(|gidx| {
+                        dm.group_gen_envs.get_mut(&gidx).map(|env| {
+                            let (text, conf, e8) = env.generate_with_e8(&gen_conditioning, 300, 0.8);
+                            E8Contribution { group_idx: gidx, lattice_point: e8, text, confidence: conf }
+                        })
+                    })
+                }
+            } else {
+                group_idx.and_then(|gidx| {
+                    let adapted = dm.adapt_for_group_clifford(gidx, &conditioned, h_raw, GEN_COND_DIM);
+                    dm.group_gen_envs.get_mut(&gidx).map(|env| {
+                        let (text, conf, e8) = env.generate_with_e8(&adapted, 300, 0.8);
+                        E8Contribution { group_idx: gidx, lattice_point: e8, text, confidence: conf }
+                    })
                 })
-            });
+            };
 
             let (best_text, best_conf, best_gidx) = match primary {
                 Some(ref c) if c.confidence >= 0.9 && c.text.len() > 5 => {
@@ -566,17 +611,37 @@ impl LanguageService {
                         contributions.push(c);
                     }
 
-                    let other_keys: Vec<usize> = dm.group_gen_envs.keys()
-                        .filter(|&&k| Some(k) != group_idx)
-                        .copied().collect();
-                    for gidx in other_keys {
-                        let adapted = dm.adapt_for_group_clifford(gidx, &conditioned, h_raw, GEN_COND_DIM);
-                        if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
-                            let (text, conf, e8) = env.generate_with_e8(&adapted, 300, 0.8);
-                            if text.len() > 5 {
-                                contributions.push(E8Contribution {
-                                    group_idx: gidx, lattice_point: e8, text, confidence: conf,
-                                });
+                    // MetaBrain volley: use trichocyst candidates from ArchetypeBrain
+                    if let Some(ref mr) = meta_result {
+                        for &(v_gidx, v_aidx, v_weight) in &mr.volley {
+                            if Some(v_gidx) == group_idx { continue; }
+                            if let Some(env) = dm.group_gen_envs.get_mut(&v_gidx) {
+                                let (text, conf) = env.generate_with_archetype(
+                                    &gen_conditioning, v_aidx, v_weight, 300, 0.8,
+                                );
+                                if text.len() > 5 {
+                                    let mut e8 = [0.0f32; 8];
+                                    for i in 0..8.min(gen_conditioning.len()) { e8[i] = gen_conditioning[i]; }
+                                    contributions.push(E8Contribution {
+                                        group_idx: v_gidx, lattice_point: e8, text, confidence: conf,
+                                    });
+                                }
+                            }
+                        }
+                    } else {
+                        // Fallback: fan out to all other groups
+                        let other_keys: Vec<usize> = dm.group_gen_envs.keys()
+                            .filter(|&&k| Some(k) != group_idx)
+                            .copied().collect();
+                        for gidx in other_keys {
+                            let adapted = dm.adapt_for_group_clifford(gidx, &conditioned, h_raw, GEN_COND_DIM);
+                            if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
+                                let (text, conf, e8) = env.generate_with_e8(&adapted, 300, 0.8);
+                                if text.len() > 5 {
+                                    contributions.push(E8Contribution {
+                                        group_idx: gidx, lattice_point: e8, text, confidence: conf,
+                                    });
+                                }
                             }
                         }
                     }

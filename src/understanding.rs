@@ -8,8 +8,12 @@
 //! vector to form a 176d (padded to 192d) conditioning signal that tells the
 //! generation head both WHAT the topic is and WHAT TO DO with it.
 
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+use crate::micro_brain::{MicroBrain, MicroBrainRole};
 
 pub const TOPIC_EMBED_DIM: usize = 32;
 pub const VERB_EMBED_DIM: usize = 16;
@@ -19,7 +23,7 @@ pub const VERB_LABELS: &[&str] = &[
     "explain", "design", "implement", "debug", "optimize", "test", "refactor", "compare",
 ];
 
-fn intent_to_verb(intent: &str) -> &'static str {
+pub fn intent_to_verb(intent: &str) -> &'static str {
     let s = intent.to_ascii_lowercase();
     if s.contains("debug") { return "debug"; }
     if s.contains("test") { return "test"; }
@@ -160,6 +164,12 @@ pub struct UnderstandingLayer {
     pub verb_embeddings: Vec<Vec<f32>>,
     pub verb_classifier: SmallMlp,
 
+    /// MicroBrain replacements — used when present, SmallMlp used as fallback.
+    #[serde(default)]
+    pub topic_brain: Option<MicroBrain>,
+    #[serde(default)]
+    pub verb_brain: Option<MicroBrain>,
+
     pub frozen: bool,
 }
 
@@ -172,6 +182,8 @@ impl Default for UnderstandingLayer {
             verb_names: Vec::new(),
             verb_embeddings: Vec::new(),
             verb_classifier: SmallMlp::new(1, 1, 1, 0),
+            topic_brain: None,
+            verb_brain: None,
             frozen: false,
         }
     }
@@ -306,14 +318,107 @@ impl UnderstandingLayer {
             verb_names,
             verb_embeddings,
             verb_classifier: verb_clf,
+            topic_brain: None,
+            verb_brain: None,
             frozen: false,
         }
     }
 
+    /// Build with MicroBrain classifiers (NeuralEnvironment) instead of SmallMlp.
+    /// Falls back to SmallMlp training first, then replaces with MicroBrain.
+    pub fn build_with_micro_brains(samples: &[(&[f32], &str)], raw_dim: usize) -> Self {
+        let mut layer = Self::build(samples, raw_dim);
+
+        let mut rng = StdRng::seed_from_u64(42);
+        let num_topics = layer.topic_names.len().max(2);
+        let num_verbs = layer.verb_names.len();
+
+        let mut topic_brain = MicroBrain::new(
+            MicroBrainRole::Topic, raw_dim, num_topics, 64,
+            layer.topic_names.clone(), &mut rng,
+        );
+        let mut verb_brain = MicroBrain::new(
+            MicroBrainRole::Verb, raw_dim, num_verbs, 32,
+            layer.verb_names.clone(), &mut rng,
+        );
+
+        let mut topic_map: HashMap<String, usize> = HashMap::new();
+        for (i, name) in layer.topic_names.iter().enumerate() {
+            topic_map.insert(name.clone(), i);
+        }
+        let verb_map: HashMap<String, usize> = layer.verb_names.iter().enumerate()
+            .map(|(i, v)| (v.clone(), i)).collect();
+
+        let topic_epochs = 400;
+        for epoch in 0..topic_epochs {
+            let mut total_loss = 0.0f32;
+            for &(raw, intent) in samples {
+                if let Some(&idx) = topic_map.get(intent) {
+                    total_loss += topic_brain.train_step(raw, idx, &mut rng);
+                }
+            }
+            if epoch % 100 == 0 || epoch == topic_epochs - 1 {
+                println!("    [understanding/topic-brain] epoch {}/{} loss={:.4}",
+                    epoch, topic_epochs, total_loss / samples.len().max(1) as f32);
+            }
+        }
+
+        let verb_epochs = 300;
+        for epoch in 0..verb_epochs {
+            let mut total_loss = 0.0f32;
+            for &(raw, intent) in samples {
+                let verb = intent_to_verb(intent);
+                if let Some(&idx) = verb_map.get(verb) {
+                    total_loss += verb_brain.train_step(raw, idx, &mut rng);
+                }
+            }
+            if epoch % 100 == 0 || epoch == verb_epochs - 1 {
+                println!("    [understanding/verb-brain] epoch {}/{} loss={:.4}",
+                    epoch, verb_epochs, total_loss / samples.len().max(1) as f32);
+            }
+        }
+
+        // Evaluate MicroBrain accuracy
+        let mut topic_correct = 0usize;
+        let mut verb_correct = 0usize;
+        for &(raw, intent) in samples {
+            let (pred_topic, _, _) = topic_brain.predict(raw);
+            if let Some(&true_idx) = topic_map.get(intent) {
+                if pred_topic == true_idx { topic_correct += 1; }
+            }
+            let (pred_verb, _, _) = verb_brain.predict(raw);
+            let true_verb = intent_to_verb(intent);
+            if let Some(&true_idx) = verb_map.get(true_verb) {
+                if pred_verb == true_idx { verb_correct += 1; }
+            }
+        }
+        let n = samples.len().max(1);
+        println!("    [understanding/brain] topic accuracy: {:.1}% ({}/{}), verb accuracy: {:.1}% ({}/{})",
+            topic_correct as f32 / n as f32 * 100.0, topic_correct, n,
+            verb_correct as f32 / n as f32 * 100.0, verb_correct, n);
+
+        layer.topic_brain = Some(topic_brain);
+        layer.verb_brain = Some(verb_brain);
+        layer
+    }
+
     /// Classify input and return (topic_embedding, verb_embedding, topic_name, verb_name).
-    pub fn classify(&self, raw: &[f32]) -> (Vec<f32>, Vec<f32>, String, String) {
-        let (topic_idx, _) = self.topic_classifier.predict_with_confidence(raw);
-        let (verb_idx, _) = self.verb_classifier.predict_with_confidence(raw);
+    /// Prefers MicroBrain classifiers when available, falls back to SmallMlp.
+    pub fn classify(&mut self, raw: &[f32]) -> (Vec<f32>, Vec<f32>, String, String) {
+        let topic_idx = if let Some(ref mut brain) = self.topic_brain {
+            let (idx, _, _) = brain.predict(raw);
+            idx
+        } else {
+            let (idx, _) = self.topic_classifier.predict_with_confidence(raw);
+            idx
+        };
+        let verb_idx = if let Some(ref mut brain) = self.verb_brain {
+            let (idx, _, _) = brain.predict(raw);
+            idx
+        } else {
+            let (idx, _) = self.verb_classifier.predict_with_confidence(raw);
+            idx
+        };
 
         let topic_emb = self.topic_embeddings.get(topic_idx)
             .cloned()
@@ -331,8 +436,22 @@ impl UnderstandingLayer {
     }
 
     /// Get the combined understanding vector (48d) for conditioning.
-    pub fn conditioning_vector(&self, raw: &[f32]) -> Vec<f32> {
+    pub fn conditioning_vector(&mut self, raw: &[f32]) -> Vec<f32> {
         let (topic_emb, verb_emb, _, _) = self.classify(raw);
+        let mut out = Vec::with_capacity(UNDERSTANDING_DIM);
+        out.extend_from_slice(&topic_emb);
+        out.extend_from_slice(&verb_emb);
+        out
+    }
+
+    /// Immutable version using SmallMlp fallback only (safe for shared references).
+    pub fn conditioning_vector_shared(&self, raw: &[f32]) -> Vec<f32> {
+        let (topic_idx, _) = self.topic_classifier.predict_with_confidence(raw);
+        let (verb_idx, _) = self.verb_classifier.predict_with_confidence(raw);
+        let topic_emb = self.topic_embeddings.get(topic_idx)
+            .cloned().unwrap_or_else(|| vec![0.0f32; TOPIC_EMBED_DIM]);
+        let verb_emb = self.verb_embeddings.get(verb_idx)
+            .cloned().unwrap_or_else(|| vec![0.0f32; VERB_EMBED_DIM]);
         let mut out = Vec::with_capacity(UNDERSTANDING_DIM);
         out.extend_from_slice(&topic_emb);
         out.extend_from_slice(&verb_emb);
@@ -341,6 +460,8 @@ impl UnderstandingLayer {
 
     pub fn freeze(&mut self) {
         self.frozen = true;
+        if let Some(ref mut b) = self.topic_brain { b.freeze(); }
+        if let Some(ref mut b) = self.verb_brain { b.freeze(); }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -397,7 +518,7 @@ mod tests {
             .zip(intents.iter())
             .map(|(r, &i)| (r.as_slice(), i))
             .collect();
-        let layer = UnderstandingLayer::build(&samples, 64);
+        let mut layer = UnderstandingLayer::build(&samples, 64);
         let (topic_emb, verb_emb, topic_name, verb_name) = layer.classify(&raw_vecs[0]);
         assert_eq!(topic_emb.len(), TOPIC_EMBED_DIM);
         assert_eq!(verb_emb.len(), VERB_EMBED_DIM);
@@ -412,7 +533,7 @@ mod tests {
             .zip(intents.iter())
             .map(|(r, &i)| (r.as_slice(), i))
             .collect();
-        let layer = UnderstandingLayer::build(&samples, 64);
+        let mut layer = UnderstandingLayer::build(&samples, 64);
         let cond = layer.conditioning_vector(&raw_vecs[0]);
         assert_eq!(cond.len(), UNDERSTANDING_DIM);
     }
@@ -437,9 +558,9 @@ mod tests {
             .zip(intents.iter())
             .map(|(r, &i)| (r.as_slice(), i))
             .collect();
-        let layer = UnderstandingLayer::build(&samples, 64);
+        let mut layer = UnderstandingLayer::build(&samples, 64);
         let json = serde_json::to_string(&layer).unwrap();
-        let restored: UnderstandingLayer = serde_json::from_str(&json).unwrap();
+        let mut restored: UnderstandingLayer = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.topic_count(), layer.topic_count());
         assert_eq!(restored.verb_count(), layer.verb_count());
         let (t1, v1, _, _) = layer.classify(&raw_vecs[0]);
@@ -488,7 +609,7 @@ mod tests {
             .zip(intents.iter())
             .map(|(r, &i)| (r.as_slice(), i))
             .collect();
-        let layer = UnderstandingLayer::build(&samples, 64);
+        let mut layer = UnderstandingLayer::build(&samples, 64);
         let c0 = layer.conditioning_vector(&raw_vecs[0]); // coding_implementation
         let c1 = layer.conditioning_vector(&raw_vecs[1]); // coding_debug
         let diff: f32 = c0.iter().zip(c1.iter()).map(|(a, b)| (a - b).abs()).sum();

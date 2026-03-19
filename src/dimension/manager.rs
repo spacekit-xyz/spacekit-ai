@@ -26,6 +26,7 @@ use super::language::{
     LanguageRoutingDecision, LanguageRuntime, route_language_embedding,
 };
 use crate::clifford::{GroupRotor, embed_bridge_vector, structural_fingerprint, structural_similarity};
+use crate::micro_brain::MetaBrain;
 use crate::understanding::UnderstandingLayer;
 use super::main_dim::MainDimension;
 use super::mirror_dim::{MirrorDimension, EpochResult};
@@ -84,6 +85,8 @@ pub struct DimensionManager {
     pub group_fingerprints: HashMap<usize, Vec<f32>>,
     #[serde(default)]
     pub understanding: Option<UnderstandingLayer>,
+    #[serde(default)]
+    pub meta_brain: Option<MetaBrain>,
     next_group_id: GroupId,
     low_confidence_streak: u32,
     pub auto_spawn_threshold: f32,
@@ -110,6 +113,7 @@ impl DimensionManager {
             group_rotors: HashMap::new(),
             group_fingerprints: HashMap::new(),
             understanding: None,
+            meta_brain: None,
             next_group_id: 0,
             low_confidence_streak: 0,
             auto_spawn_threshold: 0.15,
@@ -131,7 +135,7 @@ impl DimensionManager {
     /// The 128d base vector is augmented with the 48d understanding vector
     /// (topic 32d + verb 16d) and zero-padded to GEN_COND_DIM (192d).
     pub fn adapt_for_group_clifford(
-        &self,
+        &mut self,
         group_idx: usize,
         z_shared: &[f32],
         h_raw: &[f32],
@@ -143,7 +147,7 @@ impl DimensionManager {
             self.adapt_for_group(group_idx, z_shared, h_raw)
         };
 
-        let understanding_vec = match &self.understanding {
+        let understanding_vec = match &mut self.understanding {
             Some(ul) if !ul.is_empty() => ul.conditioning_vector(h_raw),
             _ => vec![0.0f32; crate::understanding::UNDERSTANDING_DIM],
         };
@@ -777,7 +781,18 @@ impl DimensionManager {
         let routing = self.route_text(text)?;
         let mut action = action_from_routing(&self.main, &routing, text);
 
-        if let Some(ref clf) = self.action_classifier {
+        if let Some(ref mut mb) = self.meta_brain {
+            if mb.is_ready() {
+                if let Ok(bridged) = self.language_runtime.bridge_text_stateless(text) {
+                    let (idx, conf, _) = mb.action_brain.predict(&bridged.routed_vector);
+                    if conf > 0.4 {
+                        action.action_type = crate::micro_brain::index_to_action_type(idx);
+                        action.confidence = conf;
+                        action.reason = "meta-brain".to_string();
+                    }
+                }
+            }
+        } else if let Some(ref clf) = self.action_classifier {
             if let Ok(bridged) = self.language_runtime.bridge_text_stateless(text) {
                 let (predicted_type, conf) = clf.predict_with_confidence(&bridged.routed_vector);
                 if conf > 0.4 {
@@ -797,7 +812,18 @@ impl DimensionManager {
         let routing = self.route_text_stateless(text)?;
         let mut action = action_from_routing(&self.main, &routing, text);
 
-        if let Some(ref clf) = self.action_classifier {
+        if let Some(ref mut mb) = self.meta_brain {
+            if mb.is_ready() {
+                if let Ok(bridged) = self.language_runtime.bridge_text_stateless(text) {
+                    let (idx, conf, _) = mb.action_brain.predict(&bridged.routed_vector);
+                    if conf > 0.4 {
+                        action.action_type = crate::micro_brain::index_to_action_type(idx);
+                        action.confidence = conf;
+                        action.reason = "meta-brain".to_string();
+                    }
+                }
+            }
+        } else if let Some(ref clf) = self.action_classifier {
             if let Ok(bridged) = self.language_runtime.bridge_text_stateless(text) {
                 let (predicted_type, conf) = clf.predict_with_confidence(&bridged.routed_vector);
                 if conf > 0.4 {
