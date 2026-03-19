@@ -365,6 +365,132 @@ pub struct BridgeOutput {
     pub confidence: f32,
 }
 
+pub const DEFAULT_ADAPTER_RANK: usize = 8;
+pub const DEFAULT_ADAPTER_L2: f32 = 1e-4;
+
+/// Low-rank per-group adapter: `z_g = z_shared + A @ B @ h_raw`.
+/// B projects raw encoder dim down to rank, A projects rank up to bridge dim.
+/// Trained per-group alongside generation heads; shared bridge stays frozen for routing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupAdapter {
+    pub raw_dim: usize,
+    pub bridge_dim: usize,
+    pub rank: usize,
+    pub b_down: Vec<Vec<f32>>,  // rank × raw_dim
+    pub a_up: Vec<Vec<f32>>,    // bridge_dim × rank
+    pub l2_weight: f32,
+    pub frozen: bool,
+}
+
+impl GroupAdapter {
+    pub fn new(raw_dim: usize, bridge_dim: usize, rank: usize) -> Self {
+        let scale = (2.0 / (raw_dim + rank) as f32).sqrt();
+        let mut b_down = vec![vec![0.0f32; raw_dim]; rank];
+        let mut a_up = vec![vec![0.0f32; rank]; bridge_dim];
+        // Kaiming-style init: small deterministic spread so groups diverge immediately
+        for (r, row) in b_down.iter_mut().enumerate() {
+            for (i, w) in row.iter_mut().enumerate() {
+                let hash = ((r * 31 + i * 17) % 1000) as f32 / 1000.0 - 0.5;
+                *w = hash * scale;
+            }
+        }
+        for (o, row) in a_up.iter_mut().enumerate() {
+            for (r, w) in row.iter_mut().enumerate() {
+                let hash = ((o * 13 + r * 29) % 1000) as f32 / 1000.0 - 0.5;
+                *w = hash * scale * 0.1;  // near-zero init so adapter starts as identity-ish
+            }
+        }
+        Self { raw_dim, bridge_dim, rank, b_down, a_up, l2_weight: DEFAULT_ADAPTER_L2, frozen: false }
+    }
+
+    /// Forward: returns the adapter delta to add to z_shared.
+    pub fn forward(&self, h_raw: &[f32]) -> Vec<f32> {
+        debug_assert_eq!(h_raw.len(), self.raw_dim);
+        // hidden = B @ h_raw  (rank-dim)
+        let mut hidden = vec![0.0f32; self.rank];
+        for (r, row) in self.b_down.iter().enumerate() {
+            let mut acc = 0.0f32;
+            for (i, &w) in row.iter().enumerate() {
+                acc += w * h_raw[i];
+            }
+            hidden[r] = if acc > 0.0 { acc } else { 0.01 * acc };  // LeakyReLU
+        }
+        // delta = A @ hidden  (bridge_dim)
+        let mut delta = vec![0.0f32; self.bridge_dim];
+        for (o, row) in self.a_up.iter().enumerate() {
+            let mut acc = 0.0f32;
+            for (r, &w) in row.iter().enumerate() {
+                acc += w * hidden[r];
+            }
+            delta[o] = acc;
+        }
+        delta
+    }
+
+    /// Adapt z_shared using raw embedding: z_g = z_shared + adapter.forward(h_raw)
+    pub fn adapt(&self, z_shared: &[f32], h_raw: &[f32]) -> Vec<f32> {
+        let delta = self.forward(h_raw);
+        z_shared.iter().zip(delta.iter()).map(|(&z, &d)| z + d).collect()
+    }
+
+    /// SGD training step: given the gradient signal from gen head loss.
+    /// `cond_grad` is the gradient of loss w.r.t. the adapted vector (bridge_dim).
+    /// `h_raw` is the raw encoder vector for this sample.
+    pub fn train_step(&mut self, h_raw: &[f32], cond_grad: &[f32], lr: f32) {
+        if self.frozen { return; }
+        debug_assert_eq!(h_raw.len(), self.raw_dim);
+        debug_assert_eq!(cond_grad.len(), self.bridge_dim);
+
+        // Recompute forward activations for backward pass
+        let mut hidden = vec![0.0f32; self.rank];
+        let mut hidden_pre_relu = vec![0.0f32; self.rank];
+        for (r, row) in self.b_down.iter().enumerate() {
+            let mut acc = 0.0f32;
+            for (i, &w) in row.iter().enumerate() {
+                acc += w * h_raw[i];
+            }
+            hidden_pre_relu[r] = acc;
+            hidden[r] = if acc > 0.0 { acc } else { 0.01 * acc };
+        }
+
+        // grad_A[o][r] = cond_grad[o] * hidden[r]
+        for (o, row) in self.a_up.iter_mut().enumerate() {
+            let go = cond_grad[o];
+            for (r, w) in row.iter_mut().enumerate() {
+                let grad = go * hidden[r] + self.l2_weight * *w;
+                *w -= lr * grad;
+            }
+        }
+
+        // grad through ReLU: d_hidden[r] = sum_o(cond_grad[o] * A[o][r]) * relu'(pre)
+        let mut d_hidden = vec![0.0f32; self.rank];
+        for r in 0..self.rank {
+            let mut acc = 0.0f32;
+            for (o, row) in self.a_up.iter().enumerate() {
+                acc += cond_grad[o] * row[r];
+            }
+            d_hidden[r] = if hidden_pre_relu[r] > 0.0 { acc } else { 0.01 * acc };
+        }
+
+        // grad_B[r][i] = d_hidden[r] * h_raw[i]
+        for (r, row) in self.b_down.iter_mut().enumerate() {
+            let dr = d_hidden[r];
+            for (i, w) in row.iter_mut().enumerate() {
+                let grad = dr * h_raw[i] + self.l2_weight * *w;
+                *w -= lr * grad;
+            }
+        }
+    }
+
+    pub fn param_count(&self) -> usize {
+        self.rank * self.raw_dim + self.bridge_dim * self.rank
+    }
+
+    pub fn freeze(&mut self) {
+        self.frozen = true;
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalibrationReport {
     pub encoder_model: String,
@@ -996,5 +1122,102 @@ mod tests {
         let decision = route_language_embedding(&[], &[0.0; 64], 0.5, 0.2);
         assert!(decision.rejected_as_ood);
         assert!(decision.chosen_group_id.is_none());
+    }
+
+    #[test]
+    fn group_adapter_forward_produces_correct_dims() {
+        let adapter = GroupAdapter::new(384, 128, 8);
+        let h_raw: Vec<f32> = (0..384).map(|i| (i as f32 * 0.013).sin()).collect();
+        let delta = adapter.forward(&h_raw);
+        assert_eq!(delta.len(), 128);
+        assert!(delta.iter().any(|&v| v != 0.0), "adapter output should be non-zero");
+    }
+
+    #[test]
+    fn group_adapter_adapt_adds_delta_to_shared() {
+        let adapter = GroupAdapter::new(384, 128, 8);
+        let z_shared = vec![1.0f32; 128];
+        let h_raw: Vec<f32> = (0..384).map(|i| (i as f32 * 0.013).sin()).collect();
+        let adapted = adapter.adapt(&z_shared, &h_raw);
+        assert_eq!(adapted.len(), 128);
+        assert!(adapted != z_shared, "adapted should differ from z_shared");
+    }
+
+    #[test]
+    fn group_adapter_train_reduces_loss_proxy() {
+        let mut adapter = GroupAdapter::new(64, 16, 4);
+        let h_raw: Vec<f32> = (0..64).map(|i| (i as f32) * 0.01).collect();
+        let z_shared = vec![0.5f32; 16];
+
+        let target_delta: Vec<f32> = (0..16).map(|i| (i as f32) * 0.1).collect();
+        let target: Vec<f32> = z_shared.iter().zip(target_delta.iter()).map(|(z, d)| z + d).collect();
+
+        let initial_adapted = adapter.adapt(&z_shared, &h_raw);
+        let initial_err: f32 = initial_adapted.iter().zip(target.iter())
+            .map(|(a, t)| (a - t).powi(2)).sum();
+
+        for _ in 0..200 {
+            let adapted = adapter.adapt(&z_shared, &h_raw);
+            let grad: Vec<f32> = adapted.iter().zip(target.iter())
+                .map(|(a, t)| 2.0 * (a - t)).collect();
+            adapter.train_step(&h_raw, &grad, 0.01);
+        }
+
+        let final_adapted = adapter.adapt(&z_shared, &h_raw);
+        let final_err: f32 = final_adapted.iter().zip(target.iter())
+            .map(|(a, t)| (a - t).powi(2)).sum();
+
+        assert!(final_err < initial_err * 0.5,
+            "adapter should reduce error: initial={:.4} final={:.4}", initial_err, final_err);
+    }
+
+    #[test]
+    fn group_adapter_frozen_blocks_training() {
+        let mut adapter = GroupAdapter::new(64, 16, 4);
+        adapter.freeze();
+        let h_raw = vec![0.1f32; 64];
+        let before = adapter.forward(&h_raw);
+        let grad = vec![1.0f32; 16];
+        adapter.train_step(&h_raw, &grad, 0.1);
+        let after = adapter.forward(&h_raw);
+        assert_eq!(before, after, "frozen adapter should not change");
+    }
+
+    #[test]
+    fn group_adapter_different_groups_diverge() {
+        let a1 = GroupAdapter::new(384, 128, 8);
+        let mut a2 = GroupAdapter::new(384, 128, 8);
+        let h_raw: Vec<f32> = (0..384).map(|i| (i as f32 * 0.013).sin()).collect();
+        let z_shared = vec![0.5f32; 128];
+
+        let grad = vec![0.5f32; 128];
+        for _ in 0..50 {
+            a2.train_step(&h_raw, &grad, 0.01);
+        }
+
+        let out1 = a1.adapt(&z_shared, &h_raw);
+        let out2 = a2.adapt(&z_shared, &h_raw);
+        assert_ne!(out1, out2, "different adapters should produce different outputs after training");
+    }
+
+    #[test]
+    fn group_adapter_serialization_roundtrip() {
+        let adapter = GroupAdapter::new(64, 16, 4);
+        let json = serde_json::to_string(&adapter).expect("serialize");
+        let loaded: GroupAdapter = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(adapter.raw_dim, loaded.raw_dim);
+        assert_eq!(adapter.bridge_dim, loaded.bridge_dim);
+        assert_eq!(adapter.rank, loaded.rank);
+        assert_eq!(adapter.b_down, loaded.b_down);
+        assert_eq!(adapter.a_up, loaded.a_up);
+
+        let h = vec![0.1f32; 64];
+        assert_eq!(adapter.forward(&h), loaded.forward(&h));
+    }
+
+    #[test]
+    fn group_adapter_param_count() {
+        let adapter = GroupAdapter::new(768, 128, 8);
+        assert_eq!(adapter.param_count(), 768 * 8 + 128 * 8);
     }
 }

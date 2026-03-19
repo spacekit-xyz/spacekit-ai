@@ -22,7 +22,7 @@ use super::group_gen::GroupGenEnv;
 use crate::spectral::TokenDictionary;
 use super::embedding::{compute_group_embedding, build_tag_vector, GroupEmbedding, TAG_VECTOR_DIM};
 use super::language::{
-    CalibrationDataset, CalibrationReport, CalibrationRequirements, LanguageConfig,
+    CalibrationDataset, CalibrationReport, CalibrationRequirements, GroupAdapter, LanguageConfig,
     LanguageRoutingDecision, LanguageRuntime, route_language_embedding,
 };
 use super::main_dim::MainDimension;
@@ -74,6 +74,8 @@ pub struct DimensionManager {
     pub gen_dictionary: Option<TokenDictionary>,
     #[serde(default)]
     pub code_dictionary: Option<TokenDictionary>,
+    #[serde(default)]
+    pub group_adapters: HashMap<usize, GroupAdapter>,
     next_group_id: GroupId,
     low_confidence_streak: u32,
     pub auto_spawn_threshold: f32,
@@ -96,10 +98,20 @@ impl DimensionManager {
             group_code_envs: HashMap::new(),
             gen_dictionary: None,
             code_dictionary: None,
+            group_adapters: HashMap::new(),
             next_group_id: 0,
             low_confidence_streak: 0,
             auto_spawn_threshold: 0.15,
             auto_spawn_k: 10,
+        }
+    }
+
+    /// Apply per-group adapter to a bridged vector using the raw encoder vector.
+    /// Returns the adapted vector if an adapter exists for this group, otherwise returns z_shared unchanged.
+    pub fn adapt_for_group(&self, group_idx: usize, z_shared: &[f32], h_raw: &[f32]) -> Vec<f32> {
+        match self.group_adapters.get(&group_idx) {
+            Some(adapter) if h_raw.len() == adapter.raw_dim => adapter.adapt(z_shared, h_raw),
+            _ => z_shared.to_vec(),
         }
     }
 

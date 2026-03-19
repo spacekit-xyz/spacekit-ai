@@ -27,7 +27,7 @@ pub use generation::{GeneratedResponse, render_action_template};
 pub use embedding::{GroupEmbedding, compute_group_embedding, cosine_similarity, retrieve_relevant_groups};
 pub use language::{
     CalibrationCoverage, CalibrationDataset, CalibrationRequirements, CalibrationReport,
-    EncoderPreset, EmaSmoother, HashingLanguageEncoder, LanguageBridge, LanguageConfig,
+    EncoderPreset, EmaSmoother, GroupAdapter, HashingLanguageEncoder, LanguageBridge, LanguageConfig,
     LanguageEncoder, LanguageRoutingDecision, LanguageRuntime, LanguageSample, route_language_embedding,
 };
 pub use main_dim::{MainDimension, FrozenGroupEnv};

@@ -508,14 +508,13 @@ impl LanguageService {
         let group_idx = action.target_group_id
             .and_then(|gid| dm.main.group_order.iter().position(|&g| g == gid));
 
-        let resp = if let Some((_, ref bridged)) = encoded {
+        let resp = if let Some((ref h_raw, ref bridged)) = encoded {
             // Apply OCEAN personality conditioning to the routed vector
             let mut conditioned = bridged.routed_vector.clone();
             personality.condition_vector(&mut conditioned);
-            let routed = &conditioned;
 
             // --- Level 3: Check episodic memory for cached composition ---
-            let _cached_groups = Self::retrieve_cached_composition(dm, routed);
+            let _cached_groups = Self::retrieve_cached_composition(dm, &conditioned);
 
             // Apply OCEAN Hopf diversity bonus to all gen envs
             let div_bonus = personality.hopf_diversity_bonus();
@@ -524,16 +523,15 @@ impl LanguageService {
             }
 
             // --- Level 1: Competitive multi-head inference with E8 composition ---
-            // Run routed group first. If effective confidence < 0.9, run all
-            // groups, collect E8 contribution vectors, and blend in E8 space.
             use crate::dimension::group_gen::{
                 E8Contribution, e8_blend_quantum, e8_compose_sentences_quantum,
                 e8_select_best, compute_q,
             };
 
             let primary = group_idx.and_then(|gidx| {
+                let adapted = dm.adapt_for_group(gidx, &conditioned, h_raw);
                 dm.group_gen_envs.get_mut(&gidx).map(|env| {
-                    let (text, conf, e8) = env.generate_with_e8(routed, 300, 0.8);
+                    let (text, conf, e8) = env.generate_with_e8(&adapted, 300, 0.8);
                     E8Contribution { group_idx: gidx, lattice_point: e8, text, confidence: conf }
                 })
             });
@@ -552,8 +550,9 @@ impl LanguageService {
                         .filter(|&&k| Some(k) != group_idx)
                         .copied().collect();
                     for gidx in other_keys {
+                        let adapted = dm.adapt_for_group(gidx, &conditioned, h_raw);
                         if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
-                            let (text, conf, e8) = env.generate_with_e8(routed, 300, 0.8);
+                            let (text, conf, e8) = env.generate_with_e8(&adapted, 300, 0.8);
                             if text.len() > 5 {
                                 contributions.push(E8Contribution {
                                     group_idx: gidx, lattice_point: e8, text, confidence: conf,
@@ -571,7 +570,7 @@ impl LanguageService {
                         // Quantum group composition: compute deformation
                         // parameter q from input embedding asymmetry, then
                         // use R-matrix braided blend for non-commutative composition
-                        let q = compute_q(routed, &contributions);
+                        let q = compute_q(&conditioned, &contributions);
                         let blended = e8_blend_quantum(&contributions, q);
 
                         // Level 1: E8-scored selection of best single response
@@ -592,7 +591,7 @@ impl LanguageService {
                                 // Level 3: cache this quantum composition
                                 let involved: Vec<usize> = contributions.iter()
                                     .map(|c| c.group_idx).collect();
-                                Self::cache_composition(dm, routed, &involved, comp_conf);
+                                Self::cache_composition(dm, &conditioned, &involved, comp_conf);
                             }
                         }
 
@@ -838,8 +837,8 @@ impl LanguageService {
         let group_idx = action.target_group_id
             .and_then(|gid| dm.main.group_order.iter().position(|&g| g == gid));
 
-        let code = if let Some((_, ref bridged)) = encoded {
-            let routed = &bridged.routed_vector;
+        let code = if let Some((ref h_raw, ref bridged)) = encoded {
+            let base_cond = &bridged.routed_vector;
             let lang = match action.payload {
                 Some(crate::dimension::action::ActionPayload::CodingAssist { ref language_hint, .. }) =>
                     language_hint.clone(),
@@ -848,8 +847,9 @@ impl LanguageService {
 
             // --- Level 1: Competitive multi-head inference for code ---
             let primary = group_idx.and_then(|gidx| {
+                let adapted = dm.adapt_for_group(gidx, base_cond, h_raw);
                 dm.group_code_envs.get_mut(&gidx).map(|env| {
-                    let (code, conf) = env.generate(routed, 500, 0.7);
+                    let (code, conf) = env.generate(&adapted, 500, 0.7);
                     (code, conf, gidx)
                 })
             });
@@ -867,8 +867,9 @@ impl LanguageService {
                         .filter(|&&k| Some(k) != group_idx)
                         .copied().collect();
                     for gidx in other_keys {
+                        let adapted = dm.adapt_for_group(gidx, base_cond, h_raw);
                         if let Some(env) = dm.group_code_envs.get_mut(&gidx) {
-                            let (c, cf) = env.generate(routed, 500, 0.7);
+                            let (c, cf) = env.generate(&adapted, 500, 0.7);
                             if cf > best_cf && c.len() > 5 {
                                 best_c = c;
                                 best_cf = cf;
@@ -1106,10 +1107,10 @@ impl LanguageService {
                 let dm = self.active_dm_mut();
 
                 let encoded = dm.language_runtime.encode_and_bridge(&turn.message).ok();
-                if let Some((_, ref bridged)) = encoded {
+                if let Some((ref h_raw, ref bridged)) = encoded {
                     let embedding = &bridged.routed_vector;
 
-                    // 1. Router correction: reinforce or correct group routing
+                    // 1. Router correction: reinforce or correct group routing (uses shared bridge)
                     if let Some(group_id) = turn.group_id {
                         let mut rng = StdRng::from_entropy();
                         if let Some(ref mut router) = dm.observer.learned_router {
@@ -1119,18 +1120,19 @@ impl LanguageService {
                         }
                     }
 
-                    // 2. Generation head correction: if correction text provided, train on it
+                    // 2. Generation head correction: if correction text provided, train on adapted vector
                     if let Some(ref correction) = feedback.correction {
                         if let Some(group_id) = turn.group_id {
                             let group_idx = dm.main.group_order.iter()
                                 .position(|&g| g == group_id);
                             if let Some(gidx) = group_idx {
+                                let adapted = dm.adapt_for_group(gidx, embedding, h_raw);
                                 if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
                                     let was_frozen = env.frozen;
                                     env.frozen = false;
                                     let mut rng = StdRng::from_entropy();
                                     for _ in 0..CONTINUUM_STEPS {
-                                        env.train_step(embedding, correction, &mut rng);
+                                        env.train_step(&adapted, correction, &mut rng);
                                     }
                                     env.frozen = was_frozen;
                                 }

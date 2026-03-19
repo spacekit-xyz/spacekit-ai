@@ -1355,24 +1355,41 @@ fn train_brain(
     println!("  gen_epochs={}, num_groups={}, replicas_per_task={}", gen_epochs, num_groups, k_replicas);
 
     // Partition training data by (group, kind), carrying novelty scores per sample.
+    // Each pair now carries (bridged, raw, target) so per-group adapters can specialize conditioning.
     let mut gen_by_group: HashMap<usize, Vec<(&[f32], &str)>> = HashMap::new();
+    let mut gen_raw_by_group: HashMap<usize, Vec<&[f32]>> = HashMap::new();
     let mut gen_novelty_by_group: HashMap<usize, Vec<f32>> = HashMap::new();
     let mut code_by_group: HashMap<usize, Vec<(&[f32], &str)>> = HashMap::new();
+    let mut code_raw_by_group: HashMap<usize, Vec<&[f32]>> = HashMap::new();
     let mut code_novelty_by_group: HashMap<usize, Vec<f32>> = HashMap::new();
-    for (i, (bridged, s)) in bridged_embeddings.iter().zip(samples.iter()).enumerate() {
+    for (i, ((bridged, raw), s)) in bridged_embeddings.iter().zip(raw_embeddings.iter()).zip(samples.iter()).enumerate() {
         let gidx = group_map(s);
         let nov = novelty_scores.get(i).copied().unwrap_or(0.0);
         if let Some(r) = s.expected_response.as_deref() {
             gen_by_group.entry(gidx).or_default().push((bridged.as_slice(), r));
+            gen_raw_by_group.entry(gidx).or_default().push(raw.as_slice());
             gen_novelty_by_group.entry(gidx).or_default().push(nov);
         }
         if let Some(c) = s.expected_code.as_deref() {
             if !c.is_empty() && c != "null" {
                 code_by_group.entry(gidx).or_default().push((bridged.as_slice(), c));
+                code_raw_by_group.entry(gidx).or_default().push(raw.as_slice());
                 code_novelty_by_group.entry(gidx).or_default().push(nov);
             }
         }
     }
+
+    // Create per-group low-rank adapters for generation conditioning.
+    use growformer::dimension::language::{GroupAdapter, DEFAULT_ADAPTER_RANK};
+    let mut group_adapters: HashMap<usize, GroupAdapter> = HashMap::new();
+    for &gidx in gen_by_group.keys().chain(code_by_group.keys()) {
+        if !group_adapters.contains_key(&gidx) {
+            group_adapters.insert(gidx, GroupAdapter::new(raw_dim, bridge_dim, DEFAULT_ADAPTER_RANK));
+        }
+    }
+    let adapter_params: usize = group_adapters.values().map(|a| a.param_count()).sum();
+    println!("  per-group adapters: {} groups, rank={}, {}d->{}d, {} params total",
+        group_adapters.len(), DEFAULT_ADAPTER_RANK, raw_dim, bridge_dim, adapter_params);
 
     // Build per-group dictionaries from each group's own data.
     // Larger groups get larger dictionaries (2048 max), smaller groups get 1024.
@@ -1508,6 +1525,8 @@ fn train_brain(
         kind: &'static str,
         replica: usize,
         pairs: &'a [(&'a [f32], &'a str)],
+        raw_vecs: &'a [&'a [f32]],
+        adapter: GroupAdapter,
         novelty: Vec<f32>,
         seed: u64,
         dictionary: TokenDictionary,
@@ -1536,10 +1555,15 @@ fn train_brain(
                 let cb = gen_codebooks.get(&gidx).cloned();
                 let hopf = gen_hopf.get(&gidx).cloned();
                 let nov = gen_novelty_by_group.get(&gidx).cloned().unwrap_or_default();
+                let raw = gen_raw_by_group.get(&gidx).map(|v| v.as_slice()).unwrap_or(&[]);
+                let adapter = group_adapters.get(&gidx).cloned()
+                    .unwrap_or_else(|| GroupAdapter::new(raw_dim, bridge_dim, DEFAULT_ADAPTER_RANK));
                 for r in 0..k_replicas {
                     tasks.push(GenTask {
                         gidx, kind: "gen", replica: r,
                         pairs: p.as_slice(),
+                        raw_vecs: raw,
+                        adapter: adapter.clone(),
                         novelty: nov.clone(),
                         seed: 100 + gidx as u64 * 1000 + r as u64,
                         dictionary: dict.clone(),
@@ -1566,10 +1590,15 @@ fn train_brain(
                 let cb = code_codebooks.get(&gidx).cloned();
                 let hopf = code_hopf.get(&gidx).cloned();
                 let nov = code_novelty_by_group.get(&gidx).cloned().unwrap_or_default();
+                let raw = code_raw_by_group.get(&gidx).map(|v| v.as_slice()).unwrap_or(&[]);
+                let adapter = group_adapters.get(&gidx).cloned()
+                    .unwrap_or_else(|| GroupAdapter::new(raw_dim, bridge_dim, DEFAULT_ADAPTER_RANK));
                 for r in 0..k_replicas {
                     tasks.push(GenTask {
                         gidx, kind: "code", replica: r,
                         pairs: p.as_slice(),
+                        raw_vecs: raw,
+                        adapter: adapter.clone(),
                         novelty: nov.clone(),
                         seed: 200 + gidx as u64 * 1000 + r as u64,
                         dictionary: dict.clone(),
@@ -1599,9 +1628,10 @@ fn train_brain(
         }
     }
 
-    let results: Vec<(usize, &str, usize, f32, GroupGenEnv)> = std::thread::scope(|s| {
+    let results: Vec<(usize, &str, usize, f32, GroupGenEnv, GroupAdapter)> = std::thread::scope(|s| {
         let handles: Vec<_> = tasks.iter().map(|task| {
             s.spawn(move || {
+                let mut adapter = task.adapter.clone();
                 let mut task_rng = StdRng::seed_from_u64(task.seed);
                 let ov = task.overrides.as_ref();
                 let default_ov = growformer::dimension::group_gen::GenEnvOverrides::default();
@@ -1649,6 +1679,7 @@ fn train_brain(
                 let eval_check_interval = task.es_window.max(50);
                 let mut best_eval_loss = f32::INFINITY;
                 let mut stopped_early = false;
+                let has_raw = task.raw_vecs.len() == task.pairs.len();
 
                 for epoch in 0..te {
                     if epoch < novelty_curriculum_end && !task.novelty.is_empty() && task.novelty.len() == n_pairs {
@@ -1661,15 +1692,37 @@ fn train_brain(
                     } else {
                         indices.shuffle(&mut task_rng);
                     }
+                    let adapter_lr = 0.001f32;
+                    let adapter_warmup = 20;
                     let mut total_loss = 0.0f32;
                     for &i in &indices {
-                        let l = env.train_step(task.pairs[i].0, task.pairs[i].1, &mut task_rng);
+                        let (cond, h_raw) = if has_raw {
+                            (adapter.adapt(task.pairs[i].0, task.raw_vecs[i]), Some(task.raw_vecs[i]))
+                        } else {
+                            (task.pairs[i].0.to_vec(), None)
+                        };
+                        let l = env.train_step(&cond, task.pairs[i].1, &mut task_rng);
                         sample_losses[i] = l;
                         total_loss += l;
+
+                        // Train adapter via finite-difference gradient after warmup
+                        if let Some(raw) = h_raw {
+                            if epoch >= adapter_warmup && !adapter.frozen {
+                                let base_loss = l;
+                                let delta = adapter.forward(raw);
+                                let eps = 0.01f32;
+                                let mut grad = vec![0.0f32; delta.len()];
+                                for d in 0..delta.len() {
+                                    let mut perturbed = cond.clone();
+                                    perturbed[d] += eps;
+                                    let l_plus = env.eval_loss(&perturbed, task.pairs[i].1);
+                                    grad[d] = (l_plus - base_loss) / eps;
+                                }
+                                adapter.train_step(raw, &grad, adapter_lr);
+                            }
+                        }
                     }
                     if epoch >= replay_start_epoch && replay_count > 0 {
-                        // Once loss data is available, use both loss ranking and novelty:
-                        // blend loss-based priority with novelty-based priority.
                         let mut ranked: Vec<(usize, f32)> = sample_losses.iter().copied().enumerate()
                             .map(|(idx, loss)| {
                                 let nov_weight = if idx < task.novelty.len() {
@@ -1682,7 +1735,12 @@ fn train_brain(
                             .collect();
                         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                         for &(idx, _score) in ranked.iter().take(replay_count) {
-                            env.train_step(task.pairs[idx].0, task.pairs[idx].1, &mut task_rng);
+                            let cond = if has_raw {
+                                adapter.adapt(task.pairs[idx].0, task.raw_vecs[idx])
+                            } else {
+                                task.pairs[idx].0.to_vec()
+                            };
+                            env.train_step(&cond, task.pairs[idx].1, &mut task_rng);
                         }
                     }
                     let last_avg = total_loss / n_pairs.max(1) as f32;
@@ -1734,8 +1792,13 @@ fn train_brain(
                         && epoch % eval_check_interval == 0 && epoch > 0
                     {
                         let mut eval_sum = 0.0f32;
-                        for &(cond, target) in task.pairs {
-                            eval_sum += env.eval_loss(cond, target);
+                        for (j, &(bridged, target)) in task.pairs.iter().enumerate() {
+                            let cond = if has_raw {
+                                adapter.adapt(bridged, task.raw_vecs[j])
+                            } else {
+                                bridged.to_vec()
+                            };
+                            eval_sum += env.eval_loss(&cond, target);
                         }
                         let eval_avg = eval_sum / n_pairs.max(1) as f32;
                         eval_loss_history.push(eval_avg);
@@ -1775,42 +1838,49 @@ fn train_brain(
                         task.kind, task.gidx, task.replica, actual_epochs, te);
                 }
                 let mut eval_loss = 0.0f32;
-                for &(cond, target) in task.pairs {
-                    eval_loss += env.eval_loss(cond, target);
+                for (j, &(bridged, target)) in task.pairs.iter().enumerate() {
+                    let cond = if has_raw {
+                        adapter.adapt(bridged, task.raw_vecs[j])
+                    } else {
+                        bridged.to_vec()
+                    };
+                    eval_loss += env.eval_loss(&cond, target);
                 }
                 let final_loss = eval_loss / task.pairs.len().max(1) as f32;
                 env.freeze();
-                println!("    [{} g{} r{}] frozen: {} neurons, {} synapses, eval_loss={:.4}",
+                adapter.freeze();
+                println!("    [{} g{} r{}] frozen: {} neurons, {} synapses, eval_loss={:.4}, adapter_params={}",
                     task.kind, task.gidx, task.replica,
-                    env.total_neurons(), env.total_synapses(), final_loss);
-                (task.gidx, task.kind, task.replica, final_loss, env)
+                    env.total_neurons(), env.total_synapses(), final_loss, adapter.param_count());
+                (task.gidx, task.kind, task.replica, final_loss, env, adapter)
             })
         }).collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
     // Select best replica per (group, kind) by lowest eval loss
-    let mut best: HashMap<(usize, &str), (f32, GroupGenEnv)> = HashMap::new();
-    for (gidx, kind, replica, loss, env) in results {
+    let mut best: HashMap<(usize, &str), (f32, GroupGenEnv, GroupAdapter)> = HashMap::new();
+    for (gidx, kind, replica, loss, env, adapter) in results {
         let key = (gidx, kind);
         let is_better = match best.get(&key) {
-            Some((prev_loss, _)) => loss < *prev_loss,
+            Some((prev_loss, _, _)) => loss < *prev_loss,
             None => true,
         };
         if is_better {
             if k_replicas > 1 {
                 println!("    [{} g{}] best replica so far: r{} loss={:.4}", kind, gidx, replica, loss);
             }
-            best.insert(key, (loss, env));
+            best.insert(key, (loss, env, adapter));
         }
     }
 
-    for ((gidx, kind), (_loss, env)) in best {
+    for ((gidx, kind), (_loss, env, adapter)) in best {
         match kind {
             "gen" => { svc.dm.group_gen_envs.insert(gidx, env); }
             "code" => { svc.dm.group_code_envs.insert(gidx, env); }
             _ => {}
         }
+        svc.dm.group_adapters.insert(gidx, adapter);
     }
 
     // ---------------------------------------------------------------
