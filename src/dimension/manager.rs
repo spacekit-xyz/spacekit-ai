@@ -26,6 +26,7 @@ use super::language::{
     LanguageRoutingDecision, LanguageRuntime, route_language_embedding,
 };
 use crate::clifford::{GroupRotor, embed_bridge_vector, structural_fingerprint, structural_similarity};
+use crate::understanding::UnderstandingLayer;
 use super::main_dim::MainDimension;
 use super::mirror_dim::{MirrorDimension, EpochResult};
 use super::observer::GlobalObserver;
@@ -81,6 +82,8 @@ pub struct DimensionManager {
     pub group_rotors: HashMap<usize, GroupRotor>,
     #[serde(default)]
     pub group_fingerprints: HashMap<usize, Vec<f32>>,
+    #[serde(default)]
+    pub understanding: Option<UnderstandingLayer>,
     next_group_id: GroupId,
     low_confidence_streak: u32,
     pub auto_spawn_threshold: f32,
@@ -106,6 +109,7 @@ impl DimensionManager {
             group_adapters: HashMap::new(),
             group_rotors: HashMap::new(),
             group_fingerprints: HashMap::new(),
+            understanding: None,
             next_group_id: 0,
             low_confidence_streak: 0,
             auto_spawn_threshold: 0.15,
@@ -124,6 +128,8 @@ impl DimensionManager {
 
     /// Apply per-group Clifford rotor to condition from raw encoder vector.
     /// Falls back to the linear adapter path if no rotor exists for this group.
+    /// The 128d base vector is augmented with the 48d understanding vector
+    /// (topic 32d + verb 16d) and zero-padded to GEN_COND_DIM (192d).
     pub fn adapt_for_group_clifford(
         &self,
         group_idx: usize,
@@ -131,11 +137,22 @@ impl DimensionManager {
         h_raw: &[f32],
         target_dim: usize,
     ) -> Vec<f32> {
-        if let Some(rotor) = self.group_rotors.get(&group_idx) {
-            rotor.condition(h_raw, target_dim)
+        let base = if let Some(rotor) = self.group_rotors.get(&group_idx) {
+            rotor.condition(h_raw, 128)
         } else {
             self.adapt_for_group(group_idx, z_shared, h_raw)
-        }
+        };
+
+        let understanding_vec = match &self.understanding {
+            Some(ul) if !ul.is_empty() => ul.conditioning_vector(h_raw),
+            _ => vec![0.0f32; crate::understanding::UNDERSTANDING_DIM],
+        };
+
+        let mut out = Vec::with_capacity(target_dim);
+        out.extend_from_slice(&base);
+        out.extend_from_slice(&understanding_vec);
+        out.resize(target_dim, 0.0);
+        out
     }
 
     /// Register a structural fingerprint for a group, computed from the mean

@@ -1392,6 +1392,26 @@ fn train_brain(
     println!("  per-group adapters: {} groups, rank={}, {}d->{}d, {} params total",
         group_adapters.len(), DEFAULT_ADAPTER_RANK, raw_dim, bridge_dim, adapter_params);
 
+    // Stage 2.5: Understanding Layer — train topic + verb classifiers from
+    // (raw_embedding, semantic_intent) pairs, then freeze.
+    println!("\n--- Stage 2.5: Training Understanding Layer ---");
+    {
+        use growformer::understanding::UnderstandingLayer;
+        let understanding_samples: Vec<(&[f32], &str)> = raw_embeddings.iter()
+            .zip(samples.iter())
+            .map(|(raw, s)| (raw.as_slice(), s.semantic_intent.as_str()))
+            .collect();
+        if understanding_samples.is_empty() {
+            println!("  [skip] no understanding samples");
+        } else {
+            let mut ul = UnderstandingLayer::build(&understanding_samples, raw_dim);
+            ul.freeze();
+            println!("  understanding layer: {} topics, {} verbs, frozen=true",
+                ul.topic_count(), ul.verb_count());
+            svc.dm.understanding = Some(ul);
+        }
+    }
+
     // Build per-group dictionaries from each group's own data.
     // Larger groups get larger dictionaries (2048 max), smaller groups get 1024.
     use growformer::dimension::group_gen::{bits_for_dict, MAX_TOKENS};
@@ -1423,7 +1443,7 @@ fn train_brain(
     // archetypes + slots, reducing prediction from ~1900 to ~80-120 bits.
     // Scale archetypes with data size: larger groups need more archetypes
     // to avoid collapsing diverse texts into too few buckets.
-    let base_archetypes = 16usize;
+    let base_archetypes = 32usize;
     let mut gen_codebooks: HashMap<usize, AlgebraicCodebook> = HashMap::new();
     let mut code_codebooks: HashMap<usize, AlgebraicCodebook> = HashMap::new();
     for (&gidx, pairs) in &gen_by_group {
@@ -1436,11 +1456,11 @@ fn train_brain(
             .map(|g| g.unique_intents)
             .unwrap_or(0);
         let gen_max_arch = if texts.len() > 150 || intent_count > 40 {
-            base_archetypes * 6  // 96 for large/high-diversity groups
+            base_archetypes * 4  // 128 for large/high-diversity groups
         } else if texts.len() > 50 || intent_count > 12 {
-            base_archetypes * 3  // 48 for medium groups or high intent diversity
+            base_archetypes * 3  // 96 for medium groups or high intent diversity
         } else {
-            base_archetypes      // 16 for small groups
+            base_archetypes      // 32 for small groups
         };
         let cb = AlgebraicCodebook::build(&texts, dict, gen_max_arch, Some(&embs));
         let mode = if cb.has_prototypes() { "SLOT-ONLY" } else { "FULL" };
@@ -1632,8 +1652,10 @@ fn train_brain(
         }
     }
 
+    let understanding_ref = svc.dm.understanding.as_ref();
     let results: Vec<(usize, &str, usize, f32, GroupGenEnv, GroupAdapter, GroupRotor)> = std::thread::scope(|s| {
         let handles: Vec<_> = tasks.iter().map(|task| {
+            let understanding_layer = understanding_ref;
             s.spawn(move || {
                 let mut adapter = task.adapter.clone();
                 let mut rotor = task.rotor.clone();
@@ -1701,11 +1723,19 @@ fn train_brain(
                     let adapter_warmup = 20;
                     let mut total_loss = 0.0f32;
                     for &i in &indices {
-                        let (cond, h_raw) = if has_raw {
+                        let (mut cond, h_raw) = if has_raw {
                             (adapter.adapt(task.pairs[i].0, task.raw_vecs[i]), Some(task.raw_vecs[i]))
                         } else {
                             (task.pairs[i].0.to_vec(), None)
                         };
+                        if let Some(raw) = h_raw {
+                            if let Some(ref ul) = understanding_layer {
+                                let uv = ul.conditioning_vector(raw);
+                                cond.extend_from_slice(&uv);
+                            }
+                        }
+                        let env_cond_dim = env.env.layers.first().map_or(cond.len(), |l| l.len());
+                        cond.resize(env_cond_dim, 0.0);
                         let l = env.train_step(&cond, task.pairs[i].1, &mut task_rng);
                         sample_losses[i] = l;
                         total_loss += l;

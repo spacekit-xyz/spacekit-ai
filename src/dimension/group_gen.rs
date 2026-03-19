@@ -32,7 +32,7 @@ use crate::spectral::{
 };
 use crate::types::EnvironmentConfig;
 
-pub const GEN_COND_DIM: usize = 128;
+pub const GEN_COND_DIM: usize = 192;
 pub const MAX_TOKENS: usize = 128;
 pub const GEN_HIDDEN: usize = 256;
 pub const GEN_K: usize = 64;
@@ -208,6 +208,9 @@ impl AlgebraicCodebook {
             for (i, slot) in arch.slots.iter().enumerate() {
                 slot_bit_widths[i] = slot_bit_widths[i].max(slot.bits);
             }
+        }
+        for bw in slot_bit_widths.iter_mut() {
+            if *bw > 0 { *bw += 1; }
         }
 
         let slot_only_bits: usize = slot_bit_widths.iter().sum();
@@ -660,6 +663,9 @@ impl AlgebraicCodebook {
             for (i, slot) in arch.slots.iter().enumerate() {
                 slot_bit_widths[i] = slot_bit_widths[i].max(slot.bits);
             }
+        }
+        for bw in slot_bit_widths.iter_mut() {
+            if *bw > 0 { *bw += 1; }
         }
 
         let slot_only_bits: usize = slot_bit_widths.iter().sum();
@@ -1252,11 +1258,12 @@ impl GroupGenEnv {
         let hidden = ov.hidden.unwrap_or(GEN_HIDDEN);
         let k = ov.k.unwrap_or(GEN_K);
         let cond_dim = ov.cond_dim.unwrap_or(GEN_COND_DIM);
-        let output_dim = if codebook.has_prototypes() {
+        let raw_output_dim = if codebook.has_prototypes() {
             codebook.slot_only_bits
         } else {
             codebook.total_bits
         };
+        let output_dim = raw_output_dim.max(256);
         let bits_per_token = bits_for_dict(dictionary.len());
         let coded_bits_per_token = bits_per_token;
         let mut config = gen_env_config();
@@ -1352,10 +1359,17 @@ impl GroupGenEnv {
         let token_ids = self.dictionary.encode(text);
 
         if let Some(ref cb) = self.codebook {
-            if cb.has_prototypes() {
-                return cb.encode_slot_only(&token_ids);
+            let raw = if cb.has_prototypes() {
+                cb.encode_slot_only(&token_ids)
+            } else {
+                cb.encode(&token_ids)
+            };
+            if raw.len() < self.output_dim {
+                let mut padded = raw;
+                padded.resize(self.output_dim, 0.0);
+                return padded;
             }
-            return cb.encode(&token_ids);
+            return raw;
         }
 
         // Raw binary path (with ECC)
@@ -2369,10 +2383,10 @@ mod tests {
         let ov = GenEnvOverrides::default();
         let mut env = GroupGenEnv::new_algebraic(dict, cb, &ov, &mut rng);
 
-        // output_dim should be slot_only_bits
+        // output_dim should be at least slot_only_bits (with 256-bit minimum floor)
         assert!(env.output_dim > 0);
-        assert!(env.codebook.as_ref().unwrap().slot_only_bits == env.output_dim,
-            "env output_dim ({}) should equal slot_only_bits ({})",
+        assert!(env.output_dim >= env.codebook.as_ref().unwrap().slot_only_bits,
+            "env output_dim ({}) should be >= slot_only_bits ({})",
             env.output_dim, env.codebook.as_ref().unwrap().slot_only_bits);
 
         // Train

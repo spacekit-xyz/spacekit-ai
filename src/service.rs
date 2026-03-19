@@ -523,6 +523,12 @@ impl LanguageService {
         }
 
         let resp = if let Some((ref h_raw, ref bridged)) = encoded {
+            if let Some(ref ul) = dm.understanding {
+                if !ul.is_empty() {
+                    let (_, _, topic, verb) = ul.classify(h_raw);
+                    println!("  [understanding] topic={}, verb={}", topic, verb);
+                }
+            }
             // Apply OCEAN personality conditioning to the routed vector
             let mut conditioned = bridged.routed_vector.clone();
             personality.condition_vector(&mut conditioned);
