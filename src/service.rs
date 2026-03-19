@@ -506,8 +506,21 @@ impl LanguageService {
         let action = dm.route_text_to_action_stateless(text)?;
 
         let encoded = dm.language_runtime.encode_and_bridge(text).ok();
-        let group_idx = action.target_group_id
+        let mut group_idx = action.target_group_id
             .and_then(|gid| dm.main.group_order.iter().position(|&g| g == gid));
+
+        // Structural routing fallback: when surface routing rejects as OOD,
+        // use grade-2 bivector similarity to find a group that shares the
+        // input's relational structure — understanding-based routing.
+        if group_idx.is_none() {
+            if let Some((ref h_raw, _)) = encoded {
+                if let Some((best_gidx, best_sim, _)) = dm.route_by_structure(h_raw) {
+                    if best_sim > 0.5 {
+                        group_idx = Some(best_gidx);
+                    }
+                }
+            }
+        }
 
         let resp = if let Some((ref h_raw, ref bridged)) = encoded {
             // Apply OCEAN personality conditioning to the routed vector
@@ -835,8 +848,18 @@ impl LanguageService {
         let action = dm.route_text_to_action_stateless(text)?;
 
         let encoded = dm.language_runtime.encode_and_bridge(text).ok();
-        let group_idx = action.target_group_id
+        let mut group_idx = action.target_group_id
             .and_then(|gid| dm.main.group_order.iter().position(|&g| g == gid));
+
+        if group_idx.is_none() {
+            if let Some((ref h_raw, _)) = encoded {
+                if let Some((best_gidx, best_sim, _)) = dm.route_by_structure(h_raw) {
+                    if best_sim > 0.5 {
+                        group_idx = Some(best_gidx);
+                    }
+                }
+            }
+        }
 
         let code = if let Some((ref h_raw, ref bridged)) = encoded {
             let base_cond = &bridged.routed_vector;

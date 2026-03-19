@@ -25,7 +25,7 @@ use super::language::{
     CalibrationDataset, CalibrationReport, CalibrationRequirements, GroupAdapter, LanguageConfig,
     LanguageRoutingDecision, LanguageRuntime, route_language_embedding,
 };
-use crate::clifford::GroupRotor;
+use crate::clifford::{GroupRotor, embed_bridge_vector, structural_fingerprint, structural_similarity};
 use super::main_dim::MainDimension;
 use super::mirror_dim::{MirrorDimension, EpochResult};
 use super::observer::GlobalObserver;
@@ -79,6 +79,8 @@ pub struct DimensionManager {
     pub group_adapters: HashMap<usize, GroupAdapter>,
     #[serde(default)]
     pub group_rotors: HashMap<usize, GroupRotor>,
+    #[serde(default)]
+    pub group_fingerprints: HashMap<usize, Vec<f32>>,
     next_group_id: GroupId,
     low_confidence_streak: u32,
     pub auto_spawn_threshold: f32,
@@ -103,6 +105,7 @@ impl DimensionManager {
             code_dictionary: None,
             group_adapters: HashMap::new(),
             group_rotors: HashMap::new(),
+            group_fingerprints: HashMap::new(),
             next_group_id: 0,
             low_confidence_streak: 0,
             auto_spawn_threshold: 0.15,
@@ -133,6 +136,52 @@ impl DimensionManager {
         } else {
             self.adapt_for_group(group_idx, z_shared, h_raw)
         }
+    }
+
+    /// Register a structural fingerprint for a group, computed from the mean
+    /// of its training embeddings' grade-2 bivector components in Cl(8).
+    pub fn register_group_fingerprint(&mut self, group_idx: usize, raw_embeddings: &[&[f32]]) {
+        if raw_embeddings.is_empty() { return; }
+        let mut mean_fp = [0.0f32; 28];
+        for raw in raw_embeddings {
+            let mv = embed_bridge_vector(raw);
+            let fp = structural_fingerprint(&mv);
+            for (m, f) in mean_fp.iter_mut().zip(fp.iter()) {
+                *m += f;
+            }
+        }
+        let n = raw_embeddings.len() as f32;
+        for m in mean_fp.iter_mut() { *m /= n; }
+        self.group_fingerprints.insert(group_idx, mean_fp.to_vec());
+    }
+
+    /// Route by structural similarity: embed the raw input into Cl(8), extract
+    /// its grade-2 fingerprint, and compare against all group fingerprints.
+    /// Returns (best_group_idx, similarity, second_similarity) or None if
+    /// no fingerprints are registered.
+    pub fn route_by_structure(&self, h_raw: &[f32]) -> Option<(usize, f32, f32)> {
+        if self.group_fingerprints.is_empty() { return None; }
+        let mv = embed_bridge_vector(h_raw);
+        let input_mv_for_sim = {
+            let mut m = crate::clifford::Multivector::zero();
+            let fp = structural_fingerprint(&mv);
+            let start = crate::clifford::GRADE_OFFSETS[2];
+            m.components[start..start + 28].copy_from_slice(&fp);
+            m
+        };
+        let mut scored: Vec<(usize, f32)> = self.group_fingerprints.iter()
+            .map(|(&gidx, fp_vec)| {
+                let mut gm = crate::clifford::Multivector::zero();
+                let start = crate::clifford::GRADE_OFFSETS[2];
+                let len = fp_vec.len().min(28);
+                gm.components[start..start + len].copy_from_slice(&fp_vec[..len]);
+                (gidx, structural_similarity(&input_mv_for_sim, &gm))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let (best_gidx, best_sim) = scored.first().copied()?;
+        let second_sim = scored.get(1).map(|x| x.1).unwrap_or(-1.0);
+        Some((best_gidx, best_sim, second_sim))
     }
 
     /// Single entry point for inference. Pass context_tags to re-rank by tag-vector similarity.

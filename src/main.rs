@@ -1903,6 +1903,23 @@ fn train_brain(
         svc.dm.group_rotors.insert(gidx, rotor);
     }
 
+    // Register per-group structural fingerprints (grade-2 bivectors in Cl(8))
+    // for understanding-based routing on novel/OOD inputs.
+    println!("\n--- Computing Structural Fingerprints ---");
+    for gidx in 0..num_groups {
+        let mut all_raw: Vec<&[f32]> = Vec::new();
+        if let Some(raws) = gen_raw_by_group.get(&gidx) {
+            all_raw.extend(raws.iter());
+        }
+        if let Some(raws) = code_raw_by_group.get(&gidx) {
+            all_raw.extend(raws.iter());
+        }
+        if !all_raw.is_empty() {
+            svc.dm.register_group_fingerprint(gidx, &all_raw);
+            println!("  group {}: fingerprint from {} embeddings", gidx, all_raw.len());
+        }
+    }
+
     // ---------------------------------------------------------------
     // Build final paramecium from trained codebooks.
     // This captures the learned archetype structure so the lattice is
