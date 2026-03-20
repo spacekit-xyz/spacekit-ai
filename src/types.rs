@@ -355,6 +355,7 @@ pub struct EnvironmentConfig {
     /// as outputs saturate. BCE gradient = (o-t) stays strong at saturation.
     /// Enable for binary-target tasks (generation). Default false (MSE, validated
     /// for spiral/MNIST classification).
+    #[serde(default)]
     pub output_bce: bool,
 
     // -------------------------------------------------------------------------

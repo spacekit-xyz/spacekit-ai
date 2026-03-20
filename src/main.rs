@@ -1820,6 +1820,48 @@ fn train_brain(
                 let mut stopped_early = false;
                 let has_raw = task.raw_vecs.len() == task.pairs.len();
 
+                // =================================================================
+                // Phase 1 — MEMORIZE: high LR, full activation, no regularization.
+                // Imprints the data as fast as possible (typically 2-3 passes).
+                // =================================================================
+                let memorize_epochs = 3usize;
+                let snap = env.enter_memorize_mode();
+                println!("    [{} g{} r{}] Phase 1 (memorize): {} epochs, lr={:.3}, k=full, dropout=0",
+                    task.kind, task.gidx, task.replica, memorize_epochs, env.env.current_lr);
+                for m_epoch in 0..memorize_epochs {
+                    indices.shuffle(&mut task_rng);
+                    let mut total_loss = 0.0f32;
+                    for &i in &indices {
+                        let (mut cond, h_raw) = if has_raw {
+                            (adapter.adapt(task.pairs[i].0, task.raw_vecs[i]), Some(task.raw_vecs[i]))
+                        } else {
+                            (task.pairs[i].0.to_vec(), None)
+                        };
+                        if let Some(raw) = h_raw {
+                            if let Some(ref ul) = understanding_layer {
+                                let uv = ul.conditioning_vector_shared(raw);
+                                cond.extend_from_slice(&uv);
+                            }
+                        }
+                        let env_cond_dim = env.env.layers.first().map_or(cond.len(), |l| l.len());
+                        cond.resize(env_cond_dim, 0.0);
+                        let l = env.train_step(&cond, task.pairs[i].1, &mut task_rng);
+                        total_loss += l;
+                    }
+                    let avg = total_loss / n_pairs.max(1) as f32;
+                    println!("    [{} g{} r{}] memorize {}/{} loss={:.4}",
+                        task.kind, task.gidx, task.replica, m_epoch + 1, memorize_epochs, avg);
+                }
+                // =================================================================
+                // Phase 2 — CONSOLIDATE: restore normal config, re-enable
+                // regularization. The network already holds a rough imprint;
+                // pruning + dropout will now refine it into durable memory.
+                // =================================================================
+                env.enter_consolidate_mode(&snap);
+                println!("    [{} g{} r{}] Phase 2 (consolidate): {} epochs, lr={:.4}, k={}, dropout={:.2}",
+                    task.kind, task.gidx, task.replica, te, env.env.current_lr,
+                    env.env.config.competitive_k, env.env.config.dropout_rate);
+
                 for epoch in 0..te {
                     if epoch < novelty_curriculum_end && !task.novelty.is_empty() && task.novelty.len() == n_pairs {
                         // Curriculum phase: present novel (hard) samples first, then familiar.

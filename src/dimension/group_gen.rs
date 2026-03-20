@@ -1174,6 +1174,26 @@ impl HopfCompositionTable {
 }
 
 // ---------------------------------------------------------------------------
+// Two-phase training: Memorize → Consolidate
+// ---------------------------------------------------------------------------
+
+/// Snapshot of config values overridden during the memorize phase.
+/// Passed to `enter_consolidate_mode` to restore original settings.
+#[derive(Debug, Clone)]
+pub struct MemorizeSnapshot {
+    pub learning_rate: f32,
+    pub current_lr: f32,
+    pub competitive_k: usize,
+    pub dropout_rate: f32,
+    pub weight_decay: f32,
+    pub bias_decay: f32,
+    pub lateral_inhibition: f32,
+    pub kwta_suppression: f32,
+    pub prune_stop_tick: u64,
+    pub engram_enabled: bool,
+}
+
+// ---------------------------------------------------------------------------
 // GroupGenEnv
 // ---------------------------------------------------------------------------
 
@@ -1298,6 +1318,55 @@ impl GroupGenEnv {
     /// Call before training begins to lock in the warmup window.
     pub fn set_prune_stop_tick(&mut self, tick: u64) {
         self.env.config.prune_stop_tick = tick;
+    }
+
+    /// Switch to aggressive memorization mode: high LR, full neuron
+    /// activation (k = hidden_size), no dropout, no weight/bias decay,
+    /// pruning disabled. Call before Phase 1 of two-phase training.
+    /// Returns the saved config snapshot needed by `enter_consolidate_mode`.
+    pub fn enter_memorize_mode(&mut self) -> MemorizeSnapshot {
+        let snap = MemorizeSnapshot {
+            learning_rate: self.env.config.learning_rate,
+            current_lr: self.env.current_lr,
+            competitive_k: self.env.config.competitive_k,
+            dropout_rate: self.env.config.dropout_rate,
+            weight_decay: self.env.config.weight_decay,
+            bias_decay: self.env.config.bias_decay,
+            lateral_inhibition: self.env.config.lateral_inhibition,
+            kwta_suppression: self.env.config.kwta_suppression,
+            prune_stop_tick: self.env.config.prune_stop_tick,
+            engram_enabled: self.env.config.engram_enabled,
+        };
+
+        let hidden_size = self.env.layers.get(1).map_or(GEN_HIDDEN, |l| l.len());
+
+        self.env.config.learning_rate = 0.25;
+        self.env.current_lr = 0.25;
+        self.env.config.competitive_k = hidden_size;
+        self.env.config.dropout_rate = 0.0;
+        self.env.config.weight_decay = 0.0;
+        self.env.config.bias_decay = 0.0;
+        self.env.config.lateral_inhibition = 0.0;
+        self.env.config.kwta_suppression = 0.0;
+        self.env.config.prune_stop_tick = 1; // effectively disable pruning
+        self.env.config.engram_enabled = false;
+
+        snap
+    }
+
+    /// Restore consolidation-phase settings from a prior snapshot and
+    /// optionally anneal LR slightly below original for stability.
+    pub fn enter_consolidate_mode(&mut self, snap: &MemorizeSnapshot) {
+        self.env.config.learning_rate = snap.learning_rate;
+        self.env.current_lr = snap.current_lr;
+        self.env.config.competitive_k = snap.competitive_k;
+        self.env.config.dropout_rate = snap.dropout_rate;
+        self.env.config.weight_decay = snap.weight_decay;
+        self.env.config.bias_decay = snap.bias_decay;
+        self.env.config.lateral_inhibition = snap.lateral_inhibition;
+        self.env.config.kwta_suppression = snap.kwta_suppression;
+        self.env.config.prune_stop_tick = 0; // re-enable pruning from current tick
+        self.env.config.engram_enabled = snap.engram_enabled;
     }
 
     /// Encode a token ID as Gray-coded + Hamming ECC binary values.
@@ -2617,5 +2686,70 @@ mod tests {
         println!("asymmetry: quantum={:.3} classical={:.3}", asym_quantum, asym_classical);
         assert!(asym_quantum >= asym_classical,
             "quantum deformation should increase asymmetry");
+    }
+
+    #[test]
+    fn test_two_phase_memorize_consolidate() {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+
+        let dict = TokenDictionary::build(&["hello", "world", "foo", "bar"], 128);
+        let mut env = GroupGenEnv::new(dict, &mut rng);
+
+        let orig_lr = env.env.config.learning_rate;
+        let orig_k = env.env.config.competitive_k;
+        let orig_dropout = env.env.config.dropout_rate;
+        let orig_wd = env.env.config.weight_decay;
+        let orig_bd = env.env.config.bias_decay;
+
+        let snap = env.enter_memorize_mode();
+
+        assert_eq!(env.env.current_lr, 0.25, "memorize LR should be 0.25");
+        assert_eq!(env.env.config.dropout_rate, 0.0, "memorize: no dropout");
+        assert_eq!(env.env.config.weight_decay, 0.0, "memorize: no weight decay");
+        assert_eq!(env.env.config.bias_decay, 0.0, "memorize: no bias decay");
+        assert_eq!(env.env.config.lateral_inhibition, 0.0, "memorize: no lateral inhib");
+        let hidden_size = env.env.layers.get(1).map_or(0, |l| l.len());
+        assert_eq!(env.env.config.competitive_k, hidden_size, "memorize: full k");
+        assert_eq!(env.env.config.prune_stop_tick, 1, "memorize: pruning disabled");
+
+        env.enter_consolidate_mode(&snap);
+
+        assert!((env.env.current_lr - orig_lr).abs() < 1e-6, "consolidate: LR restored");
+        assert_eq!(env.env.config.competitive_k, orig_k, "consolidate: k restored");
+        assert!((env.env.config.dropout_rate - orig_dropout).abs() < 1e-6, "consolidate: dropout restored");
+        assert!((env.env.config.weight_decay - orig_wd).abs() < 1e-8, "consolidate: weight_decay restored");
+        assert!((env.env.config.bias_decay - orig_bd).abs() < 1e-8, "consolidate: bias_decay restored");
+        assert_eq!(env.env.config.prune_stop_tick, 0, "consolidate: pruning re-enabled");
+    }
+
+    #[test]
+    fn test_memorize_phase_learns_faster() {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(99);
+
+        let dict = TokenDictionary::build(&["alpha", "beta", "gamma", "delta"], 128);
+
+        // Train a pair with memorize mode ON
+        let mut env_mem = GroupGenEnv::new(dict.clone(), &mut rng);
+        let _snap = env_mem.enter_memorize_mode();
+        let cond: Vec<f32> = (0..env_mem.env.layers[0].len()).map(|i| (i as f32 * 0.1).sin()).collect();
+        let mut mem_loss = 0.0;
+        for _ in 0..5 {
+            mem_loss = env_mem.train_step(&cond, "alpha", &mut rng);
+        }
+
+        // Train the same pair with normal mode
+        let mut rng2 = rand::rngs::StdRng::seed_from_u64(99);
+        let mut env_norm = GroupGenEnv::new(dict, &mut rng2);
+        let cond2: Vec<f32> = (0..env_norm.env.layers[0].len()).map(|i| (i as f32 * 0.1).sin()).collect();
+        let mut norm_loss = 0.0;
+        for _ in 0..5 {
+            norm_loss = env_norm.train_step(&cond2, "alpha", &mut rng2);
+        }
+
+        println!("memorize loss after 5 steps: {:.4}, normal loss: {:.4}", mem_loss, norm_loss);
+        assert!(mem_loss < norm_loss,
+            "memorize mode should converge faster: mem={:.4} vs norm={:.4}", mem_loss, norm_loss);
     }
 }
