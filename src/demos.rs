@@ -330,20 +330,38 @@ fn load_m5_or_synthetic() -> CalibrationDataset {
     }
 }
 
-fn load_all_m5_training_data() -> Result<Vec<LanguageSample>, String> {
-    let dir = std::path::Path::new("data/language/m5");
-    if !dir.exists() { return Err(format!("M5 data directory not found: {}", dir.display())); }
-    let mut all = Vec::new();
-    let mut entries: Vec<_> = std::fs::read_dir(dir).map_err(|e| format!("read_dir failed: {}", e))?.filter_map(|e| e.ok()).collect();
+fn load_train_jsonl_dir(all: &mut Vec<LanguageSample>, dir: &std::path::Path) -> Result<(), String> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|e| format!("read_dir failed ({}): {}", dir.display(), e))?
+        .filter_map(|e| e.ok())
+        .collect();
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
         let name = entry.file_name().to_string_lossy().to_string();
         if name.starts_with("train_") && name.ends_with(".jsonl") {
             let path = entry.path();
             let samples = load_language_samples_jsonl(path.to_str().unwrap())?;
-            println!("  loaded {}: {} samples", name, samples.len());
+            println!("  loaded {}: {} samples", path.display(), samples.len());
             all.extend(samples);
         }
+    }
+    Ok(())
+}
+
+fn load_all_m5_training_data() -> Result<Vec<LanguageSample>, String> {
+    let m5 = std::path::Path::new("data/language/m5");
+    if !m5.exists() {
+        return Err(format!("M5 data directory not found: {}", m5.display()));
+    }
+    let mut all = Vec::new();
+    load_train_jsonl_dir(&mut all, m5)?;
+    let agent = std::path::Path::new("data/agent");
+    if agent.exists() {
+        load_train_jsonl_dir(&mut all, agent)?;
+    }
+    let routekit = std::path::Path::new("data/routekit");
+    if routekit.exists() {
+        load_train_jsonl_dir(&mut all, routekit)?;
     }
     Ok(all)
 }
