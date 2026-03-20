@@ -1,63 +1,93 @@
-//! GroupRouter — maps input to group relevance (heuristic or learned).
+//! GroupRouter — maps input to group relevance (Paramecium lattice or heuristic).
 //!
-//! **Learned router**: Small MLP `input -> logits over groups`. Training data referenced by
-//! **id** (GroupId): each sample is `(input, target_group_id)`. At calibration / after promotion
-//! we have task-labeled data (e.g. "spiral" -> group 0), so we can collect (input, group_id) and
-//! train the router. **desc** (GroupEmbedding.description) and **metatags** (GroupEmbedding.metatags)
-//! can filter which groups participate in routing or be used as extra input in future extensions.
+//! **Learned router**: Paramecium lattice trained via `develop()` in one pass.
+//! Each behavioral program stores (embedding, group_id). At inference, wave-propagation
+//! selects the nearest program and returns its group_id.
 
-use crate::environment::NeuralEnvironment;
-use crate::types::{EnvironmentConfig, GroupId};
+use crate::types::GroupId;
+use crate::spectral::TokenDictionary;
+use crate::dimension::paramecium::InfraciliaryLattice;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use super::embedding::{retrieve_relevant_groups, GroupEmbedding};
 
 // ---------------------------------------------------------------------------
-// Learned router: neural net input -> logits per group
+// Learned router: Paramecium lattice input -> group selection
 // ---------------------------------------------------------------------------
 
-/// Learned router: MLP with shape [input_dim, hidden_size, num_groups].
-/// Train with (input, target_group_id); infer returns logits; argmax = chosen group.
-/// Reference training data by **id** (GroupId). When num_groups increases (new promotion),
-/// rebuild or extend the output layer (current impl uses fixed num_groups at creation).
+/// Learned router: Paramecium lattice developed from (embedding, group_label) pairs.
+/// One-pass training via `develop()`. Inference via wave-propagation nearest-program.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct LearnedRouter {
-    pub env: NeuralEnvironment,
+    pub lattice: InfraciliaryLattice,
     pub num_groups: usize,
     pub input_dim: usize,
 }
 
 impl LearnedRouter {
-    /// Build a router MLP: input_dim -> hidden -> num_groups. Uses a config with higher learning rate
-    /// (0.15) so the small classifier converges quickly on labeled (input, group) data.
     pub fn new(
         input_dim: usize,
         num_groups: usize,
-        hidden_size: usize,
-        rng: &mut impl Rng,
+        _hidden_size: usize,
+        _rng: &mut impl Rng,
     ) -> Self {
-        let mut config = EnvironmentConfig::default();
-        config.learning_rate = 0.15;
-        let mut env = NeuralEnvironment::new(config);
-        env.build_layers(&[input_dim, hidden_size, num_groups], rng);
+        let dict = TokenDictionary::build(&[], 64);
+        let lattice = InfraciliaryLattice::new(dict);
         LearnedRouter {
-            env,
+            lattice,
             num_groups,
             input_dim,
         }
     }
 
-    /// Logits over groups (same order as main.group_order). Empty if input len != input_dim.
+    /// Build router from labeled training data in one pass.
+    pub fn build(
+        input_dim: usize,
+        num_groups: usize,
+        samples: &[(Vec<f32>, GroupId)],
+    ) -> Self {
+        let group_labels: Vec<String> = (0..num_groups).map(|g| format!("group_{}", g)).collect();
+        let dict = TokenDictionary::build(
+            &group_labels.iter().map(|s| s.as_str()).collect::<Vec<_>>(), 64,
+        );
+        let pairs: Vec<(Vec<f32>, String)> = samples.iter()
+            .map(|(emb, gid)| (emb.clone(), format!("group_{}", gid)))
+            .collect();
+        let mut lattice = InfraciliaryLattice::new(dict);
+        lattice.develop(&pairs, 0.90);
+        LearnedRouter {
+            lattice,
+            num_groups,
+            input_dim,
+        }
+    }
+
+    /// Logits over groups via direct cosine nearest-neighbor (no EMA drift).
     pub fn predict_logits(&mut self, input: &[f32]) -> Vec<f32> {
         if input.len() != self.input_dim || self.num_groups == 0 {
             return vec![];
         }
-        self.env.predict(input)
+        let mut logits = vec![0.0f32; self.num_groups];
+        if self.lattice.programs.is_empty() {
+            return logits;
+        }
+        let mut best_idx = 0;
+        let mut best_sim = f32::NEG_INFINITY;
+        for (i, prog) in self.lattice.programs.iter().enumerate() {
+            let sim = cosine_sim(input, &prog.ema_centroid);
+            if sim > best_sim { best_sim = sim; best_idx = i; }
+        }
+        let text = self.lattice.dictionary.decode(&self.lattice.programs[best_idx].token_sequence);
+        if let Some(gid) = Self::parse_group_id(&text) {
+            if gid < self.num_groups {
+                logits[gid] = best_sim.max(0.0);
+            }
+        }
+        logits
     }
 
-    /// One training step: forward + backprop with one-hot target for group_id. Returns loss.
-    /// Use when you have labeled data (input, group_id); group_id is the **id** reference.
+    /// One training step: develop lattice with this (input, group_id) pair.
     pub fn train_step(
         &mut self,
         input: &[f32],
@@ -71,46 +101,69 @@ impl LearnedRouter {
         if gid >= self.num_groups {
             return 0.0;
         }
-        let output = self.env.forward(input);
-        let mut target = vec![0.0f32; self.num_groups];
-        target[gid] = 1.0;
-        self.env.backprop(&output, &target)
+        let pairs = vec![(input.to_vec(), format!("group_{}", gid))];
+        self.lattice.develop(&pairs, 0.90);
+
+        let resp = self.lattice.respond(input);
+        let predicted = Self::parse_group_id(&resp.text).unwrap_or(usize::MAX);
+        if predicted == gid { 0.0 } else { 1.0 }
     }
 
-    /// Chosen group id (argmax of logits). None if no groups or empty logits.
+    /// Chosen group id (from nearest lattice program).
     pub fn choose_group(&mut self, input: &[f32]) -> Option<GroupId> {
         let logits = self.predict_logits(input);
         if logits.is_empty() {
             return None;
         }
-        let (idx, _) = logits
+        let (idx, &val) = logits
             .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))?;
-        Some(idx as GroupId)
+        if val > 0.0 { Some(idx as GroupId) } else { None }
     }
 
-    /// Average parameters from multiple routers (same topology). Used for parallel minibatch SGD:
-    /// clone router B times, run B train steps in parallel, then average_from(&clones).
+    /// Merge multiple routers by combining their lattice programs.
     pub fn average_from(routers: &[Self]) -> Option<Self> {
         if routers.is_empty() {
             return None;
         }
-        let envs: Vec<NeuralEnvironment> = routers.iter().map(|r| r.env.clone()).collect();
-        Some(LearnedRouter {
-            env: NeuralEnvironment::average_params_from(&envs),
-            num_groups: routers[0].num_groups,
-            input_dim: routers[0].input_dim,
-        })
+        let mut base = routers[0].clone();
+        for r in &routers[1..] {
+            for prog in &r.lattice.programs {
+                let text = base.lattice.dictionary.decode(&prog.token_sequence);
+                let pairs = vec![(prog.ema_centroid.clone(), text)];
+                base.lattice.develop(&pairs, 0.95);
+            }
+        }
+        Some(base)
     }
+
+    fn parse_group_id(text: &str) -> Option<usize> {
+        text.strip_prefix("group_").and_then(|s| s.parse().ok())
+    }
+
+    pub fn program_count(&self) -> usize {
+        self.lattice.program_count()
+    }
+}
+
+fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
+    let mut dot = 0.0f32;
+    let mut na = 0.0f32;
+    let mut nb = 0.0f32;
+    for i in 0..a.len().min(b.len()) {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    let denom = na.sqrt() * nb.sqrt();
+    if denom < 1e-10 { 0.0 } else { dot / denom }
 }
 
 // ---------------------------------------------------------------------------
 // Query-based attention (cosine similarity over embeddings)
 // ---------------------------------------------------------------------------
 
-/// Given a query vector (e.g. from running input through a reference env), return top-k groups by cosine similarity.
-/// Routing in production uses LearnedRouter when set, or GlobalObserver's cosine over hidden activations.
 pub fn attend_by_query(
     query: &[f32],
     embeddings: &[GroupEmbedding],
@@ -123,7 +176,6 @@ pub fn attend_by_query(
 // Tag-based re-rank and stickiness (Markov-like prior) — no training, scalable
 // ---------------------------------------------------------------------------
 
-/// Add stickiness: boost score for the group that was last chosen (Markov-like temporal prior).
 pub fn apply_stickiness(
     scores: &mut [(GroupId, f32)],
     last_chosen_group_id: Option<GroupId>,
@@ -141,7 +193,6 @@ pub fn apply_stickiness(
     }
 }
 
-/// Re-rank by tag-vector similarity to query (from context_tags via build_tag_vector).
 pub fn apply_tag_rerank(
     scores: &mut [(GroupId, f32)],
     embeddings: &[GroupEmbedding],
@@ -218,5 +269,21 @@ mod tests {
         assert!(scores[0].1 > scores[1].1);
         let best = scores.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap().0;
         assert_eq!(best, 0);
+    }
+
+    #[test]
+    fn test_router_build_and_classify() {
+        let samples: Vec<(Vec<f32>, GroupId)> = vec![
+            (vec![1.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0),
+            (vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 1),
+            (vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0], 2),
+            (vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0], 3),
+        ];
+        let mut router = LearnedRouter::build(16, 4, &samples);
+        for (emb, expected_gid) in &samples {
+            let chosen = router.choose_group(emb);
+            assert_eq!(chosen, Some(*expected_gid),
+                "router should route {:?} to group {}", emb, expected_gid);
+        }
     }
 }

@@ -18,7 +18,7 @@ use super::composition::{EpisodicMemory, Episode, VirtualGroup};
 use super::action::{ActionJson, ActionType, action_from_routing};
 use super::action_classifier::ActionClassifier;
 use super::generation_head::GenerationHead;
-use super::group_gen::GroupGenEnv;
+use super::group_gen::{GroupGenEnv, IndexedGenEnv};
 use crate::spectral::TokenDictionary;
 use super::embedding::{compute_group_embedding, build_tag_vector, GroupEmbedding, TAG_VECTOR_DIM};
 use super::language::{
@@ -70,9 +70,9 @@ pub struct DimensionManager {
     pub generation_head: Option<GenerationHead>,
     pub codegen_head: Option<GenerationHead>,
     #[serde(default)]
-    pub group_gen_envs: HashMap<usize, GroupGenEnv>,
+    pub group_gen_envs: HashMap<usize, IndexedGenEnv>,
     #[serde(default)]
-    pub group_code_envs: HashMap<usize, GroupGenEnv>,
+    pub group_code_envs: HashMap<usize, IndexedGenEnv>,
     #[serde(default)]
     pub gen_dictionary: Option<TokenDictionary>,
     #[serde(default)]
@@ -147,7 +147,7 @@ impl DimensionManager {
             self.adapt_for_group(group_idx, z_shared, h_raw)
         };
 
-        let understanding_vec = match &mut self.understanding {
+        let understanding_vec = match &self.understanding {
             Some(ul) if !ul.is_empty() => ul.conditioning_vector(h_raw),
             _ => vec![0.0f32; crate::understanding::UNDERSTANDING_DIM],
         };
@@ -441,56 +441,19 @@ impl DimensionManager {
     pub fn train_language_router(
         &mut self,
         samples: &[(Vec<f32>, usize)],
-        epochs: usize,
-        rng: &mut impl Rng,
-        batch_size: Option<usize>,
+        _epochs: usize,
+        _rng: &mut impl Rng,
+        _batch_size: Option<usize>,
     ) -> (f32, f32) {
         let num_groups = self.main.group_order.len();
         if num_groups == 0 || samples.is_empty() {
             return (0.0, 0.0);
         }
         let input_dim = samples[0].0.len();
-        let hidden = (input_dim * 2).min(128);
-        let mut router = LearnedRouter::new(input_dim, num_groups, hidden, rng);
-        let mut indices: Vec<usize> = (0..samples.len()).collect();
-        let mut last_loss = 0.0f32;
-
-        let use_parallel = batch_size.map_or(0, |b| b).saturating_sub(1) > 0;
-
-        for epoch in 0..epochs {
-            indices.shuffle(rng);
-            if use_parallel {
-                let b = batch_size.unwrap_or(1);
-                for chunk in indices.chunks(b) {
-                    let batch_data: Vec<(&[f32], usize)> = chunk
-                        .iter()
-                        .map(|&i| (samples[i].0.as_slice(), samples[i].1))
-                        .collect();
-                    let mut clones: Vec<LearnedRouter> =
-                        (0..batch_data.len()).map(|_| router.clone()).collect();
-                    let seed_base = (epoch as u64).wrapping_mul(1_000_000).wrapping_add(chunk[0] as u64);
-                    let losses: Vec<f32> = crate::maybe_par_iter_mut!(clones)
-                        .zip(batch_data)
-                        .enumerate()
-                        .map(|(i, (clone, (emb, group_idx)))| {
-                            let mut thread_rng = StdRng::seed_from_u64(seed_base.wrapping_add(i as u64));
-                            clone.train_step(emb, group_idx as GroupId, &mut thread_rng)
-                        })
-                        .collect();
-                    last_loss = losses.iter().sum::<f32>() / losses.len().max(1) as f32;
-                    if let Some(avg_router) = LearnedRouter::average_from(&clones) {
-                        router = avg_router;
-                    }
-                }
-            } else {
-                let mut total_loss = 0.0f32;
-                for &i in &indices {
-                    let (ref emb, group_idx) = samples[i];
-                    total_loss += router.train_step(emb, group_idx as GroupId, rng);
-                }
-                last_loss = total_loss / indices.len() as f32;
-            }
-        }
+        let typed_samples: Vec<(Vec<f32>, GroupId)> = samples.iter()
+            .map(|(emb, gid)| (emb.clone(), *gid as GroupId))
+            .collect();
+        let mut router = LearnedRouter::build(input_dim, num_groups, &typed_samples);
 
         let mut correct = 0usize;
         for (emb, expected) in samples {
@@ -501,8 +464,9 @@ impl DimensionManager {
             }
         }
         let accuracy = correct as f32 / samples.len() as f32;
+        let loss = 1.0 - accuracy;
         self.observer.learned_router = Some(router);
-        (last_loss, accuracy)
+        (loss, accuracy)
     }
 
     /// Train the action classifier from (embedding, ActionType) pairs with balanced class sampling.
@@ -510,52 +474,16 @@ impl DimensionManager {
     pub fn train_action_classifier(
         &mut self,
         samples: &[(Vec<f32>, ActionType)],
-        epochs: usize,
-        lr: f32,
+        _epochs: usize,
+        _lr: f32,
     ) -> (f32, f32) {
         if samples.is_empty() {
             return (0.0, 0.0);
         }
         let input_dim = samples[0].0.len();
-        let mut clf = ActionClassifier::new(input_dim, 64);
+        let typed_samples: Vec<(Vec<f32>, ActionType)> = samples.to_vec();
+        let mut clf = ActionClassifier::build(input_dim, &typed_samples);
 
-        // Group indices by class for balanced sampling
-        use super::action_classifier::NUM_ACTION_TYPES;
-        let mut by_class: Vec<Vec<usize>> = vec![vec![]; NUM_ACTION_TYPES];
-        for (i, (_, at)) in samples.iter().enumerate() {
-            let idx = match at {
-                ActionType::SupportTicket => 0,
-                ActionType::CodingAssist => 1,
-                ActionType::GeneralAssist => 2,
-                ActionType::ToolCall => 3,
-                ActionType::Fallback => 4,
-            };
-            by_class[idx].push(i);
-        }
-        let active_classes: Vec<usize> = by_class.iter().enumerate()
-            .filter(|(_, v)| !v.is_empty())
-            .map(|(i, _)| i)
-            .collect();
-        let samples_per_class_per_epoch = 50;
-
-        let mut last_loss = 0.0f32;
-        let mut rng_seed = 77u64;
-        for _ in 0..epochs {
-            let mut total_loss = 0.0f32;
-            let mut steps = 0usize;
-            for &cls in &active_classes {
-                let pool = &by_class[cls];
-                for k in 0..samples_per_class_per_epoch {
-                    rng_seed = rng_seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-                    let idx = pool[(rng_seed as usize / 7) % pool.len()];
-                    let (ref emb, ref at) = samples[idx];
-                    total_loss += clf.train_step(emb, at, lr);
-                    steps += 1;
-                    let _ = k;
-                }
-            }
-            last_loss = total_loss / steps.max(1) as f32;
-        }
         let mut correct = 0usize;
         for (emb, expected) in samples {
             if clf.predict(emb) == *expected {
@@ -563,8 +491,9 @@ impl DimensionManager {
             }
         }
         let accuracy = correct as f32 / samples.len() as f32;
+        let loss = 1.0 - accuracy;
         self.action_classifier = Some(clf);
-        (last_loss, accuracy)
+        (loss, accuracy)
     }
 
     /// Returns (trained VirtualGroup, accuracy on data). Use small data (e.g. 20–50 samples).
@@ -792,7 +721,7 @@ impl DimensionManager {
                     }
                 }
             }
-        } else if let Some(ref clf) = self.action_classifier {
+        } else if let Some(ref mut clf) = self.action_classifier {
             if let Ok(bridged) = self.language_runtime.bridge_text_stateless(text) {
                 let (predicted_type, conf) = clf.predict_with_confidence(&bridged.routed_vector);
                 if conf > 0.4 {
@@ -823,7 +752,7 @@ impl DimensionManager {
                     }
                 }
             }
-        } else if let Some(ref clf) = self.action_classifier {
+        } else if let Some(ref mut clf) = self.action_classifier {
             if let Ok(bridged) = self.language_runtime.bridge_text_stateless(text) {
                 let (predicted_type, conf) = clf.predict_with_confidence(&bridged.routed_vector);
                 if conf > 0.4 {

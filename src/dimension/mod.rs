@@ -40,5 +40,6 @@ pub use observer::{GlobalObserver, RoutingConfig};
 pub use action_classifier::{ActionClassifier, action_target_to_type, action_type_one_hot, group_id_one_hot};
 pub use generation_head::GenerationHead;
 pub use group_gen::GroupGenEnv;
+pub use group_gen::IndexedGenEnv;
 pub use manager::{DimensionManager, DimensionManagerConfig, GroupSummary, MirrorSummary, EpisodicSummary, CheckpointSizeSummary};
 pub use tool::{ToolSchema, ToolParam, ParamType, ToolRegistry, ToolCallInfo, ToolResult};

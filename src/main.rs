@@ -276,110 +276,24 @@ fn retrain_single_gen(
         None
     };
 
-    // Train replicas
-    println!("\n--- Training gen g{} ({} epochs, {} replicas) ---",
-        target_group, gen_epochs, k_replicas);
+    // Build IndexedGenEnv: one-pass Paramecium lattice development
+    use growformer::dimension::group_gen::IndexedGenEnv as RetrainIndexedGenEnv;
+    println!("\n--- Building indexed gen g{} ({} pairs, Paramecium lattice) ---", target_group, gen_pairs.len());
 
-    let mut best_env: Option<GroupGenEnv> = None;
-    let mut best_loss = f32::MAX;
-
-    let log_interval = gen_epochs / 25 + 1;
-    let replay_frac = 0.15;
-    let replay_start_epoch = 50;
-
-    for replica in 0..k_replicas as usize {
-        let mut task_rng = StdRng::seed_from_u64(42 + replica as u64 * 1000 + target_group as u64 * 100);
-        let ov = gen_overrides.clone().unwrap_or_default();
-        let mut env = GroupGenEnv::new_algebraic(dict.clone(), cb.clone(), &ov, &mut task_rng);
-        if let Some(ref h) = hopf {
-            env.hopf_table = Some(h.clone());
-        }
-
-        let n_pairs = gen_pairs.len();
-        let mut indices: Vec<usize> = (0..n_pairs).collect();
-        let mut sample_losses: Vec<f32> = vec![0.0; n_pairs];
-        let replay_count = (n_pairs as f32 * replay_frac).ceil() as usize;
-        let mut loss_history: Vec<f32> = Vec::new();
-        let mut stopped_early = false;
-
-        for epoch in 0..gen_epochs {
-            indices.shuffle(&mut task_rng);
-            let mut total_loss = 0.0f32;
-
-            for &idx in &indices {
-                let l = env.train_step(&gen_pairs[idx].0, &gen_pairs[idx].1, &mut task_rng);
-                sample_losses[idx] = l;
-                total_loss += l;
-            }
-
-            // Priority replay: re-train on highest-loss samples
-            if epoch >= replay_start_epoch && replay_count > 0 {
-                let mut ranked: Vec<(usize, f32)> = sample_losses.iter().copied().enumerate().collect();
-                ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                for &(idx, _) in ranked.iter().take(replay_count) {
-                    env.train_step(&gen_pairs[idx].0, &gen_pairs[idx].1, &mut task_rng);
-                }
-            }
-
-            let last_avg = total_loss / n_pairs.max(1) as f32;
-            loss_history.push(last_avg);
-
-            // Early stopping (with min loss floor)
-            if early_stop_window > 0 && epoch >= early_stop_min_ep && loss_history.len() >= early_stop_window {
-                let recent = &loss_history[loss_history.len() - early_stop_window..];
-                let old_avg = recent[..early_stop_window / 2].iter().sum::<f32>() / (early_stop_window / 2) as f32;
-                let new_avg = recent[early_stop_window / 2..].iter().sum::<f32>() / (early_stop_window - early_stop_window / 2) as f32;
-                let improvement = (old_avg - new_avg) / old_avg.max(1e-8);
-                if improvement < early_stop_min_imp && new_avg < 0.02 {
-                    println!("    [gen g{} r{}] early stop at epoch {}/{}: loss={:.4} improvement={:.5}",
-                        target_group, replica, epoch, gen_epochs, last_avg, improvement);
-                    stopped_early = true;
-                    break;
-                }
-                if improvement < early_stop_min_imp && new_avg >= 0.02 && epoch % log_interval == 0 {
-                    println!("    [gen g{} r{}] epoch {}/{}: plateau (imp={:.5}) but loss={:.4} > 0.02, continuing...",
-                        target_group, replica, epoch, gen_epochs, improvement, new_avg);
-                }
-            }
-
-            if epoch % log_interval == 0 || epoch == gen_epochs - 1 {
-                println!("    [gen g{} r{}] epoch {}/{} loss={:.4} synapses={}",
-                    target_group, replica, epoch, gen_epochs, last_avg, env.env.total_synapses());
-            }
-        }
-
-        let actual_epochs = loss_history.len();
-        if stopped_early {
-            println!("    [gen g{} r{}] converged after {} of {} epochs", target_group, replica, actual_epochs, gen_epochs);
-        }
-
-        // Eval loss
-        let mut eval_loss = 0.0f32;
-        for i in 0..n_pairs {
-            eval_loss += env.eval_loss(&gen_pairs[i].0, &gen_pairs[i].1);
-        }
-        eval_loss /= n_pairs.max(1) as f32;
-
-        env.freeze();
-        println!("    [gen g{} r{}] frozen: {} neurons, {} synapses, eval_loss={:.4}",
-            target_group, replica, env.env.layers.iter().map(|l| l.len()).sum::<usize>(),
-            env.env.total_synapses(), eval_loss);
-
-        if eval_loss < best_loss {
-            best_loss = eval_loss;
-            best_env = Some(env);
-            println!("    [gen g{}] best replica so far: r{} loss={:.4}", target_group, replica, eval_loss);
-        }
-    }
+    let mut indexed_env = RetrainIndexedGenEnv::from_parts(
+        dict.clone(),
+        cb.clone(),
+        hopf.unwrap_or_default(),
+        &gen_pairs,
+        0.85,
+    );
+    indexed_env.freeze();
+    println!("  Indexed gen g{}: {} lattice programs, frozen", target_group, indexed_env.program_count());
 
     // Replace the gen env in the brain
     let dm = svc.active_dm_mut();
-    if let Some(env) = best_env {
-        dm.group_gen_envs.insert(target_group, env);
-        println!("\n  Replaced gen env for group {} (eval_loss={:.4})", target_group, best_loss);
-    } else {
-        return Err("No successful replica".to_string());
-    }
+    dm.group_gen_envs.insert(target_group, indexed_env);
+    println!("\n  Replaced gen env for group {}", target_group);
 
     // Re-export
     println!("\n--- Exporting Brain ---");
@@ -403,9 +317,10 @@ fn retrain_single_gen(
                 println!("  prompt: {:?}", prompt);
                 println!("  action: {:?} (conf={:.2}) group={:?}",
                     action.action_type, action.confidence, action.target_group_id);
+                let t_end = truncate_to_char_boundary(&resp.text, 200);
                 println!("  gen [{}] (conf={:.2}): {:?}\n",
                     resp.template_id, resp.confidence,
-                    &resp.text[..resp.text.len().min(200)]);
+                    &resp.text[..t_end]);
             }
             Err(e) => println!("  {:?} → ERROR: {}\n", prompt, e),
         }
@@ -441,12 +356,12 @@ fn run_inference(brain_path: &str, prompt: Option<&str>) -> Result<(), String> {
     for (gidx, env) in &dm.group_gen_envs {
         let hopf_info = if env.hopf_table.is_some() { "hopf=yes" } else { "hopf=no" };
         let cb_info = env.codebook.as_ref().map(|cb| format!("proto={} arch={}", cb.has_prototypes(), cb.archetypes.len())).unwrap_or_else(|| "no-codebook".to_string());
-        println!("    gen[{}]: {} tokens in dict, {} neurons, {} synapses, {}, {}",
-            gidx, env.dictionary.len(), env.total_neurons(), env.total_synapses(), hopf_info, cb_info);
+        println!("    gen[{}]: {} tokens in dict, {} lattice programs, {}, {}",
+            gidx, env.dictionary.len(), env.program_count(), hopf_info, cb_info);
     }
     for (gidx, env) in &dm.group_code_envs {
-        println!("    code[{}]: {} tokens in dict, {} neurons, {} synapses",
-            gidx, env.dictionary.len(), env.total_neurons(), env.total_synapses());
+        println!("    code[{}]: {} tokens in dict, {} lattice programs",
+            gidx, env.dictionary.len(), env.program_count());
     }
 
     if let Some(prompt_text) = prompt {
@@ -1152,6 +1067,13 @@ fn next_power_of_two_or_round(n: usize) -> usize {
     256
 }
 
+fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> usize {
+    if max_bytes >= s.len() { return s.len(); }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) { end -= 1; }
+    end
+}
+
 fn train_brain(
     epochs: u32,
     output_path: &str,
@@ -1307,7 +1229,9 @@ fn train_brain(
         &mut rng,
         brain_parallel_batch_size(),
     );
-    println!("  Router loss={:.4} accuracy={:.1}% ({} epochs)", router_loss, router_acc * 100.0, router_epochs);
+    println!("  Router loss={:.4} accuracy={:.1}% (Paramecium one-pass, {} programs)",
+        router_loss, router_acc * 100.0,
+        svc.dm.observer.learned_router.as_ref().map(|r| r.program_count()).unwrap_or(0));
 
     // ---------------------------------------------------------------
     // Stage 2: Train ActionClassifier
@@ -1323,7 +1247,9 @@ fn train_brain(
         .collect();
     let (clf_epochs, clf_lr) = if let Some(ac) = &auto_cfg { (ac.classifier_epochs, ac.classifier_lr) } else { (500, 0.03) };
     let (clf_loss, clf_acc) = svc.dm.train_action_classifier(&action_samples, clf_epochs, clf_lr);
-    println!("  Classifier loss={:.4} accuracy={:.1}%", clf_loss, clf_acc * 100.0);
+    println!("  Classifier loss={:.4} accuracy={:.1}% (Paramecium one-pass, {} programs)",
+        clf_loss, clf_acc * 100.0,
+        svc.dm.action_classifier.as_ref().map(|c| c.program_count()).unwrap_or(0));
 
     // ---------------------------------------------------------------
     // Stages 3+4: Per-group generation envs (Growformer substrate)
@@ -1392,12 +1318,12 @@ fn train_brain(
     println!("  per-group adapters: {} groups, rank={}, {}d->{}d, {} params total",
         group_adapters.len(), DEFAULT_ADAPTER_RANK, raw_dim, bridge_dim, adapter_params);
 
-    // Stage 2.5: Understanding Layer + MetaBrain — train MicroBrain classifiers
-    // for topic/verb/action, then build MetaBrain coordinator. Freeze all.
-    println!("\n--- Stage 2.5: Training Understanding Layer + MetaBrain ---");
+    // Stage 2.5: Understanding Layer + MetaBrain — Paramecium one-pass build.
+    // All classifiers use Paramecium lattice develop(), zero iterative epochs.
+    println!("\n--- Stage 2.5: Understanding Layer + MetaBrain (Paramecium one-pass) ---");
     {
         use growformer::understanding::UnderstandingLayer;
-        use growformer::micro_brain::MetaBrain;
+        use growformer::micro_brain::{MetaBrain, MicroBrain, MicroBrainRole};
         use growformer::dimension::action_classifier::NUM_ACTION_TYPES;
 
         let understanding_samples: Vec<(&[f32], &str)> = raw_embeddings.iter()
@@ -1407,12 +1333,11 @@ fn train_brain(
         if understanding_samples.is_empty() {
             println!("  [skip] no understanding samples");
         } else {
-            let mut ul = UnderstandingLayer::build_with_micro_brains(&understanding_samples, raw_dim);
+            let mut ul = UnderstandingLayer::build(&understanding_samples, raw_dim);
             ul.freeze();
-            println!("  understanding layer: {} topics, {} verbs, micro-brains=true, frozen=true",
+            println!("  understanding layer: {} topics, {} verbs, Paramecium one-pass, frozen=true",
                 ul.topic_count(), ul.verb_count());
 
-            // Build MetaBrain with micro-brains sized for the actual vocabulary
             let mut mb_rng = rand::rngs::StdRng::seed_from_u64(314);
             let mut mb = MetaBrain::build(
                 raw_dim,
@@ -1424,29 +1349,27 @@ fn train_brain(
                 &mut mb_rng,
             );
 
-            // Train action brain from action_samples
-            println!("  training action brain...");
-            let action_epochs = 300;
-            for epoch in 0..action_epochs {
-                let mut total_loss = 0.0f32;
-                for (emb, at) in &action_samples {
-                    let target_idx = match at {
+            // One-pass action brain from action_samples
+            let action_data: Vec<(&[f32], usize)> = action_samples.iter()
+                .map(|(emb, at)| {
+                    let idx = match at {
                         growformer::dimension::action::ActionType::SupportTicket => 0,
                         growformer::dimension::action::ActionType::CodingAssist => 1,
                         growformer::dimension::action::ActionType::GeneralAssist => 2,
                         growformer::dimension::action::ActionType::ToolCall => 3,
                         growformer::dimension::action::ActionType::Fallback => 4,
                     };
-                    total_loss += mb.action_brain.train_step(emb, target_idx, &mut mb_rng);
-                }
-                if epoch % 100 == 0 || epoch == action_epochs - 1 {
-                    println!("    [meta/action] epoch {}/{} loss={:.4}",
-                        epoch, action_epochs, total_loss / action_samples.len().max(1) as f32);
-                }
-            }
+                    (emb.as_slice(), idx)
+                })
+                .collect();
+            mb.action_brain = MicroBrain::build_from_data(
+                MicroBrainRole::Action, raw_dim, NUM_ACTION_TYPES,
+                vec!["support".into(), "coding".into(), "general".into(), "tool".into(), "fallback".into()],
+                &action_data,
+            );
+            println!("  action brain: {} programs (one-pass)", mb.action_brain.lattice.program_count());
 
-            // Train topic + verb brains from understanding samples
-            println!("  training topic + verb brains...");
+            // One-pass topic + verb brains
             let mut topic_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
             for (i, name) in ul.topic_names.iter().enumerate() {
                 topic_map.insert(name.clone(), i);
@@ -1454,42 +1377,53 @@ fn train_brain(
             let verb_map: std::collections::HashMap<String, usize> = ul.verb_names.iter().enumerate()
                 .map(|(i, v)| (v.clone(), i)).collect();
 
-            for epoch in 0..300 {
-                let mut tl = 0.0f32;
-                let mut vl = 0.0f32;
-                for &(raw, intent) in &understanding_samples {
-                    if let Some(&idx) = topic_map.get(intent) {
-                        tl += mb.topic_brain.train_step(raw, idx, &mut mb_rng);
-                    }
-                    let verb = growformer::understanding::intent_to_verb(intent);
-                    if let Some(&idx) = verb_map.get(verb) {
-                        vl += mb.verb_brain.train_step(raw, idx, &mut mb_rng);
-                    }
-                }
-                if epoch % 100 == 0 || epoch == 299 {
-                    let n = understanding_samples.len().max(1) as f32;
-                    println!("    [meta/topic+verb] epoch {}/300 topic_loss={:.4} verb_loss={:.4}",
-                        epoch, tl / n, vl / n);
-                }
-            }
+            let topic_data: Vec<(&[f32], usize)> = understanding_samples.iter()
+                .filter_map(|&(raw, intent)| topic_map.get(intent).map(|&idx| (raw, idx)))
+                .collect();
+            mb.topic_brain = MicroBrain::build_from_data(
+                MicroBrainRole::Topic, raw_dim, ul.topic_count(),
+                ul.topic_names.clone(), &topic_data,
+            );
 
-            // Train coordinator: target is the adapted conditioning vectors
-            println!("  training coordinator...");
-            for epoch in 0..200 {
-                let mut cl = 0.0f32;
-                for (raw, bridged) in raw_embeddings.iter().zip(bridged_embeddings.iter()) {
+            let verb_data: Vec<(&[f32], usize)> = understanding_samples.iter()
+                .map(|&(raw, intent)| {
+                    let verb = growformer::understanding::intent_to_verb(intent);
+                    let idx = verb_map.get(verb).copied().unwrap_or(0);
+                    (raw, idx)
+                })
+                .collect();
+            mb.verb_brain = MicroBrain::build_from_data(
+                MicroBrainRole::Verb, raw_dim, ul.verb_count(),
+                ul.verb_names.clone(), &verb_data,
+            );
+            println!("  topic brain: {} programs, verb brain: {} programs (one-pass)",
+                mb.topic_brain.lattice.program_count(), mb.verb_brain.lattice.program_count());
+
+            // One-pass coordinator: develop from all (raw → conditioning) pairs
+            let coord_pairs: Vec<(Vec<f32>, Vec<f32>)> = raw_embeddings.iter()
+                .zip(bridged_embeddings.iter())
+                .map(|(raw, bridged)| {
+                    let (_, _, topic_logits) = mb.topic_brain.predict(raw);
+                    let (_, _, verb_logits) = mb.verb_brain.predict(raw);
+                    let (_, _, action_logits) = mb.action_brain.predict(raw);
+                    let (_, tc, _) = mb.topic_brain.predict(raw);
+                    let (_, vc, _) = mb.verb_brain.predict(raw);
+                    let (_, ac, _) = mb.action_brain.predict(raw);
+                    let mut ci = Vec::new();
+                    ci.extend_from_slice(&topic_logits);
+                    ci.extend_from_slice(&verb_logits);
+                    ci.extend_from_slice(&action_logits);
+                    ci.push(tc); ci.push(vc); ci.push(ac);
                     let mut target = bridged.clone();
                     target.resize(growformer::dimension::group_gen::GEN_COND_DIM, 0.0);
-                    cl += mb.train_coordinator_step(raw, &target);
-                }
-                if epoch % 50 == 0 || epoch == 199 {
-                    println!("    [meta/coordinator] epoch {}/200 loss={:.4}",
-                        epoch, cl / raw_embeddings.len().max(1) as f32);
-                }
-            }
+                    (ci, target)
+                })
+                .collect();
+            mb.coordinator.develop(&coord_pairs);
+            println!("  coordinator: {} centroids (one-pass)", mb.coordinator.centroids.len());
 
             mb.freeze();
-            println!("  MetaBrain: frozen, topic_brain={}cls verb_brain={}cls action_brain={}cls",
+            println!("  MetaBrain: frozen, topic={}cls verb={}cls action={}cls",
                 mb.topic_brain.output_dim, mb.verb_brain.output_dim, mb.action_brain.output_dim);
 
             svc.dm.understanding = Some(ul);
@@ -1643,449 +1577,83 @@ fn train_brain(
         }
     }
 
-    // Pruning warmup: stop pruning after 30% of training ticks.
-    // Each epoch = num_pairs ticks (one train_tick per sample).
-    // Warmup fraction: 30% — enough for the substrate to self-organize,
-    // then freeze structure so learning doesn't erode capacity.
-    let prune_warmup_frac = 0.3;
+    // ---------------------------------------------------------------
+    // Stages 3+4: Indexed generation via Paramecium lattice
+    //
+    // Knowledge is indexed in one pass (codebook + lattice develop).
+    // No NeuralEnvironment, no backprop, no iterative training.
+    // ---------------------------------------------------------------
+    println!("\n--- Stages 3+4: Indexed Generation (Paramecium lattice) ---");
 
-    let early_stop_window = auto_cfg.as_ref().map(|ac| ac.early_stop_window).unwrap_or(0);
-    let early_stop_min_imp = auto_cfg.as_ref().map(|ac| ac.early_stop_min_improvement).unwrap_or(0.0);
-    let early_stop_min_ep = auto_cfg.as_ref().map(|ac| ac.early_stop_min_epochs).unwrap_or(0);
-
-    struct GenTask<'a> {
-        gidx: usize,
-        kind: &'static str,
-        replica: usize,
-        pairs: &'a [(&'a [f32], &'a str)],
-        raw_vecs: &'a [&'a [f32]],
-        adapter: GroupAdapter,
-        rotor: GroupRotor,
-        novelty: Vec<f32>,
-        seed: u64,
-        dictionary: TokenDictionary,
-        codebook: Option<AlgebraicCodebook>,
-        hopf: Option<HopfCompositionTable>,
-        prune_stop_tick: u64,
-        task_epochs: usize,
-        overrides: Option<growformer::dimension::group_gen::GenEnvOverrides>,
-        es_window: usize,
-        es_min_imp: f32,
-        es_min_ep: usize,
-    }
-    let mut tasks: Vec<GenTask> = Vec::new();
-    let mut base_tasks = 0usize;
+    use growformer::dimension::group_gen::IndexedGenEnv;
+    let spawn_threshold = 0.85;
     for gidx in 0..num_groups {
         if let Some(p) = gen_by_group.get(&gidx) {
             if !p.is_empty() {
-                let task_epochs = if p.len() > 150 {
-                    (gen_epochs as f64 * 2.0) as usize
-                } else {
-                    gen_epochs
-                };
-                let total_ticks = task_epochs as u64 * p.len() as u64;
-                let stop_tick = (total_ticks as f64 * prune_warmup_frac) as u64;
-                let dict = gen_dicts.get(&gidx).unwrap().clone();
-                let cb = gen_codebooks.get(&gidx).cloned();
-                let hopf = gen_hopf.get(&gidx).cloned();
-                let nov = gen_novelty_by_group.get(&gidx).cloned().unwrap_or_default();
-                let raw = gen_raw_by_group.get(&gidx).map(|v| v.as_slice()).unwrap_or(&[]);
-                let adapter = group_adapters.get(&gidx).cloned()
-                    .unwrap_or_else(|| GroupAdapter::new(raw_dim, bridge_dim, DEFAULT_ADAPTER_RANK));
-                for r in 0..k_replicas {
-                    tasks.push(GenTask {
-                        gidx, kind: "gen", replica: r,
-                        pairs: p.as_slice(),
-                        raw_vecs: raw,
-                        adapter: adapter.clone(),
-                        rotor: GroupRotor::new(),
-                        novelty: nov.clone(),
-                        seed: 100 + gidx as u64 * 1000 + r as u64,
-                        dictionary: dict.clone(),
-                        codebook: cb.clone(),
-                        hopf: hopf.clone(),
-                        prune_stop_tick: stop_tick,
-                        task_epochs,
-                        overrides: gen_overrides.clone(),
-                        es_window: early_stop_window,
-                        es_min_imp: early_stop_min_imp,
-                        es_min_ep: early_stop_min_ep,
-                    });
-                }
-                base_tasks += 1;
+                println!("  task: group {} gen — {} pairs", gidx, p.len());
             }
         }
         if let Some(p) = code_by_group.get(&gidx) {
-            let min_code_samples = 10;
-            if p.len() >= min_code_samples {
-                let task_epochs = gen_epochs;
-                let total_ticks = task_epochs as u64 * p.len() as u64;
-                let stop_tick = (total_ticks as f64 * prune_warmup_frac) as u64;
-                let dict = code_dicts.get(&gidx).unwrap().clone();
-                let cb = code_codebooks.get(&gidx).cloned();
-                let hopf = code_hopf.get(&gidx).cloned();
-                let nov = code_novelty_by_group.get(&gidx).cloned().unwrap_or_default();
-                let raw = code_raw_by_group.get(&gidx).map(|v| v.as_slice()).unwrap_or(&[]);
-                let adapter = group_adapters.get(&gidx).cloned()
-                    .unwrap_or_else(|| GroupAdapter::new(raw_dim, bridge_dim, DEFAULT_ADAPTER_RANK));
-                for r in 0..k_replicas {
-                    tasks.push(GenTask {
-                        gidx, kind: "code", replica: r,
-                        pairs: p.as_slice(),
-                        raw_vecs: raw,
-                        adapter: adapter.clone(),
-                        rotor: GroupRotor::new(),
-                        novelty: nov.clone(),
-                        seed: 200 + gidx as u64 * 1000 + r as u64,
-                        dictionary: dict.clone(),
-                        codebook: cb.clone(),
-                        hopf: hopf.clone(),
-                        prune_stop_tick: stop_tick,
-                        task_epochs,
-                        overrides: gen_overrides.clone(),
-                        es_window: early_stop_window,
-                        es_min_imp: early_stop_min_imp,
-                        es_min_ep: early_stop_min_ep,
-                    });
-                }
-                base_tasks += 1;
+            if !p.is_empty() {
+                println!("  task: group {} code — {} pairs", gidx, p.len());
             }
         }
     }
-    println!("  {} base tasks × {} replicas = {} total threads",
-        base_tasks, k_replicas, tasks.len());
-    println!("  pruning warmup: {:.0}% of training ticks", prune_warmup_frac * 100.0);
+
+    // Build IndexedGenEnv for each group (one-pass Paramecium lattice)
+    let t_index_start = std::time::Instant::now();
     for gidx in 0..num_groups {
-        if let Some(p) = gen_by_group.get(&gidx) {
-            if !p.is_empty() { println!("  task: group {} gen — {} pairs", gidx, p.len()); }
+        if let Some(pairs) = gen_by_group.get(&gidx) {
+            if pairs.is_empty() { continue; }
+            let dict = gen_dicts.get(&gidx).unwrap().clone();
+            let cb = gen_codebooks.get(&gidx).cloned().unwrap_or_else(|| AlgebraicCodebook::build(
+                &pairs.iter().map(|(_, t)| *t).collect::<Vec<_>>(), &dict, 32, None,
+            ));
+            let hopf = gen_hopf.get(&gidx).cloned().unwrap_or_default();
+            let training_pairs: Vec<(Vec<f32>, String)> = pairs.iter()
+                .map(|(emb, text)| (emb.to_vec(), text.to_string()))
+                .collect();
+            let mut env = IndexedGenEnv::from_parts(dict, cb, hopf, &training_pairs, spawn_threshold);
+            env.freeze();
+            println!("  gen[g{}]: {} lattice programs, frozen", gidx, env.program_count());
+            svc.dm.group_gen_envs.insert(gidx, env);
+
+            let adapter = group_adapters.get(&gidx).cloned()
+                .unwrap_or_else(|| GroupAdapter::new(raw_dim, bridge_dim, DEFAULT_ADAPTER_RANK));
+            svc.dm.group_adapters.insert(gidx, adapter);
+            svc.dm.group_rotors.insert(gidx, GroupRotor::new());
         }
-        if let Some(p) = code_by_group.get(&gidx) {
-            if !p.is_empty() { println!("  task: group {} code — {} pairs", gidx, p.len()); }
-        }
-    }
 
-    let understanding_ref = svc.dm.understanding.as_ref();
-    let results: Vec<(usize, &str, usize, f32, GroupGenEnv, GroupAdapter, GroupRotor)> = std::thread::scope(|s| {
-        let handles: Vec<_> = tasks.iter().map(|task| {
-            let understanding_layer = understanding_ref;
-            s.spawn(move || {
-                let mut adapter = task.adapter.clone();
-                let mut rotor = task.rotor.clone();
-                let mut task_rng = StdRng::seed_from_u64(task.seed);
-                let ov = task.overrides.as_ref();
-                let default_ov = growformer::dimension::group_gen::GenEnvOverrides::default();
-                let ov_ref = ov.unwrap_or(&default_ov);
-                let mut env = if let Some(cb) = task.codebook.clone() {
-                    GroupGenEnv::new_algebraic(task.dictionary.clone(), cb, ov_ref, &mut task_rng)
-                } else if let Some(ov) = &task.overrides {
-                    GroupGenEnv::new_with_overrides(task.dictionary.clone(), ov, &mut task_rng)
-                } else {
-                    GroupGenEnv::new(task.dictionary.clone(), &mut task_rng)
-                };
-                if let Some(hopf) = task.hopf.clone() {
-                    env.set_hopf_table(hopf);
-                }
-                env.set_prune_stop_tick(task.prune_stop_tick);
-                let te = task.task_epochs;
-                let log_interval = (te / 50).max(1);
-                let mode_str = if env.codebook.is_some() { " ALGEBRAIC" } else { "" };
-                println!("    [{} g{} r{}]{} output_dim={} epochs={} prune_stop_tick={}{}",
-                    task.kind, task.gidx, task.replica, mode_str,
-                    env.output_dim, te, task.prune_stop_tick,
-                    if task.es_window > 0 { format!(" early_stop(win={} min_imp={:.4} min_ep={})", task.es_window, task.es_min_imp, task.es_min_ep) } else { String::new() });
-                let n_pairs = task.pairs.len();
-                let mut indices: Vec<usize> = (0..n_pairs).collect();
-                let mut sample_losses: Vec<f32> = vec![0.0; n_pairs];
-                let replay_frac = 0.15;
-                let replay_start_epoch = 50;
-                let replay_count = (n_pairs as f32 * replay_frac).ceil() as usize;
+        if let Some(pairs) = code_by_group.get(&gidx) {
+            let min_code_samples = 10;
+            if pairs.len() < min_code_samples { continue; }
+            let dict = code_dicts.get(&gidx).unwrap().clone();
+            let cb = code_codebooks.get(&gidx).cloned().unwrap_or_else(|| AlgebraicCodebook::build_syntax_aware(
+                &pairs.iter().map(|(_, t)| *t).collect::<Vec<_>>(), &dict, 32, None,
+            ));
+            let hopf = code_hopf.get(&gidx).cloned().unwrap_or_default();
+            let training_pairs: Vec<(Vec<f32>, String)> = pairs.iter()
+                .map(|(emb, text)| (emb.to_vec(), text.to_string()))
+                .collect();
+            let mut env = IndexedGenEnv::from_parts(dict, cb, hopf, &training_pairs, spawn_threshold);
+            env.freeze();
+            println!("  code[g{}]: {} lattice programs, frozen", gidx, env.program_count());
+            svc.dm.group_code_envs.insert(gidx, env);
 
-                // Paramecium curriculum: sort by ascending novelty (hardest-first).
-                // In early epochs the model has no loss signal, so the lattice's
-                // pre-training novelty scores drive sample ordering instead.
-                let novelty_curriculum_end = replay_start_epoch;
-                let mut novelty_order: Vec<usize> = (0..n_pairs).collect();
-                if !task.novelty.is_empty() && task.novelty.len() == n_pairs {
-                    novelty_order.sort_by(|&a, &b| {
-                        task.novelty[a].partial_cmp(&task.novelty[b])
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                }
-
-                // Convergence monitor state
-                let mut loss_history: Vec<f32> = Vec::new();
-                let mut eval_loss_history: Vec<f32> = Vec::new();
-                let eval_check_interval = task.es_window.max(50);
-                let mut best_eval_loss = f32::INFINITY;
-                let mut stopped_early = false;
-                let has_raw = task.raw_vecs.len() == task.pairs.len();
-
-                // =================================================================
-                // Phase 1 — MEMORIZE: high LR, full activation, no regularization.
-                // Imprints the data as fast as possible (typically 2-3 passes).
-                // =================================================================
-                let memorize_epochs = 3usize;
-                let snap = env.enter_memorize_mode();
-                println!("    [{} g{} r{}] Phase 1 (memorize): {} epochs, lr={:.3}, k=full, dropout=0",
-                    task.kind, task.gidx, task.replica, memorize_epochs, env.env.current_lr);
-                for m_epoch in 0..memorize_epochs {
-                    indices.shuffle(&mut task_rng);
-                    let mut total_loss = 0.0f32;
-                    for &i in &indices {
-                        let (mut cond, h_raw) = if has_raw {
-                            (adapter.adapt(task.pairs[i].0, task.raw_vecs[i]), Some(task.raw_vecs[i]))
-                        } else {
-                            (task.pairs[i].0.to_vec(), None)
-                        };
-                        if let Some(raw) = h_raw {
-                            if let Some(ref ul) = understanding_layer {
-                                let uv = ul.conditioning_vector_shared(raw);
-                                cond.extend_from_slice(&uv);
-                            }
-                        }
-                        let env_cond_dim = env.env.layers.first().map_or(cond.len(), |l| l.len());
-                        cond.resize(env_cond_dim, 0.0);
-                        let l = env.train_step(&cond, task.pairs[i].1, &mut task_rng);
-                        total_loss += l;
-                    }
-                    let avg = total_loss / n_pairs.max(1) as f32;
-                    println!("    [{} g{} r{}] memorize {}/{} loss={:.4}",
-                        task.kind, task.gidx, task.replica, m_epoch + 1, memorize_epochs, avg);
-                }
-                // =================================================================
-                // Phase 2 — CONSOLIDATE: restore normal config, re-enable
-                // regularization. The network already holds a rough imprint;
-                // pruning + dropout will now refine it into durable memory.
-                // =================================================================
-                env.enter_consolidate_mode(&snap);
-                println!("    [{} g{} r{}] Phase 2 (consolidate): {} epochs, lr={:.4}, k={}, dropout={:.2}",
-                    task.kind, task.gidx, task.replica, te, env.env.current_lr,
-                    env.env.config.competitive_k, env.env.config.dropout_rate);
-
-                for epoch in 0..te {
-                    if epoch < novelty_curriculum_end && !task.novelty.is_empty() && task.novelty.len() == n_pairs {
-                        // Curriculum phase: present novel (hard) samples first, then familiar.
-                        // Add jitter so it's not identical every epoch.
-                        let jitter = (epoch as f32 * 0.1).sin().abs();
-                        let split = ((n_pairs as f32) * jitter * 0.3) as usize;
-                        indices[..split].copy_from_slice(&novelty_order[..split.min(n_pairs)]);
-                        indices[split..].shuffle(&mut task_rng);
-                    } else {
-                        indices.shuffle(&mut task_rng);
-                    }
-                    let adapter_lr = 0.001f32;
-                    let adapter_warmup = 20;
-                    let mut total_loss = 0.0f32;
-                    for &i in &indices {
-                        let (mut cond, h_raw) = if has_raw {
-                            (adapter.adapt(task.pairs[i].0, task.raw_vecs[i]), Some(task.raw_vecs[i]))
-                        } else {
-                            (task.pairs[i].0.to_vec(), None)
-                        };
-                        if let Some(raw) = h_raw {
-                            if let Some(ref ul) = understanding_layer {
-                                let uv = ul.conditioning_vector_shared(raw);
-                                cond.extend_from_slice(&uv);
-                            }
-                        }
-                        let env_cond_dim = env.env.layers.first().map_or(cond.len(), |l| l.len());
-                        cond.resize(env_cond_dim, 0.0);
-                        let l = env.train_step(&cond, task.pairs[i].1, &mut task_rng);
-                        sample_losses[i] = l;
-                        total_loss += l;
-
-                        // Train adapter via SPSA (2 evals instead of dim-many)
-                        if let Some(raw) = h_raw {
-                            if epoch >= adapter_warmup && !adapter.frozen {
-                                let dim = cond.len();
-                                let eps = 0.02f32;
-                                let mut perturb = vec![0.0f32; dim];
-                                for p in perturb.iter_mut() {
-                                    *p = if rand::Rng::gen_bool(&mut task_rng, 0.5) { 1.0 } else { -1.0 };
-                                }
-                                let mut c_plus = cond.clone();
-                                let mut c_minus = cond.clone();
-                                for d in 0..dim {
-                                    c_plus[d] += eps * perturb[d];
-                                    c_minus[d] -= eps * perturb[d];
-                                }
-                                let l_plus = env.eval_loss(&c_plus, task.pairs[i].1);
-                                let l_minus = env.eval_loss(&c_minus, task.pairs[i].1);
-                                let scale = (l_plus - l_minus) / (2.0 * eps);
-                                let grad: Vec<f32> = perturb.iter().map(|&p| scale / p).collect();
-                                adapter.train_step(raw, &grad, adapter_lr);
-                            }
-
-                            // Train Clifford rotor via SPSA on the same sample
-                            if epoch >= adapter_warmup && !rotor.frozen {
-                                let cond_dim = cond.len();
-                                rotor.train_step_spsa(raw, cond_dim, |c| env.eval_loss(c, task.pairs[i].1), adapter_lr);
-                            }
-                        }
-                    }
-                    if epoch >= replay_start_epoch && replay_count > 0 {
-                        let mut ranked: Vec<(usize, f32)> = sample_losses.iter().copied().enumerate()
-                            .map(|(idx, loss)| {
-                                let nov_weight = if idx < task.novelty.len() {
-                                    1.0 - task.novelty[idx]
-                                } else {
-                                    0.0
-                                };
-                                (idx, loss + nov_weight * 0.1)
-                            })
-                            .collect();
-                        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                        for &(idx, _score) in ranked.iter().take(replay_count) {
-                            let cond = if has_raw {
-                                adapter.adapt(task.pairs[idx].0, task.raw_vecs[idx])
-                            } else {
-                                task.pairs[idx].0.to_vec()
-                            };
-                            env.train_step(&cond, task.pairs[idx].1, &mut task_rng);
-                        }
-                    }
-                    let last_avg = total_loss / n_pairs.max(1) as f32;
-                    loss_history.push(last_avg);
-
-                    // Early stopping: two conditions can trigger a stop.
-                    //
-                    // 1. Soft stop: loss plateaued AND below an adaptive floor.
-                    //    Floor scales with output dimension — a 352-bit prediction task
-                    //    can't reach the same absolute loss as a 140-bit task.
-                    //    Floor = 0.02 * (output_dim / 140), clamped to [0.02, 0.15].
-                    //
-                    // 2. Hard stop: loss hasn't improved for 2× the early-stop window,
-                    //    regardless of absolute value. The task is stuck.
-                    let es_loss_floor = (0.02 * (env.output_dim as f32 / 140.0)).clamp(0.02, 0.15);
-                    let hard_plateau_window = task.es_window * 2;
-                    if task.es_window > 0 && epoch >= task.es_min_ep && loss_history.len() >= task.es_window {
-                        let recent = &loss_history[loss_history.len() - task.es_window..];
-                        let old_avg = recent[..task.es_window / 2].iter().sum::<f32>() / (task.es_window / 2) as f32;
-                        let new_avg = recent[task.es_window / 2..].iter().sum::<f32>() / (task.es_window - task.es_window / 2) as f32;
-                        let improvement = (old_avg - new_avg) / old_avg.max(1e-8);
-                        if improvement < task.es_min_imp && new_avg < es_loss_floor {
-                            println!("    [{} g{} r{}] early stop at epoch {}/{}: loss={:.4} improvement={:.5} < {:.4} (floor={:.3})",
-                                task.kind, task.gidx, task.replica, epoch, te, last_avg, improvement, task.es_min_imp, es_loss_floor);
-                            stopped_early = true;
-                            break;
-                        }
-                        if improvement < task.es_min_imp && loss_history.len() >= hard_plateau_window {
-                            let far_back = &loss_history[loss_history.len() - hard_plateau_window..];
-                            let far_old = far_back[..hard_plateau_window / 2].iter().sum::<f32>() / (hard_plateau_window / 2) as f32;
-                            let far_new = far_back[hard_plateau_window / 2..].iter().sum::<f32>() / (hard_plateau_window - hard_plateau_window / 2) as f32;
-                            let long_improvement = (far_old - far_new) / far_old.max(1e-8);
-                            if long_improvement < task.es_min_imp {
-                                println!("    [{} g{} r{}] hard plateau stop at epoch {}/{}: loss={:.4} no improvement over {} epochs (floor={:.3})",
-                                    task.kind, task.gidx, task.replica, epoch, te, last_avg, hard_plateau_window, es_loss_floor);
-                                stopped_early = true;
-                                break;
-                            }
-                        }
-                        if improvement < task.es_min_imp && new_avg >= es_loss_floor {
-                            println!("    [{} g{} r{}] epoch {}/{}: plateau (imp={:.5}) but loss={:.4} > floor {:.3}, continuing...",
-                                task.kind, task.gidx, task.replica, epoch, te, improvement, new_avg, es_loss_floor);
-                        }
-                    }
-
-                    // Eval-loss divergence check: detect overfitting by comparing
-                    // train loss trend against periodic eval loss snapshots.
-                    if task.es_window > 0 && epoch >= task.es_min_ep
-                        && epoch % eval_check_interval == 0 && epoch > 0
-                    {
-                        let mut eval_sum = 0.0f32;
-                        for (j, &(bridged, target)) in task.pairs.iter().enumerate() {
-                            let cond = if has_raw {
-                                adapter.adapt(bridged, task.raw_vecs[j])
-                            } else {
-                                bridged.to_vec()
-                            };
-                            eval_sum += env.eval_loss(&cond, target);
-                        }
-                        let eval_avg = eval_sum / n_pairs.max(1) as f32;
-                        eval_loss_history.push(eval_avg);
-                        if eval_avg < best_eval_loss {
-                            best_eval_loss = eval_avg;
-                        }
-                        if eval_loss_history.len() >= 3 {
-                            let recent_eval = eval_loss_history[eval_loss_history.len() - 1];
-                            let prev_eval = eval_loss_history[eval_loss_history.len() - 2];
-                            let older_eval = eval_loss_history[eval_loss_history.len() - 3];
-                            let eval_rising = recent_eval > prev_eval && prev_eval > older_eval;
-                            let train_falling = last_avg < loss_history[loss_history.len().saturating_sub(eval_check_interval + 1)];
-                            if eval_rising && train_falling && recent_eval > best_eval_loss * 1.3 {
-                                println!("    [{} g{} r{}] overfit stop at epoch {}/{}: train={:.4} eval={:.4} (best_eval={:.4}, rising for {} checks)",
-                                    task.kind, task.gidx, task.replica, epoch, te, last_avg, recent_eval, best_eval_loss, eval_loss_history.len());
-                                stopped_early = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    if epoch % log_interval == 0 || epoch == te - 1 {
-                        if k_replicas > 1 {
-                            println!("    [{} g{} r{}] epoch {}/{} loss={:.4} synapses={}",
-                                task.kind, task.gidx, task.replica, epoch, te,
-                                last_avg, env.total_synapses());
-                        } else {
-                            println!("    [{} g{}] epoch {}/{} loss={:.4} synapses={}",
-                                task.kind, task.gidx, epoch, te,
-                                last_avg, env.total_synapses());
-                        }
-                    }
-                }
-                let actual_epochs = loss_history.len();
-                if stopped_early {
-                    println!("    [{} g{} r{}] converged after {} of {} epochs",
-                        task.kind, task.gidx, task.replica, actual_epochs, te);
-                }
-                let mut eval_loss = 0.0f32;
-                for (j, &(bridged, target)) in task.pairs.iter().enumerate() {
-                    let cond = if has_raw {
-                        adapter.adapt(bridged, task.raw_vecs[j])
-                    } else {
-                        bridged.to_vec()
-                    };
-                    eval_loss += env.eval_loss(&cond, target);
-                }
-                let final_loss = eval_loss / task.pairs.len().max(1) as f32;
-                env.freeze();
-                adapter.freeze();
-                rotor.freeze();
-                println!("    [{} g{} r{}] frozen: {} neurons, {} synapses, eval_loss={:.4}, adapter_params={}, rotor_params={}",
-                    task.kind, task.gidx, task.replica,
-                    env.total_neurons(), env.total_synapses(), final_loss,
-                    adapter.param_count(), GroupRotor::param_count());
-                (task.gidx, task.kind, task.replica, final_loss, env, adapter, rotor)
-            })
-        }).collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
-
-    // Select best replica per (group, kind) by lowest eval loss
-    let mut best: HashMap<(usize, &str), (f32, GroupGenEnv, GroupAdapter, GroupRotor)> = HashMap::new();
-    for (gidx, kind, replica, loss, env, adapter, rotor) in results {
-        let key = (gidx, kind);
-        let is_better = match best.get(&key) {
-            Some((prev_loss, _, _, _)) => loss < *prev_loss,
-            None => true,
-        };
-        if is_better {
-            if k_replicas > 1 {
-                println!("    [{} g{}] best replica so far: r{} loss={:.4}", kind, gidx, replica, loss);
+            if !svc.dm.group_adapters.contains_key(&gidx) {
+                let adapter = group_adapters.get(&gidx).cloned()
+                    .unwrap_or_else(|| GroupAdapter::new(raw_dim, bridge_dim, DEFAULT_ADAPTER_RANK));
+                svc.dm.group_adapters.insert(gidx, adapter);
+                svc.dm.group_rotors.insert(gidx, GroupRotor::new());
             }
-            best.insert(key, (loss, env, adapter, rotor));
         }
     }
+    let t_index_elapsed = t_index_start.elapsed();
+    println!("  Indexed {} gen + {} code groups in {:?}",
+        svc.dm.group_gen_envs.len(), svc.dm.group_code_envs.len(), t_index_elapsed);
 
-    for ((gidx, kind), (_loss, env, adapter, rotor)) in best {
-        match kind {
-            "gen" => { svc.dm.group_gen_envs.insert(gidx, env); }
-            "code" => { svc.dm.group_code_envs.insert(gidx, env); }
-            _ => {}
-        }
-        svc.dm.group_adapters.insert(gidx, adapter);
-        svc.dm.group_rotors.insert(gidx, rotor);
-    }
+    // (Legacy thread scope with NeuralEnvironment training removed —
+    // replaced by one-pass Paramecium lattice indexing above)
 
     // Register per-group structural fingerprints (grade-2 bivectors in Cl(8))
     // for understanding-based routing on novel/OOD inputs.
@@ -2131,10 +1699,10 @@ fn train_brain(
     println!("  GroupGenEnvs: {} groups", svc.dm.group_gen_envs.len());
     println!("  GroupCodeEnvs: {} groups", svc.dm.group_code_envs.len());
     for (gidx, env) in &svc.dm.group_gen_envs {
-        println!("    gen[{}]: {} neurons, {} synapses, frozen={}", gidx, env.total_neurons(), env.total_synapses(), env.frozen);
+        println!("    gen[{}]: {} lattice programs, frozen={}", gidx, env.program_count(), env.frozen);
     }
     for (gidx, env) in &svc.dm.group_code_envs {
-        println!("    code[{}]: {} neurons, {} synapses, frozen={}", gidx, env.total_neurons(), env.total_synapses(), env.frozen);
+        println!("    code[{}]: {} lattice programs, frozen={}", gidx, env.program_count(), env.frozen);
     }
 
     println!("\n--- Post-Training Inference Check ---");
@@ -2152,11 +1720,13 @@ fn train_brain(
         }
         if let Ok((_, resp)) = svc.generation(prompt) {
             let r = &resp.text;
-            println!("  gen [{}] (conf={:.2}): {:?}", resp.template_id, resp.confidence, &r[..r.len().min(200)]);
+            let r_end = truncate_to_char_boundary(r, 200);
+            println!("  gen [{}] (conf={:.2}): {:?}", resp.template_id, resp.confidence, &r[..r_end]);
         }
         if let Ok((_, Some(code))) = svc.codegen(prompt) {
             let c = &code.code;
-            println!("  code [{}]: {:?}", code.kind, &c[..c.len().min(200)]);
+            let c_end = truncate_to_char_boundary(c, 200);
+            println!("  code [{}]: {:?}", code.kind, &c[..c_end]);
         }
     }
 

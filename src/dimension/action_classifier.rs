@@ -1,9 +1,11 @@
-//! Trained MLP classifier: embedding -> action_type logits.
-//! Replaces keyword-based `infer_action_type_from_text`.
+//! Paramecium-based action classifier: embedding -> action_type.
+//! One-pass `develop()` replaces iterative backprop MLP training.
 
 use serde::{Deserialize, Serialize};
 
 use crate::types::GroupId;
+use crate::spectral::TokenDictionary;
+use crate::dimension::paramecium::InfraciliaryLattice;
 
 use super::action::ActionType;
 
@@ -19,16 +21,14 @@ fn action_type_index(at: &ActionType) -> usize {
     }
 }
 
-/// One-hot encoding of action type for conditioning generation heads. Returns a 4-element vector.
+/// One-hot encoding of action type for conditioning generation heads.
 pub fn action_type_one_hot(at: &ActionType) -> [f32; NUM_ACTION_TYPES] {
     let mut out = [0.0f32; NUM_ACTION_TYPES];
     out[action_type_index(at)] = 1.0;
     out
 }
 
-/// One-hot encoding of routed group for conditioning generation heads (region binding).
-/// Returns a vector of length `num_dims` (typically `group_order.len()`). Used so the head
-/// receives an explicit region signal and can select the correct attractor per group.
+/// One-hot encoding of routed group for conditioning generation heads.
 pub fn group_id_one_hot(group_id: Option<GroupId>, group_order: &[GroupId], num_dims: usize) -> Vec<f32> {
     let mut v = vec![0.0f32; num_dims];
     if let Some(gid) = group_id {
@@ -51,147 +51,127 @@ fn index_to_action_type(idx: usize) -> ActionType {
     }
 }
 
-/// Small 2-layer MLP for action classification.
-/// Architecture: input_dim -> hidden -> NUM_ACTION_TYPES
+const ACTION_LABELS: [&str; NUM_ACTION_TYPES] = [
+    "action_support", "action_coding", "action_general", "action_tool", "action_fallback",
+];
+
+/// Paramecium lattice-based action classifier.
+/// Replaces the hand-rolled MLP. One-pass `develop()` training.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ActionClassifier {
-    pub w1: Vec<Vec<f32>>,
-    pub b1: Vec<f32>,
-    pub w2: Vec<Vec<f32>>,
-    pub b2: Vec<f32>,
+    pub lattice: InfraciliaryLattice,
     pub input_dim: usize,
     pub hidden_dim: usize,
 }
 
 impl ActionClassifier {
     pub fn new(input_dim: usize, hidden_dim: usize) -> Self {
-        let mut w1 = vec![vec![0.0f32; input_dim]; hidden_dim];
-        let mut w2 = vec![vec![0.0f32; hidden_dim]; NUM_ACTION_TYPES];
-        for (h, row) in w1.iter_mut().enumerate() {
-            for (i, w) in row.iter_mut().enumerate() {
-                *w = (((h as u64 * 2654435761 + i as u64 * 7919) % 1000) as f32 / 1000.0 - 0.5)
-                    * 0.1;
-            }
-        }
-        for (o, row) in w2.iter_mut().enumerate() {
-            for (h, w) in row.iter_mut().enumerate() {
-                *w = (((o as u64 * 2654435761 + h as u64 * 7919) % 1000) as f32 / 1000.0 - 0.5)
-                    * 0.1;
-            }
-        }
+        let dict = TokenDictionary::build(&ACTION_LABELS, 64);
+        let lattice = InfraciliaryLattice::new(dict);
         Self {
-            w1,
-            b1: vec![0.0; hidden_dim],
-            w2,
-            b2: vec![0.0; NUM_ACTION_TYPES],
+            lattice,
             input_dim,
             hidden_dim,
         }
     }
 
-    fn forward(&self, x: &[f32]) -> (Vec<f32>, Vec<f32>) {
-        let mut h = vec![0.0f32; self.hidden_dim];
-        for (j, hj) in h.iter_mut().enumerate() {
-            let mut acc = self.b1[j];
-            for (i, &xi) in x.iter().enumerate() {
-                if i < self.w1[j].len() {
-                    acc += self.w1[j][i] * xi;
-                }
-            }
-            *hj = acc.tanh();
-        }
-        let out_dim = self.b2.len().max(NUM_ACTION_TYPES);
-        let mut logits = vec![0.0f32; out_dim];
-        for (o, lo) in logits.iter_mut().enumerate() {
-            let bias = self.b2.get(o).copied().unwrap_or(0.0);
-            let mut acc = bias;
-            if let Some(row) = self.w2.get(o) {
-                for (j, &hj) in h.iter().enumerate() {
-                    if j < row.len() {
-                        acc += row[j] * hj;
-                    }
-                }
-            }
-            *lo = acc;
-        }
-        (h, logits)
-    }
-
-    /// Expand output layer if a checkpoint was saved with fewer action types.
-    pub fn ensure_output_dim(&mut self) {
-        while self.w2.len() < NUM_ACTION_TYPES {
-            self.w2.push(vec![0.0; self.hidden_dim]);
-        }
-        while self.b2.len() < NUM_ACTION_TYPES {
-            self.b2.push(0.0);
+    /// Build classifier from labeled data in one pass.
+    pub fn build(input_dim: usize, samples: &[(Vec<f32>, ActionType)]) -> Self {
+        let dict = TokenDictionary::build(&ACTION_LABELS, 64);
+        let pairs: Vec<(Vec<f32>, String)> = samples.iter()
+            .map(|(emb, at)| {
+                let idx = action_type_index(at);
+                (emb.clone(), ACTION_LABELS[idx].to_string())
+            })
+            .collect();
+        let mut lattice = InfraciliaryLattice::new(dict);
+        lattice.develop(&pairs, 0.90);
+        Self {
+            lattice,
+            input_dim,
+            hidden_dim: 0,
         }
     }
 
-    pub fn predict(&self, x: &[f32]) -> ActionType {
-        let (_, logits) = self.forward(x);
-        let idx = logits
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i)
-            .unwrap_or(3);
-        index_to_action_type(idx)
+    /// Expand output — no-op for lattice (programs grow automatically).
+    pub fn ensure_output_dim(&mut self) {}
+
+    pub fn predict(&mut self, x: &[f32]) -> ActionType {
+        self.predict_shared(x)
     }
 
-    pub fn predict_with_confidence(&self, x: &[f32]) -> (ActionType, f32) {
-        let (_, logits) = self.forward(x);
-        let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let exp_sum: f32 = logits.iter().map(|&l| (l - max_logit).exp()).sum();
-        let probs: Vec<f32> = logits.iter().map(|&l| (l - max_logit).exp() / exp_sum).collect();
-        let idx = probs
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i)
-            .unwrap_or(3);
-        (index_to_action_type(idx), probs[idx])
-    }
-
-    /// Train one step with softmax cross-entropy loss. Returns loss.
-    pub fn train_step(&mut self, x: &[f32], target: &ActionType, lr: f32) -> f32 {
-        let target_idx = action_type_index(target);
-        let (h, logits) = self.forward(x);
-
-        // Softmax
-        let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let exp: Vec<f32> = logits.iter().map(|&l| (l - max_logit).exp()).collect();
-        let sum_exp: f32 = exp.iter().sum();
-        let probs: Vec<f32> = exp.iter().map(|e| e / sum_exp).collect();
-
-        let loss = -(probs[target_idx].max(1e-10).ln());
-
-        // d_logits = probs - one_hot(target)
-        let mut d_logits = probs.clone();
-        d_logits[target_idx] -= 1.0;
-
-        // Backprop through w2, b2
-        let mut d_h = vec![0.0f32; self.hidden_dim];
-        for (o, &dl) in d_logits.iter().enumerate() {
-            self.b2[o] -= lr * dl;
-            for (j, &hj) in h.iter().enumerate() {
-                d_h[j] += self.w2[o][j] * dl;
-                self.w2[o][j] -= lr * dl * hj;
-            }
+    /// Immutable prediction — no EMA centroid drift.
+    pub fn predict_shared(&self, x: &[f32]) -> ActionType {
+        if self.lattice.programs.is_empty() {
+            return ActionType::Fallback;
         }
-
-        // Backprop through tanh: d_pre_h = d_h * (1 - h^2)
-        for (j, dh) in d_h.iter().enumerate() {
-            let d_pre = dh * (1.0 - h[j] * h[j]);
-            self.b1[j] -= lr * d_pre;
-            for (i, &xi) in x.iter().enumerate() {
-                if i < self.w1[j].len() {
-                    self.w1[j][i] -= lr * d_pre * xi;
-                }
-            }
+        let mut best_idx = 0;
+        let mut best_sim = f32::NEG_INFINITY;
+        for (i, prog) in self.lattice.programs.iter().enumerate() {
+            let sim = cosine_sim(x, &prog.ema_centroid);
+            if sim > best_sim { best_sim = sim; best_idx = i; }
         }
-
-        loss
+        let text = self.lattice.dictionary.decode(&self.lattice.programs[best_idx].token_sequence);
+        Self::parse_action(&text).unwrap_or(ActionType::Fallback)
     }
+
+    pub fn predict_with_confidence(&mut self, x: &[f32]) -> (ActionType, f32) {
+        self.predict_with_confidence_shared(x)
+    }
+
+    pub fn predict_with_confidence_shared(&self, x: &[f32]) -> (ActionType, f32) {
+        if self.lattice.programs.is_empty() {
+            return (ActionType::Fallback, 0.0);
+        }
+        let mut best_idx = 0;
+        let mut best_sim = f32::NEG_INFINITY;
+        for (i, prog) in self.lattice.programs.iter().enumerate() {
+            let sim = cosine_sim(x, &prog.ema_centroid);
+            if sim > best_sim { best_sim = sim; best_idx = i; }
+        }
+        let text = self.lattice.dictionary.decode(&self.lattice.programs[best_idx].token_sequence);
+        let at = Self::parse_action(&text).unwrap_or(ActionType::Fallback);
+        (at, best_sim.max(0.0))
+    }
+
+    /// Train one step: develop lattice with this (input, action) pair.
+    pub fn train_step(&mut self, x: &[f32], target: &ActionType, _lr: f32) -> f32 {
+        let idx = action_type_index(target);
+        let pairs = vec![(x.to_vec(), ACTION_LABELS[idx].to_string())];
+        self.lattice.develop(&pairs, 0.90);
+
+        let resp = self.lattice.respond(x);
+        let predicted = Self::parse_action(&resp.text);
+        if predicted.as_ref() == Some(target) { 0.0 } else { 1.0 }
+    }
+
+    pub fn program_count(&self) -> usize {
+        self.lattice.program_count()
+    }
+
+    fn parse_action(text: &str) -> Option<ActionType> {
+        match text {
+            "action_support" => Some(ActionType::SupportTicket),
+            "action_coding" => Some(ActionType::CodingAssist),
+            "action_general" => Some(ActionType::GeneralAssist),
+            "action_tool" => Some(ActionType::ToolCall),
+            "action_fallback" => Some(ActionType::Fallback),
+            _ => None,
+        }
+    }
+}
+
+fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
+    let mut dot = 0.0f32;
+    let mut na = 0.0f32;
+    let mut nb = 0.0f32;
+    for i in 0..a.len().min(b.len()) {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    let denom = na.sqrt() * nb.sqrt();
+    if denom < 1e-10 { 0.0 } else { dot / denom }
 }
 
 pub fn action_target_to_type(target: &str) -> ActionType {
@@ -209,11 +189,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_classifier_build_and_predict() {
+        let samples: Vec<(Vec<f32>, ActionType)> = vec![
+            (vec![1.0, 0.0, 0.0, 0.0, 0.5, 0.1, 0.0, 0.0], ActionType::SupportTicket),
+            (vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.1], ActionType::CodingAssist),
+            (vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.5, 0.0, 0.1], ActionType::GeneralAssist),
+        ];
+        let mut clf = ActionClassifier::build(8, &samples);
+        assert_eq!(clf.predict(&samples[0].0), ActionType::SupportTicket);
+        assert_eq!(clf.predict(&samples[1].0), ActionType::CodingAssist);
+        assert_eq!(clf.predict(&samples[2].0), ActionType::GeneralAssist);
+    }
+
+    #[test]
     fn test_classifier_trains_and_predicts() {
         let mut clf = ActionClassifier::new(8, 16);
         let support_emb = vec![1.0, 0.0, 0.0, 0.0, 0.5, 0.1, 0.0, 0.0];
         let coding_emb = vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.1];
-        for _ in 0..100 {
+        for _ in 0..3 {
             clf.train_step(&support_emb, &ActionType::SupportTicket, 0.1);
             clf.train_step(&coding_emb, &ActionType::CodingAssist, 0.1);
         }
