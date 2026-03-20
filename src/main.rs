@@ -178,19 +178,28 @@ fn retrain_single_gen(
         }
     };
 
-    // Embed only the target group's gen data
+    // Embed only the target group's gen data, applying the same Clifford + understanding
+    // conditioning used at inference time so lattice cosine similarity is high.
     println!("\n--- Computing embeddings for group {} ---", target_group);
     let runtime = &svc.dm.language_runtime;
-    let mut gen_pairs: Vec<(Vec<f32>, String)> = Vec::new();
+    let mut gen_pairs: Vec<(Vec<f32>, String, String)> = Vec::new();
     for s in &samples {
         if group_map(s) != target_group { continue; }
         if let Some(r) = s.expected_response.as_deref() {
             match runtime.encode_and_bridge(&s.text) {
-                Ok((_raw, bridged)) => {
-                    gen_pairs.push((bridged.routed_vector, r.to_string()));
+                Ok((raw, bridged)) => {
+                    let cond = svc.dm.adapt_for_group_clifford(
+                        target_group, &bridged.routed_vector, &raw,
+                        growformer::dimension::group_gen::GEN_COND_DIM,
+                    );
+                    gen_pairs.push((cond, r.to_string(), s.semantic_intent.clone()));
                 }
                 Err(_) => {
-                    gen_pairs.push((vec![0.0; DEFAULT_BRIDGE_DIM], r.to_string()));
+                    gen_pairs.push((
+                        vec![0.0; growformer::dimension::group_gen::GEN_COND_DIM],
+                        r.to_string(),
+                        s.semantic_intent.clone(),
+                    ));
                 }
             }
         }
@@ -236,8 +245,8 @@ fn retrain_single_gen(
     use growformer::dimension::group_gen::{bits_for_dict, MAX_TOKENS};
     let effective_max_tokens = gen_overrides.as_ref().and_then(|o| o.max_tokens).unwrap_or(MAX_TOKENS);
 
-    let texts: Vec<&str> = gen_pairs.iter().map(|(_, t)| t.as_str()).collect();
-    let embs: Vec<&[f32]> = gen_pairs.iter().map(|(e, _)| e.as_slice()).collect();
+    let texts: Vec<&str> = gen_pairs.iter().map(|(_, t, _)| t.as_str()).collect();
+    let embs: Vec<&[f32]> = gen_pairs.iter().map(|(e, _, _)| e.as_slice()).collect();
 
     let max_dict = if texts.len() >= 100 { 2048 } else { 1024 };
     let dict = TokenDictionary::build(&texts, max_dict);
@@ -280,7 +289,7 @@ fn retrain_single_gen(
     use growformer::dimension::group_gen::IndexedGenEnv as RetrainIndexedGenEnv;
     println!("\n--- Building indexed gen g{} ({} pairs, Paramecium lattice) ---", target_group, gen_pairs.len());
 
-    let mut indexed_env = RetrainIndexedGenEnv::from_parts(
+    let mut indexed_env = RetrainIndexedGenEnv::from_tagged_parts(
         dict.clone(),
         cb.clone(),
         hopf.unwrap_or_default(),
@@ -1285,9 +1294,11 @@ fn train_brain(
     // Each pair now carries (bridged, raw, target) so per-group adapters can specialize conditioning.
     let mut gen_by_group: HashMap<usize, Vec<(&[f32], &str)>> = HashMap::new();
     let mut gen_raw_by_group: HashMap<usize, Vec<&[f32]>> = HashMap::new();
+    let mut gen_topic_by_group: HashMap<usize, Vec<&str>> = HashMap::new();
     let mut gen_novelty_by_group: HashMap<usize, Vec<f32>> = HashMap::new();
     let mut code_by_group: HashMap<usize, Vec<(&[f32], &str)>> = HashMap::new();
     let mut code_raw_by_group: HashMap<usize, Vec<&[f32]>> = HashMap::new();
+    let mut code_topic_by_group: HashMap<usize, Vec<&str>> = HashMap::new();
     let mut code_novelty_by_group: HashMap<usize, Vec<f32>> = HashMap::new();
     for (i, ((bridged, raw), s)) in bridged_embeddings.iter().zip(raw_embeddings.iter()).zip(samples.iter()).enumerate() {
         let gidx = group_map(s);
@@ -1295,12 +1306,14 @@ fn train_brain(
         if let Some(r) = s.expected_response.as_deref() {
             gen_by_group.entry(gidx).or_default().push((bridged.as_slice(), r));
             gen_raw_by_group.entry(gidx).or_default().push(raw.as_slice());
+            gen_topic_by_group.entry(gidx).or_default().push(s.semantic_intent.as_str());
             gen_novelty_by_group.entry(gidx).or_default().push(nov);
         }
         if let Some(c) = s.expected_code.as_deref() {
             if !c.is_empty() && c != "null" {
                 code_by_group.entry(gidx).or_default().push((bridged.as_slice(), c));
                 code_raw_by_group.entry(gidx).or_default().push(raw.as_slice());
+                code_topic_by_group.entry(gidx).or_default().push(s.semantic_intent.as_str());
                 code_novelty_by_group.entry(gidx).or_default().push(nov);
             }
         }
@@ -1586,7 +1599,7 @@ fn train_brain(
     println!("\n--- Stages 3+4: Indexed Generation (Paramecium lattice) ---");
 
     use growformer::dimension::group_gen::IndexedGenEnv;
-    let spawn_threshold = 0.85;
+    let spawn_threshold = 0.97;
     for gidx in 0..num_groups {
         if let Some(p) = gen_by_group.get(&gidx) {
             if !p.is_empty() {
@@ -1600,52 +1613,77 @@ fn train_brain(
         }
     }
 
-    // Build IndexedGenEnv for each group (one-pass Paramecium lattice)
-    let t_index_start = std::time::Instant::now();
-    for gidx in 0..num_groups {
-        if let Some(pairs) = gen_by_group.get(&gidx) {
-            if pairs.is_empty() { continue; }
-            let dict = gen_dicts.get(&gidx).unwrap().clone();
-            let cb = gen_codebooks.get(&gidx).cloned().unwrap_or_else(|| AlgebraicCodebook::build(
-                &pairs.iter().map(|(_, t)| *t).collect::<Vec<_>>(), &dict, 32, None,
-            ));
-            let hopf = gen_hopf.get(&gidx).cloned().unwrap_or_default();
-            let training_pairs: Vec<(Vec<f32>, String)> = pairs.iter()
-                .map(|(emb, text)| (emb.to_vec(), text.to_string()))
-                .collect();
-            let mut env = IndexedGenEnv::from_parts(dict, cb, hopf, &training_pairs, spawn_threshold);
-            env.freeze();
-            println!("  gen[g{}]: {} lattice programs, frozen", gidx, env.program_count());
-            svc.dm.group_gen_envs.insert(gidx, env);
-
+    // Install per-group adapters and rotors BEFORE building gen envs so we can
+    // apply the same Clifford + understanding conditioning used at inference time.
+    for &gidx in gen_by_group.keys().chain(code_by_group.keys()) {
+        if !svc.dm.group_adapters.contains_key(&gidx) {
             let adapter = group_adapters.get(&gidx).cloned()
                 .unwrap_or_else(|| GroupAdapter::new(raw_dim, bridge_dim, DEFAULT_ADAPTER_RANK));
             svc.dm.group_adapters.insert(gidx, adapter);
             svc.dm.group_rotors.insert(gidx, GroupRotor::new());
         }
+    }
+
+    // Build IndexedGenEnv for each group (one-pass Paramecium lattice).
+    // Conditioning vectors are built with the same Clifford + understanding path
+    // used at inference time so that cosine similarity is high during generation.
+    let t_index_start = std::time::Instant::now();
+    for gidx in 0..num_groups {
+        if let Some(pairs) = gen_by_group.get(&gidx) {
+            if pairs.is_empty() { continue; }
+            let raw_vecs = gen_raw_by_group.get(&gidx).unwrap();
+            let topic_names = gen_topic_by_group.get(&gidx).unwrap();
+            let dict = gen_dicts.get(&gidx).unwrap().clone();
+            let cb = gen_codebooks.get(&gidx).cloned().unwrap_or_else(|| AlgebraicCodebook::build(
+                &pairs.iter().map(|(_, t)| *t).collect::<Vec<_>>(), &dict, 32, None,
+            ));
+            let hopf = gen_hopf.get(&gidx).cloned().unwrap_or_default();
+            let training_pairs: Vec<(Vec<f32>, String, String)> = pairs.iter()
+                .zip(raw_vecs.iter())
+                .zip(topic_names.iter())
+                .map(|(((bridged, text), raw), topic_name)| {
+                    let cond = svc.dm.adapt_for_group_clifford(
+                        gidx, bridged, raw, growformer::dimension::group_gen::GEN_COND_DIM,
+                    );
+                    (cond, text.to_string(), (*topic_name).to_string())
+                })
+                .collect();
+            let mut env = IndexedGenEnv::from_tagged_parts(dict, cb, hopf, &training_pairs, spawn_threshold);
+            env.freeze();
+            println!(
+                "  gen[g{}]: {} lattice programs, {} topic sub-lattices, frozen",
+                gidx, env.program_count(), env.topic_subindex.len()
+            );
+            svc.dm.group_gen_envs.insert(gidx, env);
+        }
 
         if let Some(pairs) = code_by_group.get(&gidx) {
             let min_code_samples = 10;
             if pairs.len() < min_code_samples { continue; }
+            let raw_vecs = code_raw_by_group.get(&gidx).unwrap();
+            let topic_names = code_topic_by_group.get(&gidx).unwrap();
             let dict = code_dicts.get(&gidx).unwrap().clone();
             let cb = code_codebooks.get(&gidx).cloned().unwrap_or_else(|| AlgebraicCodebook::build_syntax_aware(
                 &pairs.iter().map(|(_, t)| *t).collect::<Vec<_>>(), &dict, 32, None,
             ));
             let hopf = code_hopf.get(&gidx).cloned().unwrap_or_default();
-            let training_pairs: Vec<(Vec<f32>, String)> = pairs.iter()
-                .map(|(emb, text)| (emb.to_vec(), text.to_string()))
+            let training_pairs: Vec<(Vec<f32>, String, String)> = pairs.iter()
+                .zip(raw_vecs.iter())
+                .zip(topic_names.iter())
+                .map(|(((bridged, text), raw), topic_name)| {
+                    let cond = svc.dm.adapt_for_group_clifford(
+                        gidx, bridged, raw, growformer::dimension::group_gen::GEN_COND_DIM,
+                    );
+                    (cond, text.to_string(), (*topic_name).to_string())
+                })
                 .collect();
-            let mut env = IndexedGenEnv::from_parts(dict, cb, hopf, &training_pairs, spawn_threshold);
+            let mut env = IndexedGenEnv::from_tagged_parts(dict, cb, hopf, &training_pairs, spawn_threshold);
             env.freeze();
-            println!("  code[g{}]: {} lattice programs, frozen", gidx, env.program_count());
+            println!(
+                "  code[g{}]: {} lattice programs, {} topic sub-lattices, frozen",
+                gidx, env.program_count(), env.topic_subindex.len()
+            );
             svc.dm.group_code_envs.insert(gidx, env);
-
-            if !svc.dm.group_adapters.contains_key(&gidx) {
-                let adapter = group_adapters.get(&gidx).cloned()
-                    .unwrap_or_else(|| GroupAdapter::new(raw_dim, bridge_dim, DEFAULT_ADAPTER_RANK));
-                svc.dm.group_adapters.insert(gidx, adapter);
-                svc.dm.group_rotors.insert(gidx, GroupRotor::new());
-            }
         }
     }
     let t_index_elapsed = t_index_start.elapsed();
@@ -1715,7 +1753,12 @@ fn train_brain(
     ];
     for prompt in &test_prompts {
         println!("\n  prompt: {:?}", prompt);
-        if let Ok(action) = svc.dm.route_text_to_action_stateless(prompt) {
+        let action_result = svc.dm.route_text_to_action_stateless(prompt);
+        let is_coding = matches!(
+            &action_result,
+            Ok(ref a) if matches!(a.action_type, growformer::dimension::action::ActionType::CodingAssist)
+        );
+        if let Ok(ref action) = action_result {
             println!("  action: {:?} (conf={:.2}) group={:?}", action.action_type, action.confidence, action.target_group_id);
         }
         if let Ok((_, resp)) = svc.generation(prompt) {
@@ -1723,10 +1766,12 @@ fn train_brain(
             let r_end = truncate_to_char_boundary(r, 200);
             println!("  gen [{}] (conf={:.2}): {:?}", resp.template_id, resp.confidence, &r[..r_end]);
         }
-        if let Ok((_, Some(code))) = svc.codegen(prompt) {
-            let c = &code.code;
-            let c_end = truncate_to_char_boundary(c, 200);
-            println!("  code [{}]: {:?}", code.kind, &c[..c_end]);
+        if is_coding {
+            if let Ok((_, Some(code))) = svc.codegen(prompt) {
+                let c = &code.code;
+                let c_end = truncate_to_char_boundary(c, 200);
+                println!("  code [{}]: {:?}", code.kind, &c[..c_end]);
+            }
         }
     }
 

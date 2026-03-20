@@ -526,6 +526,7 @@ impl LanguageService {
             // Apply OCEAN personality conditioning to the routed vector
             let mut conditioned = bridged.routed_vector.clone();
             personality.condition_vector(&mut conditioned);
+            let mut topic_hint: Option<String> = None;
 
             // --- MetaBrain path: unified routing + conditioning + archetype selection ---
             let meta_result = if let Some(ref mut mb) = dm.meta_brain {
@@ -533,7 +534,8 @@ impl LanguageService {
                     let r = mb.process(h_raw, &conditioned);
                     println!("  [meta-brain] topic={}, verb={}, action={:?}, conf={:.3}",
                         r.topic, r.verb, r.action, r.confidence);
-                    if r.group_idx.is_some() { group_idx = r.group_idx; }
+                    if group_idx.is_none() && r.group_idx.is_some() { group_idx = r.group_idx; }
+                    topic_hint = Some(r.topic.clone());
                     Some(r)
                 } else { None }
             } else {
@@ -541,6 +543,7 @@ impl LanguageService {
                     if !ul.is_empty() {
                         let (_, _, topic, verb) = ul.classify(h_raw);
                         println!("  [understanding] topic={}, verb={}", topic, verb);
+                        topic_hint = Some(topic);
                     }
                 }
                 None
@@ -572,37 +575,19 @@ impl LanguageService {
                 e8_select_best, compute_q,
             };
 
-            // Use MetaBrain archetype selection when available
-            let primary = if let Some(ref mr) = meta_result {
-                if let (Some(gidx), Some(aidx)) = (mr.group_idx, mr.archetype_idx) {
-                    dm.group_gen_envs.get_mut(&gidx).map(|env| {
-                        let (text, conf) = env.generate_with_archetype(
-                            &gen_conditioning, aidx, mr.confidence, 300, 0.8,
-                        );
-                        let mut e8 = [0.0f32; 8];
-                        for i in 0..8.min(gen_conditioning.len()) { e8[i] = gen_conditioning[i]; }
-                        E8Contribution { group_idx: gidx, lattice_point: e8, text, confidence: conf }
-                    })
-                } else {
-                    group_idx.and_then(|gidx| {
-                        dm.group_gen_envs.get_mut(&gidx).map(|env| {
-                            let (text, conf, e8) = env.generate_with_e8(&gen_conditioning, 300, 0.8);
-                            E8Contribution { group_idx: gidx, lattice_point: e8, text, confidence: conf }
-                        })
-                    })
-                }
-            } else {
-                group_idx.and_then(|gidx| {
-                    let adapted = dm.adapt_for_group_clifford(gidx, &conditioned, h_raw, GEN_COND_DIM);
-                    dm.group_gen_envs.get_mut(&gidx).map(|env| {
-                        let (text, conf, e8) = env.generate_with_e8(&adapted, 300, 0.8);
-                        E8Contribution { group_idx: gidx, lattice_point: e8, text, confidence: conf }
-                    })
+            // Primary generation: prefer classifier's group_idx over MetaBrain's.
+            // Only use MetaBrain's archetype when the classifier didn't provide a group.
+            let effective_gidx = group_idx.or_else(|| meta_result.as_ref().and_then(|mr| mr.group_idx));
+            let primary = effective_gidx.and_then(|gidx| {
+                let cond = dm.adapt_for_group_clifford(gidx, &conditioned, h_raw, GEN_COND_DIM);
+                dm.group_gen_envs.get_mut(&gidx).map(|env| {
+                    let (text, conf, e8) = env.generate_with_e8_for_topic(&cond, topic_hint.as_deref(), 300, 0.8);
+                    E8Contribution { group_idx: gidx, lattice_point: e8, text, confidence: conf }
                 })
-            };
+            });
 
             let (best_text, best_conf, best_gidx) = match primary {
-                Some(ref c) if c.confidence >= 0.9 && c.text.len() > 5 => {
+                Some(ref c) if c.confidence >= 0.70 && c.text.len() > 5 => {
                     (c.text.clone(), c.confidence, c.group_idx)
                 }
                 primary_result => {
@@ -616,8 +601,8 @@ impl LanguageService {
                         for &(v_gidx, v_aidx, v_weight) in &mr.volley {
                             if Some(v_gidx) == group_idx { continue; }
                             if let Some(env) = dm.group_gen_envs.get_mut(&v_gidx) {
-                                let (text, conf) = env.generate_with_archetype(
-                                    &gen_conditioning, v_aidx, v_weight, 300, 0.8,
+                                let (text, conf) = env.generate_with_archetype_for_topic(
+                                    &gen_conditioning, topic_hint.as_deref(), v_aidx, v_weight, 300, 0.8,
                                 );
                                 if text.len() > 5 {
                                     let mut e8 = [0.0f32; 8];
@@ -636,7 +621,7 @@ impl LanguageService {
                         for gidx in other_keys {
                             let adapted = dm.adapt_for_group_clifford(gidx, &conditioned, h_raw, GEN_COND_DIM);
                             if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
-                                let (text, conf, e8) = env.generate_with_e8(&adapted, 300, 0.8);
+                                let (text, conf, e8) = env.generate_with_e8_for_topic(&adapted, topic_hint.as_deref(), 300, 0.8);
                                 if text.len() > 5 {
                                     contributions.push(E8Contribution {
                                         group_idx: gidx, lattice_point: e8, text, confidence: conf,
@@ -934,6 +919,12 @@ impl LanguageService {
 
         let code = if let Some((ref h_raw, ref bridged)) = encoded {
             let base_cond = &bridged.routed_vector;
+            let topic_hint = dm.understanding.as_ref()
+                .filter(|ul| !ul.is_empty())
+                .map(|ul| {
+                    let (_, _, topic, _) = ul.classify(h_raw);
+                    topic
+                });
             let lang = match action.payload {
                 Some(crate::dimension::action::ActionPayload::CodingAssist { ref language_hint, .. }) =>
                     language_hint.clone(),
@@ -944,13 +935,13 @@ impl LanguageService {
             let primary = group_idx.and_then(|gidx| {
                 let adapted = dm.adapt_for_group_clifford(gidx, base_cond, h_raw, GEN_COND_DIM);
                 dm.group_code_envs.get_mut(&gidx).map(|env| {
-                    let (code, conf) = env.generate(&adapted, 500, 0.7);
+                    let (code, conf) = env.generate_for_topic(&adapted, topic_hint.as_deref(), 500, 0.7);
                     (code, conf, gidx)
                 })
             });
 
             let (best_code, _best_conf, best_gidx) = match primary {
-                Some((ref c, conf, gidx)) if conf >= 0.9 && c.len() > 5 => {
+                Some((ref c, conf, gidx)) if conf >= 0.70 && c.len() > 5 => {
                     (c.clone(), conf, gidx)
                 }
                 primary_result => {
@@ -964,7 +955,7 @@ impl LanguageService {
                     for gidx in other_keys {
                         let adapted = dm.adapt_for_group_clifford(gidx, base_cond, h_raw, GEN_COND_DIM);
                         if let Some(env) = dm.group_code_envs.get_mut(&gidx) {
-                            let (c, cf) = env.generate(&adapted, 500, 0.7);
+                            let (c, cf) = env.generate_for_topic(&adapted, topic_hint.as_deref(), 500, 0.7);
                             if cf > best_cf && c.len() > 5 {
                                 best_c = c;
                                 best_cf = cf;

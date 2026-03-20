@@ -129,6 +129,14 @@ fn truncate_at_sentence(text: &str, max_tokens: usize) -> String {
     }
 }
 
+fn gen_cosine_sim(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na < 1e-12 || nb < 1e-12 { return 0.0; }
+    dot / (na * nb)
+}
+
 /// A variable position in a response archetype.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ArchetypeSlot {
@@ -2047,8 +2055,17 @@ pub fn e8_compose_sentences_quantum(
 use crate::dimension::paramecium::InfraciliaryLattice;
 
 #[derive(Clone, Serialize, Deserialize)]
+pub struct TopicSubIndex {
+    pub topic_name: String,
+    pub centroid: Vec<f32>,
+    pub lattice: InfraciliaryLattice,
+    pub sample_count: usize,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct IndexedGenEnv {
     pub lattice: InfraciliaryLattice,
+    pub topic_subindex: Vec<TopicSubIndex>,
     pub dictionary: TokenDictionary,
     pub codebook: Option<AlgebraicCodebook>,
     pub hopf_table: Option<HopfCompositionTable>,
@@ -2063,6 +2080,51 @@ pub struct IndexedGenEnv {
 }
 
 impl IndexedGenEnv {
+    fn build_topic_subindex(
+        dictionary: &TokenDictionary,
+        training_triples: &[(Vec<f32>, String, String)],
+        spawn_threshold: f32,
+    ) -> Vec<TopicSubIndex> {
+        if training_triples.is_empty() {
+            return Vec::new();
+        }
+        let mut by_topic: HashMap<String, Vec<(Vec<f32>, String)>> = HashMap::new();
+        for (cond, text, topic) in training_triples {
+            by_topic.entry(topic.clone()).or_default().push((cond.clone(), text.clone()));
+        }
+
+        let mut out = Vec::with_capacity(by_topic.len());
+        for (topic_name, pairs) in by_topic {
+            if pairs.is_empty() {
+                continue;
+            }
+            let mut centroid = vec![0.0f32; pairs[0].0.len()];
+            for (cond, _) in &pairs {
+                for (dst, src) in centroid.iter_mut().zip(cond.iter()) {
+                    *dst += *src;
+                }
+            }
+            let n = pairs.len().max(1) as f32;
+            for v in &mut centroid {
+                *v /= n;
+            }
+            let norm = centroid.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+            for v in &mut centroid {
+                *v /= norm;
+            }
+
+            let mut lattice = InfraciliaryLattice::new(dictionary.clone());
+            lattice.develop(&pairs, spawn_threshold);
+            out.push(TopicSubIndex {
+                topic_name,
+                centroid,
+                lattice,
+                sample_count: pairs.len(),
+            });
+        }
+        out
+    }
+
     /// Build from training pairs in a single pass. No iterative training.
     ///
     /// 1. Build dictionary + codebook + Hopf table (algebraic indexing)
@@ -2100,6 +2162,7 @@ impl IndexedGenEnv {
 
         Self {
             lattice,
+            topic_subindex: Vec::new(),
             dictionary: dict,
             codebook: Some(cb),
             hopf_table: Some(hopf),
@@ -2126,6 +2189,39 @@ impl IndexedGenEnv {
 
         Self {
             lattice,
+            topic_subindex: Vec::new(),
+            dictionary,
+            codebook: Some(codebook),
+            hopf_table: Some(hopf),
+            last_selected_archetype: None,
+            last_generation_confidence: 0.0,
+            diversity_bonus: 0.0,
+            frozen: false,
+            output_dim,
+        }
+    }
+
+    /// Build from pre-constructed components plus semantic topic labels.
+    /// Each topic gets a compact sub-lattice that acts like a living index
+    /// inside the coarse group.
+    pub fn from_tagged_parts(
+        dictionary: TokenDictionary,
+        codebook: AlgebraicCodebook,
+        hopf: HopfCompositionTable,
+        training_triples: &[(Vec<f32>, String, String)],
+        spawn_threshold: f32,
+    ) -> Self {
+        let training_pairs: Vec<(Vec<f32>, String)> = training_triples.iter()
+            .map(|(cond, text, _topic)| (cond.clone(), text.clone()))
+            .collect();
+        let topic_subindex = Self::build_topic_subindex(&dictionary, training_triples, spawn_threshold);
+        let output_dim = codebook.slot_only_bits;
+        let mut lattice = InfraciliaryLattice::new(dictionary.clone());
+        lattice.develop(&training_pairs, spawn_threshold);
+
+        Self {
+            lattice,
+            topic_subindex,
             dictionary,
             codebook: Some(codebook),
             hopf_table: Some(hopf),
@@ -2141,49 +2237,148 @@ impl IndexedGenEnv {
     /// Uses Paramecium wave-propagation to select the best program,
     /// then decodes via the codebook when confidence is high,
     /// or falls back to Hopf composition for uncertain inputs.
-    pub fn generate(&mut self, cond: &[f32], _max_len: usize, _temperature: f32) -> (String, f32) {
-        if let Some(ref cb) = self.codebook {
-            if cb.has_prototypes() {
-                let (arch_idx, geometric_conf) = cb.select_archetype_by_embedding(cond);
+    /// Immutable nearest-neighbor lookup over lattice programs.
+    /// No EMA centroid drift — safe for repeated inference calls.
+    fn nearest_response_in_lattice(
+        &self,
+        lattice: &InfraciliaryLattice,
+        cond: &[f32],
+    ) -> (String, usize, f32) {
+        if lattice.programs.is_empty() {
+            return (String::new(), 0, 0.0);
+        }
+        let mut best_idx = 0;
+        let mut best_sim = f32::NEG_INFINITY;
+        for (i, prog) in lattice.programs.iter().enumerate() {
+            let sim = gen_cosine_sim(cond, &prog.ema_centroid);
+            if sim > best_sim { best_sim = sim; best_idx = i; }
+        }
+        let text = self.dictionary.decode(&lattice.programs[best_idx].token_sequence);
+        (text, best_idx, best_sim.max(0.0))
+    }
 
-                if geometric_conf >= 0.9 {
-                    // High confidence: use codebook archetype directly,
-                    // fill slots from the nearest lattice program's token sequence
-                    let resp = self.lattice.respond(cond);
-                    let slot_tokens = self.dictionary.encode(&resp.text);
+    fn nearest_response(&self, cond: &[f32]) -> (String, usize, f32) {
+        self.nearest_response_in_lattice(&self.lattice, cond)
+    }
+
+    fn nearest_topic_response(&self, cond: &[f32], topic_hint: Option<&str>) -> Option<(String, String, f32)> {
+        if self.topic_subindex.is_empty() {
+            return None;
+        }
+        let hint = topic_hint.map(|s| s.trim()).filter(|s| !s.is_empty());
+        let mut best: Option<(String, String, f32)> = None;
+        for topic in &self.topic_subindex {
+            let topic_sim = gen_cosine_sim(cond, &topic.centroid).max(0.0);
+            let (text, _prog_idx, local_conf) = self.nearest_response_in_lattice(&topic.lattice, cond);
+            if text.is_empty() {
+                continue;
+            }
+            let hint_bonus = match hint {
+                Some(h) if h.eq_ignore_ascii_case(&topic.topic_name) => 0.12,
+                Some(_) => 0.0,
+                None => 0.02,
+            };
+            let density_bonus = ((topic.sample_count as f32).ln_1p() / 10.0).min(0.08);
+            let combined = (0.68 * local_conf + 0.24 * topic_sim + hint_bonus + density_bonus).clamp(0.0, 1.0);
+            if best.as_ref().map(|(_, _, score)| combined > *score).unwrap_or(true) {
+                best = Some((text, topic.topic_name.clone(), combined));
+            }
+        }
+        best
+    }
+
+    /// Top-K nearest responses by cosine similarity (immutable).
+    fn nearest_responses_k(&self, cond: &[f32], k: usize) -> Vec<(String, usize, f32)> {
+        if self.lattice.programs.is_empty() {
+            return Vec::new();
+        }
+        let mut scored: Vec<(usize, f32)> = self.lattice.programs.iter().enumerate()
+            .map(|(i, prog)| (i, gen_cosine_sim(cond, &prog.ema_centroid)))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.into_iter().take(k).map(|(idx, sim)| {
+            let text = self.dictionary.decode(&self.lattice.programs[idx].token_sequence);
+            (text, idx, sim)
+        }).collect()
+    }
+
+    pub fn generate(&mut self, cond: &[f32], _max_len: usize, _temperature: f32) -> (String, f32) {
+        self.generate_for_topic(cond, None, _max_len, _temperature)
+    }
+
+    pub fn generate_for_topic(
+        &mut self,
+        cond: &[f32],
+        topic_hint: Option<&str>,
+        _max_len: usize,
+        _temperature: f32,
+    ) -> (String, f32) {
+        let (global_text, prog_idx, global_conf) = self.nearest_response(cond);
+        let topic_seed = self.nearest_topic_response(cond, topic_hint);
+        let (text, lattice_conf, topic_selected) = match topic_seed {
+            Some((topic_text, topic_name, topic_conf))
+                if topic_conf >= global_conf - 0.03 && topic_text.len() > 5 =>
+            {
+                (topic_text, topic_conf, Some(topic_name))
+            }
+            _ => (global_text, global_conf, None),
+        };
+
+        // High confidence: return lattice text directly (skip lossy archetype roundtrip)
+        if lattice_conf >= 0.80 && text.len() > 5 {
+            self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
+            self.last_generation_confidence = lattice_conf;
+            return (text, lattice_conf);
+        }
+
+        // Medium confidence: use archetype structure + slot filling
+        if lattice_conf >= 0.55 {
+            if let Some(ref cb) = self.codebook {
+                if cb.has_prototypes() {
+                    let (arch_idx, _) = cb.select_archetype_by_embedding(cond);
+                    let slot_tokens = self.dictionary.encode(&text);
                     let slot_bits = cb.encode_slot_only(&slot_tokens);
                     let decoded_ids = cb.decode_with_archetype(arch_idx, &slot_bits);
-                    let text = self.dictionary.decode(&decoded_ids);
-                    let text = Self::truncate_archetype(&cb.archetypes, arch_idx, &decoded_ids, &text);
-
-                    self.last_selected_archetype = Some(arch_idx);
-                    self.last_generation_confidence = geometric_conf * resp.confidence;
-                    return (text, self.last_generation_confidence);
+                    let decoded_text = self.dictionary.decode(&decoded_ids);
+                    let decoded_text = Self::truncate_archetype(
+                        &cb.archetypes, arch_idx, &decoded_ids, &decoded_text,
+                    );
+                    if decoded_text.len() > 5 {
+                        self.last_selected_archetype = Some(arch_idx);
+                        self.last_generation_confidence = lattice_conf;
+                        return (decoded_text, lattice_conf);
+                    }
                 }
+            }
+            self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
+            self.last_generation_confidence = lattice_conf;
+            return (text, lattice_conf);
+        }
 
-                // Low confidence: Hopf composition from trichocyst volley
-                if let Some(ref hopf) = self.hopf_table {
-                    let volley = self.lattice.trichocyst_volley(cond, 3);
-                    if !volley.is_empty() {
-                        let best_tokens = self.dictionary.encode(&volley[0].text);
-                        let slot_bits = cb.encode_slot_only(&best_tokens);
-                        let (ids, comp_conf) = hopf.compose_and_decode_with_personality(
-                            cond, &slot_bits, cb, self.diversity_bonus
-                        );
-                        let text = self.dictionary.decode(&ids);
+        // Low confidence: Hopf composition from top-K lattice responses
+        if let (Some(ref cb), Some(ref hopf)) = (&self.codebook, &self.hopf_table) {
+            if cb.has_prototypes() {
+                let top_k = self.nearest_responses_k(cond, 3);
+                if !top_k.is_empty() {
+                    let best_tokens = self.dictionary.encode(&top_k[0].0);
+                    let slot_bits = cb.encode_slot_only(&best_tokens);
+                    let (ids, comp_conf) = hopf.compose_and_decode_with_personality(
+                        cond, &slot_bits, cb, self.diversity_bonus,
+                    );
+                    let composed = self.dictionary.decode(&ids);
+                    if composed.len() > 5 {
                         self.last_selected_archetype = None;
                         self.last_generation_confidence = comp_conf;
-                        return (text, comp_conf);
+                        return (composed, comp_conf);
                     }
                 }
             }
         }
 
-        // Fallback: pure lattice response
-        let resp = self.lattice.respond(cond);
-        self.last_selected_archetype = Some(resp.program_idx);
-        self.last_generation_confidence = resp.confidence;
-        (resp.text, resp.confidence)
+        // Final fallback: return lattice text as-is
+        self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
+        self.last_generation_confidence = lattice_conf;
+        (text, lattice_conf)
     }
 
     /// Generate using a pre-selected archetype index (from ArchetypeBrain).
@@ -2191,24 +2386,57 @@ impl IndexedGenEnv {
         &mut self, cond: &[f32], arch_idx: usize, arch_conf: f32,
         _max_len: usize, _temperature: f32,
     ) -> (String, f32) {
+        self.generate_with_archetype_for_topic(cond, None, arch_idx, arch_conf, _max_len, _temperature)
+    }
+
+    pub fn generate_with_archetype_for_topic(
+        &mut self,
+        cond: &[f32],
+        topic_hint: Option<&str>,
+        arch_idx: usize,
+        arch_conf: f32,
+        _max_len: usize,
+        _temperature: f32,
+    ) -> (String, f32) {
+        let (global_text, prog_idx, global_conf) = self.nearest_response(cond);
+        let topic_seed = self.nearest_topic_response(cond, topic_hint);
+        let (text, lattice_conf, topic_selected) = match topic_seed {
+            Some((topic_text, topic_name, topic_conf))
+                if topic_conf >= global_conf - 0.03 && topic_text.len() > 5 =>
+            {
+                (topic_text, topic_conf, Some(topic_name))
+            }
+            _ => (global_text, global_conf, None),
+        };
+
+        // High confidence: return lattice text directly
+        if lattice_conf >= 0.80 && text.len() > 5 {
+            self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
+            self.last_generation_confidence = lattice_conf;
+            return (text, lattice_conf);
+        }
+
+        // Use archetype reconstruction as fallback
         if let Some(ref cb) = self.codebook {
             if cb.has_prototypes() && arch_idx < cb.archetypes.len() {
-                let resp = self.lattice.respond(cond);
-                let slot_tokens = self.dictionary.encode(&resp.text);
+                let slot_tokens = self.dictionary.encode(&text);
                 let slot_bits = cb.encode_slot_only(&slot_tokens);
                 let decoded_ids = cb.decode_with_archetype(arch_idx, &slot_bits);
-                let text = self.dictionary.decode(&decoded_ids);
-                let text = Self::truncate_archetype(&cb.archetypes, arch_idx, &decoded_ids, &text);
-
-                self.last_selected_archetype = Some(arch_idx);
-                self.last_generation_confidence = arch_conf * resp.confidence;
-                return (text, self.last_generation_confidence);
+                let decoded_text = self.dictionary.decode(&decoded_ids);
+                let decoded_text = Self::truncate_archetype(
+                    &cb.archetypes, arch_idx, &decoded_ids, &decoded_text,
+                );
+                if decoded_text.len() > 5 {
+                    self.last_selected_archetype = Some(arch_idx);
+                    self.last_generation_confidence = arch_conf * lattice_conf;
+                    return (decoded_text, self.last_generation_confidence);
+                }
             }
         }
-        let resp = self.lattice.respond(cond);
-        self.last_selected_archetype = Some(arch_idx);
-        self.last_generation_confidence = arch_conf;
-        (resp.text, arch_conf)
+
+        self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
+        self.last_generation_confidence = lattice_conf;
+        (text, lattice_conf)
     }
 
     /// Generate and return an 8d E8 contribution vector alongside the text.
@@ -2224,14 +2452,30 @@ impl IndexedGenEnv {
         (text, conf, e8_point)
     }
 
+    pub fn generate_with_e8_for_topic(
+        &mut self,
+        cond: &[f32],
+        topic_hint: Option<&str>,
+        max_len: usize,
+        temperature: f32,
+    ) -> (String, f32, [f32; 8]) {
+        let (text, conf) = self.generate_for_topic(cond, topic_hint, max_len, temperature);
+        let mut raw = [0.0f32; 8];
+        for i in 0..8.min(cond.len()) {
+            raw[i] = cond[i];
+        }
+        let e8_point = E8Lattice::nearest_point(&raw);
+        (text, conf, e8_point)
+    }
+
     /// Online learning: train on a correction by developing the lattice
     /// with the new (embedding, correction) pair. No backprop.
     pub fn train_step(&mut self, cond: &[f32], target: &str, _rng: &mut impl Rng) -> f32 {
         if self.frozen { return 0.0; }
         let pairs = vec![(cond.to_vec(), target.to_string())];
         self.lattice.develop(&pairs, 0.7);
-        let resp = self.lattice.respond(cond);
-        1.0 - resp.confidence
+        let (_, _, conf) = self.nearest_response(cond);
+        1.0 - conf
     }
 
     /// Freeze the environment (no further online learning).
@@ -3327,6 +3571,47 @@ mod tests {
         assert!(avg_overlap >= 0.50,
             "IndexedGenEnv should achieve ≥50% token overlap with zero iterative training, got {:.1}%",
             avg_overlap * 100.0);
+    }
+
+    #[test]
+    fn test_indexed_gen_env_topic_subroute_prefers_matching_intent() {
+        let texts = vec![
+            "Reset your password from the account recovery page and use the emailed verification link.",
+            "The observer pattern lets subscribers react to publisher state changes without tight coupling.",
+        ];
+        let mut e0 = vec![0.0f32; 64];
+        let mut e1 = vec![0.0f32; 64];
+        e0[0] = 1.0;
+        e0[3] = 0.3;
+        e0[7] = 0.2;
+        e1[0] = 0.95;
+        e1[4] = 0.35;
+        e1[9] = 0.25;
+        let embeddings = vec![e0, e1];
+        let topics = ["account_recovery", "behavioral"];
+        let text_refs: Vec<&str> = texts.clone();
+        let emb_refs: Vec<&[f32]> = embeddings.iter().map(|e| e.as_slice()).collect();
+        let dict = TokenDictionary::build(&text_refs, 256);
+        let codebook = AlgebraicCodebook::build(&text_refs, &dict, 8, Some(&emb_refs));
+        let seqs: Vec<Vec<u16>> = text_refs.iter().map(|t| dict.encode(t)).collect();
+        let mut clusters = vec![Vec::new(); codebook.archetypes.len()];
+        for (i, seq) in seqs.iter().enumerate() {
+            let (arch, _) = codebook.match_best(seq);
+            if arch < clusters.len() { clusters[arch].push(i); }
+        }
+        let hopf = HopfCompositionTable::build(&codebook, Some(&emb_refs), &clusters, 3);
+        let triples: Vec<(Vec<f32>, String, String)> = embeddings.iter().zip(texts.iter()).zip(topics.iter())
+            .map(|((emb, text), topic)| (emb.clone(), (*text).to_string(), (*topic).to_string()))
+            .collect();
+
+        let mut env = IndexedGenEnv::from_tagged_parts(dict, codebook, hopf, &triples, 0.99);
+        let (resp, conf) = env.generate_for_topic(&embeddings[0], Some("account_recovery"), 64, 0.7);
+        assert!(conf > 0.75, "topic-routed confidence too low: {}", conf);
+        assert!(
+            resp.to_lowercase().contains("password") || resp.to_lowercase().contains("recovery"),
+            "topic sub-route picked wrong response: {}",
+            resp,
+        );
     }
 
     #[test]

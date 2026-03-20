@@ -484,9 +484,15 @@ impl MetaBrain {
 
         let coordinator_output = self.coordinator.predict(&coord_input);
 
-        // Build final conditioning: blend coordinator output with bridge + understanding
-        let topic_emb = self.topic_embeddings.get(topic_idx)
-            .cloned().unwrap_or_else(|| vec![0.0f32; TOPIC_EMBED_DIM]);
+        // Build final conditioning: blend coordinator output with bridge + understanding.
+        // Gate low-confidence topic predictions to prevent misclassified topics
+        // (e.g. prompt_injection for legitimate coding prompts) from polluting conditioning.
+        let topic_emb = if topic_conf >= 0.45 {
+            self.topic_embeddings.get(topic_idx)
+                .cloned().unwrap_or_else(|| vec![0.0f32; TOPIC_EMBED_DIM])
+        } else {
+            vec![0.0f32; TOPIC_EMBED_DIM]
+        };
         let verb_emb = self.verb_embeddings.get(verb_idx)
             .cloned().unwrap_or_else(|| vec![0.0f32; VERB_EMBED_DIM]);
 

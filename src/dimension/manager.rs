@@ -135,7 +135,7 @@ impl DimensionManager {
     /// The 128d base vector is augmented with the 48d understanding vector
     /// (topic 32d + verb 16d) and zero-padded to GEN_COND_DIM (192d).
     pub fn adapt_for_group_clifford(
-        &mut self,
+        &self,
         group_idx: usize,
         z_shared: &[f32],
         h_raw: &[f32],
