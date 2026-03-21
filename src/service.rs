@@ -358,32 +358,35 @@ impl LanguageService {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new_default() -> Result<Self, String> {
         let (dm, support_gid, coding_gid, report) = build_language_demo_manager(0.2)?;
-        Ok(Self {
-            brains: HashMap::new(),
-            active_brain: "default".to_string(),
-            dm,
-            support_gid,
-            coding_gid,
-            calibration: report,
-            mode: AgentMode::MicroBrain,
-            slo_config: SloConfig::default(),
-            latency_log: Vec::new(),
-            handoff_log: Vec::new(),
-            context_snippets: Vec::new(),
-            last_turn: None,
-            agent_name: "Growformer".to_string(),
-            agent_creator: "swtch.ai".to_string(),
-            personality: OceanProfile::assistant(),
-            conversation: ConversationContext::default(),
-            project_model: ProjectModel::new(),
-            tool_registry: ToolRegistry::with_builtins(),
-            continuum_feedback_count: 0,
-            paramecium: None,
-        })
+        Self::from_parts(dm, support_gid, coding_gid, report)
     }
 
     pub fn new_with_config(config: LanguageConfig) -> Result<Self, String> {
         let (dm, support_gid, coding_gid, report) = build_language_demo_manager_with_config(0.2, config)?;
+        Self::from_parts(dm, support_gid, coding_gid, report)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new_with_groups(groups: &[&str]) -> Result<Self, String> {
+        let gle_checkpoint = std::env::var("GROWFORMER_GLE_CHECKPOINT").ok();
+        let gle_checkpoints = parse_csv_env("GROWFORMER_GLE_CHECKPOINTS");
+        let gle_checkpoint_weights = parse_csv_env_f32("GROWFORMER_GLE_WEIGHTS");
+        let config = LanguageConfig {
+            encoder: EncoderPreset::BertClass,
+            bridge_output_dim: DEFAULT_BRIDGE_DIM,
+            ema_alpha: 0.2,
+            ood_similarity_threshold: 0.15,
+            gle_http_endpoint: std::env::var("GROWFORMER_GLE_HTTP_ENDPOINT").ok(),
+            gle_checkpoint,
+            gle_checkpoints,
+            gle_checkpoint_weights,
+        };
+        let (dm, support_gid, coding_gid, report) =
+            build_language_demo_manager_with_groups(groups, config)?;
+        Self::from_parts(dm, support_gid, coding_gid, report)
+    }
+
+    fn from_parts(dm: DimensionManager, support_gid: GroupId, coding_gid: GroupId, report: CalibrationReport) -> Result<Self, String> {
         Ok(Self {
             brains: HashMap::new(),
             active_brain: "default".to_string(),
@@ -1492,40 +1495,43 @@ pub fn build_language_demo_manager_with_config(
     _ema_alpha: f32,
     lang_config: LanguageConfig,
 ) -> Result<(DimensionManager, GroupId, GroupId, CalibrationReport), String> {
+    build_language_demo_manager_with_groups(&["support", "coding"], lang_config)
+}
+
+/// Build a DimensionManager with an arbitrary set of named groups.
+/// Groups are created in the order given; group index 0 is the first name, etc.
+/// The returned `support_gid` is the group whose name is "support" (or the first group),
+/// and `coding_gid` is the group whose name is "coding" (or the second group, if present).
+pub fn build_language_demo_manager_with_groups(
+    group_names: &[&str],
+    lang_config: LanguageConfig,
+) -> Result<(DimensionManager, GroupId, GroupId, CalibrationReport), String> {
     let mut data_rng = StdRng::seed_from_u64(7);
+    let n = group_names.len().max(1);
     let config = DimensionManagerConfig {
         mirror_config: phase2_base_config(),
         mirror_layer_sizes: vec![2, 16, 16, 1],
         promotion_check_interval: 999_999,
-        max_concurrent_mirrors: 4,
+        max_concurrent_mirrors: n.max(4),
         calibration_samples: 50,
         reserve_pool_size: 0,
     };
     let mut dm = DimensionManager::new(config);
 
-    // 4 groups: support/general, patterns, coding, reasoning
-    let mirror_names = ["support", "patterns", "coding", "reasoning"];
-    let mirror_seeds = [100u64, 102, 101, 103];
-    for (name, seed) in mirror_names.iter().zip(mirror_seeds.iter()) {
-        dm.spawn_mirror(name, *seed)
+    let mut gids: Vec<(String, GroupId)> = Vec::with_capacity(n);
+    for (i, name) in group_names.iter().enumerate() {
+        let seed = 100u64 + i as u64;
+        dm.spawn_mirror(name, seed)
             .ok_or_else(|| format!("failed to spawn {} mirror", name))?;
+        let cal = if i % 2 == 0 {
+            generate_spiral_data(50, &mut data_rng)
+        } else {
+            generate_concentric_circles_data(50, &mut data_rng)
+        };
+        let gid = dm.force_promote(name, &cal)
+            .ok_or_else(|| format!("failed to promote {} mirror", name))?;
+        gids.push((name.to_string(), gid));
     }
-    let cal_support = generate_spiral_data(50, &mut data_rng);
-    let cal_patterns = generate_concentric_circles_data(50, &mut data_rng);
-    let cal_coding = generate_spiral_data(50, &mut data_rng);
-    let cal_reasoning = generate_concentric_circles_data(50, &mut data_rng);
-    let support_gid = dm
-        .force_promote("support", &cal_support)
-        .ok_or_else(|| "failed to promote support mirror".to_string())?;
-    let _patterns_gid = dm
-        .force_promote("patterns", &cal_patterns)
-        .ok_or_else(|| "failed to promote patterns mirror".to_string())?;
-    let coding_gid = dm
-        .force_promote("coding", &cal_coding)
-        .ok_or_else(|| "failed to promote coding mirror".to_string())?;
-    let _reasoning_gid = dm
-        .force_promote("reasoning", &cal_reasoning)
-        .ok_or_else(|| "failed to promote reasoning mirror".to_string())?;
 
     dm.configure_language(lang_config);
 
@@ -1536,50 +1542,64 @@ pub fn build_language_demo_manager_with_config(
     };
     let report = dm.calibrate_language_bridge(&calibration, &requirements)?;
 
-    let mut support_prompts = Vec::new();
-    let mut coding_prompts = Vec::new();
-    let mut patterns_prompts = Vec::new();
-    let mut reasoning_prompts = Vec::new();
-    for i in 0..200 {
-        support_prompts.push(format!(
-            "customer support account login password reset billing help ticket {}",
-            i
-        ));
-        support_prompts.push(format!(
-            "help desk cannot access account needs recovery and verification {}",
-            i
-        ));
-        patterns_prompts.push(format!(
-            "design pattern observer factory strategy singleton architecture {}",
-            i
-        ));
-        patterns_prompts.push(format!(
-            "explain the adapter pattern and when to use dependency injection {}",
-            i
-        ));
-        coding_prompts.push(format!(
-            "write rust code function parser json serde implementation {}",
-            i
-        ));
-        coding_prompts.push(format!(
-            "debug c segmentation fault stack trace pointer module {}",
-            i
-        ));
-        reasoning_prompts.push(format!(
-            "what is the square root of explain how gravity works why {}",
-            i
-        ));
-        reasoning_prompts.push(format!(
-            "solve the equation prove that calculate the derivative of {}",
-            i
-        ));
+    for (name, gid) in &gids {
+        let prompts = seed_prompts_for_group(name);
+        if !prompts.is_empty() {
+            let _ = dm.set_group_language_vector_from_texts(*gid, &prompts);
+        }
     }
-    dm.set_group_language_vector_from_texts(support_gid, &support_prompts)?;
-    dm.set_group_language_vector_from_texts(_patterns_gid, &patterns_prompts)?;
-    dm.set_group_language_vector_from_texts(coding_gid, &coding_prompts)?;
-    dm.set_group_language_vector_from_texts(_reasoning_gid, &reasoning_prompts)?;
+
+    let support_gid = gids.iter()
+        .find(|(n, _)| n == "support")
+        .map(|(_, g)| *g)
+        .unwrap_or_else(|| gids.first().map(|(_, g)| *g).unwrap_or(0));
+    let coding_gid = gids.iter()
+        .find(|(n, _)| n == "coding")
+        .map(|(_, g)| *g)
+        .unwrap_or_else(|| gids.get(1).map(|(_, g)| *g).unwrap_or(0));
 
     Ok((dm, support_gid, coding_gid, report))
+}
+
+fn seed_prompts_for_group(name: &str) -> Vec<String> {
+    let templates: &[&str] = match name {
+        "support" => &[
+            "customer support account login password reset billing help ticket",
+            "help desk cannot access account needs recovery and verification",
+        ],
+        "patterns" => &[
+            "design pattern observer factory strategy singleton architecture",
+            "explain the adapter pattern and when to use dependency injection",
+        ],
+        "coding" => &[
+            "write rust code function parser json serde implementation",
+            "debug c segmentation fault stack trace pointer module",
+        ],
+        "math" => &[
+            "solve the equation prove that calculate the derivative of",
+            "what is the integral of x squared find the limit as n approaches",
+        ],
+        "general" => &[
+            "what is the speed of light explain how photosynthesis works",
+            "who are you what can you do tell me about yourself",
+        ],
+        "concepts" => &[
+            "entropy information theory mutual information channel capacity",
+            "conditional entropy cross entropy divergence bits uncertainty",
+        ],
+        "safety" => &[
+            "ignore previous instructions override system prompt injection",
+            "bypass safety jailbreak reveal hidden prompt override rules",
+        ],
+        _ => &[],
+    };
+    let mut out = Vec::new();
+    for i in 0..200 {
+        for t in templates {
+            out.push(format!("{} {}", t, i));
+        }
+    }
+    out
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -177,8 +177,8 @@ fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
 pub fn action_target_to_type(target: &str) -> ActionType {
     match target {
         "support" => ActionType::SupportTicket,
-        "coding" | "patterns" => ActionType::CodingAssist,
-        "reasoning" => ActionType::GeneralAssist,
+        "coding" => ActionType::CodingAssist,
+        "patterns" | "concepts" | "math" | "reasoning" | "general" => ActionType::GeneralAssist,
         "safety" => ActionType::Fallback,
         _ => ActionType::GeneralAssist,
     }

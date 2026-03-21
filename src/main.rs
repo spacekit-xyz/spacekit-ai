@@ -168,14 +168,13 @@ fn retrain_single_gen(
     let samples = load_all_m5_training_data()?;
     println!("Loaded {} training samples", samples.len());
 
+    // Build group lookup from the loaded brain's group names
+    let brain_group_names: Vec<String> = dm.main.group_order.iter()
+        .map(|gid| dm.main.groups.get(gid).map(|g| g.task_name.clone()).unwrap_or_default())
+        .collect();
+    let group_lookup = build_group_lookup(&brain_group_names);
     let group_map = |s: &LanguageSample| -> usize {
-        match s.action_target.as_deref() {
-            Some("support") | Some("general") => 0,
-            Some("patterns") => 1.min(num_groups - 1),
-            Some("coding") => if num_groups >= 3 { 2.min(num_groups - 1) } else { 1.min(num_groups - 1) },
-            Some("reasoning") => if num_groups >= 4 { 3.min(num_groups - 1) } else { 1.min(num_groups - 1) },
-            _ => 0,
-        }
+        action_target_to_group(s.action_target.as_deref(), &group_lookup, num_groups)
     };
 
     // Embed only the target group's gen data, applying the same Clifford + understanding
@@ -384,7 +383,12 @@ fn run_inference(brain_path: &str, prompt: Option<&str>) -> Result<(), String> {
 }
 
 fn run_single_prompt(svc: &mut LanguageService, prompt: &str) {
-    if let Ok(action) = svc.active_dm_mut().route_text_to_action_stateless(prompt) {
+    let action_result = svc.active_dm_mut().route_text_to_action_stateless(prompt);
+    let is_coding = matches!(
+        &action_result,
+        Ok(ref a) if matches!(a.action_type, growformer::dimension::action::ActionType::CodingAssist)
+    );
+    if let Ok(ref action) = action_result {
         println!("  route: {:?} (conf={:.2}) group={:?}",
             action.action_type, action.confidence, action.target_group_id);
     }
@@ -398,14 +402,16 @@ fn run_single_prompt(svc: &mut LanguageService, prompt: &str) {
         Err(e) => eprintln!("  gen error: {}", e),
     }
 
-    match svc.codegen(prompt) {
-        Ok((_, Some(code))) => {
-            if !code.code.is_empty() {
-                println!("  code [{}]: {}", code.kind, code.code);
+    if is_coding {
+        match svc.codegen(prompt) {
+            Ok((_, Some(code))) => {
+                if !code.code.is_empty() {
+                    println!("  code [{}]: {}", code.kind, code.code);
+                }
             }
+            Ok((_, None)) => {}
+            Err(e) => eprintln!("  code error: {}", e),
         }
-        Ok((_, None)) => {}
-        Err(e) => eprintln!("  code error: {}", e),
     }
 }
 
@@ -1083,6 +1089,39 @@ fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> usize {
     end
 }
 
+/// Discover the unique group names from the training data's action_target field.
+/// Returns a stable, sorted list of group names. The order defines group indices.
+fn discover_group_names(samples: &[growformer::dimension::LanguageSample]) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for s in samples {
+        if let Some(at) = s.action_target.as_deref() {
+            seen.insert(at.to_string());
+        }
+    }
+    // Canonical ordering: support first, coding second, then the rest alphabetically.
+    // This ensures support_gid=0 and coding_gid=1 align with LanguageService expectations.
+    let mut ordered: Vec<String> = Vec::with_capacity(seen.len());
+    if seen.remove("support") { ordered.push("support".to_string()); }
+    if seen.remove("coding") { ordered.push("coding".to_string()); }
+    for name in seen {
+        ordered.push(name);
+    }
+    ordered
+}
+
+/// Build a lookup table from action_target name → group index, matching
+/// the canonical ordering produced by `discover_group_names`.
+fn build_group_lookup(group_names: &[String]) -> HashMap<String, usize> {
+    group_names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect()
+}
+
+fn action_target_to_group(target: Option<&str>, lookup: &HashMap<String, usize>, num_groups: usize) -> usize {
+    target
+        .and_then(|t| lookup.get(t).copied())
+        .unwrap_or(0)
+        .min(num_groups.saturating_sub(1))
+}
+
 fn train_brain(
     epochs: u32,
     output_path: &str,
@@ -1110,7 +1149,11 @@ fn train_brain(
         println!("  shuffled and truncated to {} (support={}, coding={}, other={})", samples.len(), support_n, coding_n, other_n);
     }
 
-    let mut svc = LanguageService::new_default()?;
+    // Discover groups dynamically from the training data's action_target values.
+    let discovered_group_names = discover_group_names(&samples);
+    println!("Discovered {} groups from data: {:?}", discovered_group_names.len(), discovered_group_names);
+    let group_name_refs: Vec<&str> = discovered_group_names.iter().map(|s| s.as_str()).collect();
+    let mut svc = LanguageService::new_with_groups(&group_name_refs)?;
 
     // Compute both raw and bridged embeddings.
     // Bridged vectors for routing/classification; raw vectors for generation conditioning.
@@ -1175,14 +1218,9 @@ fn train_brain(
     println!("  novelty scores: avg={:.3} min={:.3} max={:.3}", avg_novelty, min_novelty, max_novelty);
 
     let num_groups = svc.dm.main.group_order.len();
+    let group_lookup = build_group_lookup(&discovered_group_names);
     let group_map = |s: &LanguageSample| -> usize {
-        match s.action_target.as_deref() {
-            Some("support") | Some("general") => 0,
-            Some("patterns") => 1.min(num_groups - 1),
-            Some("coding") => if num_groups >= 3 { 2.min(num_groups - 1) } else { 1.min(num_groups - 1) },
-            Some("reasoning") => if num_groups >= 4 { 3.min(num_groups - 1) } else { 1.min(num_groups - 1) },
-            _ => 1.min(num_groups - 1),
-        }
+        action_target_to_group(s.action_target.as_deref(), &group_lookup, num_groups)
     };
 
     // ---------------------------------------------------------------
