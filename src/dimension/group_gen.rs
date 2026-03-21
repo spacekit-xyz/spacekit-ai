@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::clifford::{embed_bridge_vector, causal_fingerprint, BOOST_BIVECTOR_COUNT};
+use crate::cloze;
 use crate::environment::NeuralEnvironment;
 use crate::spectral::{
     TokenDictionary, hamming_parity_bits, hamming_encode, hamming_decode,
@@ -2385,14 +2386,27 @@ impl IndexedGenEnv {
             return (text, lattice_conf);
         }
 
-        // Medium confidence OR causal-inhibited high confidence: archetype template + slot filling
+        // Medium confidence OR causal-inhibited high confidence: archetype template + slot filling.
+        // When inhibited, use INFERRED slots (from lattice program votes) instead of
+        // copied slots (from retrieved text). This is the "beyond parrot" path.
         if lattice_conf >= 0.55 || causal_inhibited {
             if let Some(ref cb) = self.codebook {
                 if cb.has_prototypes() {
-                    // Select archetype by INPUT embedding (structural template)
                     let (arch_idx, _) = cb.select_archetype_by_embedding(cond);
-                    let slot_tokens = self.dictionary.encode(&text);
-                    let slot_bits = cb.encode_slot_only(&slot_tokens);
+
+                    let slot_bits = if causal_inhibited {
+                        // INFER slots from input semantics: K-nearest programs vote.
+                        let inferred = cloze::infer_slots(
+                            cond, arch_idx, cb, &self.dictionary,
+                            &self.lattice.programs, 5,
+                        );
+                        cloze::encode_inferred_slot_bits(&inferred, cb)
+                    } else {
+                        // Normal path: copy slots from retrieved text.
+                        let slot_tokens = self.dictionary.encode(&text);
+                        cb.encode_slot_only(&slot_tokens)
+                    };
+
                     let decoded_ids = cb.decode_with_archetype(arch_idx, &slot_bits);
                     let decoded_text = self.dictionary.decode(&decoded_ids);
                     let decoded_text = Self::truncate_archetype(

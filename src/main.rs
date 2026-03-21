@@ -1763,6 +1763,87 @@ fn train_brain(
     println!("  ReasoningEngine: active, settling_rounds=4");
 
     // ---------------------------------------------------------------
+    // Cloze games: fill-in-the-blank learning to teach slot inference.
+    // Programs learn to "own" specific slot fills through centroid drift.
+    // Multiple rounds: each round refines program ownership.
+    // ---------------------------------------------------------------
+    {
+        use growformer::cloze;
+        println!("\n--- Cloze Learning (Fill-in-the-Blank) ---");
+        let cloze_rounds = 3;
+        let k_voters = 5;
+        let reward_rate = 0.08;
+        let punish_rate = 0.04;
+        let mut total_stats = cloze::ClozeStats::default();
+        for (gidx, env) in svc.dm.group_gen_envs.iter_mut() {
+            let codebook = match env.codebook.as_ref() {
+                Some(cb) if !cb.archetypes.is_empty() => cb.clone(),
+                _ => continue,
+            };
+            // Build cloze tasks from the lattice programs (distilled training data).
+            let training_pairs: Vec<(Vec<f32>, String)> = env.lattice.programs.iter()
+                .map(|prog| {
+                    let text = env.dictionary.decode(&prog.token_sequence);
+                    (prog.ema_centroid.clone(), text)
+                })
+                .collect();
+            let tasks = cloze::generate_cloze_tasks(&codebook, &env.dictionary, &training_pairs);
+            if tasks.is_empty() { continue; }
+            // Unfreeze for cloze learning, re-freeze after.
+            env.frozen = false;
+            let mut round_stats = cloze::ClozeStats::default();
+            for _round in 0..cloze_rounds {
+                let stats = cloze::play_cloze_round(env, &tasks, k_voters, reward_rate, punish_rate);
+                round_stats.games_played += stats.games_played;
+                round_stats.total_slots += stats.total_slots;
+                round_stats.correct_slots += stats.correct_slots;
+                round_stats.reward_applied += stats.reward_applied;
+                round_stats.punishment_applied += stats.punishment_applied;
+            }
+            env.frozen = true;
+            println!("  cloze[g{}]: {} rounds × {} tasks, {}", gidx, cloze_rounds, tasks.len(), round_stats);
+            total_stats.games_played += round_stats.games_played;
+            total_stats.total_slots += round_stats.total_slots;
+            total_stats.correct_slots += round_stats.correct_slots;
+            total_stats.reward_applied += round_stats.reward_applied;
+            total_stats.punishment_applied += round_stats.punishment_applied;
+        }
+        // Also run cloze on code environments.
+        for (gidx, env) in svc.dm.group_code_envs.iter_mut() {
+            let codebook = match env.codebook.as_ref() {
+                Some(cb) if !cb.archetypes.is_empty() => cb.clone(),
+                _ => continue,
+            };
+            let training_pairs: Vec<(Vec<f32>, String)> = env.lattice.programs.iter()
+                .map(|prog| {
+                    let text = env.dictionary.decode(&prog.token_sequence);
+                    (prog.ema_centroid.clone(), text)
+                })
+                .collect();
+            let tasks = cloze::generate_cloze_tasks(&codebook, &env.dictionary, &training_pairs);
+            if tasks.is_empty() { continue; }
+            env.frozen = false;
+            let mut round_stats = cloze::ClozeStats::default();
+            for _round in 0..cloze_rounds {
+                let stats = cloze::play_cloze_round(env, &tasks, k_voters, reward_rate, punish_rate);
+                round_stats.games_played += stats.games_played;
+                round_stats.total_slots += stats.total_slots;
+                round_stats.correct_slots += stats.correct_slots;
+                round_stats.reward_applied += stats.reward_applied;
+                round_stats.punishment_applied += stats.punishment_applied;
+            }
+            env.frozen = true;
+            println!("  cloze[code_g{}]: {} rounds × {} tasks, {}", gidx, cloze_rounds, tasks.len(), round_stats);
+            total_stats.games_played += round_stats.games_played;
+            total_stats.total_slots += round_stats.total_slots;
+            total_stats.correct_slots += round_stats.correct_slots;
+            total_stats.reward_applied += round_stats.reward_applied;
+            total_stats.punishment_applied += round_stats.punishment_applied;
+        }
+        println!("  TOTAL: {}", total_stats);
+    }
+
+    // ---------------------------------------------------------------
     // Build final paramecium from trained codebooks.
     // This captures the learned archetype structure so the lattice is
     // available for curriculum-guided continuum learning at runtime.
@@ -1804,6 +1885,12 @@ fn train_brain(
         "my account is locked after too many failed attempts",
         "write an addition function in Rust",
         "explain the factory pattern using a restaurant analogy",
+        // Circle+spiral composition tests: novel combinations of trained skills
+        "write a subtraction function in Rust",
+        "write a multiplication function in Rust",
+        "implement a stack using an enum in Rust",
+        "explain how to combine iterators with error handling",
+        "what is the pattern for a struct with methods in Rust",
     ];
     for prompt in &test_prompts {
         println!("\n  prompt: {:?}", prompt);
