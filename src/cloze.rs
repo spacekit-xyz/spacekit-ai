@@ -318,6 +318,159 @@ pub fn encode_inferred_slot_bits(
     bits
 }
 
+/// Compute the field gradient ∇F at query point `cond`.
+///
+/// Each program is a source J_i at position x_i with response embedding r_i.
+/// The field gradient at x is:
+///
+///   ∇F(x) = Σ_i  w_i · (x - x_i) / |x - x_i|²
+///
+/// where w_i = cosine_sim(cond, centroid_i) is the source strength.
+///
+/// The gradient is a vector in embedding space that points in the direction
+/// the response field is changing fastest. For "subtraction" near the "addition"
+/// program, ∇F points AWAY from addition TOWARD subtraction.
+///
+/// Returns: (gradient_vector, gradient_magnitude)
+pub fn compute_field_gradient(
+    cond: &[f32],
+    programs: &[BehavioralProgram],
+) -> (Vec<f32>, f32) {
+    let dim = cond.len();
+    let mut gradient = vec![0.0f32; dim];
+
+    if programs.is_empty() {
+        return (gradient, 0.0);
+    }
+
+    let mut weight_sum = 0.0f32;
+
+    for prog in programs {
+        let centroid = &prog.ema_centroid;
+        let min_dim = dim.min(centroid.len());
+
+        // Displacement: x - x_i
+        let mut disp = vec![0.0f32; dim];
+        let mut disp_norm_sq = 0.0f32;
+        for i in 0..min_dim {
+            disp[i] = cond[i] - centroid[i];
+            disp_norm_sq += disp[i] * disp[i];
+        }
+
+        if disp_norm_sq < 1e-10 {
+            continue; // Skip exact matches (zero displacement = no gradient contribution)
+        }
+
+        // Source strength: how relevant is this program to the query
+        let sim = cosine_sim(cond, centroid).max(0.0);
+        if sim < 0.01 { continue; }
+
+        // Green's function weight: 1/r² * source_strength
+        let green_weight = sim / disp_norm_sq;
+
+        // Accumulate: gradient += weight * displacement_direction
+        for i in 0..dim {
+            gradient[i] += green_weight * disp[i];
+        }
+        weight_sum += green_weight;
+    }
+
+    // Normalize by total weight to get directional gradient
+    if weight_sum > 1e-10 {
+        for v in &mut gradient {
+            *v /= weight_sum;
+        }
+    }
+
+    let magnitude = gradient.iter().map(|x| x * x).sum::<f32>().sqrt();
+    (gradient, magnitude)
+}
+
+/// Infer slot values using the field gradient ∇F for directional discrimination.
+///
+/// Unlike `infer_slots` which uses proximity voting (same for add/sub),
+/// this uses the gradient to bias votes TOWARD programs that the field
+/// is flowing toward and AWAY from programs the field is flowing from.
+///
+/// For "subtraction" query near "addition" centroid:
+///   - ∇F points from addition → subtraction
+///   - Programs aligned with ∇F get vote bonus (subtraction program)
+///   - Programs anti-aligned with ∇F get vote penalty (addition program)
+pub fn infer_slots_with_gradient(
+    cond: &[f32],
+    gradient: &[f32],
+    gradient_mag: f32,
+    archetype_idx: usize,
+    codebook: &AlgebraicCodebook,
+    programs: &[BehavioralProgram],
+    k_voters: usize,
+) -> Vec<usize> {
+    let arch = match codebook.archetypes.get(archetype_idx) {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    if arch.slots.is_empty() || programs.is_empty() {
+        return vec![0; codebook.max_slot_count];
+    }
+
+    // Score programs by BOTH proximity AND gradient alignment.
+    let mut scored: Vec<(usize, f32)> = programs.iter().enumerate()
+        .map(|(i, prog)| {
+            let sim = cosine_sim(cond, &prog.ema_centroid).max(0.0);
+
+            // Gradient alignment: does this program lie in the direction ∇F points?
+            // Compute: dot(centroid_i - cond, gradient) — positive means the program
+            // is in the direction the field is flowing TO.
+            let gradient_alignment = if gradient_mag > 1e-6 {
+                let min_dim = cond.len().min(prog.ema_centroid.len()).min(gradient.len());
+                let dot: f32 = (0..min_dim)
+                    .map(|j| (prog.ema_centroid[j] - cond[j]) * gradient[j])
+                    .sum();
+                // Normalize by gradient magnitude
+                (dot / gradient_mag).clamp(-1.0, 1.0)
+            } else {
+                0.0
+            };
+
+            // Blend: proximity (60%) + gradient alignment (40%)
+            // gradient_alignment ranges [-1, 1], map to [0, 1]
+            let grad_score = (gradient_alignment + 1.0) / 2.0;
+            let combined = 0.60 * sim + 0.40 * grad_score;
+            (i, combined)
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let voters: Vec<(usize, f32)> = scored.into_iter().take(k_voters).collect();
+
+    // Vote on each slot position, weighted by the gradient-aware score.
+    let mut inferred = Vec::with_capacity(codebook.max_slot_count);
+    for (_slot_idx, slot) in arch.slots.iter().enumerate() {
+        if slot.vocab.is_empty() {
+            inferred.push(0);
+            continue;
+        }
+        let mut votes = vec![0.0f32; slot.vocab.len()];
+
+        for &(prog_idx, weight) in &voters {
+            let prog = &programs[prog_idx];
+            let actual_tok = prog.token_sequence.get(slot.position).copied().unwrap_or(0);
+            if let Some(vocab_idx) = slot.vocab.iter().position(|&t| t == actual_tok) {
+                votes[vocab_idx] += weight;
+            }
+        }
+
+        let winner = votes.iter().enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(idx, _)| idx)
+            .unwrap_or(0);
+        inferred.push(winner);
+    }
+
+    inferred.resize(codebook.max_slot_count, 0);
+    inferred
+}
+
 fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();

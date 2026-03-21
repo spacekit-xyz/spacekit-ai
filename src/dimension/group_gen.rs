@@ -25,7 +25,10 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::clifford::{embed_bridge_vector, causal_fingerprint, BOOST_BIVECTOR_COUNT};
+use crate::clifford::{
+    embed_bridge_vector, causal_fingerprint, spatial_fingerprint,
+    BOOST_BIVECTOR_COUNT, ROTATION_BIVECTOR_COUNT,
+};
 use crate::cloze;
 use crate::environment::NeuralEnvironment;
 use crate::spectral::{
@@ -2261,6 +2264,15 @@ impl IndexedGenEnv {
     /// or falls back to Hopf composition for uncertain inputs.
     /// Immutable nearest-neighbor lookup over lattice programs.
     /// No EMA centroid drift — safe for repeated inference calls.
+    /// STA field evaluation: programs are sources, query is a field point.
+    ///
+    /// Instead of cosine similarity (scalar, same for nearby points), compute the
+    /// displacement vector from each program centroid to the input, embed it into
+    /// Cl(1,7), and score using both spatial and causal fingerprints of the
+    /// DISPLACEMENT. This discriminates "addition" from "subtraction" because their
+    /// displacement vectors to the same program point in different directions.
+    ///
+    /// F(x) = Σ_i G_ret(x, x_i) · J_i  (Green's function field evaluation)
     fn nearest_response_in_lattice(
         &self,
         lattice: &InfraciliaryLattice,
@@ -2269,14 +2281,55 @@ impl IndexedGenEnv {
         if lattice.programs.is_empty() {
             return (String::new(), 0, 0.0);
         }
+
+        let input_mv = embed_bridge_vector(cond);
+        let input_spatial = spatial_fingerprint(&input_mv);
+
         let mut best_idx = 0;
-        let mut best_sim = f32::NEG_INFINITY;
+        let mut best_score = f32::NEG_INFINITY;
+
         for (i, prog) in lattice.programs.iter().enumerate() {
-            let sim = gen_cosine_sim(cond, &prog.ema_centroid);
-            if sim > best_sim { best_sim = sim; best_idx = i; }
+            // Cosine similarity (base alignment, as before)
+            let cosine = gen_cosine_sim(cond, &prog.ema_centroid);
+
+            // Displacement vector: input - centroid
+            let displacement: Vec<f32> = cond.iter()
+                .zip(prog.ema_centroid.iter())
+                .map(|(a, b)| a - b)
+                .collect();
+            let disp_norm_sq: f32 = displacement.iter().map(|d| d * d).sum();
+
+            // Green's function: inverse distance weighting (1/r²), capped
+            let proximity = if disp_norm_sq < 1e-8 {
+                100.0 // Exact match
+            } else {
+                (1.0 / disp_norm_sq).min(100.0)
+            };
+
+            // Embed displacement into Cl(1,7) to get directional information
+            let disp_mv = embed_bridge_vector(&displacement);
+            let disp_spatial = spatial_fingerprint(&disp_mv);
+
+            // Spatial coherence: how well the displacement's rotation bivectors
+            // ANTI-align with the input's spatial fingerprint. Low spatial energy
+            // in the displacement means the input is in the source's "rest frame"
+            // — the query is native to this program's region.
+            let disp_spatial_energy: f32 = disp_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let spatial_penalty = (disp_spatial_energy * 2.0).min(1.0);
+
+            // Combined score: high cosine + high proximity + low spatial displacement
+            let field_score = 0.50 * cosine
+                + 0.25 * (proximity / 100.0).sqrt() // normalize proximity to [0,1]
+                + 0.25 * (1.0 - spatial_penalty);    // reward low spatial displacement
+
+            if field_score > best_score {
+                best_score = field_score;
+                best_idx = i;
+            }
         }
+
         let text = self.dictionary.decode(&lattice.programs[best_idx].token_sequence);
-        (text, best_idx, best_sim.max(0.0))
+        (text, best_idx, best_score.max(0.0))
     }
 
     fn nearest_response(&self, cond: &[f32]) -> (String, usize, f32) {
@@ -2289,19 +2342,30 @@ impl IndexedGenEnv {
         }
         let hint = topic_hint.map(|s| s.trim()).filter(|s| !s.is_empty());
 
-        // Compute the input's causal fingerprint once for all comparisons.
+        // Compute input's STA fingerprints once for all topic comparisons.
         let input_mv = embed_bridge_vector(cond);
         let input_causal = causal_fingerprint(&input_mv);
 
         let mut best: Option<(String, String, f32)> = None;
         for topic in &self.topic_subindex {
-            let topic_sim = gen_cosine_sim(cond, &topic.centroid).max(0.0);
             let (text, _prog_idx, local_conf) = self.nearest_response_in_lattice(&topic.lattice, cond);
             if text.is_empty() {
                 continue;
             }
 
-            // Causal similarity: do the boost bivectors (goal/action direction) align?
+            // Displacement from topic centroid to input, in Cl(1,7)
+            let displacement: Vec<f32> = cond.iter()
+                .zip(topic.centroid.iter())
+                .map(|(a, b)| a - b)
+                .collect();
+            let disp_mv = embed_bridge_vector(&displacement);
+            let disp_spatial = spatial_fingerprint(&disp_mv);
+            let spatial_energy: f32 = disp_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+            // Low displacement energy = input is in this topic's rest frame
+            let field_proximity = (1.0 - (spatial_energy * 2.0).min(1.0)).max(0.0);
+
+            // Causal alignment (boost bivectors)
             let causal_sim = {
                 let dot: f32 = input_causal.iter().zip(topic.causal_centroid.iter()).map(|(a, b)| a * b).sum();
                 let na: f32 = input_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -2315,7 +2379,7 @@ impl IndexedGenEnv {
                 None => 0.02,
             };
             let density_bonus = ((topic.sample_count as f32).ln_1p() / 10.0).min(0.08);
-            let combined = (0.50 * local_conf + 0.20 * topic_sim + 0.22 * causal_sim + hint_bonus + density_bonus).clamp(0.0, 1.0);
+            let combined = (0.40 * local_conf + 0.22 * field_proximity + 0.18 * causal_sim + hint_bonus + density_bonus).clamp(0.0, 1.0);
             if best.as_ref().map(|(_, _, score)| combined > *score).unwrap_or(true) {
                 best = Some((text, topic.topic_name.clone(), combined));
             }
@@ -2324,12 +2388,27 @@ impl IndexedGenEnv {
     }
 
     /// Top-K nearest responses by cosine similarity (immutable).
+    /// Top-K using STA field scoring (displacement-aware, not just cosine).
     fn nearest_responses_k(&self, cond: &[f32], k: usize) -> Vec<(String, usize, f32)> {
         if self.lattice.programs.is_empty() {
             return Vec::new();
         }
         let mut scored: Vec<(usize, f32)> = self.lattice.programs.iter().enumerate()
-            .map(|(i, prog)| (i, gen_cosine_sim(cond, &prog.ema_centroid)))
+            .map(|(i, prog)| {
+                let cosine = gen_cosine_sim(cond, &prog.ema_centroid);
+                let displacement: Vec<f32> = cond.iter()
+                    .zip(prog.ema_centroid.iter())
+                    .map(|(a, b)| a - b)
+                    .collect();
+                let disp_mv = embed_bridge_vector(&displacement);
+                let disp_spatial = spatial_fingerprint(&disp_mv);
+                let spatial_energy: f32 = disp_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let spatial_penalty = (spatial_energy * 2.0).min(1.0);
+                let disp_norm_sq: f32 = displacement.iter().map(|d| d * d).sum();
+                let proximity = if disp_norm_sq < 1e-8 { 100.0 } else { (1.0 / disp_norm_sq).min(100.0) };
+                let score = 0.50 * cosine + 0.25 * (proximity / 100.0).sqrt() + 0.25 * (1.0 - spatial_penalty);
+                (i, score)
+            })
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.into_iter().take(k).map(|(idx, sim)| {
@@ -2360,42 +2439,59 @@ impl IndexedGenEnv {
             _ => (global_text, global_conf, None),
         };
 
-        // Inhibition gate: compute causal divergence between input and retrieved program.
-        // If the goal/action direction differs (e.g., "subtraction" retrieved "addition"),
-        // the causal fingerprints will diverge and we force the archetype/slot path
-        // instead of returning verbatim — the system inhibits the wrong-intent match.
-        let causal_inhibited = if lattice_conf >= 0.80 {
+        // ∇F field gradient: compute the directional derivative of the response field
+        // at the query point. Large |∇F| means we're between programs (the field is
+        // changing fast) — inhibit verbatim and use gradient-aware slot inference.
+        let (field_gradient, gradient_mag) = cloze::compute_field_gradient(cond, &self.lattice.programs);
+
+        // STA inhibition gate: fires when EITHER the displacement energy is high
+        // OR the field gradient magnitude is significant (we're between programs).
+        let field_inhibited = if lattice_conf >= 0.75 {
             let retrieved_centroid = &self.lattice.programs[prog_idx].ema_centroid;
-            let input_mv = embed_bridge_vector(cond);
-            let retrieved_mv = embed_bridge_vector(retrieved_centroid);
-            let input_cf = causal_fingerprint(&input_mv);
-            let retrieved_cf = causal_fingerprint(&retrieved_mv);
-            let dot: f32 = input_cf.iter().zip(retrieved_cf.iter()).map(|(a, b)| a * b).sum();
-            let na: f32 = input_cf.iter().map(|x| x * x).sum::<f32>().sqrt();
-            let nb: f32 = retrieved_cf.iter().map(|x| x * x).sum::<f32>().sqrt();
-            let causal_sim = if na < 1e-10 || nb < 1e-10 { 1.0 } else { dot / (na * nb) };
-            causal_sim < 0.85
+            let displacement: Vec<f32> = cond.iter()
+                .zip(retrieved_centroid.iter())
+                .map(|(a, b)| a - b)
+                .collect();
+            let disp_mv = embed_bridge_vector(&displacement);
+            let disp_spatial = spatial_fingerprint(&disp_mv);
+            let spatial_energy: f32 = disp_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let disp_causal = causal_fingerprint(&disp_mv);
+            let causal_energy: f32 = disp_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let displacement_energy = spatial_energy + causal_energy;
+
+            // Inhibit if: displacement from nearest program is significant,
+            // OR the field gradient is large (meaning multiple programs compete).
+            displacement_energy > 0.10 || gradient_mag > 0.02
         } else {
             false
         };
 
-        // High confidence AND causal alignment: return lattice text directly
-        if lattice_conf >= 0.80 && text.len() > 5 && !causal_inhibited {
+        // High confidence AND in the program's rest frame: return lattice text directly
+        if lattice_conf >= 0.80 && text.len() > 5 && !field_inhibited {
             self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
             self.last_generation_confidence = lattice_conf;
             return (text, lattice_conf);
         }
 
-        // Medium confidence OR causal-inhibited high confidence: archetype template + slot filling.
-        // When inhibited, use INFERRED slots (from lattice program votes) instead of
-        // copied slots (from retrieved text). This is the "beyond parrot" path.
-        if lattice_conf >= 0.55 || causal_inhibited {
+        // Inhibited OR medium confidence: use gradient-aware slot inference.
+        // The field gradient tells us WHICH DIRECTION the response should shift,
+        // enabling discrimination between add/sub/mul within the same group.
+        if lattice_conf >= 0.55 || field_inhibited {
             if let Some(ref cb) = self.codebook {
                 if cb.has_prototypes() {
                     let (arch_idx, _) = cb.select_archetype_by_embedding(cond);
 
-                    let slot_bits = if causal_inhibited {
-                        // INFER slots from input semantics: K-nearest programs vote.
+                    let slot_bits = if field_inhibited && gradient_mag > 0.01 {
+                        // ∇F-aware slot inference: use gradient to bias toward
+                        // the correct program's slot fills.
+                        let inferred = cloze::infer_slots_with_gradient(
+                            cond, &field_gradient, gradient_mag,
+                            arch_idx, cb,
+                            &self.lattice.programs, 7,
+                        );
+                        cloze::encode_inferred_slot_bits(&inferred, cb)
+                    } else if field_inhibited {
+                        // Inhibited but low gradient: use proximity-based inference.
                         let inferred = cloze::infer_slots(
                             cond, arch_idx, cb, &self.dictionary,
                             &self.lattice.programs, 5,
