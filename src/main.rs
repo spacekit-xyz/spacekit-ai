@@ -6,6 +6,7 @@ use growformer::dimension::language::DEFAULT_BRIDGE_DIM;
 use growformer::clifford::GroupRotor;
 use growformer::dimension::group_gen::{AlgebraicCodebook, HopfCompositionTable};
 use growformer::dimension::paramecium::InfraciliaryLattice;
+use growformer::reasoning::{CognitiveMap, ReasoningEngine};
 use growformer::spectral::TokenDictionary;
 use std::collections::HashMap;
 use growformer::service::LanguageService;
@@ -1749,6 +1750,19 @@ fn train_brain(
     }
 
     // ---------------------------------------------------------------
+    // Build cognitive map — hippocampal relational graph across all groups
+    // ---------------------------------------------------------------
+    println!("\n--- Building Cognitive Map (Reasoning Engine) ---");
+    let cog_map = CognitiveMap::build(&svc.dm.group_gen_envs, &svc.dm.group_rotors);
+    println!("  nodes: {}, edges: {} (cross-group structural links)", cog_map.node_count(), cog_map.edge_count());
+    let group_dicts: HashMap<usize, TokenDictionary> = svc.dm.group_gen_envs.iter()
+        .map(|(&gidx, env)| (gidx, env.dictionary.clone()))
+        .collect();
+    let reasoning_engine = ReasoningEngine::new(cog_map, group_dicts);
+    svc.reasoning = Some(reasoning_engine);
+    println!("  ReasoningEngine: active, settling_rounds=4");
+
+    // ---------------------------------------------------------------
     // Build final paramecium from trained codebooks.
     // This captures the learned archetype structure so the lattice is
     // available for curriculum-guided continuum learning at runtime.
@@ -1788,6 +1802,8 @@ fn train_brain(
         "explain the observer pattern",
         "design a microservices architecture in Rust",
         "my account is locked after too many failed attempts",
+        "write an addition function in Rust",
+        "explain the factory pattern using a restaurant analogy",
     ];
     for prompt in &test_prompts {
         println!("\n  prompt: {:?}", prompt);

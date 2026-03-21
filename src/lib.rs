@@ -42,6 +42,7 @@ pub mod mnist;
 pub mod neuron;
 pub mod systems;
 pub mod types;
+pub mod reasoning;
 pub mod service;
 pub mod spectral;
 #[cfg(feature = "wasm-bindgen")]

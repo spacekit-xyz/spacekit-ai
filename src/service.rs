@@ -18,6 +18,7 @@ use crate::dimension::EncoderPreset;
 use crate::spectral::{ProjectModel, EntityKind, HybridEmbedder};
 use crate::dimension::tool::{ToolRegistry, ToolSchema, ToolCallInfo, ToolResult};
 use crate::dimension::paramecium::InfraciliaryLattice;
+use crate::reasoning::ReasoningEngine;
 use crate::types::{EnvironmentConfig, GroupId, Sample};
 
 // ---------------------------------------------------------------------------
@@ -352,6 +353,8 @@ pub struct LanguageService {
     continuum_feedback_count: u64,
     /// Paramecium: lattice-only inference engine (optional, built from brain).
     pub paramecium: Option<InfraciliaryLattice>,
+    /// Reasoning engine: hippocampal-prefrontal circuit for cross-group composition.
+    pub reasoning: Option<ReasoningEngine>,
 }
 
 impl LanguageService {
@@ -408,6 +411,7 @@ impl LanguageService {
             tool_registry: ToolRegistry::with_builtins(),
             continuum_feedback_count: 0,
             paramecium: None,
+            reasoning: None,
         })
     }
 
@@ -505,6 +509,7 @@ impl LanguageService {
         }
 
         let personality = self.personality.clone();
+
         let dm = self.active_dm_mut();
         let action = dm.route_text_to_action_stateless(text)?;
 
@@ -690,6 +695,27 @@ impl LanguageService {
         } else {
             render_action_template(&action)
         };
+
+        // Reasoning fallback: if primary generation confidence is low,
+        // try the hippocampal-prefrontal circuit for cross-group composition.
+        let resp = if resp.confidence < 0.55 && resp.text.len() > 5 {
+            if let (Some(ref reasoning), Some((ref _h_raw, ref bridged))) = (&self.reasoning, &encoded) {
+                let mut cond = bridged.routed_vector.clone();
+                cond.resize(GEN_COND_DIM, 0.0);
+                let dm_ref = self.active_dm();
+                if reasoning.should_reason(&cond, resp.confidence, &dm_ref.group_gen_envs) {
+                    let result = reasoning.reason(&cond, &dm_ref.group_gen_envs, &dm_ref.group_rotors);
+                    if result.confidence > resp.confidence && result.text.len() > 5 {
+                        GeneratedResponse {
+                            text: result.text,
+                            template_id: format!("reasoning_{}_groups", result.source_groups.len()),
+                            traceable: false,
+                            confidence: result.confidence,
+                        }
+                    } else { resp }
+                } else { resp }
+            } else { resp }
+        } else { resp };
 
         self.record_latency(start);
         Ok((action, resp))
