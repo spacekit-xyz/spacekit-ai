@@ -277,15 +277,30 @@ pub fn play_cloze_round(
                 }
                 stats.reward_applied += 1;
             } else if did_punish && !did_reward {
-                // Punishment: drift AWAY from the input (weaken ownership)
-                let alpha = punish_rate * sim;
+                // Contrastive punishment (two forces):
+                //   1. Push AWAY from the incorrect input (repulsive)
+                //   2. Pull TOWARD own original centroid (attractive anchor)
+                //
+                // This creates within-group separation: each program retreats
+                // to its correct home while being repelled from incorrect queries.
+                let repel_alpha = punish_rate * sim;
+                let attract_alpha = punish_rate * 0.5; // gentler pull toward home
+
                 for i in 0..dim {
-                    prog.ema_centroid[i] = prog.ema_centroid[i] * (1.0 + alpha) - task.cond[i] * alpha;
+                    // Repel from incorrect input
+                    prog.ema_centroid[i] = prog.ema_centroid[i] * (1.0 + repel_alpha) - task.cond[i] * repel_alpha;
                 }
+
+                // Attract toward original centroid (home base)
+                let home_dim = prog.centroid.len().min(dim);
+                for i in 0..home_dim {
+                    prog.ema_centroid[i] = prog.ema_centroid[i] * (1.0 - attract_alpha) + prog.centroid[i] * attract_alpha;
+                }
+
                 // Re-normalize to prevent centroid explosion
                 let norm = prog.ema_centroid.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
                 let original_norm = prog.centroid.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
-                let target_norm = original_norm; // maintain original scale
+                let target_norm = original_norm;
                 for v in &mut prog.ema_centroid {
                     *v *= target_norm / norm;
                 }

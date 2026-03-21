@@ -35,6 +35,7 @@ macro_rules! maybe_par_iter_mut {
 pub mod clifford;
 pub mod cloze;
 pub mod dimension;
+pub mod growformer_lang;
 pub mod micro_brain;
 pub mod understanding;
 pub mod environment;

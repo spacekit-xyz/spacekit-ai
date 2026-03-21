@@ -63,7 +63,16 @@ impl LearnedRouter {
         }
     }
 
-    /// Logits over groups via direct cosine nearest-neighbor (no EMA drift).
+    /// Logits over groups via K-nearest neighbor voting with field gradient bias.
+    ///
+    /// Instead of picking a single nearest program (fragile when groups overlap),
+    /// the top-K programs vote for their groups. Votes are weighted by:
+    ///   - Cosine similarity to input (proximity)
+    ///   - Field gradient alignment (directional flow toward the program)
+    ///
+    /// This enables correct routing even when "write an addition function" and
+    /// "implement a linked list" have very similar embeddings: the gradient
+    /// breaks the tie by pointing toward the correct cluster.
     pub fn predict_logits(&mut self, input: &[f32]) -> Vec<f32> {
         if input.len() != self.input_dim || self.num_groups == 0 {
             return vec![];
@@ -72,18 +81,66 @@ impl LearnedRouter {
         if self.lattice.programs.is_empty() {
             return logits;
         }
-        let mut best_idx = 0;
-        let mut best_sim = f32::NEG_INFINITY;
-        for (i, prog) in self.lattice.programs.iter().enumerate() {
-            let sim = cosine_sim(input, &prog.ema_centroid);
-            if sim > best_sim { best_sim = sim; best_idx = i; }
+
+        let k = 7.min(self.lattice.programs.len());
+
+        // Score all programs by cosine similarity.
+        let mut scored: Vec<(usize, f32)> = self.lattice.programs.iter().enumerate()
+            .map(|(i, prog)| (i, cosine_sim(input, &prog.ema_centroid)))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Compute field gradient: ∇F at the query point, where each program
+        // is a source with strength proportional to its similarity.
+        let dim = input.len();
+        let mut gradient = vec![0.0f32; dim];
+        let mut weight_sum = 0.0f32;
+        for &(idx, sim) in scored.iter().take(k * 3) {
+            if sim < 0.01 { break; }
+            let centroid = &self.lattice.programs[idx].ema_centroid;
+            let mut disp_norm_sq = 0.0f32;
+            for j in 0..dim.min(centroid.len()) {
+                let d = input[j] - centroid[j];
+                disp_norm_sq += d * d;
+            }
+            if disp_norm_sq < 1e-10 { continue; }
+            let green_w = sim / disp_norm_sq;
+            for j in 0..dim.min(centroid.len()) {
+                gradient[j] += green_w * (input[j] - centroid[j]);
+            }
+            weight_sum += green_w;
         }
-        let text = self.lattice.dictionary.decode(&self.lattice.programs[best_idx].token_sequence);
-        if let Some(gid) = Self::parse_group_id(&text) {
-            if gid < self.num_groups {
-                logits[gid] = best_sim.max(0.0);
+        if weight_sum > 1e-10 {
+            for v in &mut gradient { *v /= weight_sum; }
+        }
+        let grad_mag: f32 = gradient.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+        // K-NN voting with gradient alignment bias.
+        for &(idx, sim) in scored.iter().take(k) {
+            if sim < 0.0 { continue; }
+            let text = self.lattice.dictionary.decode(&self.lattice.programs[idx].token_sequence);
+            if let Some(gid) = Self::parse_group_id(&text) {
+                if gid < self.num_groups {
+                    // Gradient alignment: does this program lie in the direction ∇F points?
+                    let grad_bonus = if grad_mag > 1e-6 {
+                        let centroid = &self.lattice.programs[idx].ema_centroid;
+                        let min_dim = dim.min(centroid.len()).min(gradient.len());
+                        let dot: f32 = (0..min_dim)
+                            .map(|j| (centroid[j] - input[j]) * gradient[j])
+                            .sum();
+                        let alignment = (dot / grad_mag).clamp(-1.0, 1.0);
+                        (alignment + 1.0) / 2.0  // map [-1,1] → [0,1]
+                    } else {
+                        0.5
+                    };
+
+                    // Weight: 65% proximity + 35% gradient alignment
+                    let vote = sim.max(0.0) * (0.65 + 0.35 * grad_bonus);
+                    logits[gid] += vote;
+                }
             }
         }
+
         logits
     }
 

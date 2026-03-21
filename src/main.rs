@@ -1300,6 +1300,31 @@ fn train_brain(
         svc.dm.action_classifier.as_ref().map(|c| c.program_count()).unwrap_or(0));
 
     // ---------------------------------------------------------------
+    // Stage 2b: Build GrowformerLang MetaCodebook
+    // Maps training data to abstract concepts and builds per-language projectors.
+    // This enables concept-level routing that's immune to surface-form overlap.
+    // ---------------------------------------------------------------
+    println!("\n--- Stage 2b: GrowformerLang MetaCodebook ---");
+    {
+        use growformer::growformer_lang::{infer_concept, detect_language, MetaCodebook};
+        let meta_samples: Vec<_> = bridged_embeddings.iter().zip(samples.iter())
+            .map(|(emb, s)| {
+                let concept = infer_concept(
+                    &s.text,
+                    Some(&s.semantic_intent),
+                    s.action_target.as_deref(),
+                );
+                let lang = detect_language(&s.text);
+                let gidx = group_map(s);
+                (emb.clone(), concept, lang, gidx)
+            })
+            .collect();
+        let mcb = MetaCodebook::build(&meta_samples);
+        mcb.print_summary();
+        svc.meta_codebook = Some(mcb);
+    }
+
+    // ---------------------------------------------------------------
     // Stages 3+4: Per-group generation envs (Growformer substrate)
     // Each group gets its own NeuralEnvironment for text AND code generation.
     // Conditioning = bridged_embedding — routing already selected the group.
@@ -1770,10 +1795,10 @@ fn train_brain(
     {
         use growformer::cloze;
         println!("\n--- Cloze Learning (Fill-in-the-Blank) ---");
-        let cloze_rounds = 3;
-        let k_voters = 5;
-        let reward_rate = 0.08;
-        let punish_rate = 0.04;
+        let cloze_rounds = 6;
+        let k_voters = 7;
+        let reward_rate = 0.10;
+        let punish_rate = 0.06;
         let mut total_stats = cloze::ClozeStats::default();
         for (gidx, env) in svc.dm.group_gen_envs.iter_mut() {
             let codebook = match env.codebook.as_ref() {

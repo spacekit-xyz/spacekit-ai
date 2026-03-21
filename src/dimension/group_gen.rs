@@ -2267,12 +2267,14 @@ impl IndexedGenEnv {
     /// STA field evaluation: programs are sources, query is a field point.
     ///
     /// Instead of cosine similarity (scalar, same for nearby points), compute the
-    /// displacement vector from each program centroid to the input, embed it into
-    /// Cl(1,7), and score using both spatial and causal fingerprints of the
-    /// DISPLACEMENT. This discriminates "addition" from "subtraction" because their
-    /// displacement vectors to the same program point in different directions.
+    /// Equivariant within-group scoring using full multivector features in Cl(1,7).
     ///
-    /// F(x) = Σ_i G_ret(x, x_i) · J_i  (Green's function field evaluation)
+    /// Instead of scalar-only cosine (invariant → collapses within-group differences),
+    /// this uses grade-2 bivector alignment (equivariant → preserves orientation, phase,
+    /// and relative structure). This enables discrimination inside the symmetry class:
+    /// "addition" and "subtraction" have similar scalars but different bivector orientations.
+    ///
+    /// Score = α·cosine + β·spatial_align + γ·causal_align + δ·proximity
     fn nearest_response_in_lattice(
         &self,
         lattice: &InfraciliaryLattice,
@@ -2282,48 +2284,61 @@ impl IndexedGenEnv {
             return (String::new(), 0, 0.0);
         }
 
+        // Embed input into Cl(1,7) once — extract equivariant features
         let input_mv = embed_bridge_vector(cond);
         let input_spatial = spatial_fingerprint(&input_mv);
+        let input_causal = causal_fingerprint(&input_mv);
 
         let mut best_idx = 0;
         let mut best_score = f32::NEG_INFINITY;
 
         for (i, prog) in lattice.programs.iter().enumerate() {
-            // Cosine similarity (base alignment, as before)
             let cosine = gen_cosine_sim(cond, &prog.ema_centroid);
 
-            // Displacement vector: input - centroid
-            let displacement: Vec<f32> = cond.iter()
+            // Embed program into Cl(1,7) — full multivector, not just scalar
+            let prog_mv = embed_bridge_vector(&prog.ema_centroid);
+            let prog_spatial = spatial_fingerprint(&prog_mv);
+            let prog_causal = causal_fingerprint(&prog_mv);
+
+            // EQUIVARIANT: spatial bivector alignment (21 rotation bivectors).
+            // These encode the relational/structural pattern of each program.
+            // add vs sub: same scalars, different rotation bivector orientations.
+            let sp_dot: f32 = input_spatial.iter().zip(prog_spatial.iter())
+                .map(|(a, b)| a * b).sum();
+            let sp_na: f32 = input_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let sp_nb: f32 = prog_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let spatial_align = if sp_na < 1e-8 || sp_nb < 1e-8 { 0.0 }
+                else { (sp_dot / (sp_na * sp_nb)).clamp(-1.0, 1.0) };
+
+            // EQUIVARIANT: causal bivector alignment (7 boost bivectors).
+            // These encode the temporal/causal direction of each program.
+            let ca_dot: f32 = input_causal.iter().zip(prog_causal.iter())
+                .map(|(a, b)| a * b).sum();
+            let ca_na: f32 = input_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let ca_nb: f32 = prog_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let causal_align = if ca_na < 1e-8 || ca_nb < 1e-8 { 0.0 }
+                else { (ca_dot / (ca_na * ca_nb)).clamp(-1.0, 1.0) };
+
+            // Inverse distance proximity
+            let disp_norm_sq: f32 = cond.iter()
                 .zip(prog.ema_centroid.iter())
-                .map(|(a, b)| a - b)
-                .collect();
-            let disp_norm_sq: f32 = displacement.iter().map(|d| d * d).sum();
+                .map(|(a, b)| (a - b) * (a - b))
+                .sum();
+            let proximity = if disp_norm_sq < 1e-8 { 1.0 }
+                else { (1.0 / disp_norm_sq).min(100.0).sqrt() / 10.0 };
 
-            // Green's function: inverse distance weighting (1/r²), capped
-            let proximity = if disp_norm_sq < 1e-8 {
-                100.0 // Exact match
-            } else {
-                (1.0 / disp_norm_sq).min(100.0)
-            };
+            // Equivariant score: scalar + bivector alignment
+            //   Scalar cosine (invariant): 30% — overall similarity
+            //   Spatial alignment (equivariant): 35% — rotation bivector match
+            //   Causal alignment (equivariant): 20% — boost bivector match
+            //   Proximity: 15% — inverse distance
+            let score = 0.30 * cosine.max(0.0)
+                + 0.35 * (spatial_align + 1.0) / 2.0
+                + 0.20 * (causal_align + 1.0) / 2.0
+                + 0.15 * proximity;
 
-            // Embed displacement into Cl(1,7) to get directional information
-            let disp_mv = embed_bridge_vector(&displacement);
-            let disp_spatial = spatial_fingerprint(&disp_mv);
-
-            // Spatial coherence: how well the displacement's rotation bivectors
-            // ANTI-align with the input's spatial fingerprint. Low spatial energy
-            // in the displacement means the input is in the source's "rest frame"
-            // — the query is native to this program's region.
-            let disp_spatial_energy: f32 = disp_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
-            let spatial_penalty = (disp_spatial_energy * 2.0).min(1.0);
-
-            // Combined score: high cosine + high proximity + low spatial displacement
-            let field_score = 0.50 * cosine
-                + 0.25 * (proximity / 100.0).sqrt() // normalize proximity to [0,1]
-                + 0.25 * (1.0 - spatial_penalty);    // reward low spatial displacement
-
-            if field_score > best_score {
-                best_score = field_score;
+            if score > best_score {
+                best_score = score;
                 best_idx = i;
             }
         }
@@ -2387,6 +2402,72 @@ impl IndexedGenEnv {
         best
     }
 
+    /// Directly query the sub-lattice whose name matches `forced_topic` (case-insensitive).
+    /// Bypasses cross-topic competition — used when `infer_operation_topic` gives a
+    /// specific operation name (e.g., "subtraction_operation") so the correct sub-lattice
+    /// is selected even when a sibling (e.g., "addition_operation") has higher cosine sim.
+    ///
+    /// When `lang_hint` is Some (e.g., "rust"), programs whose decoded text matches the
+    /// target language's markers are preferred, preventing Python code from being returned
+    /// when Rust was requested.
+    fn forced_topic_response(&self, cond: &[f32], forced_topic: &str) -> Option<(String, String, f32)> {
+        self.forced_topic_response_lang(cond, forced_topic, None)
+    }
+
+    fn forced_topic_response_lang(&self, cond: &[f32], forced_topic: &str, lang_hint: Option<&str>) -> Option<(String, String, f32)> {
+        self.topic_subindex.iter()
+            .find(|t| t.topic_name.eq_ignore_ascii_case(forced_topic))
+            .and_then(|topic| {
+                if topic.lattice.programs.is_empty() { return None; }
+
+                // Score all programs in the sub-lattice, with language preference
+                let mut scored: Vec<(usize, f32)> = topic.lattice.programs.iter().enumerate()
+                    .map(|(i, prog)| {
+                        let cosine = gen_cosine_sim(cond, &prog.ema_centroid);
+                        (i, cosine)
+                    })
+                    .collect();
+                scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+                // When a language hint is provided, try to find a program matching that language
+                if let Some(lang) = lang_hint {
+                    let lang_lower = lang.to_lowercase();
+                    let is_rust = lang_lower == "rust";
+                    let is_python = lang_lower == "python" || lang_lower == "py";
+
+                    for &(idx, score) in &scored {
+                        let text = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence);
+                        let matches_lang = if is_rust {
+                            text.contains("fn ") || text.contains("-> ") || text.contains("let ")
+                                || text.contains("i32") || text.contains("f64") || text.contains("impl ")
+                        } else if is_python {
+                            text.contains("def ") || text.contains("return ") && !text.contains("->")
+                        } else {
+                            true
+                        };
+                        if matches_lang && !text.is_empty() && score > 0.10 {
+                            let snippet: String = text.chars().take(60).collect();
+                            println!("    [forced-topic] '{}' → {} progs, conf={:.3}, text=\"{}...\"",
+                                forced_topic, topic.lattice.programs.len(), score, snippet);
+                            return Some((text, topic.topic_name.clone(), score));
+                        }
+                    }
+                }
+
+                // Fallback: use the top-scored program regardless of language
+                let (best_idx, best_score) = scored[0];
+                let text = self.dictionary.decode(&topic.lattice.programs[best_idx].token_sequence);
+                let snippet: String = text.chars().take(60).collect();
+                println!("    [forced-topic] '{}' → {} progs, conf={:.3}, text=\"{}...\"",
+                    forced_topic, topic.lattice.programs.len(), best_score, snippet);
+                if text.is_empty() || best_score < 0.10 {
+                    None
+                } else {
+                    Some((text, topic.topic_name.clone(), best_score))
+                }
+            })
+    }
+
     /// Top-K nearest responses by cosine similarity (immutable).
     /// Top-K using STA field scoring (displacement-aware, not just cosine).
     fn nearest_responses_k(&self, cond: &[f32], k: usize) -> Vec<(String, usize, f32)> {
@@ -2428,16 +2509,53 @@ impl IndexedGenEnv {
         _max_len: usize,
         _temperature: f32,
     ) -> (String, f32) {
+        self.generate_for_topic_lang(cond, topic_hint, None, _max_len, _temperature)
+    }
+
+    pub fn generate_for_topic_lang(
+        &mut self,
+        cond: &[f32],
+        topic_hint: Option<&str>,
+        lang_hint: Option<&str>,
+        _max_len: usize,
+        _temperature: f32,
+    ) -> (String, f32) {
         let (global_text, prog_idx, global_conf) = self.nearest_response(cond);
-        let topic_seed = self.nearest_topic_response(cond, topic_hint);
-        let (text, lattice_conf, topic_selected) = match topic_seed {
-            Some((topic_text, topic_name, topic_conf))
-                if topic_conf >= global_conf - 0.03 && topic_text.len() > 5 =>
-            {
-                (topic_text, topic_conf, Some(topic_name))
+
+        // When a specific operation topic is provided (e.g., "subtraction_operation"),
+        // bypass cross-topic competition and directly query the matching sub-lattice.
+        // This prevents addition's high cosine similarity from drowning out subtraction.
+        let forced = topic_hint.and_then(|h| self.forced_topic_response_lang(cond, h, lang_hint));
+        let forced_active = forced.is_some();
+        let (text, lattice_conf, topic_selected) = if let Some((ft, fn_name, ft_conf)) = forced {
+            if ft.len() > 5 && ft_conf > 0.10 {
+                (ft, ft_conf.max(global_conf * 0.85), Some(fn_name))
+            } else {
+                (global_text, global_conf, None)
             }
-            _ => (global_text, global_conf, None),
+        } else {
+            let topic_seed = self.nearest_topic_response(cond, topic_hint);
+            match topic_seed {
+                Some((topic_text, topic_name, topic_conf)) if topic_text.len() > 5 => {
+                    if topic_conf >= global_conf - 0.03 {
+                        (topic_text, topic_conf, Some(topic_name))
+                    } else {
+                        (global_text, global_conf, None)
+                    }
+                }
+                _ => (global_text, global_conf, None),
+            }
         };
+
+        // When forced topic matched and returned valid text, return it directly.
+        // The sub-lattice already contains only programs for this specific operation,
+        // so the field inhibition gate (which uses the GLOBAL lattice) would incorrectly
+        // override the sub-lattice's authoritative result.
+        if forced_active && topic_selected.is_some() && text.len() > 5 {
+            self.last_selected_archetype = None;
+            self.last_generation_confidence = lattice_conf;
+            return (text, lattice_conf);
+        }
 
         // ∇F field gradient: compute the directional derivative of the response field
         // at the query point. Large |∇F| means we're between programs (the field is
@@ -2459,8 +2577,6 @@ impl IndexedGenEnv {
             let causal_energy: f32 = disp_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
             let displacement_energy = spatial_energy + causal_energy;
 
-            // Inhibit if: displacement from nearest program is significant,
-            // OR the field gradient is large (meaning multiple programs compete).
             displacement_energy > 0.10 || gradient_mag > 0.02
         } else {
             false
@@ -2564,18 +2680,33 @@ impl IndexedGenEnv {
         _temperature: f32,
     ) -> (String, f32) {
         let (global_text, prog_idx, global_conf) = self.nearest_response(cond);
-        let topic_seed = self.nearest_topic_response(cond, topic_hint);
-        let (text, lattice_conf, topic_selected) = match topic_seed {
-            Some((topic_text, topic_name, topic_conf))
-                if topic_conf >= global_conf - 0.03 && topic_text.len() > 5 =>
-            {
-                (topic_text, topic_conf, Some(topic_name))
+
+        let forced = topic_hint.and_then(|h| self.forced_topic_response(cond, h));
+        let forced_active = forced.is_some();
+        let (text, lattice_conf, topic_selected) = if let Some((ft, fn_name, ft_conf)) = forced {
+            if ft.len() > 5 && ft_conf > 0.10 {
+                (ft, ft_conf.max(global_conf * 0.85), Some(fn_name))
+            } else {
+                (global_text, global_conf, None)
             }
-            _ => (global_text, global_conf, None),
+        } else {
+            let topic_seed = self.nearest_topic_response(cond, topic_hint);
+            match topic_seed {
+                Some((topic_text, topic_name, topic_conf)) if topic_text.len() > 5 => {
+                    if topic_conf >= global_conf - 0.03 {
+                        (topic_text, topic_conf, Some(topic_name))
+                    } else {
+                        (global_text, global_conf, None)
+                    }
+                }
+                _ => (global_text, global_conf, None),
+            }
         };
 
-        // High confidence: return lattice text directly
-        if lattice_conf >= 0.80 && text.len() > 5 {
+        // Forced topic: return directly, bypass archetype reconstruction
+        if (forced_active && topic_selected.is_some() && text.len() > 5)
+            || (lattice_conf >= 0.80 && text.len() > 5)
+        {
             self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
             self.last_generation_confidence = lattice_conf;
             return (text, lattice_conf);

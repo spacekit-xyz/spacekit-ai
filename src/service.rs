@@ -355,6 +355,8 @@ pub struct LanguageService {
     pub paramecium: Option<InfraciliaryLattice>,
     /// Reasoning engine: hippocampal-prefrontal circuit for cross-group composition.
     pub reasoning: Option<ReasoningEngine>,
+    /// GrowformerLang: meta-language codebook for concept-level routing.
+    pub meta_codebook: Option<crate::growformer_lang::MetaCodebook>,
 }
 
 impl LanguageService {
@@ -412,6 +414,7 @@ impl LanguageService {
             continuum_feedback_count: 0,
             paramecium: None,
             reasoning: None,
+            meta_codebook: None,
         })
     }
 
@@ -510,12 +513,34 @@ impl LanguageService {
 
         let personality = self.personality.clone();
 
+        // Pre-compute meta-routing BEFORE taking the mutable dm borrow.
+        // The meta-codebook is immutable and doesn't need dm.
+        let meta_pre = self.meta_codebook.as_ref().and_then(|mcb| {
+            let dm_ref = &self.dm;
+            let bridged = dm_ref.language_runtime.bridge_text_stateless(text).ok()?;
+            let mr = mcb.route_and_project(&bridged.routed_vector, text);
+            if mr.confidence > 0.3 { Some(mr) } else { None }
+        });
+
         let dm = self.active_dm_mut();
         let action = dm.route_text_to_action_stateless(text)?;
 
         let encoded = dm.language_runtime.encode_and_bridge(text).ok();
         let mut group_idx = action.target_group_id
             .and_then(|gid| dm.main.group_order.iter().position(|&g| g == gid));
+
+        // GrowformerLang meta-routing: override traditional routing with concept-level routing.
+        let mut meta_routing: Option<crate::growformer_lang::MetaRoutingResult> = None;
+        if let Some(mr) = meta_pre {
+            if let Some(best_g) = mr.best_group() {
+                if best_g < dm.main.group_order.len() {
+                    println!("  [meta-route] concept={}, lang={}, conf={:.3}, margin={:.3} → group {}",
+                        mr.concept.name(), mr.language.name(), mr.confidence, mr.margin, best_g);
+                    group_idx = Some(best_g);
+                }
+            }
+            meta_routing = Some(mr);
+        }
 
         // Structural routing fallback: when surface routing rejects as OOD,
         // use grade-2 bivector similarity to find a group that shares the
@@ -531,9 +556,23 @@ impl LanguageService {
         }
 
         let resp = if let Some((ref h_raw, ref bridged)) = encoded {
-            // Apply OCEAN personality conditioning to the routed vector
-            let mut conditioned = bridged.routed_vector.clone();
-            personality.condition_vector(&mut conditioned);
+            // Apply OCEAN personality conditioning to the routed vector.
+            // When language projector is active, blend projected embedding into conditioning.
+            let mut conditioned = if let Some(ref mr) = meta_routing {
+                if !mr.projected_embedding.is_empty() {
+                    let mut proj = mr.projected_embedding.clone();
+                    personality.condition_vector(&mut proj);
+                    proj
+                } else {
+                    let mut c = bridged.routed_vector.clone();
+                    personality.condition_vector(&mut c);
+                    c
+                }
+            } else {
+                let mut c = bridged.routed_vector.clone();
+                personality.condition_vector(&mut c);
+                c
+            };
             let mut topic_hint: Option<String> = None;
 
             // --- MetaBrain path: unified routing + conditioning + archetype selection ---
@@ -556,6 +595,13 @@ impl LanguageService {
                 }
                 None
             };
+
+            // Override topic_hint with operation-specific intent from GrowformerLang.
+            // This gives the topic sub-lattice a precise key (e.g., "addition_operation")
+            // instead of a generic label from the understanding layer.
+            if let Some(op_topic) = crate::growformer_lang::infer_operation_topic(text) {
+                topic_hint = Some(op_topic);
+            }
 
             // Use MetaBrain conditioning when available, else fall back to Clifford path
             let gen_conditioning = if let Some(ref mr) = meta_result {
@@ -931,12 +977,31 @@ impl LanguageService {
 
     pub fn codegen(&mut self, text: &str) -> Result<(ActionJson, Option<CodeGeneration>), String> {
         let start = portable_instant();
+
+        // Pre-compute meta-routing before mutable borrow (need full result for projected_embedding)
+        let meta_pre = self.meta_codebook.as_ref().and_then(|mcb| {
+            let bridged = self.dm.language_runtime.bridge_text_stateless(text).ok()?;
+            let mr = mcb.route_and_project(&bridged.routed_vector, text);
+            if mr.confidence > 0.3 { Some(mr) } else { None }
+        });
+
         let dm = self.active_dm_mut();
         let action = dm.route_text_to_action_stateless(text)?;
 
         let encoded = dm.language_runtime.encode_and_bridge(text).ok();
         let mut group_idx = action.target_group_id
             .and_then(|gid| dm.main.group_order.iter().position(|&g| g == gid));
+
+        // Apply meta-routing override for codegen
+        if let Some(ref mr) = meta_pre {
+            if let Some(mg) = mr.best_group() {
+                if mg < dm.main.group_order.len() {
+                    println!("  [meta-route codegen] concept={}, lang={}, conf={:.3} → group {}",
+                        mr.concept.name(), mr.language.name(), mr.confidence, mg);
+                    group_idx = Some(mg);
+                }
+            }
+        }
 
         if group_idx.is_none() {
             if let Some((ref h_raw, _)) = encoded {
@@ -949,30 +1014,69 @@ impl LanguageService {
         }
 
         let code = if let Some((ref h_raw, ref bridged)) = encoded {
-            let base_cond = &bridged.routed_vector;
-            let topic_hint = dm.understanding.as_ref()
-                .filter(|ul| !ul.is_empty())
-                .map(|ul| {
-                    let (_, _, topic, _) = ul.classify(h_raw);
-                    topic
+            let raw_cond = &bridged.routed_vector;
+            // Use language-projected embedding when available for language-specific conditioning
+            let projected_cond: Vec<f32>;
+            let base_cond: &[f32] = if let Some(ref mr) = meta_pre {
+                if !mr.projected_embedding.is_empty() {
+                    projected_cond = mr.projected_embedding.clone();
+                    &projected_cond
+                } else {
+                    raw_cond
+                }
+            } else {
+                raw_cond
+            };
+            // Operation-specific topic hint from GrowformerLang for sub-lattice discrimination,
+            // falling back to understanding layer's generic topic.
+            let topic_hint = crate::growformer_lang::infer_operation_topic(text)
+                .or_else(|| {
+                    dm.understanding.as_ref()
+                        .filter(|ul| !ul.is_empty())
+                        .map(|ul| {
+                            let (_, _, topic, _) = ul.classify(h_raw);
+                            topic
+                        })
                 });
             let lang = match action.payload {
                 Some(crate::dimension::action::ActionPayload::CodingAssist { ref language_hint, .. }) =>
                     language_hint.clone(),
-                _ => "python".to_string(),
+                _ => {
+                    if let Some(ref mr) = meta_pre {
+                        mr.language.name().to_lowercase()
+                    } else {
+                        "python".to_string()
+                    }
+                }
             };
 
             // --- Level 1: Competitive multi-head inference for code ---
             let primary = group_idx.and_then(|gidx| {
-                let adapted = dm.adapt_for_group_clifford(gidx, base_cond, h_raw, GEN_COND_DIM);
+                let mut adapted = dm.adapt_for_group_clifford(gidx, base_cond, h_raw, GEN_COND_DIM);
+                // Blend language-projected embedding into conditioning so that
+                // the generation path receives language-specific signal even when
+                // a group rotor overrides z_shared.
+                if let Some(ref mr) = meta_pre {
+                    if !mr.projected_embedding.is_empty() {
+                        let proj = &mr.projected_embedding;
+                        for i in 0..proj.len().min(adapted.len()) {
+                            adapted[i] = adapted[i] * 0.65 + proj[i] * 0.35;
+                        }
+                    }
+                }
                 dm.group_code_envs.get_mut(&gidx).map(|env| {
-                    let (code, conf) = env.generate_for_topic(&adapted, topic_hint.as_deref(), 500, 0.7);
+                    let (code, conf) = env.generate_for_topic_lang(
+                        &adapted, topic_hint.as_deref(), Some(lang.as_str()), 500, 0.7,
+                    );
                     (code, conf, gidx)
                 })
             });
 
+            // When meta-routing is active and forced topic returned valid code,
+            // trust the primary group — lower threshold to prevent fan-out override.
+            let code_accept_threshold = if meta_pre.is_some() { 0.40 } else { 0.70 };
             let (best_code, _best_conf, best_gidx) = match primary {
-                Some((ref c, conf, gidx)) if conf >= 0.70 && c.len() > 5 => {
+                Some((ref c, conf, gidx)) if conf >= code_accept_threshold && c.len() > 5 => {
                     (c.clone(), conf, gidx)
                 }
                 primary_result => {
