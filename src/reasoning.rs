@@ -8,7 +8,7 @@
 //! This module implements that process using Growformer primitives:
 //!
 //! - **Cognitive Map** (hippocampus): a graph of programs across all groups,
-//!   connected by structural similarity (Cl(8) bivector cosine). Enables
+//!   connected by structural similarity (Cl(1,7) bivector cosine). Enables
 //!   traversal from one concept to structurally related concepts in other
 //!   domains.
 //!
@@ -21,7 +21,7 @@
 //!   hypotheses inhibit each other, and the pattern converges to a coherent
 //!   "thought."
 //!
-//! - **Transfer Rotor Composition** (frontal reasoning): the Cl(8) transfer
+//! - **Transfer Rotor Composition** (frontal reasoning): the Cl(1,7) transfer
 //!   rotor maps structure from domain A to domain B — genuine analogical
 //!   reasoning expressed as geometry.
 //!
@@ -311,20 +311,27 @@ impl ReasoningEngine {
             };
         }
 
-        // Collect top activated nodes, ensuring cross-group diversity
+        // Score nodes by BOTH wave energy AND direct input relevance.
+        // This prevents a high-connectivity hub from winning regardless of input.
         let mut scored: Vec<(usize, f32)> = energy.iter().enumerate()
             .filter(|(_, &e)| e > 0.1)
-            .map(|(i, &e)| (i, e))
+            .map(|(i, &e)| {
+                let node = &self.cognitive_map.nodes[i];
+                let input_relevance = cosine_sim(cond, &node.centroid).max(0.0);
+                // Blend: 40% wave energy, 60% input relevance
+                let combined = 0.4 * e + 0.6 * input_relevance;
+                (i, combined)
+            })
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // Pick the best node per group (up to 3 groups)
         let mut best_per_group: Vec<(usize, f32)> = Vec::new();
         let mut seen_groups = std::collections::HashSet::new();
-        for &(node_idx, e) in &scored {
+        for &(node_idx, combined_score) in &scored {
             let gidx = self.cognitive_map.nodes[node_idx].group_idx;
             if seen_groups.insert(gidx) {
-                best_per_group.push((node_idx, e));
+                best_per_group.push((node_idx, combined_score));
                 if best_per_group.len() >= 3 { break; }
             }
         }
@@ -485,30 +492,45 @@ impl ReasoningEngine {
     }
 
     /// Check if the reasoning engine should be invoked.
-    /// Returns true when the primary classifier has low confidence (the prompt
-    /// doesn't cleanly fit one group) or when multiple groups activate strongly.
+    /// Only fires when there's genuine cross-domain ambiguity: the top two
+    /// groups must be very close in activation AND both must be individually
+    /// strong.  This prevents triggering on clear single-domain prompts.
     pub fn should_reason(
         &self,
         cond: &[f32],
-        primary_confidence: f32,
+        _primary_confidence: f32,
         group_envs: &HashMap<usize, IndexedGenEnv>,
     ) -> bool {
-        if primary_confidence > 0.75 {
+        let mut group_scores: Vec<(usize, f32)> = group_envs.iter()
+            .map(|(&gidx, env)| {
+                let best_sim = env.lattice.programs.iter()
+                    .map(|p| cosine_sim(cond, &p.ema_centroid))
+                    .fold(0.0f32, f32::max);
+                (gidx, best_sim)
+            })
+            .collect();
+        group_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        if group_scores.len() < 2 {
             return false;
         }
 
-        // Check if multiple groups activate above threshold
-        let mut active_groups = 0;
-        for (&_gidx, env) in group_envs {
-            let best_sim = env.lattice.programs.iter()
-                .map(|p| cosine_sim(cond, &p.ema_centroid))
-                .fold(0.0f32, f32::max);
-            if best_sim > 0.3 {
-                active_groups += 1;
-            }
+        let top = group_scores[0].1;
+        let second = group_scores[1].1;
+
+        // Both must be individually strong (above 0.35)
+        if top < 0.35 || second < 0.35 {
+            return false;
         }
 
-        active_groups >= 2
+        // The gap between top and second must be small (ratio > 0.85).
+        // This means the prompt genuinely activates two domains nearly equally.
+        if top > 0.01 {
+            let ambiguity = second / top;
+            ambiguity > 0.85
+        } else {
+            false
+        }
     }
 }
 

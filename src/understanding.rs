@@ -7,6 +7,10 @@
 //! The combined 48d understanding vector is concatenated with the 128d bridge
 //! vector to form a 176d (padded to 192d) conditioning signal that tells the
 //! generation head both WHAT the topic is and WHAT TO DO with it.
+//!
+//! With Cl(1,7) SpaceTime Algebra, the verb embedding also produces a
+//! **goal magnitude** scalar that feeds the timelike (e_0) dimension of the
+//! Clifford embedding, giving the system causal/sequential direction.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -312,6 +316,28 @@ impl UnderstandingLayer {
         out.extend_from_slice(&topic_emb);
         out.extend_from_slice(&verb_emb);
         out
+    }
+
+    /// Compute the goal magnitude for the timelike (e_0) dimension.
+    /// Action verbs that imply directed change (implement, debug, optimize, refactor)
+    /// produce higher magnitudes than passive verbs (explain, compare).
+    /// This feeds the timelike axis of the Cl(1,7) embedding.
+    pub fn goal_magnitude(&self, raw: &[f32]) -> f32 {
+        let (verb_idx, verb_conf) = self.verb_classifier.predict_with_confidence(raw);
+        let verb_name = self.verb_names.get(verb_idx)
+            .map(|s| s.as_str()).unwrap_or("explain");
+        let directedness = match verb_name {
+            "implement" => 1.0,
+            "debug"     => 0.9,
+            "optimize"  => 0.85,
+            "refactor"  => 0.8,
+            "test"      => 0.7,
+            "design"    => 0.6,
+            "compare"   => 0.3,
+            "explain"   => 0.2,
+            _           => 0.1,
+        };
+        directedness * verb_conf.max(0.0).min(1.0)
     }
 
     pub fn freeze(&mut self) {

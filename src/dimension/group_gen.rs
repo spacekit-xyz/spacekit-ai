@@ -25,6 +25,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::clifford::{embed_bridge_vector, causal_fingerprint, BOOST_BIVECTOR_COUNT};
 use crate::environment::NeuralEnvironment;
 use crate::spectral::{
     TokenDictionary, hamming_parity_bits, hamming_encode, hamming_decode,
@@ -2058,6 +2059,10 @@ use crate::dimension::paramecium::InfraciliaryLattice;
 pub struct TopicSubIndex {
     pub topic_name: String,
     pub centroid: Vec<f32>,
+    /// Mean causal fingerprint (7d boost bivectors from Cl(1,7)) for this topic.
+    /// Encodes the temporal/goal direction of samples in this topic cluster.
+    #[serde(default)]
+    pub causal_centroid: [f32; BOOST_BIVECTOR_COUNT],
     pub lattice: InfraciliaryLattice,
     pub sample_count: usize,
 }
@@ -2098,9 +2103,16 @@ impl IndexedGenEnv {
             if pairs.is_empty() {
                 continue;
             }
-            let mut centroid = vec![0.0f32; pairs[0].0.len()];
+            let dim = pairs[0].0.len();
+            let mut centroid = vec![0.0f32; dim];
+            let mut causal_sum = [0.0f32; BOOST_BIVECTOR_COUNT];
             for (cond, _) in &pairs {
                 for (dst, src) in centroid.iter_mut().zip(cond.iter()) {
+                    *dst += *src;
+                }
+                let mv = embed_bridge_vector(cond);
+                let cfp = causal_fingerprint(&mv);
+                for (dst, src) in causal_sum.iter_mut().zip(cfp.iter()) {
                     *dst += *src;
                 }
             }
@@ -2112,12 +2124,21 @@ impl IndexedGenEnv {
             for v in &mut centroid {
                 *v /= norm;
             }
+            let mut causal_centroid = [0.0f32; BOOST_BIVECTOR_COUNT];
+            for (i, v) in causal_sum.iter().enumerate() {
+                causal_centroid[i] = v / n;
+            }
+            let cnorm = causal_centroid.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+            for v in &mut causal_centroid {
+                *v /= cnorm;
+            }
 
             let mut lattice = InfraciliaryLattice::new(dictionary.clone());
             lattice.develop(&pairs, spawn_threshold);
             out.push(TopicSubIndex {
                 topic_name,
                 centroid,
+                causal_centroid,
                 lattice,
                 sample_count: pairs.len(),
             });
@@ -2266,6 +2287,11 @@ impl IndexedGenEnv {
             return None;
         }
         let hint = topic_hint.map(|s| s.trim()).filter(|s| !s.is_empty());
+
+        // Compute the input's causal fingerprint once for all comparisons.
+        let input_mv = embed_bridge_vector(cond);
+        let input_causal = causal_fingerprint(&input_mv);
+
         let mut best: Option<(String, String, f32)> = None;
         for topic in &self.topic_subindex {
             let topic_sim = gen_cosine_sim(cond, &topic.centroid).max(0.0);
@@ -2273,13 +2299,22 @@ impl IndexedGenEnv {
             if text.is_empty() {
                 continue;
             }
+
+            // Causal similarity: do the boost bivectors (goal/action direction) align?
+            let causal_sim = {
+                let dot: f32 = input_causal.iter().zip(topic.causal_centroid.iter()).map(|(a, b)| a * b).sum();
+                let na: f32 = input_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let nb: f32 = topic.causal_centroid.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if na < 1e-10 || nb < 1e-10 { 0.0 } else { (dot / (na * nb)).max(0.0) }
+            };
+
             let hint_bonus = match hint {
                 Some(h) if h.eq_ignore_ascii_case(&topic.topic_name) => 0.12,
                 Some(_) => 0.0,
                 None => 0.02,
             };
             let density_bonus = ((topic.sample_count as f32).ln_1p() / 10.0).min(0.08);
-            let combined = (0.68 * local_conf + 0.24 * topic_sim + hint_bonus + density_bonus).clamp(0.0, 1.0);
+            let combined = (0.50 * local_conf + 0.20 * topic_sim + 0.22 * causal_sim + hint_bonus + density_bonus).clamp(0.0, 1.0);
             if best.as_ref().map(|(_, _, score)| combined > *score).unwrap_or(true) {
                 best = Some((text, topic.topic_name.clone(), combined));
             }
@@ -2324,17 +2359,37 @@ impl IndexedGenEnv {
             _ => (global_text, global_conf, None),
         };
 
-        // High confidence: return lattice text directly (skip lossy archetype roundtrip)
-        if lattice_conf >= 0.80 && text.len() > 5 {
+        // Inhibition gate: compute causal divergence between input and retrieved program.
+        // If the goal/action direction differs (e.g., "subtraction" retrieved "addition"),
+        // the causal fingerprints will diverge and we force the archetype/slot path
+        // instead of returning verbatim — the system inhibits the wrong-intent match.
+        let causal_inhibited = if lattice_conf >= 0.80 {
+            let retrieved_centroid = &self.lattice.programs[prog_idx].ema_centroid;
+            let input_mv = embed_bridge_vector(cond);
+            let retrieved_mv = embed_bridge_vector(retrieved_centroid);
+            let input_cf = causal_fingerprint(&input_mv);
+            let retrieved_cf = causal_fingerprint(&retrieved_mv);
+            let dot: f32 = input_cf.iter().zip(retrieved_cf.iter()).map(|(a, b)| a * b).sum();
+            let na: f32 = input_cf.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let nb: f32 = retrieved_cf.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let causal_sim = if na < 1e-10 || nb < 1e-10 { 1.0 } else { dot / (na * nb) };
+            causal_sim < 0.85
+        } else {
+            false
+        };
+
+        // High confidence AND causal alignment: return lattice text directly
+        if lattice_conf >= 0.80 && text.len() > 5 && !causal_inhibited {
             self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
             self.last_generation_confidence = lattice_conf;
             return (text, lattice_conf);
         }
 
-        // Medium confidence: use archetype structure + slot filling
-        if lattice_conf >= 0.55 {
+        // Medium confidence OR causal-inhibited high confidence: archetype template + slot filling
+        if lattice_conf >= 0.55 || causal_inhibited {
             if let Some(ref cb) = self.codebook {
                 if cb.has_prototypes() {
+                    // Select archetype by INPUT embedding (structural template)
                     let (arch_idx, _) = cb.select_archetype_by_embedding(cond);
                     let slot_tokens = self.dictionary.encode(&text);
                     let slot_bits = cb.encode_slot_only(&slot_tokens);

@@ -1,11 +1,12 @@
-//! Cl(8,0) Clifford Algebra — geometric product engine for Growformer.
+//! Cl(1,7) Clifford Algebra — SpaceTime-inspired geometric product engine.
 //!
-//! Provides the 256-dimensional real Clifford algebra over R^8,
-//! where multivectors are decomposed by grade:
+//! Provides the 256-dimensional real Clifford algebra over R^{1,7},
+//! where e_0 is **timelike** (e_0² = −1) and e_1..e_7 are spacelike (e_i² = +1).
+//! Multivectors are decomposed by grade:
 //!
 //!   grade 0: 1 scalar           (routing similarity)
-//!   grade 1: 8 vectors          (raw signal)
-//!   grade 2: 28 bivectors       (per-group conditioning / rotations)
+//!   grade 1: 8 vectors          (1 timelike + 7 spacelike)
+//!   grade 2: 28 bivectors       (7 boost planes + 21 rotation planes)
 //!   grade 3: 56 trivectors
 //!   grade 4: 70 quadvectors
 //!   grade 5: 56
@@ -14,18 +15,32 @@
 //!   grade 8: 1 pseudoscalar     (orientation)
 //!   total:   256 basis blades
 //!
+//! The mixed metric signature gives the algebra causal structure:
+//!   - Boost bivectors (e_0∧e_i) encode temporal/causal/sequential relations
+//!   - Rotation bivectors (e_i∧e_j, i,j≥1) encode spatial/structural relations
+//!   - Rotors include both spatial rotations and Lorentz boosts
+//!
 //! The geometric product `uv = u·v + u∧v` replaces:
 //!   - bridge projection (grade extraction)
 //!   - per-group adapters (rotor sandwich `R x R†`)
-//!   - E8 quantization (grade-1 in Cl(8) = E8 vector space)
+//!   - E8 quantization (grade-1 in Cl(1,7) = Minkowski-like vector space)
 //!
 //! Compact representation: only store and compute grades needed for each operation.
 
 use serde::{Deserialize, Serialize};
 
-/// Number of basis blades in Cl(8,0) = 2^8
+/// Number of basis blades in Cl(1,7) = 2^8
 pub const CL8_DIM: usize = 256;
 pub const CL8_VECTOR_DIM: usize = 8;
+
+/// Metric signature mask: bit i is set if e_i squares to −1 (timelike).
+/// Cl(1,7): e_0 is timelike, e_1..e_7 are spacelike.
+pub const TIMELIKE_MASK: u8 = 0b0000_0001;
+
+/// Number of boost bivectors (timelike ∧ spacelike): 7
+pub const BOOST_BIVECTOR_COUNT: usize = 7;
+/// Number of rotation bivectors (spacelike ∧ spacelike): 21
+pub const ROTATION_BIVECTOR_COUNT: usize = 21;
 
 /// Binomial coefficients C(8,k) — dimensions of each grade
 pub const GRADE_DIMS: [usize; 9] = [1, 8, 28, 56, 70, 56, 28, 8, 1];
@@ -33,7 +48,7 @@ pub const GRADE_DIMS: [usize; 9] = [1, 8, 28, 56, 70, 56, 28, 8, 1];
 /// Cumulative offsets into the flat 256-element representation
 pub const GRADE_OFFSETS: [usize; 9] = [0, 1, 9, 37, 93, 163, 219, 247, 255];
 
-/// A multivector in Cl(8,0), stored as 256 real components.
+/// A multivector in Cl(1,7), stored as 256 real components.
 #[derive(Clone, Debug)]
 pub struct Multivector {
     pub components: [f32; CL8_DIM],
@@ -94,26 +109,36 @@ impl<'de> Deserialize<'de> for Rotor {
     }
 }
 
-/// Precomputed geometric product sign table for Cl(8,0).
-/// For basis blades e_I and e_J, `geo_product_sign(I, J)` returns the sign
-/// and the resulting blade index K such that e_I * e_J = sign * e_K.
+/// Geometric product sign and result blade for Cl(1,7).
+///
+/// For basis blades e_I and e_J, returns (sign, K) where e_I * e_J = sign * e_K.
+/// The sign accounts for both transposition parity AND the metric signature:
+/// each shared timelike basis vector (e_0) contributes an extra −1.
 ///
 /// Blade indices use the canonical bitmap encoding:
 ///   e_0 = 0b00000001, e_1 = 0b00000010, ..., e_7 = 0b10000000
 ///   e_{01} = 0b00000011, etc.
 fn geo_sign_and_index(a: u8, b: u8) -> (f32, u8) {
     let result_blade = a ^ b;
+    let shared = a & b;
+
     // Count transpositions: for each bit in b, count how many higher bits in a
     // must be passed through (each swap contributes a sign flip).
     let mut swaps = 0u32;
     let mut b_remaining = b;
     while b_remaining != 0 {
-        let lowest_b = b_remaining & b_remaining.wrapping_neg(); // isolate lowest bit
-        let a_above = a & !((lowest_b << 1).wrapping_sub(1)); // bits in a above this position
+        let lowest_b = b_remaining & b_remaining.wrapping_neg();
+        let a_above = a & !((lowest_b << 1).wrapping_sub(1));
         swaps += a_above.count_ones();
-        b_remaining &= b_remaining - 1; // clear lowest bit
+        b_remaining &= b_remaining - 1;
     }
-    let sign = if swaps % 2 == 0 { 1.0 } else { -1.0 };
+
+    // Metric contractions: each shared basis vector that is timelike (squares to −1)
+    // contributes an additional sign flip.  In Cl(1,7), only e_0 is timelike.
+    let timelike_contractions = (shared & TIMELIKE_MASK).count_ones();
+
+    let total_negatives = swaps + timelike_contractions;
+    let sign = if total_negatives % 2 == 0 { 1.0 } else { -1.0 };
     (sign, result_blade)
 }
 
@@ -394,6 +419,15 @@ impl Rotor {
 /// Each block becomes a grade-1 vector; the full embedding is their sum
 /// (capturing the complete signal across E8 subspaces).
 pub fn embed_bridge_vector(v: &[f32]) -> Multivector {
+    embed_bridge_vector_with_goal(v, 0.0)
+}
+
+/// Embed an N-dimensional vector into Cl(1,7), with an explicit goal magnitude
+/// injected into the timelike (e_0) component.  When `goal_mag` is 0.0 this
+/// is identical to the original embedding; when non-zero it gives the
+/// multivector a causal "direction" that distinguishes passive queries from
+/// directed actions.
+pub fn embed_bridge_vector_with_goal(v: &[f32], goal_mag: f32) -> Multivector {
     let num_blocks = (v.len() + 7) / 8;
     let mut result = Multivector::zero();
     for block in 0..num_blocks {
@@ -402,24 +436,30 @@ pub fn embed_bridge_vector(v: &[f32]) -> Multivector {
         for i in 0..8 {
             chunk[i] = v.get(offset + i).copied().unwrap_or(0.0);
         }
-        // Weighted sum: each block contributes to the same grade-1 space
-        // but we also capture inter-block structure via grade-2 wedge products
         let block_mv = Multivector::vector(&chunk);
         if block == 0 {
             for i in 0..CL8_DIM {
                 result.components[i] = block_mv.components[i];
             }
         } else {
-            // Accumulate: add vector part, wedge for bivector structure
             let wedge = result.wedge(&block_mv);
             result = result.add(&block_mv);
-            // Blend in a fraction of the wedge product to preserve inter-block correlations
             let alpha = 1.0 / (block as f32 + 1.0);
             for i in GRADE_OFFSETS[2]..GRADE_OFFSETS[2] + GRADE_DIMS[2] {
                 result.components[i] += alpha * wedge.components[i];
             }
         }
     }
+
+    // Inject goal magnitude into the timelike dimension (e_0, grade-1 index 0).
+    // This replaces the accumulated e_0 content with the intentional goal signal,
+    // blended with whatever content was already there.
+    if goal_mag.abs() > 1e-8 {
+        let e0_idx = GRADE_OFFSETS[1]; // first grade-1 component = e_0
+        let existing = result.components[e0_idx];
+        result.components[e0_idx] = existing * 0.5 + goal_mag * 0.5;
+    }
+
     result
 }
 
@@ -446,7 +486,7 @@ impl GroupRotor {
     }
 
     /// Full Clifford conditioning pipeline:
-    /// raw 768d → embed into Cl(8) → rotate by group rotor → extract flat vector.
+    /// raw 768d → embed into Cl(1,7) → rotate/boost by group rotor → extract flat vector.
     pub fn condition(&self, h_raw: &[f32], target_dim: usize) -> Vec<f32> {
         let mv = embed_bridge_vector(h_raw);
         let rotor = self.rotor();
@@ -505,7 +545,9 @@ impl GroupRotor {
 }
 
 /// Extract routing score: the scalar part of the geometric product of two multivectors.
-/// Higher values = more aligned in Cl(8) space.
+/// Higher values = more aligned in Cl(1,7) space. Note: the timelike inner product
+/// contributes −u₀v₀, so agreement on the timelike axis *lowers* similarity while
+/// agreement on spacelike axes raises it — encoding causal distinctness vs content overlap.
 pub fn geometric_similarity(a: &Multivector, b: &Multivector) -> f32 {
     a.inner(b)
 }
@@ -522,10 +564,13 @@ pub fn apply_group_rotor(mv: &Multivector, rotor: &Rotor) -> Multivector {
 /// Uses grade-1 (8d) + grade-2 (28d) = 36d, or padded to target_dim.
 pub fn extract_conditioning(mv: &Multivector, target_dim: usize) -> Vec<f32> {
     let mut out = Vec::with_capacity(target_dim);
-    // Grade 1: direct signal (8 components)
+    // Grade 1: direct signal (8 components: 1 timelike + 7 spacelike)
     out.extend_from_slice(mv.grade(1));
-    // Grade 2: rotational/relational structure (28 components)
-    out.extend_from_slice(mv.grade(2));
+    // Grade 2 boost bivectors: causal/temporal structure (7 components)
+    let bv = mv.grade(2);
+    out.extend_from_slice(&bv[..BOOST_BIVECTOR_COUNT]);
+    // Grade 2 rotation bivectors: spatial/relational structure (21 components)
+    out.extend_from_slice(&bv[BOOST_BIVECTOR_COUNT..]);
     // Grade 0: scalar similarity (1 component)
     out.push(mv.scalar_part());
     // Pad or truncate to target_dim
@@ -545,6 +590,38 @@ pub fn structural_fingerprint(mv: &Multivector) -> [f32; 28] {
     let mut fp = [0.0f32; 28];
     fp.copy_from_slice(mv.grade(2));
     fp
+}
+
+/// Extract the 7d causal fingerprint: boost bivector components (e_0∧e_i).
+/// These encode temporal/sequential/causal relationships — "what leads to what."
+/// In the canonical blade ordering, the first 7 bivectors are e_{01}..e_{07},
+/// i.e. exactly the boost planes involving the timelike dimension.
+pub fn causal_fingerprint(mv: &Multivector) -> [f32; BOOST_BIVECTOR_COUNT] {
+    let mut fp = [0.0f32; BOOST_BIVECTOR_COUNT];
+    let bv = mv.grade(2);
+    fp.copy_from_slice(&bv[..BOOST_BIVECTOR_COUNT]);
+    fp
+}
+
+/// Extract the 21d spatial fingerprint: rotation bivector components (e_i∧e_j, i,j≥1).
+/// These encode structural/relational similarity — "what kind of thing is this."
+pub fn spatial_fingerprint(mv: &Multivector) -> [f32; ROTATION_BIVECTOR_COUNT] {
+    let mut fp = [0.0f32; ROTATION_BIVECTOR_COUNT];
+    let bv = mv.grade(2);
+    fp.copy_from_slice(&bv[BOOST_BIVECTOR_COUNT..]);
+    fp
+}
+
+/// Cosine similarity between two causal fingerprints.
+/// High value means two inputs share the same goal/action/temporal structure.
+pub fn causal_similarity(a: &Multivector, b: &Multivector) -> f32 {
+    let fa = causal_fingerprint(a);
+    let fb = causal_fingerprint(b);
+    let dot: f32 = fa.iter().zip(fb.iter()).map(|(x, y)| x * y).sum();
+    let na: f32 = fa.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = fb.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na < 1e-10 || nb < 1e-10 { return 0.0; }
+    dot / (na * nb)
 }
 
 /// Cosine similarity in bivector (grade-2) space only.
@@ -604,16 +681,27 @@ pub fn transfer_rotor(source: &Rotor, target: &Rotor) -> Rotor {
 }
 
 /// Understanding-aware conditioning: embed the raw input, separate content
-/// (grade-1) from structure (grade-2), apply the group rotor to structure
-/// only, then recombine.  This preserves topic-specific signal while
-/// adapting relational structure per-group — the system "understands" the
-/// structural pattern and adapts it, rather than transforming blindly.
+/// (grade-1: timelike goal + spacelike topic) from structure (grade-2:
+/// boost causality + rotation similarity), apply the group rotor to structure
+/// only, then recombine.  The rotor now includes both spatial rotations
+/// (adapting relational pattern) and boosts (adapting causal/temporal ordering).
 pub fn condition_with_understanding(
     h_raw: &[f32],
     rotor: &Rotor,
     target_dim: usize,
 ) -> (Vec<f32>, [f32; 28]) {
-    let mv = embed_bridge_vector(h_raw);
+    condition_with_understanding_goal(h_raw, rotor, target_dim, 0.0)
+}
+
+/// Goal-aware variant: injects the goal magnitude from the UnderstandingLayer
+/// into the timelike dimension before separating content and structure.
+pub fn condition_with_understanding_goal(
+    h_raw: &[f32],
+    rotor: &Rotor,
+    target_dim: usize,
+    goal_mag: f32,
+) -> (Vec<f32>, [f32; 28]) {
+    let mv = embed_bridge_vector_with_goal(h_raw, goal_mag);
     let content = mv.grade_project(1);
     let structure = abstract_mv(&mv);
     let rotated_structure = apply_group_rotor(&structure, rotor);
@@ -641,17 +729,22 @@ mod tests {
 
     #[test]
     fn test_geo_sign_basis_vectors() {
-        // e1 * e1 = +1 (in Cl(p,0), all basis vectors square to +1)
+        // e_0 * e_0 = -1 in Cl(1,7) (timelike: squares to -1)
         let (sign, blade) = geo_sign_and_index(0b00000001, 0b00000001);
         assert_eq!(blade, 0); // scalar
+        assert_eq!(sign, -1.0);
+
+        // e_1 * e_1 = +1 in Cl(1,7) (spacelike: squares to +1)
+        let (sign, blade) = geo_sign_and_index(0b00000010, 0b00000010);
+        assert_eq!(blade, 0);
         assert_eq!(sign, 1.0);
 
-        // e1 * e2 = e12
+        // e_0 * e_1 = e_{01} (no shared basis, no metric effect)
         let (sign, blade) = geo_sign_and_index(0b00000001, 0b00000010);
         assert_eq!(blade, 0b00000011);
         assert_eq!(sign, 1.0);
 
-        // e2 * e1 = -e12 (anticommutative for orthogonal vectors)
+        // e_1 * e_0 = -e_{01} (anticommutative for orthogonal vectors)
         let (sign, blade) = geo_sign_and_index(0b00000010, 0b00000001);
         assert_eq!(blade, 0b00000011);
         assert_eq!(sign, -1.0);
@@ -679,12 +772,23 @@ mod tests {
     }
 
     #[test]
-    fn test_geometric_product_parallel_vectors() {
-        // u·u = |u|² (scalar), u∧u = 0
+    fn test_geometric_product_parallel_vectors_timelike() {
+        // e_0 is timelike: u = 3·e_0, u·u = -9 (Minkowski inner product)
         let u = Multivector::vector(&[3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         let uu = u.geo(&u);
-        assert!((uu.scalar_part() - 9.0).abs() < 1e-5, "u·u should be 9, got {}", uu.scalar_part());
+        assert!((uu.scalar_part() - (-9.0)).abs() < 1e-5,
+            "timelike u·u should be -9 in Cl(1,7), got {}", uu.scalar_part());
         assert!(uu.bivector_part().iter().all(|&b| b.abs() < 1e-6));
+    }
+
+    #[test]
+    fn test_geometric_product_parallel_vectors_spacelike() {
+        // e_1 is spacelike: v = 3·e_1, v·v = +9 (Euclidean)
+        let v = Multivector::vector(&[0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let vv = v.geo(&v);
+        assert!((vv.scalar_part() - 9.0).abs() < 1e-5,
+            "spacelike v·v should be +9 in Cl(1,7), got {}", vv.scalar_part());
+        assert!(vv.bivector_part().iter().all(|&b| b.abs() < 1e-6));
     }
 
     #[test]
@@ -731,10 +835,19 @@ mod tests {
     }
 
     #[test]
-    fn test_geometric_similarity_self() {
+    fn test_geometric_similarity_self_spacelike() {
+        // Spacelike vector: self-similarity is positive
+        let v = Multivector::vector(&[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let sim = geometric_similarity(&v, &v);
+        assert!(sim > 0.0, "spacelike self-similarity should be positive: {}", sim);
+    }
+
+    #[test]
+    fn test_geometric_similarity_self_timelike() {
+        // Timelike vector: self-inner-product is negative in Cl(1,7)
         let v = Multivector::vector(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         let sim = geometric_similarity(&v, &v);
-        assert!(sim > 0.0, "self-similarity should be positive: {}", sim);
+        assert!(sim < 0.0, "timelike self-similarity should be negative in Cl(1,7): {}", sim);
     }
 
     #[test]
@@ -888,5 +1001,63 @@ mod tests {
         // Structure (fingerprint) should differ due to rotor
         let fp_diff: f32 = fp_id.iter().zip(fp_r.iter()).map(|(a, b)| (a - b).abs()).sum();
         assert!(fp_diff > 0.01, "structural fingerprint should change under non-identity rotor: diff={}", fp_diff);
+    }
+
+    #[test]
+    fn test_causal_fingerprint_size() {
+        let v: Vec<f32> = (0..128).map(|i| (i as f32 * 0.03).sin()).collect();
+        let mv = embed_bridge_vector(&v);
+        let cfp = causal_fingerprint(&mv);
+        assert_eq!(cfp.len(), BOOST_BIVECTOR_COUNT);
+        assert_eq!(cfp.len(), 7);
+    }
+
+    #[test]
+    fn test_spatial_fingerprint_size() {
+        let v: Vec<f32> = (0..128).map(|i| (i as f32 * 0.03).sin()).collect();
+        let mv = embed_bridge_vector(&v);
+        let sfp = spatial_fingerprint(&mv);
+        assert_eq!(sfp.len(), ROTATION_BIVECTOR_COUNT);
+        assert_eq!(sfp.len(), 21);
+    }
+
+    #[test]
+    fn test_causal_plus_spatial_equals_structural() {
+        let v: Vec<f32> = (0..128).map(|i| (i as f32 * 0.05).sin()).collect();
+        let mv = embed_bridge_vector(&v);
+        let full = structural_fingerprint(&mv);
+        let causal = causal_fingerprint(&mv);
+        let spatial = spatial_fingerprint(&mv);
+        for i in 0..7 {
+            assert!((full[i] - causal[i]).abs() < 1e-10,
+                "causal fingerprint should be first 7 of structural");
+        }
+        for i in 0..21 {
+            assert!((full[7 + i] - spatial[i]).abs() < 1e-10,
+                "spatial fingerprint should be last 21 of structural");
+        }
+    }
+
+    #[test]
+    fn test_goal_magnitude_affects_timelike() {
+        let v: Vec<f32> = (0..128).map(|i| (i as f32 * 0.05).sin()).collect();
+        let mv0 = embed_bridge_vector_with_goal(&v, 0.0);
+        let mv1 = embed_bridge_vector_with_goal(&v, 1.0);
+        let e0_idx = GRADE_OFFSETS[1]; // timelike component
+        assert!((mv0.components[e0_idx] - mv1.components[e0_idx]).abs() > 0.01,
+            "goal magnitude should change the timelike component");
+        // Spacelike components (indices 1..7 of grade-1) should be identical
+        for i in 1..8 {
+            assert!((mv0.grade(1)[i] - mv1.grade(1)[i]).abs() < 1e-10,
+                "goal magnitude should not affect spacelike components");
+        }
+    }
+
+    #[test]
+    fn test_metric_mixed_vector_inner_product() {
+        // v = (1, 1, 0, ...) → v·v = -1 + 1 = 0 (null/lightlike vector)
+        let v = Multivector::vector(&[1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let sim = geometric_similarity(&v, &v);
+        assert!(sim.abs() < 1e-5, "lightlike vector self-product should be ~0: {}", sim);
     }
 }
