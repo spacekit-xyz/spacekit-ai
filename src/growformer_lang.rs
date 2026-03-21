@@ -468,6 +468,73 @@ pub fn infer_concept(text: &str, semantic_intent: Option<&str>, action_target: O
     MetaConcept::GeneralKnowledge
 }
 
+/// Detect whether a query is broad/categorical (asking for an overview or definition)
+/// versus specific (asking about a particular operation, pattern, or task).
+///
+/// Broad queries like "What is software architecture?" need multi-program composition
+/// rather than single-program retrieval. This enables the generation path to invoke
+/// the summarization mode instead of returning the nearest single program.
+///
+/// Returns `true` for broad queries that should trigger group-level summarization.
+pub fn is_broad_query(text: &str) -> bool {
+    let lower = text.to_lowercase();
+
+    // "What is X?" / "Define X" / "What are X?" patterns
+    let definitional = lower.starts_with("what is ")
+        || lower.starts_with("what are ")
+        || lower.starts_with("define ")
+        || lower.starts_with("what does ")
+        || lower.contains("what is a ")
+        || lower.contains("what is an ");
+
+    // "Tell me about X" / "Explain X" without a specific sub-topic
+    let overview = lower.starts_with("tell me about ")
+        || lower.starts_with("overview of ")
+        || lower.starts_with("introduction to ")
+        || lower.starts_with("describe ")
+        || lower.contains("in general");
+
+    // "Explain X" is broad when X is a domain-level concept, not a specific operation
+    let explain_broad = lower.starts_with("explain ")
+        && !lower.contains("how to ")
+        && !lower.contains("the difference")
+        && !lower.contains("pattern")
+        && !lower.contains("function")
+        && !lower.contains("algorithm");
+
+    // "How does X work?" for domain-level concepts
+    let how_work = (lower.contains("how does") || lower.contains("how do"))
+        && lower.contains("work")
+        && !lower.contains("function")
+        && !lower.contains("implement");
+
+    // Domain-level concepts (not specific operations) — these suggest the user wants a summary
+    let domain_concept = lower.contains("software architecture")
+        || lower.contains("software engineering")
+        || lower.contains("design patterns")
+        || lower.contains("system design")
+        || lower.contains("programming paradigm")
+        || lower.contains("machine learning")
+        || lower.contains("artificial intelligence")
+        || lower.contains("cloud computing")
+        || lower.contains("devops")
+        || lower.contains("web development")
+        || lower.contains("data engineering")
+        || lower.contains("computer science")
+        || lower.contains("distributed systems")
+        || lower.contains("operating systems")
+        || lower.contains("networking");
+
+    // If the query mentions a specific sub-topic, it's not broad even if phrased generally
+    let has_specific = infer_operation_topic(text).is_some();
+    if has_specific {
+        return false;
+    }
+
+    (definitional || overview || explain_broad || how_work) && domain_concept
+        || definitional && lower.split_whitespace().count() <= 6
+}
+
 /// Infer the specific operation-level topic from text, matching `semantic_intent` values
 /// used in training data. Returns `None` for non-specific or unrecognized operations.
 /// This is finer-grained than `infer_concept` and is used as the `topic_hint` for
@@ -528,13 +595,160 @@ pub fn infer_operation_topic(text: &str) -> Option<String> {
     if lower.contains("hash map") || lower.contains("hashmap") { return Some("hashmap_implementation".into()); }
     if lower.contains("binary tree") || lower.contains("bst") { return Some("tree_implementation".into()); }
 
-    // Design pattern specifics
-    if lower.contains("factory pattern") || lower.contains("factory method") { return Some("factory_pattern".into()); }
-    if lower.contains("observer pattern") { return Some("observer_pattern".into()); }
-    if lower.contains("strategy pattern") { return Some("strategy_pattern".into()); }
-    if lower.contains("decorator pattern") { return Some("decorator_pattern".into()); }
+    // Design pattern specifics — behavioral
+    if lower.contains("observer pattern") || lower.contains("observer") && lower.contains("pattern")
+        || lower.contains("observer") && (lower.contains("event") || lower.contains("subscri") || lower.contains("notif"))
+    {
+        return Some("observer_pattern".into());
+    }
+    if lower.contains("strategy pattern") || lower.contains("strategy") && lower.contains("algorithm")
+        || lower.contains("swap algorithm")
+    {
+        return Some("strategy_pattern".into());
+    }
+    if lower.contains("command pattern") || lower.contains("undo") && lower.contains("redo") {
+        return Some("command_pattern".into());
+    }
+    if lower.contains("state pattern") || lower.contains("state machine") && lower.contains("pattern") {
+        return Some("state_pattern".into());
+    }
+    if lower.contains("template method") { return Some("template_method_pattern".into()); }
+    if lower.contains("mediator pattern") || lower.contains("mediator") && lower.contains("coupl") {
+        return Some("mediator_pattern".into());
+    }
+
+    // Design pattern specifics — creational
+    if lower.contains("factory pattern") || lower.contains("factory method") || lower.contains("abstract factory")
+        || lower.contains("factory") && (lower.contains("creat") || lower.contains("instantiat") || lower.contains("construct"))
+    {
+        return Some("factory_pattern".into());
+    }
+    if lower.contains("builder pattern") || lower.contains("builder") && lower.contains("construct") {
+        return Some("builder_pattern".into());
+    }
     if lower.contains("singleton") { return Some("singleton_pattern".into()); }
-    if lower.contains("builder pattern") { return Some("builder_pattern".into()); }
+    if lower.contains("prototype pattern") || lower.contains("prototype") && lower.contains("clon") {
+        return Some("prototype_pattern".into());
+    }
+
+    // Design pattern specifics — structural
+    if lower.contains("adapter pattern") || lower.contains("adapter") && lower.contains("interface") {
+        return Some("adapter_pattern".into());
+    }
+    if lower.contains("decorator pattern") || lower.contains("decorator") && (lower.contains("wrap") || lower.contains("extensib")) {
+        return Some("decorator_pattern".into());
+    }
+    if lower.contains("facade pattern") || lower.contains("facade") && lower.contains("simplif") {
+        return Some("facade_pattern".into());
+    }
+    if lower.contains("bridge pattern") || lower.contains("bridge") && lower.contains("abstraction") {
+        return Some("bridge_pattern".into());
+    }
+    if lower.contains("composite pattern") || lower.contains("composite") && lower.contains("tree") {
+        return Some("composite_pattern".into());
+    }
+    if lower.contains("flyweight") { return Some("flyweight_pattern".into()); }
+
+    // Architectural patterns
+    if lower.contains("microservice") {
+        return Some("microservices".into());
+    }
+    if lower.contains("hexagonal architecture") || lower.contains("ports and adapter") || lower.contains("hexagonal") && lower.contains("port") {
+        return Some("hexagonal".into());
+    }
+    if lower.contains("cqrs") || lower.contains("command query") && lower.contains("segregat") {
+        return Some("cqrs".into());
+    }
+    if lower.contains("event sourcing") || lower.contains("event-sourc") || lower.contains("event sourc") {
+        return Some("event_sourcing".into());
+    }
+    if lower.contains("event-driven") || lower.contains("event driven") || lower.contains("pub/sub") || lower.contains("pub sub") {
+        return Some("event_driven".into());
+    }
+    if lower.contains("saga") && (lower.contains("pattern") || lower.contains("compensat") || lower.contains("distributed")) {
+        return Some("saga_pattern".into());
+    }
+    if lower.contains("circuit breaker") || lower.contains("bulkhead") || lower.contains("resilience pattern") {
+        return Some("resilience_patterns".into());
+    }
+    if lower.contains("consensus") || lower.contains("raft") || lower.contains("paxos") || lower.contains("zab") {
+        return Some("consensus_algorithms".into());
+    }
+    if lower.contains("multi-tenant") || lower.contains("multi tenant") || lower.contains("tenancy") {
+        return Some("multi_tenancy".into());
+    }
+    if lower.contains("stream process") || lower.contains("streaming") && (lower.contains("pipeline") || lower.contains("data")) {
+        return Some("stream_processing".into());
+    }
+    if lower.contains("crdt") || lower.contains("conflict-free") || lower.contains("conflict free") {
+        return Some("crdt_conflict_resolution".into());
+    }
+
+    // Coding general specifics
+    if lower.contains("iterator") && lower.contains("error") || lower.contains("combine") && lower.contains("iterator") {
+        return Some("iterator_error_handling".into());
+    }
+    if lower.contains("struct") && lower.contains("method") || lower.contains("impl block") || lower.contains("impl ") && lower.contains("struct") {
+        return Some("struct_methods".into());
+    }
+    if lower.contains("error handling") || lower.contains("result") && lower.contains("error") || lower.contains("unwrap") || lower.contains("expect") {
+        return Some("error_handling".into());
+    }
+    if lower.contains("decorator") && lower.contains("python") || lower.contains("write a decorator") {
+        return Some("decorator_operation".into());
+    }
+    if lower.contains("async") && (lower.contains("handler") || lower.contains("timeout") || lower.contains("retry")) {
+        return Some("async_operation".into());
+    }
+    if lower.contains("refactor") && lower.contains("module") || lower.contains("es module") {
+        return Some("coding_refactor".into());
+    }
+
+    // Support intents — account, billing, cancellation, onboarding
+    if lower.contains("lock") && lower.contains("account") || lower.contains("locked out")
+        || lower.contains("can't log in") || lower.contains("cannot log in")
+        || lower.contains("can't login") || lower.contains("login attempt")
+        || lower.contains("account recover") || lower.contains("regain access")
+        || lower.contains("compromised") && lower.contains("account")
+    {
+        return Some("account_recovery".into());
+    }
+    if lower.contains("cancel") && (lower.contains("subscri") || lower.contains("account") || lower.contains("plan"))
+        || lower.contains("downgrade") && lower.contains("plan")
+    {
+        return Some("cancellation".into());
+    }
+    if lower.contains("charged twice") || lower.contains("duplicate charge")
+        || lower.contains("billing") || lower.contains("refund")
+        || lower.contains("overcharged") || lower.contains("wrong charge")
+    {
+        return Some("billing_issue".into());
+    }
+    if lower.contains("reset") && lower.contains("password") || lower.contains("password reset")
+        || lower.contains("forgot") && lower.contains("password")
+    {
+        return Some("account_recovery".into());
+    }
+    if lower.contains("api key") || lower.contains("get started") || lower.contains("onboard")
+        || lower.contains("new account") || lower.contains("setup") && lower.contains("account")
+    {
+        return Some("onboarding_help".into());
+    }
+    if lower.contains("outage") || lower.contains("down") && lower.contains("service")
+        || lower.contains("not working") || lower.contains("server error")
+    {
+        return Some("service_outage".into());
+    }
+    if lower.contains("feature request") || lower.contains("suggest") && lower.contains("feature")
+        || lower.contains("wish") && lower.contains("could")
+    {
+        return Some("feature_request".into());
+    }
+    if lower.contains("privacy") || lower.contains("gdpr") || lower.contains("data deletion")
+        || lower.contains("opt out") || lower.contains("tracking")
+    {
+        return Some("data_privacy".into());
+    }
 
     None
 }

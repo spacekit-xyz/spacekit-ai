@@ -18,7 +18,8 @@ use crate::dimension::EncoderPreset;
 use crate::spectral::{ProjectModel, EntityKind, HybridEmbedder};
 use crate::dimension::tool::{ToolRegistry, ToolSchema, ToolCallInfo, ToolResult};
 use crate::dimension::paramecium::InfraciliaryLattice;
-use crate::reasoning::ReasoningEngine;
+use crate::metacognition::{MetaCognition, ReflectionOutcome};
+use crate::reasoning::{ReasoningEngine, System2Config};
 use crate::types::{EnvironmentConfig, GroupId, Sample};
 
 // ---------------------------------------------------------------------------
@@ -357,6 +358,10 @@ pub struct LanguageService {
     pub reasoning: Option<ReasoningEngine>,
     /// GrowformerLang: meta-language codebook for concept-level routing.
     pub meta_codebook: Option<crate::growformer_lang::MetaCodebook>,
+    /// MetaCognition: reflective quality gate on System 1 generation output.
+    pub metacognition: Option<MetaCognition>,
+    /// System 2 configuration for deliberate multi-step reasoning.
+    pub system2_config: System2Config,
 }
 
 impl LanguageService {
@@ -415,6 +420,8 @@ impl LanguageService {
             paramecium: None,
             reasoning: None,
             meta_codebook: None,
+            metacognition: None,
+            system2_config: System2Config::default(),
         })
     }
 
@@ -555,10 +562,14 @@ impl LanguageService {
             }
         }
 
+        let mut topic_hint: Option<String> = None;
+        let is_broad = crate::growformer_lang::is_broad_query(text);
+        let mut broad_summary: Option<(String, f32)> = None;
+
         let resp = if let Some((ref h_raw, ref bridged)) = encoded {
             // Apply OCEAN personality conditioning to the routed vector.
             // When language projector is active, blend projected embedding into conditioning.
-            let mut conditioned = if let Some(ref mr) = meta_routing {
+            let conditioned = if let Some(ref mr) = meta_routing {
                 if !mr.projected_embedding.is_empty() {
                     let mut proj = mr.projected_embedding.clone();
                     personality.condition_vector(&mut proj);
@@ -573,7 +584,6 @@ impl LanguageService {
                 personality.condition_vector(&mut c);
                 c
             };
-            let mut topic_hint: Option<String> = None;
 
             // --- MetaBrain path: unified routing + conditioning + archetype selection ---
             let meta_result = if let Some(ref mut mb) = dm.meta_brain {
@@ -623,6 +633,40 @@ impl LanguageService {
                 env.diversity_bonus = div_bonus;
             }
 
+            // --- Broad query detection: summarize across topic sub-lattices ---
+            // For categorical/definitional questions ("What is software architecture?"),
+            // compose from multiple sub-topics instead of returning a single program.
+            broad_summary = if is_broad {
+                let effective_gidx = group_idx.or_else(|| meta_result.as_ref().and_then(|mr| mr.group_idx));
+                effective_gidx.and_then(|gidx| {
+                    let adapted = dm.adapt_for_group_clifford(gidx, &conditioned, h_raw, GEN_COND_DIM);
+                    dm.group_gen_envs.get(&gidx).and_then(|env| {
+                        if env.topic_subindex.len() < 3 {
+                            return None; // not enough sub-topics to summarize
+                        }
+                        let (summary, conf, topics, ens_coh) = env.summarize_across_topics(&adapted, 6, 500);
+                        if summary.len() > 30 && !topics.is_empty() {
+                            println!(
+                                "  [broad-query] summarized {} topics from group {}: {:?}, conf={:.3}, coherence={:.3}",
+                                topics.len(), gidx, topics, conf, ens_coh
+                            );
+                            // If ensemble coherence is too low, the programs
+                            // don't synchronize — fall back to single-program
+                            if ens_coh < 0.15 {
+                                println!("  [broad-query] REJECT: ensemble coherence too low ({:.3}), falling back", ens_coh);
+                                None
+                            } else {
+                                Some((summary, conf))
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                })
+            } else {
+                None
+            };
+
             // --- Level 1: Competitive multi-head inference with E8 composition ---
             use crate::dimension::group_gen::{
                 E8Contribution, e8_blend_quantum, e8_compose_sentences_quantum,
@@ -633,6 +677,17 @@ impl LanguageService {
             // Only use MetaBrain's archetype when the classifier didn't provide a group.
             let effective_gidx = group_idx.or_else(|| meta_result.as_ref().and_then(|mr| mr.group_idx));
             let primary = effective_gidx.and_then(|gidx| {
+                // If we already have a broad summary for this group, use it directly
+                if let Some((ref summary_text, summary_conf)) = broad_summary {
+                    let mut e8 = [0.0f32; 8];
+                    for i in 0..8.min(gen_conditioning.len()) { e8[i] = gen_conditioning[i]; }
+                    return Some(E8Contribution {
+                        group_idx: gidx,
+                        lattice_point: e8,
+                        text: summary_text.clone(),
+                        confidence: summary_conf,
+                    });
+                }
                 let cond = dm.adapt_for_group_clifford(gidx, &conditioned, h_raw, GEN_COND_DIM);
                 dm.group_gen_envs.get_mut(&gidx).map(|env| {
                     let (text, conf, e8) = env.generate_with_e8_for_topic(&cond, topic_hint.as_deref(), 300, 0.8);
@@ -742,15 +797,43 @@ impl LanguageService {
             render_action_template(&action)
         };
 
-        // Reasoning fallback: only invoke when primary generation confidence is
-        // genuinely low (< 0.50) AND the text is short/unhelpful. This prevents
-        // the reasoning engine from overriding good single-group responses with
-        // garbled multi-group compositions.
-        let resp = if resp.confidence < 0.50 && resp.text.len() < 20 {
-            if let (Some(ref reasoning), Some((ref _h_raw, ref bridged))) = (&self.reasoning, &encoded) {
-                let mut cond = bridged.routed_vector.clone();
-                cond.resize(GEN_COND_DIM, 0.0);
-                let dm_ref = self.active_dm();
+        // Reasoning fallback: invoke System 1.5 (wave settling) when primary
+        // confidence is genuinely low AND text is short/unhelpful, OR invoke
+        // System 2 (deliberate chaining) when confidence is in the uncertain
+        // middle and cross-domain ambiguity is detected.
+        let resp = if let (Some(ref reasoning), Some((ref _h_raw, ref bridged))) = (&self.reasoning, &encoded) {
+            let mut cond = bridged.routed_vector.clone();
+            cond.resize(GEN_COND_DIM, 0.0);
+            let dm_ref = self.active_dm();
+
+            // System 2: deliberate multi-step reasoning for uncertain cross-domain queries.
+            // When broad_summary already produced a within-group composition, trust it —
+            // System 2 cross-group retrieval would mix in unrelated domains.
+            if broad_summary.is_none() && reasoning.should_reason_deliberate_ext(&cond, resp.confidence, &dm_ref.group_gen_envs, topic_hint.as_deref(), is_broad) {
+                let s2_result = reasoning.reason_deliberate(
+                    &cond,
+                    &dm_ref.group_gen_envs,
+                    &dm_ref.group_rotors,
+                    &self.system2_config,
+                );
+                if s2_result.confidence > resp.confidence && s2_result.text.len() > 10 {
+                    println!(
+                        "  [system2] accepted: steps={}, wm={}, coherence={:.3}, groups={:?}",
+                        s2_result.steps_taken, s2_result.working_memory_size,
+                        s2_result.final_coherence, s2_result.source_groups
+                    );
+                    GeneratedResponse {
+                        text: s2_result.text,
+                        template_id: format!("system2_{}_steps", s2_result.steps_taken),
+                        traceable: false,
+                        confidence: s2_result.confidence,
+                    }
+                } else {
+                    resp
+                }
+            }
+            // System 1.5: wave settling for low-confidence short responses
+            else if resp.confidence < 0.50 && resp.text.len() < 20 {
                 if reasoning.should_reason(&cond, resp.confidence, &dm_ref.group_gen_envs) {
                     let result = reasoning.reason(&cond, &dm_ref.group_gen_envs, &dm_ref.group_rotors);
                     if result.confidence > resp.confidence && result.text.len() > 10 {
@@ -762,8 +845,35 @@ impl LanguageService {
                         }
                     } else { resp }
                 } else { resp }
-            } else { resp }
+            } else {
+                resp
+            }
         } else { resp };
+
+        // MetaCognition: reflective quality gate on the final response.
+        // For broad query summaries (already composed from multiple verified programs),
+        // skip the gate — single-topic relevance scoring would incorrectly penalize
+        // multi-topic compositions.
+        let resp = if is_broad && broad_summary.is_some() {
+            println!("  [metacog] SKIP: broad query summary (multi-topic composition)");
+            resp
+        } else if let (Some(ref mc), Some((ref h_raw, ref bridged))) = (&self.metacognition, &encoded) {
+            if mc.is_ready() {
+                let prompt_emb = &bridged.routed_vector;
+                self.metacognition_gate(
+                    resp,
+                    prompt_emb,
+                    h_raw,
+                    text,
+                    topic_hint.as_deref(),
+                    &action,
+                )
+            } else {
+                resp
+            }
+        } else {
+            resp
+        };
 
         self.record_latency(start);
         Ok((action, resp))
@@ -838,6 +948,119 @@ impl LanguageService {
 
         let lattice = InfraciliaryLattice::from_codebook(dict, &archetypes);
         self.paramecium = Some(lattice);
+    }
+
+    /// Rebuild MetaCognition from the loaded brain's lattice programs.
+    /// Called automatically after load_brain to restore the quality gate.
+    pub fn rebuild_metacognition(&mut self) {
+        let dm = self.active_dm();
+        let mut mc = MetaCognition::with_defaults();
+        let mut pair_count = 0u64;
+
+        for (_gidx, env) in &dm.group_gen_envs {
+            let default_topic = if env.topic_subindex.is_empty() {
+                "general".to_string()
+            } else {
+                env.topic_subindex[0].topic_name.clone()
+            };
+            for prog in &env.lattice.programs {
+                let topic = env.topic_subindex.iter()
+                    .find(|sub| {
+                        sub.lattice.programs.iter().any(|sp| {
+                            Self::fast_cosine(&sp.ema_centroid, &prog.ema_centroid) > 0.90
+                        })
+                    })
+                    .map(|sub| sub.topic_name.as_str())
+                    .unwrap_or(&default_topic);
+                mc.absorb_pair(&prog.ema_centroid, &prog.ema_centroid, topic);
+                pair_count += 1;
+            }
+        }
+        for (_gidx, env) in &dm.group_code_envs {
+            let default_topic = if env.topic_subindex.is_empty() {
+                "code_general".to_string()
+            } else {
+                env.topic_subindex[0].topic_name.clone()
+            };
+            for prog in &env.lattice.programs {
+                let topic = env.topic_subindex.iter()
+                    .find(|sub| {
+                        sub.lattice.programs.iter().any(|sp| {
+                            Self::fast_cosine(&sp.ema_centroid, &prog.ema_centroid) > 0.90
+                        })
+                    })
+                    .map(|sub| sub.topic_name.as_str())
+                    .unwrap_or(&default_topic);
+                mc.absorb_pair(&prog.ema_centroid, &prog.ema_centroid, topic);
+                pair_count += 1;
+            }
+        }
+
+        println!(
+            "  MetaCognition rebuilt: {} pairs, {} topics, ready={}",
+            pair_count, mc.topic_count(), mc.is_ready()
+        );
+        self.metacognition = Some(mc);
+    }
+
+    /// Rebuild ReasoningEngine (including System 2 support) from loaded brain.
+    pub fn rebuild_reasoning(&mut self) {
+        use crate::reasoning::{CognitiveMap, ReasoningEngine};
+        let dm = self.active_dm();
+        let cog_map = CognitiveMap::build(&dm.group_gen_envs, &dm.group_rotors);
+        let group_dicts: HashMap<usize, crate::spectral::TokenDictionary> = dm.group_gen_envs
+            .iter()
+            .map(|(&gidx, env)| (gidx, env.dictionary.clone()))
+            .collect();
+        println!(
+            "  ReasoningEngine rebuilt: {} nodes, {} edges",
+            cog_map.node_count(),
+            cog_map.edge_count()
+        );
+        self.reasoning = Some(ReasoningEngine::new(cog_map, group_dicts));
+    }
+
+    /// Rebuild GrowformerLang MetaCodebook from loaded brain's lattice programs.
+    /// Infers concepts and languages from decoded program text.
+    pub fn rebuild_meta_codebook(&mut self) {
+        use crate::growformer_lang::{infer_concept, detect_language, MetaCodebook};
+        let dm = self.active_dm();
+        let mut meta_samples: Vec<(Vec<f32>, crate::growformer_lang::MetaConcept, crate::growformer_lang::TargetLanguage, usize)> = Vec::new();
+
+        for (&gidx, env) in &dm.group_gen_envs {
+            for prog in &env.lattice.programs {
+                let text = env.dictionary.decode(&prog.token_sequence);
+                let concept = infer_concept(&text, None, None);
+                let lang = detect_language(&text);
+                meta_samples.push((prog.ema_centroid.clone(), concept, lang, gidx));
+            }
+        }
+        for (&gidx, env) in &dm.group_code_envs {
+            for prog in &env.lattice.programs {
+                let text = env.dictionary.decode(&prog.token_sequence);
+                let concept = infer_concept(&text, None, None);
+                let lang = detect_language(&text);
+                meta_samples.push((prog.ema_centroid.clone(), concept, lang, gidx));
+            }
+        }
+
+        let mcb = MetaCodebook::build(&meta_samples);
+        println!(
+            "  MetaCodebook rebuilt: {} samples, {} concepts",
+            meta_samples.len(),
+            mcb.entries.len()
+        );
+        self.meta_codebook = Some(mcb);
+    }
+
+    fn fast_cosine(a: &[f32], b: &[f32]) -> f32 {
+        let len = a.len().min(b.len());
+        if len == 0 { return 0.0; }
+        let dot: f32 = a[..len].iter().zip(b[..len].iter()).map(|(x, y)| x * y).sum();
+        let na = a[..len].iter().map(|x| x * x).sum::<f32>().sqrt();
+        let nb = b[..len].iter().map(|x| x * x).sum::<f32>().sqrt();
+        if na < 1e-10 || nb < 1e-10 { return 0.0; }
+        dot / (na * nb)
     }
 
     /// Paramecium inference: lattice-only, no neural substrate.
@@ -1119,6 +1342,27 @@ impl LanguageService {
             generate_code_from_action(&action, text)
         };
 
+        // MetaCognition gate for code generation: reject low-quality code
+        let code = match (self.metacognition.as_ref(), code, encoded.as_ref()) {
+            (Some(mc), Some(cg), Some((_, bridged))) if mc.is_ready() => {
+                let prompt_emb = &bridged.routed_vector;
+                let response_emb = Self::approximate_response_embedding(prompt_emb, &cg.code);
+                let topic_hint_cg = crate::growformer_lang::infer_operation_topic(text);
+                let scores = mc.evaluate(prompt_emb, &response_emb, &cg.code, topic_hint_cg.as_deref());
+                println!(
+                    "  [metacog codegen] quality={:.3}, coherence={:.3}, relevance={:.3}",
+                    scores.quality, scores.coherence, scores.relevance
+                );
+                if scores.quality >= mc.config.accept_threshold * 0.8 {
+                    Some(cg)
+                } else {
+                    println!("  [metacog codegen] REJECTED: quality below threshold");
+                    None
+                }
+            }
+            (_, code, _) => code,
+        };
+
         self.record_latency(start);
         Ok((action, code))
     }
@@ -1396,6 +1640,9 @@ impl LanguageService {
         }
         self.brains.insert("default".to_string(), dm);
         self.active_brain = "default".to_string();
+        self.rebuild_meta_codebook();
+        self.rebuild_metacognition();
+        self.rebuild_reasoning();
         Ok(())
     }
 
@@ -1496,6 +1743,88 @@ impl LanguageService {
     // -----------------------------------------------------------------------
     // M6: SLO tracking
     // -----------------------------------------------------------------------
+
+    /// MetaCognition quality gate: evaluate the candidate response and either
+    /// accept it, retry with adjusted conditioning, or degrade gracefully.
+    fn metacognition_gate(
+        &self,
+        candidate: GeneratedResponse,
+        prompt_emb: &[f32],
+        _h_raw: &[f32],
+        _original_text: &str,
+        topic_hint: Option<&str>,
+        _action: &ActionJson,
+    ) -> GeneratedResponse {
+        let mc = match &self.metacognition {
+            Some(mc) => mc,
+            None => return candidate,
+        };
+
+        // Approximate response embedding by hashing the response text through
+        // a simple projection of the prompt embedding modulated by text features.
+        // (Full re-encoding would require &mut self for the bridge; this geometric
+        // approximation is sufficient for the quality gate.)
+        let response_emb = Self::approximate_response_embedding(prompt_emb, &candidate.text);
+
+        let outcome = mc.reflect(
+            prompt_emb,
+            &response_emb,
+            &candidate.text,
+            topic_hint,
+            0,
+        );
+
+        match outcome {
+            ReflectionOutcome::Accept { scores } => {
+                println!(
+                    "  [metacog] ACCEPT: quality={:.3}",
+                    scores.quality
+                );
+                candidate
+            }
+            ReflectionOutcome::Retry { scores, adjustment, attempt } => {
+                println!(
+                    "  [metacog] RETRY: quality={:.3}, attempt {}",
+                    scores.quality, attempt + 1
+                );
+                // For now, return the candidate since full re-generation would
+                // require mutable access to the DimensionManager. The adjustment
+                // vector is computed but re-generation is deferred to a future
+                // integration pass that restructures the borrow graph.
+                // The quality score is logged for training the reflection brain.
+                let _ = adjustment;
+                candidate
+            }
+            ReflectionOutcome::Degrade { scores, message, attempts_exhausted } => {
+                println!(
+                    "  [metacog] DEGRADE: quality={:.3} after {} attempts",
+                    scores.quality, attempts_exhausted
+                );
+                GeneratedResponse {
+                    text: message,
+                    template_id: "metacog_degradation".to_string(),
+                    traceable: true,
+                    confidence: 0.0,
+                }
+            }
+        }
+    }
+
+    /// Approximate a response embedding without full re-encoding.
+    /// Projects the prompt embedding through a text-length and hash modulation
+    /// to create a distinct but related vector for the response.
+    fn approximate_response_embedding(prompt_emb: &[f32], response_text: &str) -> Vec<f32> {
+        let text_hash = response_text.bytes().fold(0u64, |acc, b| {
+            acc.wrapping_mul(31).wrapping_add(b as u64)
+        });
+        let len_factor = (response_text.len() as f32 / 200.0).clamp(0.1, 2.0);
+        let hash_phase = (text_hash % 1000) as f32 / 1000.0;
+
+        prompt_emb.iter().enumerate().map(|(i, &v)| {
+            let modulation = 1.0 + 0.3 * ((i as f32 * 0.1 + hash_phase * std::f32::consts::TAU).sin());
+            v * len_factor * modulation
+        }).collect()
+    }
 
     fn record_latency(&mut self, start: u64) {
         let elapsed = portable_elapsed_ms(start);

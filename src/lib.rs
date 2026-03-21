@@ -34,6 +34,7 @@ macro_rules! maybe_par_iter_mut {
 
 pub mod clifford;
 pub mod cloze;
+pub mod coherence;
 pub mod dimension;
 pub mod growformer_lang;
 pub mod micro_brain;
@@ -44,6 +45,7 @@ pub mod mnist;
 pub mod neuron;
 pub mod systems;
 pub mod types;
+pub mod metacognition;
 pub mod reasoning;
 pub mod service;
 pub mod spectral;

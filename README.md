@@ -17,7 +17,7 @@ What makes it distinct from everything else in the field:
 
 **Generation is recall, not computation.** When gen g1 produces "Observer defines a one-to-many dependency," it's not computing a probability distribution over a vocabulary. It's activating a structural trace — the engram laid down during training — and reading the output state of that activation. Single forward pass. The 200x speed advantage over autoregressive generation isn't an optimization. It's a consequence of how the substrate works: the whole response exists as a spatial pattern, not a sequential computation.
 
-If I had to place it in one sentence: Growformer is a continual learning substrate where knowledge is encoded as physical neural structure — grown, pruned, consolidated, and frozen — rather than as optimized parameters in a fixed graph.
+If I had to place it in one sentence: Growformer is a continual learning substrate where knowledge is encoded as physical neural structure, grown, pruned, consolidated, and frozen — rather than as optimized parameters in a fixed graph.
 
 The closest analog isn't in machine learning. It's in developmental neuroscience: experience-dependent synaptogenesis followed by activity-dependent pruning followed by synaptic consolidation. The code is implementing, in silicon, the same lifecycle that biological brains use to go from plastic learning to stable long-term memory.
 
@@ -53,31 +53,43 @@ one where intelligence is not engineered, but **grown**.
 
 ## **Latest Results**
 
-All generation outputs are **concrete model outputs** produced by a single forward pass through the Growformer NeuralEnvironment substrate. No transformer, no external model, no template system. Each output is the decoded activation of structural engram traces formed during training.
+All generation outputs are **concrete model outputs** produced by a single forward pass through the Growformer InfraciliaryLattice (Paramecium) substrate. No transformer, no external model, no template system. Each output is decoded from structural lattice programs formed during one-pass training. **No backpropagation, no iterative epochs** — training cost is O(n).
 
-### Brain Training (357 samples, 2 groups, semantic dictionary + algebraic codebook + Hopf composition + E8 lattice)
+### Brain Training (~1600 samples, 14 dynamic groups, one-pass algebraic pipeline)
 
 | Component | Metric | Value | Notes |
 |-----------|--------|-------|-------|
-| LearnedRouter | accuracy | 94.2% | 500 epochs, balanced oversampling |
-| ActionClassifier | accuracy | 89.7% | 500 epochs |
-| gen g0 (support) | eval loss | **0.0015** | 1229 neurons, early stop at 764/1950 epochs |
-| gen g1 (coding/patterns) | eval loss | **0.0054** | 1244 neurons, 206K synapses, early stop 688/1950 epochs |
-| code g1 (syntax-aware) | eval loss | **0.0021** | 1375 neurons, 249K synapses, early stop 651/1950 |
-| Brain size (full) | | **113 MB** | 2 groups, router, classifier, gen + code envs |
-| Brain size (micro) | | **18 MB** | Deployable agent: browser, mobile, IoT, edge |
+| LearnedRouter | type | InfraciliaryLattice | K-NN voting + STA field gradient bias |
+| ActionClassifier | type | InfraciliaryLattice | One-pass, 5 action types |
+| MetaCodebook | concepts | 20+ MetaConcepts | GrowformerLang concept-level routing |
+| LanguageProjectors | languages | 5 (Rust, Python, TS, Go, Generic) | Per-language Clifford rotors |
+| Generation | envs | 14 gen + 6 code groups | ~950 lattice programs total |
+| Topic sub-lattices | count | ~200 across all groups | Operation-specific within-group routing |
+| Cloze accuracy | slots | 94.6% (1470 games) | Contrastive fill-in-the-blank learning |
+| MetaCognition | pairs | **930+** pairs, **124+** topic centroids | Reflective quality gate (generate→reflect→decide) |
+| System 2 | config | max 6 steps, WM capacity 8 | Deliberate multi-step reasoning with WorkingMemory |
+| Brain size | | **~81 MB** | 14 groups, router, classifier, all envs |
+| Training time | | **~27 min** | One-pass, no epochs, no backprop |
 | Tool detection | | **4 built-in tools** | calculator, code_runner, file_reader, web_search |
 
 ### Concrete Generation Examples (single forward pass)
 
+**Within-group discrimination** — the system correctly distinguishes between addition, subtraction, and multiplication within the same arithmetic group, returning operation-specific text AND language-specific code:
+
+| Prompt | Text Response | Code | Conf |
+|--------|-------------|------|------|
+| "write an addition function in Rust" | "Sum is the result of addition. Define a function with two parameters of the same numeric type and return a + b." | `fn sum(a: f64, b: f64) -> f64 { a + b }` | 0.98 |
+| "write a subtraction function in Rust" | "The difference of two numbers is computed by subtracting the second from the first. Returns a - b." | `fn difference(a: f64, b: f64) -> f64 { a - b }` | 1.00 |
+| "write a multiplication function in Rust" | "The product of two numbers is computed by multiplication. Returns a * b." | `fn product(a: f64, b: f64) -> f64 { a * b }` | 0.99 |
+
+**Cross-domain routing:**
+
 | Prompt | Output | Type |
 |--------|--------|------|
-| "help me reset my password" | "Password reset links expire after 30 minutes for security purposes. I'll send a fresh reset link to your registered email right away." | gen (conf=0.97) |
-| "explain the observer pattern" | "Observer defines a one-to-many dependency where a subject notifies all registered observers whenever its state changes, without knowing their concrete types. This decouples the event source from its consumers, making it easy to add or remove listeners." | gen (conf=0.92) |
-| "my account is locked after too many failed attempts" | "Your account has been temporarily locked as a security precaution. I can unlock it for you now once we verify your identity through a few quick questions." | gen (conf=0.93) |
-| "who are you" | "I am Growformer, a Growformer Agent by swtch.ai. I'm a self-organizing neural substrate that learns structure, not weights — my knowledge is encoded as physical neural structure grown, pruned, consolidated, and frozen during training." | gen (conf=1.00) |
+| "help me reset my password" | "Password reset links expire after 30 minutes for security purposes. I'll send a fresh reset link to your registered email right away." | gen (conf=1.00) |
+| "implement binary search in Python" | "Use two pointers converging toward the middle to find the target in O(log n) time." + `def binary_search(arr, target): lo, hi = 0, len(arr)-1 ...` | gen+code |
+| "implement a stack using an enum in Rust" | "Use an enum with Box for heap allocation." + `enum List<T> { Nil, Cons(T, Box<List<T>>) } impl<T> List<T> { fn new() -> Self { List::Nil } ...` | gen+code |
 | "calculate 347 * 892" | [tool: calculator] 309324 → "The result of 347 × 892 is 309,324." | tool call |
-| "implement binary search in Python" | `def binary_search(arr,target):lo,hi=0,len(arr)-1 while lo<=hi:mid=(lo+hi)//2 if arr[mid]==target:return mid elif arr[mid]<target:lo=mid+1 else:hi=mid-1 return-1` | code (correct) |
 
 ### Continual Learning (Split MNIST, zero forgetting)
 
@@ -199,20 +211,29 @@ growformer/
 ├── Cargo.toml
 └── src/
     ├── lib.rs               — Library crate (shared by all binaries + WASM)
-    ├── main.rs              — Production CLI: train brains + inference
+    ├── main.rs              — Training pipeline: all stages, cloze, brain export
     ├── demos.rs             — Demos & benchmarks binary (XOR, spiral, MNIST, evals)
     ├── server.rs            — HTTP server (growformer-node)
+    ├── service.rs           — LanguageService: generation, codegen, meta-routing
     ├── types.rs             — Vec3, Synapse, NeuronGroup, EnvironmentConfig
     ├── neuron.rs            — Neuron struct with all 6 dimensions
-    ├── environment.rs       — NeuralEnvironment: forward pass, backprop, training
-    ├── spectral.rs          — TokenDictionary (semantic co-occurrence ordering + Gray coding)
-    ├── service.rs           — LanguageService: high-level API for all operations
+    ├── environment.rs       — NeuralEnvironment (legacy, used for demos)
+    ├── spectral.rs          — TokenDictionary (semantic ordering + Gray coding)
+    ├── clifford.rs          — Cl(1,7) SpaceTime Algebra: rotors, fingerprints
+    ├── growformer_lang.rs   — GrowformerLang: MetaConcept, MetaCodebook, LanguageProjector
+    ├── reasoning.rs         — CognitiveMap, ReasoningEngine (System 1.5), System 2 (WorkingMemory, StepOperator)
+    ├── metacognition.rs     — MetaCognition: Reflection Brain, quality gate, graceful degradation
+    ├── understanding.rs     — UnderstandingLayer: topic/verb classifiers, goal_magnitude
+    ├── meta_brain.rs        — MetaBrain: CentroidCoordinator, ArchetypeBrain
+    ├── cloze.rs             — Cloze learning: contrastive fill-in-the-blank
     ├── dimension/
-    │   ├── group_gen.rs     — Per-group generation (GroupGenEnv, binary token prediction)
-    │   ├── manager.rs       — DimensionManager: routing, classification, generation
-    │   ├── language.rs      — Language encoder bridge (all-MiniLM-L6-v2 → 64d)
+    │   ├── group_gen.rs     — IndexedGenEnv: topic sub-lattices, forced routing
+    │   ├── manager.rs       — DimensionManager: conditioning pipeline, Clifford rotors
+    │   ├── router.rs        — LearnedRouter (InfraciliaryLattice, K-NN + gradient)
+    │   ├── paramecium.rs    — InfraciliaryLattice (Paramecium): one-pass learning
+    │   ├── language.rs      — Language encoder bridge (all-MiniLM-L6-v2 → 128d)
     │   ├── action.rs        — Intent-to-action mapping
-    │   └── tool.rs          — Tool use: schema, registry, matching for external tool invocation
+    │   └── tool.rs          — Tool use: schema, registry, external invocation
     └── systems/
         ├── metabolic.rs     — System 1: Cost-driven synapse pruning
         ├── growth.rs        — System 2: Proximity-based synapse formation

@@ -2351,6 +2351,54 @@ impl IndexedGenEnv {
         self.nearest_response_in_lattice(&self.lattice, cond)
     }
 
+    /// Return top-K programs from a lattice, scored by equivariant STA similarity.
+    fn top_k_in_lattice(
+        &self,
+        lattice: &InfraciliaryLattice,
+        cond: &[f32],
+        k: usize,
+    ) -> Vec<(String, usize, f32)> {
+        if lattice.programs.is_empty() {
+            return Vec::new();
+        }
+        let input_mv = embed_bridge_vector(cond);
+        let input_spatial = spatial_fingerprint(&input_mv);
+        let input_causal = causal_fingerprint(&input_mv);
+
+        let mut scored: Vec<(usize, f32)> = lattice.programs.iter().enumerate()
+            .map(|(i, prog)| {
+                let cosine = gen_cosine_sim(cond, &prog.ema_centroid);
+                let prog_mv = embed_bridge_vector(&prog.ema_centroid);
+                let prog_spatial = spatial_fingerprint(&prog_mv);
+                let prog_causal = causal_fingerprint(&prog_mv);
+                let sp_dot: f32 = input_spatial.iter().zip(prog_spatial.iter()).map(|(a, b)| a * b).sum();
+                let sp_na: f32 = input_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let sp_nb: f32 = prog_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let spatial_align = if sp_na < 1e-8 || sp_nb < 1e-8 { 0.0 }
+                    else { (sp_dot / (sp_na * sp_nb)).clamp(-1.0, 1.0) };
+                let ca_dot: f32 = input_causal.iter().zip(prog_causal.iter()).map(|(a, b)| a * b).sum();
+                let ca_na: f32 = input_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let ca_nb: f32 = prog_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let causal_align = if ca_na < 1e-8 || ca_nb < 1e-8 { 0.0 }
+                    else { (ca_dot / (ca_na * ca_nb)).clamp(-1.0, 1.0) };
+                let disp_norm_sq: f32 = cond.iter().zip(prog.ema_centroid.iter())
+                    .map(|(a, b)| (a - b) * (a - b)).sum();
+                let proximity = if disp_norm_sq < 1e-8 { 1.0 }
+                    else { (1.0 / disp_norm_sq).min(100.0).sqrt() / 10.0 };
+                let score = 0.30 * cosine.max(0.0)
+                    + 0.35 * (spatial_align + 1.0) / 2.0
+                    + 0.20 * (causal_align + 1.0) / 2.0
+                    + 0.15 * proximity;
+                (i, score)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.into_iter().take(k).map(|(idx, sim)| {
+            let text = self.dictionary.decode(&lattice.programs[idx].token_sequence);
+            (text, idx, sim)
+        }).collect()
+    }
+
     fn nearest_topic_response(&self, cond: &[f32], topic_hint: Option<&str>) -> Option<(String, String, f32)> {
         if self.topic_subindex.is_empty() {
             return None;
@@ -2496,6 +2544,232 @@ impl IndexedGenEnv {
             let text = self.dictionary.decode(&self.lattice.programs[idx].token_sequence);
             (text, idx, sim)
         }).collect()
+    }
+
+    /// Summarize across topic sub-lattices using coherence-guided selection.
+    ///
+    /// Instead of just picking the top-K most relevant programs, uses
+    /// band-decomposed Cl(1,7) coherence analysis to select programs that
+    /// are both relevant AND cohere with each other as an ensemble. This
+    /// mirrors how coherent neural oscillations across brain areas indicate
+    /// functional connectivity and coordinated processing.
+    ///
+    /// Returns (composed_text, confidence, topics_used, ensemble_coherence).
+    pub fn summarize_across_topics(
+        &self,
+        cond: &[f32],
+        max_topics: usize,
+        max_chars: usize,
+    ) -> (String, f32, Vec<String>, f32) {
+        use crate::coherence::{coherence_select, ensemble_coherence};
+
+        if self.topic_subindex.is_empty() {
+            return (String::new(), 0.0, Vec::new(), 0.0);
+        }
+
+        // Phase 1: Gather best clean program from each topic sub-lattice
+        struct TopicCandidate {
+            topic_name: String,
+            text: String,
+            opening: String,
+            relevance: f32,
+            centroid: Vec<f32>,
+        }
+        let mut candidates: Vec<TopicCandidate> = Vec::new();
+
+        for topic in &self.topic_subindex {
+            if topic.lattice.programs.is_empty() {
+                continue;
+            }
+            // Try up to 3 nearest programs to find one with clean text
+            let top3 = self.top_k_in_lattice(&topic.lattice, cond, 3);
+            let mut text = String::new();
+            let mut conf = 0.0f32;
+            for (cand_text, _pidx, cand_conf) in &top3 {
+                if !cand_text.is_empty() && cand_text.len() >= 10 && !Self::has_tokenization_artifacts(cand_text) {
+                    text = cand_text.clone();
+                    conf = *cand_conf;
+                    break;
+                }
+            }
+            if text.is_empty() {
+                let (t, _, c) = self.nearest_response_in_lattice(&topic.lattice, cond);
+                text = t;
+                conf = c;
+            }
+            if text.is_empty() || text.len() < 10 || Self::has_tokenization_artifacts(&text) {
+                continue;
+            }
+
+            let opening = Self::extract_opening(&text, 200);
+            if opening.is_empty() || Self::has_tokenization_artifacts(&opening) {
+                continue;
+            }
+
+            // Centroid similarity to query
+            let centroid_sim = {
+                let dim = cond.len().min(topic.centroid.len());
+                if dim == 0 { 0.0 } else {
+                    let dot: f32 = cond[..dim].iter().zip(topic.centroid[..dim].iter())
+                        .map(|(a, b)| a * b).sum();
+                    let na = cond[..dim].iter().map(|x| x * x).sum::<f32>().sqrt();
+                    let nb = topic.centroid[..dim].iter().map(|x| x * x).sum::<f32>().sqrt();
+                    if na < 1e-10 || nb < 1e-10 { 0.0 } else { (dot / (na * nb)).max(0.0) }
+                }
+            };
+
+            let relevance = 0.5 * conf + 0.5 * centroid_sim;
+            candidates.push(TopicCandidate {
+                topic_name: topic.topic_name.clone(),
+                text,
+                opening,
+                relevance,
+                centroid: topic.centroid.clone(),
+            });
+        }
+
+        if candidates.is_empty() {
+            return (String::new(), 0.0, Vec::new(), 0.0);
+        }
+
+        // Phase 2: Coherence-guided selection
+        // Use topic centroids for coherence analysis — they represent the
+        // "sending region" in the neuroscience analogy
+        let centroid_refs: Vec<&[f32]> = candidates.iter()
+            .map(|c| c.centroid.as_slice())
+            .collect();
+        let relevance_scores: Vec<f32> = candidates.iter()
+            .map(|c| c.relevance)
+            .collect();
+
+        // Select programs that maximize both relevance AND ensemble coherence.
+        // min_coherence=0.20 prevents adding programs that desynchronize the ensemble.
+        let selected_indices = coherence_select(
+            &centroid_refs,
+            &relevance_scores,
+            max_topics * 2, // over-select, then trim by char limit
+            0.20,
+        );
+
+        if selected_indices.is_empty() {
+            return (String::new(), 0.0, Vec::new(), 0.0);
+        }
+
+        // Compute ensemble coherence of the selected set
+        let selected_centroids: Vec<&[f32]> = selected_indices.iter()
+            .map(|&i| candidates[i].centroid.as_slice())
+            .collect();
+        let (ens_coherence, band_detail) = if selected_centroids.len() >= 2 {
+            ensemble_coherence(&selected_centroids)
+        } else {
+            (1.0, crate::coherence::BandCoherence { combined: 1.0, ..Default::default() })
+        };
+
+        println!(
+            "  [coherence] ensemble={:.3}, δ={:.3} θ={:.3} α/β_boost={:.3} α/β_spatial={:.3} γ={:.3}",
+            ens_coherence,
+            band_detail.delta,
+            band_detail.theta,
+            band_detail.alpha_beta_boost,
+            band_detail.alpha_beta_spatial,
+            band_detail.gamma,
+        );
+
+        // Phase 3: Compose with deduplication and char limit
+        let mut parts: Vec<String> = Vec::new();
+        let mut topics_used: Vec<String> = Vec::new();
+        let mut total_len = 0;
+        let mut total_conf = 0.0f32;
+
+        for &idx in &selected_indices {
+            let cand = &candidates[idx];
+
+            // Deduplicate
+            let is_duplicate = parts.iter().any(|existing| {
+                let overlap_words: usize = cand.opening.split_whitespace()
+                    .filter(|w| existing.to_lowercase().contains(&w.to_lowercase()))
+                    .count();
+                let total_words = cand.opening.split_whitespace().count().max(1);
+                overlap_words as f32 / total_words as f32 > 0.6
+            });
+            if is_duplicate {
+                continue;
+            }
+
+            if total_len + cand.opening.len() > max_chars {
+                break;
+            }
+            total_len += cand.opening.len();
+            total_conf += cand.relevance;
+            topics_used.push(cand.topic_name.clone());
+            parts.push(cand.opening.clone());
+        }
+
+        if parts.is_empty() {
+            return (String::new(), 0.0, Vec::new(), 0.0);
+        }
+
+        let avg_conf = total_conf / parts.len() as f32;
+        let composed = parts.join(" ");
+        (composed, avg_conf.clamp(0.0, 1.0), topics_used, ens_coherence)
+    }
+
+    /// Detect tokenization artifacts in decoded text.
+    /// Garbled programs have isolated single characters, excessive spacing,
+    /// or parenthetical artifacts from imperfect dictionary decoding.
+    fn has_tokenization_artifacts(text: &str) -> bool {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        if words.is_empty() {
+            return true;
+        }
+
+        // Count single-character "words" (excluding common articles/prepositions)
+        let single_char_count = words.iter()
+            .filter(|w| {
+                w.len() == 1 && !matches!(w.to_lowercase().as_str(), "a" | "i" | "(" | ")" | "-" | "+" | "=" | "," | "." | ":" | ";" | "&")
+            })
+            .count();
+
+        // More than 15% single-character words is a strong artifact signal
+        if single_char_count as f32 / words.len() as f32 > 0.15 {
+            return true;
+        }
+
+        // Sequences of space-separated single characters: "e a d g s"
+        let mut consecutive_singles = 0;
+        let mut max_consecutive = 0;
+        for w in &words {
+            if w.len() == 1 && w.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false) {
+                consecutive_singles += 1;
+                max_consecutive = max_consecutive.max(consecutive_singles);
+            } else {
+                consecutive_singles = 0;
+            }
+        }
+        if max_consecutive >= 3 {
+            return true;
+        }
+
+        false
+    }
+
+    /// Extract the opening portion of a text (first 1-2 sentences, up to max_chars).
+    fn extract_opening(text: &str, max_chars: usize) -> String {
+        let truncated = if text.len() > max_chars { &text[..max_chars] } else { text };
+
+        // Find a sentence boundary
+        if let Some(period_pos) = truncated.find(". ") {
+            if period_pos > 15 {
+                return truncated[..period_pos + 1].to_string();
+            }
+        }
+        // If no clean break, take up to the last word boundary
+        if let Some(space_pos) = truncated.rfind(' ') {
+            if space_pos > 15 {
+                return format!("{}.", &truncated[..space_pos]);
+            }
+        }
+        truncated.to_string()
     }
 
     pub fn generate(&mut self, cond: &[f32], _max_len: usize, _temperature: f32) -> (String, f32) {

@@ -551,6 +551,659 @@ impl Multivector {
     }
 }
 
+// =========================================================================
+// System 2 — Deliberate Multi-Step Reasoning
+// =========================================================================
+//
+// Extends the ReasoningEngine from fixed-round wave settling (proto-System 2)
+// to variable-length deliberate chaining with intermediate state.
+//
+// Each step is a single lattice query, transfer rotor application, or
+// fragment composition — no backprop, no autoregressive token loop.
+// The inner loop chains *structural operations*, not token predictions.
+//
+// Biological analog: prefrontal working memory + inner speech.
+
+/// An entry in the working memory buffer.
+#[derive(Clone, Debug)]
+pub struct WorkingMemoryEntry {
+    /// Which cognitive map node this came from (if any).
+    pub node_idx: Option<usize>,
+    /// The group this entry belongs to.
+    pub group_idx: usize,
+    /// Embedding in bridge space.
+    pub embedding: Vec<f32>,
+    /// Decoded text fragment.
+    pub text: String,
+    /// Activation strength (how relevant this entry is to the goal).
+    pub activation: f32,
+    /// Which reasoning step produced this entry.
+    pub step_produced: usize,
+}
+
+/// The working memory buffer: a bounded scratchpad of activated programs
+/// and partial conclusions maintained across reasoning steps.
+#[derive(Clone, Debug)]
+pub struct WorkingMemory {
+    pub entries: Vec<WorkingMemoryEntry>,
+    pub capacity: usize,
+    /// The original goal embedding (prompt conditioning vector).
+    pub goal: Vec<f32>,
+    /// Running coherence score: how well the current buffer addresses the goal.
+    pub coherence: f32,
+}
+
+impl WorkingMemory {
+    pub fn new(goal: Vec<f32>, capacity: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            capacity,
+            goal,
+            coherence: 0.0,
+        }
+    }
+
+    /// Insert an entry, evicting the weakest if at capacity.
+    pub fn insert(&mut self, entry: WorkingMemoryEntry) {
+        if self.entries.len() >= self.capacity {
+            if let Some((min_idx, _)) = self.entries.iter().enumerate()
+                .min_by(|(_, a), (_, b)| a.activation.partial_cmp(&b.activation)
+                    .unwrap_or(std::cmp::Ordering::Equal))
+            {
+                if self.entries[min_idx].activation < entry.activation {
+                    self.entries.swap_remove(min_idx);
+                } else {
+                    return; // new entry is weaker than everything in buffer
+                }
+            }
+        }
+        self.entries.push(entry);
+    }
+
+    /// Compute overall coherence: average cosine similarity of all entries
+    /// to the goal embedding.
+    pub fn update_coherence(&mut self) {
+        if self.entries.is_empty() || self.goal.is_empty() {
+            self.coherence = 0.0;
+            return;
+        }
+        let total: f32 = self.entries.iter()
+            .map(|e| cosine_sim(&e.embedding, &self.goal).max(0.0) * e.activation)
+            .sum();
+        self.coherence = total / self.entries.len() as f32;
+    }
+
+    /// Assemble working memory into a composite embedding by weighted average.
+    pub fn composite_embedding(&self) -> Vec<f32> {
+        if self.entries.is_empty() {
+            return self.goal.clone();
+        }
+        let dim = self.entries[0].embedding.len();
+        let mut composite = vec![0.0f32; dim];
+        let mut total_weight = 0.0f32;
+        for entry in &self.entries {
+            for (i, v) in entry.embedding.iter().enumerate() {
+                if i < dim {
+                    composite[i] += v * entry.activation;
+                }
+            }
+            total_weight += entry.activation;
+        }
+        if total_weight > 0.0 {
+            for v in &mut composite {
+                *v /= total_weight;
+            }
+        }
+        composite
+    }
+}
+
+/// The action a reasoning step can take.
+#[derive(Clone, Debug)]
+pub enum StepAction {
+    /// Retrieve a related program from a specific group.
+    Retrieve { group_idx: usize },
+    /// Apply a transfer rotor to map knowledge from one domain to another.
+    Transfer { source_group: usize, target_group: usize },
+    /// Compose current working memory entries into a partial conclusion.
+    Compose,
+    /// Working memory is coherent enough; stop reasoning.
+    Terminate,
+}
+
+/// Configuration for System 2 deliberate reasoning.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct System2Config {
+    /// Maximum reasoning steps before forced termination.
+    pub max_steps: usize,
+    /// Working memory capacity (number of entries).
+    pub wm_capacity: usize,
+    /// Coherence threshold: terminate when working memory coherence exceeds this.
+    pub coherence_threshold: f32,
+    /// Minimum activation for a retrieved program to enter working memory.
+    pub min_activation: f32,
+    /// Transfer alignment threshold: only accept transferred knowledge above this.
+    pub transfer_threshold: f32,
+}
+
+impl Default for System2Config {
+    fn default() -> Self {
+        Self {
+            max_steps: 6,
+            wm_capacity: 8,
+            coherence_threshold: 0.65,
+            min_activation: 0.15,
+            transfer_threshold: 0.10,
+        }
+    }
+}
+
+/// Result of System 2 deliberate reasoning.
+#[derive(Clone, Debug)]
+pub struct System2Result {
+    pub text: String,
+    pub confidence: f32,
+    pub source_groups: Vec<usize>,
+    pub steps_taken: usize,
+    pub working_memory_size: usize,
+    pub final_coherence: f32,
+    pub terminated_by: System2Termination,
+}
+
+#[derive(Clone, Debug)]
+pub enum System2Termination {
+    CoherenceReached,
+    MaxSteps,
+    NoProgress,
+}
+
+impl ReasoningEngine {
+    /// System 2: deliberate multi-step reasoning with working memory.
+    ///
+    /// Unlike the fixed-round wave settling (System 1.5), this performs
+    /// variable-length chaining where each step is a conscious decision:
+    /// retrieve, transfer, compose, or terminate.
+    pub fn reason_deliberate(
+        &self,
+        cond: &[f32],
+        group_envs: &HashMap<usize, IndexedGenEnv>,
+        group_rotors: &HashMap<usize, GroupRotor>,
+        config: &System2Config,
+    ) -> System2Result {
+        let mut wm = WorkingMemory::new(cond.to_vec(), config.wm_capacity);
+
+        // Step 0: Seed working memory with initial multi-group activations
+        let activations = self.activate_all_groups(cond, group_envs);
+        for act in &activations {
+            if act.similarity >= config.min_activation {
+                let node = self.cognitive_map.nodes.get(act.node_idx);
+                let embedding = node.map(|n| n.centroid.clone()).unwrap_or_default();
+                wm.insert(WorkingMemoryEntry {
+                    node_idx: Some(act.node_idx),
+                    group_idx: act.group_idx,
+                    embedding,
+                    text: act.text.clone(),
+                    activation: act.similarity,
+                    step_produced: 0,
+                });
+            }
+        }
+        wm.update_coherence();
+
+        println!(
+            "  [system2] seeded wm with {} entries, initial coherence={:.3}",
+            wm.entries.len(),
+            wm.coherence
+        );
+
+        let mut steps_taken = 0;
+        let mut last_coherence = wm.coherence;
+        let mut stall_count = 0;
+        let terminated_by;
+
+        loop {
+            steps_taken += 1;
+
+            if wm.coherence >= config.coherence_threshold {
+                terminated_by = System2Termination::CoherenceReached;
+                println!(
+                    "  [system2] step {} → TERMINATE (coherence {:.3} >= {:.3})",
+                    steps_taken, wm.coherence, config.coherence_threshold
+                );
+                break;
+            }
+
+            if steps_taken > config.max_steps {
+                terminated_by = System2Termination::MaxSteps;
+                println!("  [system2] step {} → TERMINATE (max steps)", steps_taken);
+                break;
+            }
+
+            // Detect stalling: if coherence hasn't improved for 2 steps, stop
+            if (wm.coherence - last_coherence).abs() < 0.01 {
+                stall_count += 1;
+                if stall_count >= 2 {
+                    terminated_by = System2Termination::NoProgress;
+                    println!("  [system2] step {} → TERMINATE (no progress)", steps_taken);
+                    break;
+                }
+            } else {
+                stall_count = 0;
+            }
+            last_coherence = wm.coherence;
+
+            // Decide next action based on working memory state
+            let action = self.select_step_action(&wm, group_envs, group_rotors, config);
+
+            match action {
+                StepAction::Retrieve { group_idx } => {
+                    self.step_retrieve(&mut wm, group_idx, group_envs, config, steps_taken);
+                }
+                StepAction::Transfer { source_group, target_group } => {
+                    self.step_transfer(
+                        &mut wm,
+                        source_group,
+                        target_group,
+                        group_envs,
+                        group_rotors,
+                        config,
+                        steps_taken,
+                    );
+                }
+                StepAction::Compose => {
+                    self.step_compose(&mut wm, steps_taken);
+                }
+                StepAction::Terminate => {
+                    terminated_by = System2Termination::CoherenceReached;
+                    println!("  [system2] step {} → operator chose TERMINATE", steps_taken);
+                    break;
+                }
+            }
+
+            wm.update_coherence();
+        }
+
+        // Assemble final response from working memory
+        let (text, confidence) = self.assemble_from_wm(&wm, cond);
+        let source_groups: Vec<usize> = wm.entries.iter()
+            .map(|e| e.group_idx)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        System2Result {
+            text,
+            confidence,
+            source_groups,
+            steps_taken,
+            working_memory_size: wm.entries.len(),
+            final_coherence: wm.coherence,
+            terminated_by,
+        }
+    }
+
+    /// The StepOperator: given the current working memory state, decide what
+    /// reasoning action to take next.
+    ///
+    /// Strategy:
+    /// - If working memory has entries from only 1 group → Retrieve from
+    ///   the most structurally related group (diversify)
+    /// - If working memory has entries from 2+ groups → Transfer between
+    ///   the two most activated groups (synthesize)
+    /// - If transfer has been tried and coherence is moderate → Compose
+    /// - If coherence is high enough → Terminate
+    fn select_step_action(
+        &self,
+        wm: &WorkingMemory,
+        group_envs: &HashMap<usize, IndexedGenEnv>,
+        group_rotors: &HashMap<usize, GroupRotor>,
+        config: &System2Config,
+    ) -> StepAction {
+        if wm.coherence >= config.coherence_threshold {
+            return StepAction::Terminate;
+        }
+
+        // Count distinct groups in working memory
+        let mut group_activations: HashMap<usize, f32> = HashMap::new();
+        for entry in &wm.entries {
+            let act = group_activations.entry(entry.group_idx).or_insert(0.0);
+            *act = act.max(entry.activation);
+        }
+
+        let distinct_groups = group_activations.len();
+
+        if distinct_groups <= 1 {
+            // Need diversity: find a group not yet in working memory
+            // that has high structural similarity to an existing entry
+            let existing_group = wm.entries.first().map(|e| e.group_idx).unwrap_or(0);
+            let best_related = self.find_related_group(existing_group, &group_activations, group_envs);
+            if let Some(target_group) = best_related {
+                println!("  [system2] → RETRIEVE from group {} (diversify)", target_group);
+                return StepAction::Retrieve { group_idx: target_group };
+            }
+            // No related groups available; try compose with what we have
+            return StepAction::Compose;
+        }
+
+        // Multiple groups present — check if we should transfer or compose
+        let mut sorted_groups: Vec<(usize, f32)> = group_activations.into_iter().collect();
+        sorted_groups.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        if sorted_groups.len() >= 2 {
+            let (g1, _) = sorted_groups[0];
+            let (g2, _) = sorted_groups[1];
+
+            // Check if we've already done a transfer between these groups
+            let has_transfer = wm.entries.iter().any(|e| {
+                e.step_produced > 0
+                    && e.text.starts_with("[transferred:")
+            });
+
+            if !has_transfer {
+                println!("  [system2] → TRANSFER from group {} to group {}", g2, g1);
+                return StepAction::Transfer {
+                    source_group: g2,
+                    target_group: g1,
+                };
+            }
+        }
+
+        println!("  [system2] → COMPOSE (multi-group assembly)");
+        StepAction::Compose
+    }
+
+    /// Find a group structurally related to `source_group` that isn't already
+    /// heavily represented in working memory.
+    fn find_related_group(
+        &self,
+        source_group: usize,
+        existing_groups: &HashMap<usize, f32>,
+        group_envs: &HashMap<usize, IndexedGenEnv>,
+    ) -> Option<usize> {
+        // Use cognitive map edges to find structurally related groups
+        let source_nodes: Vec<usize> = self.cognitive_map.nodes.iter().enumerate()
+            .filter(|(_, n)| n.group_idx == source_group)
+            .map(|(i, _)| i)
+            .collect();
+
+        let mut group_scores: HashMap<usize, f32> = HashMap::new();
+        for &node_idx in &source_nodes {
+            for &(neighbor, weight) in &self.cognitive_map.adjacency[node_idx] {
+                let neighbor_group = self.cognitive_map.nodes[neighbor].group_idx;
+                if !existing_groups.contains_key(&neighbor_group) {
+                    let score = group_scores.entry(neighbor_group).or_insert(0.0);
+                    *score = score.max(weight);
+                }
+            }
+        }
+
+        // Pick the most related group that we have an env for
+        group_scores.into_iter()
+            .filter(|(g, _)| group_envs.contains_key(g))
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(g, _)| g)
+    }
+
+    /// Retrieve step: query a specific group using the composite working memory
+    /// embedding and add the best match to working memory.
+    fn step_retrieve(
+        &self,
+        wm: &mut WorkingMemory,
+        group_idx: usize,
+        group_envs: &HashMap<usize, IndexedGenEnv>,
+        config: &System2Config,
+        step: usize,
+    ) {
+        let query = wm.composite_embedding();
+        let env = match group_envs.get(&group_idx) {
+            Some(e) => e,
+            None => return,
+        };
+
+        let dict = self.group_dictionaries.get(&group_idx);
+
+        let mut best_idx = 0;
+        let mut best_sim = -1.0f32;
+        for (i, prog) in env.lattice.programs.iter().enumerate() {
+            let sim = cosine_sim(&query, &prog.ema_centroid);
+            if sim > best_sim {
+                best_sim = sim;
+                best_idx = i;
+            }
+        }
+
+        if best_sim >= config.min_activation {
+            let prog = &env.lattice.programs[best_idx];
+            let text = dict.map(|d| d.decode(&prog.token_sequence)).unwrap_or_default();
+            let node_idx = self.cognitive_map.index.get(&(group_idx, best_idx)).copied();
+
+            println!(
+                "  [system2] step {} RETRIEVE: group={}, sim={:.3}, text_len={}",
+                step, group_idx, best_sim, text.len()
+            );
+
+            wm.insert(WorkingMemoryEntry {
+                node_idx,
+                group_idx,
+                embedding: prog.ema_centroid.clone(),
+                text,
+                activation: best_sim,
+                step_produced: step,
+            });
+        }
+    }
+
+    /// Transfer step: apply a transfer rotor to map knowledge from source_group
+    /// to target_group, creating a new working memory entry that represents
+    /// the analogical transfer.
+    fn step_transfer(
+        &self,
+        wm: &mut WorkingMemory,
+        source_group: usize,
+        target_group: usize,
+        _group_envs: &HashMap<usize, IndexedGenEnv>,
+        group_rotors: &HashMap<usize, GroupRotor>,
+        config: &System2Config,
+        step: usize,
+    ) {
+        let source_rotor = group_rotors.get(&source_group)
+            .map(|gr| gr.rotor())
+            .unwrap_or_else(Rotor::identity);
+        let target_rotor = group_rotors.get(&target_group)
+            .map(|gr| gr.rotor())
+            .unwrap_or_else(Rotor::identity);
+        let xfer = transfer_rotor(&source_rotor, &target_rotor);
+
+        // Find the strongest source entry in working memory
+        let source_entry = wm.entries.iter()
+            .filter(|e| e.group_idx == source_group)
+            .max_by(|a, b| a.activation.partial_cmp(&b.activation)
+                .unwrap_or(std::cmp::Ordering::Equal))
+            .cloned();
+
+        if let Some(entry) = source_entry {
+            let source_mv = embed_bridge_vector(&entry.embedding);
+            let transferred_mv = apply_group_rotor(&source_mv, &xfer);
+
+            // Extract the transferred embedding back to bridge space
+            let transferred_emb = extract_conditioning(&transferred_mv, entry.embedding.len());
+
+            // Measure alignment with the goal
+            let alignment = cosine_sim(&transferred_emb, &wm.goal).max(0.0);
+
+            if alignment >= config.transfer_threshold {
+                println!(
+                    "  [system2] step {} TRANSFER: {}→{}, alignment={:.3}",
+                    step, source_group, target_group, alignment
+                );
+
+                wm.insert(WorkingMemoryEntry {
+                    node_idx: None,
+                    group_idx: target_group,
+                    embedding: transferred_emb,
+                    text: format!("[transferred: {}→{}] {}", source_group, target_group, entry.text),
+                    activation: alignment,
+                    step_produced: step,
+                });
+            }
+        }
+    }
+
+    /// Compose step: merge working memory entries into a partial conclusion.
+    /// Uses sentence-level interleaving weighted by activation strength.
+    fn step_compose(&self, wm: &mut WorkingMemory, step: usize) {
+        if wm.entries.len() < 2 {
+            return;
+        }
+
+        let fragments: Vec<(String, f32)> = wm.entries.iter()
+            .map(|e| (e.text.clone(), e.activation))
+            .collect();
+
+        let composed = self.interleave_fragments(&fragments, &wm.goal);
+        if composed.is_empty() {
+            return;
+        }
+
+        // The composed text's embedding is the composite of working memory
+        let composite = wm.composite_embedding();
+        let activation = cosine_sim(&composite, &wm.goal).max(0.0);
+
+        println!(
+            "  [system2] step {} COMPOSE: {} entries → {:.0} chars, activation={:.3}",
+            step,
+            fragments.len(),
+            composed.len() as f32,
+            activation
+        );
+
+        wm.insert(WorkingMemoryEntry {
+            node_idx: None,
+            group_idx: wm.entries[0].group_idx,
+            embedding: composite,
+            text: composed,
+            activation,
+            step_produced: step,
+        });
+    }
+
+    /// Assemble final response from working memory.
+    /// Selects the highest-activation entries and produces the final text.
+    fn assemble_from_wm(&self, wm: &WorkingMemory, cond: &[f32]) -> (String, f32) {
+        if wm.entries.is_empty() {
+            return (String::new(), 0.0);
+        }
+
+        // If there's a composed entry (from a Compose step), prefer it
+        if let Some(composed) = wm.entries.iter()
+            .filter(|e| e.step_produced > 0 && e.text.len() > 20)
+            .max_by(|a, b| a.activation.partial_cmp(&b.activation)
+                .unwrap_or(std::cmp::Ordering::Equal))
+        {
+            let mut text = composed.text.clone();
+            // Strip transfer markers from final output
+            while let Some(end) = text.find("] ") {
+                if text.starts_with("[transferred:") {
+                    text = text[end + 2..].to_string();
+                } else {
+                    break;
+                }
+            }
+            return (text, composed.activation.clamp(0.0, 1.0));
+        }
+
+        // Otherwise, assemble from individual entries
+        let mut sorted: Vec<&WorkingMemoryEntry> = wm.entries.iter().collect();
+        sorted.sort_by(|a, b| b.activation.partial_cmp(&a.activation)
+            .unwrap_or(std::cmp::Ordering::Equal));
+
+        let fragments: Vec<(String, f32)> = sorted.iter()
+            .take(4)
+            .map(|e| (e.text.clone(), e.activation))
+            .collect();
+
+        let text = self.interleave_fragments(&fragments, cond);
+        let confidence = sorted.first().map(|e| e.activation).unwrap_or(0.0);
+        (text, confidence.clamp(0.0, 1.0))
+    }
+
+    /// System 2 engagement check: should we invoke deliberate reasoning?
+    ///
+    /// Triggers when:
+    /// - Primary generation confidence is in the "uncertain middle" (0.30–0.65)
+    /// - Multiple groups are co-activated (cross-domain query)
+    /// - The topic hint suggests a complex/compositional question
+    pub fn should_reason_deliberate(
+        &self,
+        cond: &[f32],
+        primary_confidence: f32,
+        group_envs: &HashMap<usize, IndexedGenEnv>,
+        topic_hint: Option<&str>,
+    ) -> bool {
+        self.should_reason_deliberate_ext(cond, primary_confidence, group_envs, topic_hint, false)
+    }
+
+    /// Extended version with broad query awareness.
+    /// When `is_broad` is true, the confidence ceiling is raised to 0.85
+    /// (broad queries often get high confidence on a *wrong* single program).
+    pub fn should_reason_deliberate_ext(
+        &self,
+        cond: &[f32],
+        primary_confidence: f32,
+        group_envs: &HashMap<usize, IndexedGenEnv>,
+        topic_hint: Option<&str>,
+        is_broad: bool,
+    ) -> bool {
+        let confidence_ceiling = if is_broad { 0.85 } else { 0.65 };
+
+        if primary_confidence > confidence_ceiling {
+            return false;
+        }
+
+        if primary_confidence < 0.10 {
+            return false;
+        }
+
+        // Check for cross-domain co-activation
+        let mut group_scores: Vec<(usize, f32)> = group_envs.iter()
+            .map(|(&gidx, env)| {
+                let best_sim = env.lattice.programs.iter()
+                    .map(|p| cosine_sim(cond, &p.ema_centroid))
+                    .fold(0.0f32, f32::max);
+                (gidx, best_sim)
+            })
+            .collect();
+        group_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        if group_scores.len() < 2 {
+            return false;
+        }
+
+        let top = group_scores[0].1;
+        let second = group_scores[1].1;
+
+        // Both groups must be meaningfully activated
+        if top < 0.25 || second < 0.20 {
+            return false;
+        }
+
+        // Cross-domain ambiguity: top two groups are close
+        let ambiguity = if top > 0.01 { second / top } else { 0.0 };
+
+        // Complex topic hints suggest multi-step reasoning is valuable
+        let complex_topic = topic_hint.map(|t| {
+            t.contains("compare")
+                || t.contains("difference")
+                || t.contains("combine")
+                || t.contains("migrate")
+                || t.contains("refactor")
+                || t.contains("trade")
+        }).unwrap_or(false);
+
+        ambiguity > 0.70 || complex_topic
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

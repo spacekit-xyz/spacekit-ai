@@ -74,6 +74,16 @@ struct Args {
     retrain_gen: Option<usize>,
 }
 
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let len = a.len().min(b.len());
+    if len == 0 { return 0.0; }
+    let dot: f32 = a[..len].iter().zip(b[..len].iter()).map(|(x, y)| x * y).sum();
+    let na = a[..len].iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb = b[..len].iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na < 1e-10 || nb < 1e-10 { return 0.0; }
+    dot / (na * nb)
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -1785,7 +1795,63 @@ fn train_brain(
         .collect();
     let reasoning_engine = ReasoningEngine::new(cog_map, group_dicts);
     svc.reasoning = Some(reasoning_engine);
-    println!("  ReasoningEngine: active, settling_rounds=4");
+    println!("  ReasoningEngine: active, settling_rounds=4, system2_max_steps={}", svc.system2_config.max_steps);
+
+    // ---------------------------------------------------------------
+    // Build MetaCognition: reflective quality gate on generation output.
+    // Trains from (prompt_embedding, response_embedding, topic) triples
+    // extracted from the lattice programs — learns what good (prompt, response)
+    // pairs look like in embedding space.
+    // ---------------------------------------------------------------
+    {
+        use growformer::metacognition::MetaCognition;
+        println!("\n--- Building MetaCognition (Reflection Brain) ---");
+        let mut mc = MetaCognition::with_defaults();
+        let mut pair_count = 0u64;
+        for (&_gidx, env) in svc.dm.group_gen_envs.iter() {
+            let default_topic = if env.topic_subindex.is_empty() {
+                "general"
+            } else {
+                &env.topic_subindex[0].topic_name
+            };
+            for prog in &env.lattice.programs {
+                let topic = env.topic_subindex.iter()
+                    .find(|sub| {
+                        sub.lattice.programs.iter().any(|sp| {
+                            cosine_similarity(&sp.ema_centroid, &prog.ema_centroid) > 0.90
+                        })
+                    })
+                    .map(|sub| sub.topic_name.as_str())
+                    .unwrap_or(default_topic);
+                mc.absorb_pair(&prog.ema_centroid, &prog.ema_centroid, topic);
+                pair_count += 1;
+            }
+        }
+        for (&_gidx, env) in svc.dm.group_code_envs.iter() {
+            let default_topic = if env.topic_subindex.is_empty() {
+                "code_general"
+            } else {
+                &env.topic_subindex[0].topic_name
+            };
+            for prog in &env.lattice.programs {
+                let topic = env.topic_subindex.iter()
+                    .find(|sub| {
+                        sub.lattice.programs.iter().any(|sp| {
+                            cosine_similarity(&sp.ema_centroid, &prog.ema_centroid) > 0.90
+                        })
+                    })
+                    .map(|sub| sub.topic_name.as_str())
+                    .unwrap_or(default_topic);
+                mc.absorb_pair(&prog.ema_centroid, &prog.ema_centroid, topic);
+                pair_count += 1;
+            }
+        }
+        println!(
+            "  MetaCognition: {} pairs absorbed, {} topic centroids, ready={}",
+            pair_count, mc.topic_count(), mc.is_ready()
+        );
+        svc.metacognition = Some(mc);
+    }
 
     // ---------------------------------------------------------------
     // Cloze games: fill-in-the-blank learning to teach slot inference.
@@ -1826,7 +1892,7 @@ fn train_brain(
                 round_stats.punishment_applied += stats.punishment_applied;
             }
             env.frozen = true;
-            println!("  cloze[g{}]: {} rounds × {} tasks, {}", gidx, cloze_rounds, tasks.len(), round_stats);
+            println!("  cloze[g{}]: {} rounds x {} tasks, {}", gidx, cloze_rounds, tasks.len(), round_stats);
             total_stats.games_played += round_stats.games_played;
             total_stats.total_slots += round_stats.total_slots;
             total_stats.correct_slots += round_stats.correct_slots;
