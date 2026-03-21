@@ -68,6 +68,7 @@ All generation outputs are **concrete model outputs** produced by a single forwa
 | Cloze accuracy | slots | 94.6% (1470 games) | Contrastive fill-in-the-blank learning |
 | MetaCognition | pairs | **930+** pairs, **124+** topic centroids | Reflective quality gate (generate→reflect→decide) |
 | System 2 | config | max 6 steps, WM capacity 8 | Deliberate multi-step reasoning with WorkingMemory |
+| Neural Coherence | bands | δ θ α/β γ (Cl(1,7) grades) | Band-decomposed ensemble synchrony for multi-topic composition |
 | Brain size | | **~81 MB** | 14 groups, router, classifier, all envs |
 | Training time | | **~27 min** | One-pass, no epochs, no backprop |
 | Tool detection | | **4 built-in tools** | calculator, code_runner, file_reader, web_search |
@@ -223,6 +224,7 @@ growformer/
     ├── growformer_lang.rs   — GrowformerLang: MetaConcept, MetaCodebook, LanguageProjector
     ├── reasoning.rs         — CognitiveMap, ReasoningEngine (System 1.5), System 2 (WorkingMemory, StepOperator)
     ├── metacognition.rs     — MetaCognition: Reflection Brain, quality gate, graceful degradation
+    ├── coherence.rs         — Neural Coherence: band-decomposed STA synchrony, ensemble selection
     ├── understanding.rs     — UnderstandingLayer: topic/verb classifiers, goal_magnitude
     ├── meta_brain.rs        — MetaBrain: CentroidCoordinator, ArchetypeBrain
     ├── cloze.rs             — Cloze learning: contrastive fill-in-the-blank
