@@ -1264,9 +1264,13 @@ pub struct GroupGenEnv {
     /// Positive = favor cross-archetype mixing; negative = favor coherence.
     #[serde(skip)]
     pub diversity_bonus: f32,
-    /// Transient: query subject keywords for within-topic re-ranking.
+    /// Transient: query subject keywords for within-topic BM25 re-ranking.
     #[serde(skip)]
     pub subject_keywords: Vec<String>,
+    /// Transient: query intent action (e.g., "implement", "explain", "define").
+    /// Used to prefer code-bearing programs for "implement" queries and prose for "explain".
+    #[serde(skip)]
+    pub intent_action: String,
     /// Hex nibble encoding: each token ID is encoded as nibbles × 16 one-hot
     /// values instead of raw binary + Hamming ECC. Gives error containment
     /// per nibble and faster argmax decode.
@@ -1321,6 +1325,7 @@ impl GroupGenEnv {
             last_generation_confidence: 0.0,
             diversity_bonus: 0.0,
             subject_keywords: Vec::new(),
+            intent_action: String::new(),
             hex_mode: hex,
         }
     }
@@ -1370,6 +1375,7 @@ impl GroupGenEnv {
             last_generation_confidence: 0.0,
             diversity_bonus: 0.0,
             subject_keywords: Vec::new(),
+            intent_action: String::new(),
             hex_mode: false,
         }
     }
@@ -2223,9 +2229,12 @@ pub struct IndexedGenEnv {
     pub last_generation_confidence: f32,
     #[serde(skip)]
     pub diversity_bonus: f32,
-    /// Transient: query subject keywords for within-topic re-ranking.
+    /// Transient: query subject keywords for within-topic BM25 re-ranking.
     #[serde(skip)]
     pub subject_keywords: Vec<String>,
+    /// Transient: query intent action (e.g., "implement", "explain").
+    #[serde(skip)]
+    pub intent_action: String,
     pub frozen: bool,
     pub output_dim: usize,
 }
@@ -2339,6 +2348,7 @@ impl IndexedGenEnv {
             last_generation_confidence: 0.0,
             diversity_bonus: 0.0,
             subject_keywords: Vec::new(),
+            intent_action: String::new(),
             frozen: false,
             output_dim,
         }
@@ -2369,6 +2379,7 @@ impl IndexedGenEnv {
             last_generation_confidence: 0.0,
             diversity_bonus: 0.0,
             subject_keywords: Vec::new(),
+            intent_action: String::new(),
             frozen: false,
             output_dim,
         }
@@ -2404,6 +2415,7 @@ impl IndexedGenEnv {
             last_generation_confidence: 0.0,
             diversity_bonus: 0.0,
             subject_keywords: Vec::new(),
+            intent_action: String::new(),
             frozen: false,
             output_dim,
         };
@@ -2735,23 +2747,108 @@ impl IndexedGenEnv {
         topic_match.and_then(|topic| {
                 if topic.lattice.programs.is_empty() { return None; }
 
-                // Score programs: cosine similarity + subject keyword relevance bonus
-                let mut scored: Vec<(usize, f32)> = topic.lattice.programs.iter().enumerate()
-                    .map(|(i, prog)| {
-                        let cosine = gen_cosine_sim(cond, &prog.ema_centroid);
-                        let kw_bonus = if let Some(keywords) = subject_keywords {
-                            let text = self.dictionary.decode(&prog.token_sequence);
-                            let text_lower = text.to_ascii_lowercase();
-                            keywords.iter()
-                                .filter(|kw| kw.len() > 2 && text_lower.contains(&kw.to_ascii_lowercase()))
-                                .count() as f32
-                                * 0.08
-                        } else {
-                            0.0
-                        };
-                        (i, cosine + kw_bonus)
-                    })
+                // ── Stage 1: Vector recall ──
+                // Score all programs by cosine similarity to conditioning vector.
+                let n = topic.lattice.programs.len();
+                let mut cosine_scores: Vec<(usize, f32)> = topic.lattice.programs.iter().enumerate()
+                    .map(|(i, prog)| (i, gen_cosine_sim(cond, &prog.ema_centroid)))
                     .collect();
+                cosine_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+                // ── Stage 2: BM25 re-rank ──
+                // Decode program texts once, compute BM25 against query subject keywords.
+                // BM25 acts as a lexical safety net: even if cosine picks "quicksort"
+                // for a "stack" query, BM25 will boost programs containing "stack".
+                let query_terms: Vec<String> = subject_keywords.unwrap_or(&[]).iter()
+                    .filter(|kw| kw.len() > 2)
+                    .map(|kw| kw.to_ascii_lowercase())
+                    .collect();
+
+                let mut scored: Vec<(usize, f32)> = if query_terms.is_empty() {
+                    cosine_scores
+                } else {
+                    // Decode all program texts and tokenize into words
+                    let docs: Vec<(usize, Vec<String>)> = cosine_scores.iter()
+                        .map(|&(idx, _)| {
+                            let text = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence);
+                            let words: Vec<String> = text.to_ascii_lowercase()
+                                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                                .filter(|w| w.len() > 1)
+                                .map(|w| w.to_string())
+                                .collect();
+                            (idx, words)
+                        })
+                        .collect();
+
+                    let avgdl: f32 = docs.iter().map(|(_, w)| w.len() as f32).sum::<f32>()
+                        / (docs.len().max(1) as f32);
+                    let k1: f32 = 1.2;
+                    let b: f32 = 0.75;
+
+                    // IDF per query term: log((N - df + 0.5) / (df + 0.5) + 1)
+                    let idfs: Vec<f32> = query_terms.iter().map(|qt| {
+                        let df = docs.iter()
+                            .filter(|(_, words)| words.iter().any(|w| w == qt || w.contains(qt.as_str())))
+                            .count() as f32;
+                        ((n as f32 - df + 0.5) / (df + 0.5) + 1.0).ln()
+                    }).collect();
+
+                    // BM25 score per document
+                    let bm25_scores: Vec<f32> = docs.iter().map(|(_, words)| {
+                        let dl = words.len() as f32;
+                        let mut score = 0.0f32;
+                        for (qi, qt) in query_terms.iter().enumerate() {
+                            let tf = words.iter()
+                                .filter(|w| *w == qt || w.contains(qt.as_str()))
+                                .count() as f32;
+                            if tf > 0.0 {
+                                let num = tf * (k1 + 1.0);
+                                let den = tf + k1 * (1.0 - b + b * dl / avgdl);
+                                score += idfs[qi] * num / den;
+                            }
+                        }
+                        score
+                    }).collect();
+
+                    // Normalize BM25 to [0, 1] range for blending with cosine
+                    let bm25_max = bm25_scores.iter().cloned().fold(0.0f32, f32::max);
+                    let bm25_norm: Vec<f32> = if bm25_max > 0.0 {
+                        bm25_scores.iter().map(|s| s / bm25_max).collect()
+                    } else {
+                        bm25_scores
+                    };
+
+                    // Blend: cosine + λ * bm25_normalized (λ=0.35 gives BM25 strong influence)
+                    let lambda = 0.35f32;
+                    let mut combined: Vec<(usize, f32)> = cosine_scores.iter().enumerate()
+                        .map(|(di, &(idx, cos))| {
+                            let base = cos + lambda * bm25_norm[di];
+                            // Intent prefix: "implement"/"code"/"write" prefers programs
+                            // with code markers; "explain"/"define" prefers prose.
+                            let intent_mod = if !self.intent_action.is_empty() {
+                                let (_, words) = &docs[di];
+                                let text = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence);
+                                let has_code = text.contains("fn ") || text.contains("def ")
+                                    || text.contains("class ") || text.contains("impl ")
+                                    || text.contains("return ") || text.contains("pub fn")
+                                    || text.contains("struct ") || text.contains("let ");
+                                let action = self.intent_action.as_str();
+                                if (action == "implement" || action == "code" || action == "write") && has_code {
+                                    0.08
+                                } else if (action == "explain" || action == "define" || action == "describe") && !has_code && words.len() > 15 {
+                                    0.05
+                                } else {
+                                    0.0
+                                }
+                            } else {
+                                0.0
+                            };
+                            (idx, base + intent_mod)
+                        })
+                        .collect();
+                    combined.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    combined
+                };
                 scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
                 // When a language hint is provided, try to find a program matching that language
@@ -3075,6 +3172,7 @@ impl IndexedGenEnv {
         _temperature: f32,
     ) -> (String, f32) {
         let (global_text, prog_idx, global_conf) = self.nearest_response(cond);
+        let global_text_backup = global_text.clone();
 
         // When a specific operation topic is provided (e.g., "subtraction_operation"),
         // bypass cross-topic competition and directly query the matching sub-lattice.
@@ -3102,6 +3200,25 @@ impl IndexedGenEnv {
                 _ => (global_text, global_conf, None),
             }
         };
+
+        // Keyword-relevance gate: if the forced-topic returned text but it has zero
+        // keyword overlap with the query subject, check if the global nearest-response
+        // is a better match. This prevents "stack" queries from returning "quicksort"
+        // when the sub-lattice's cosine-nearest happens to be about a different topic.
+        if forced_active && topic_selected.is_some() && !kw_refs.is_empty() {
+            let text_lower = text.to_ascii_lowercase();
+            let has_kw_match = kw_refs.iter().any(|kw| kw.len() > 3 && text_lower.contains(*kw));
+            if !has_kw_match {
+                let global_lower = global_text_backup.to_ascii_lowercase();
+                let global_has_kw = kw_refs.iter().any(|kw| kw.len() > 3 && global_lower.contains(*kw));
+                if global_has_kw && global_conf > 0.30 && !Self::has_tokenization_artifacts(&global_text_backup) {
+                    println!("    [kw-override] forced-topic text has no keyword match, using global nearest");
+                    self.last_selected_archetype = Some(prog_idx);
+                    self.last_generation_confidence = global_conf;
+                    return (global_text_backup, global_conf);
+                }
+            }
+        }
 
         // When forced topic matched and returned valid text, return it directly.
         // The sub-lattice already contains only programs for this specific operation,

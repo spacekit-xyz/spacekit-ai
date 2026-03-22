@@ -825,13 +825,15 @@ impl LanguageService {
                         }
                     }
                     if let Some((redirect_g, redirect_count)) = best_redirect {
-                        if redirect_count > current_count {
+                        // Only redirect when current group has no programs for this topic,
+                        // or the other group has overwhelmingly more (3x+). Avoids sending
+                        // "stack" queries away from a group that has relevant stack programs
+                        // just because another group has more coding_implementation programs.
+                        let should_redirect = current_count == 0
+                            || (redirect_count >= current_count * 3 && current_count < 3);
+                        if should_redirect {
                             println!("  [cross-group] topic '{}': group {} has {} progs vs current group {} with {}, redirecting",
                                 op_topic, redirect_g, redirect_count, current_g, current_count);
-                            group_idx = Some(redirect_g);
-                        } else if current_count == 0 {
-                            println!("  [cross-group] topic '{}' not in group {}, redirecting to group {} ({} progs)",
-                                op_topic, current_g, redirect_g, redirect_count);
                             group_idx = Some(redirect_g);
                         }
                     }
@@ -864,9 +866,11 @@ impl LanguageService {
                 .filter(|w| w.len() > 2)
                 .map(|w| w.to_ascii_lowercase())
                 .collect();
+            let intent_act = query_intent.action.name().to_string();
             for env in dm.group_gen_envs.values_mut() {
                 env.diversity_bonus = div_bonus;
                 env.subject_keywords = subject_kw.clone();
+                env.intent_action = intent_act.clone();
             }
 
             // --- Broad query detection: summarize across topic sub-lattices ---
