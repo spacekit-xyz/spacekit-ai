@@ -33,7 +33,7 @@ use crate::cloze;
 use crate::environment::NeuralEnvironment;
 use crate::spectral::{
     TokenDictionary, hamming_parity_bits, hamming_encode, hamming_decode,
-    tokenize, syntax_role, structural_signature, SyntaxRole, E8Lattice,
+    tokenize, syntax_role, structural_signature, SyntaxRole, E8Lattice, from_gray,
 };
 use crate::types::EnvironmentConfig;
 
@@ -55,6 +55,10 @@ pub struct GenEnvOverrides {
     /// Override conditioning dimension (bridge output). Defaults to GEN_COND_DIM.
     #[serde(default)]
     pub cond_dim: Option<usize>,
+    /// Use hex nibble encoding instead of raw binary bits.
+    /// Each token ID is encoded as ceil(bpt/4) nibbles × 16 one-hot values.
+    #[serde(default)]
+    pub hex_mode: Option<bool>,
 }
 
 /// Compute bits needed for a dictionary of the given size.
@@ -64,6 +68,16 @@ pub fn bits_for_dict(dict_len: usize) -> usize {
     }
     let max_id = dict_len - 1;
     (usize::BITS - max_id.leading_zeros()) as usize
+}
+
+/// Number of hex nibbles (4-bit groups) needed to cover `bpt` bits.
+pub fn nibbles_for_bits(bpt: usize) -> usize {
+    (bpt + 3) / 4
+}
+
+/// Hex neurons per token: each nibble gets 16 one-hot outputs.
+pub fn hex_neurons_per_token(bpt: usize) -> usize {
+    nibbles_for_bits(bpt) * 16
 }
 
 // ---------------------------------------------------------------------------
@@ -306,25 +320,34 @@ impl AlgebraicCodebook {
 
     /// Nearest-neighbor decode for a small index: try all candidates and
     /// pick the one whose binary encoding is closest to the raw sigmoids.
+    /// Nibble-grouped decode: split bits into 4-bit hex groups and find the
+    /// best match per nibble independently. O(nibbles × 16) vs O(num_options).
+    /// Errors in one nibble are contained and don't cascade.
     pub fn soft_decode_index(bits: &[f32], num_options: usize) -> usize {
         if num_options <= 1 { return 0; }
         let nbits = bits_for_count(num_options);
-        let mut best = 0usize;
-        let mut best_dist = f32::MAX;
-        for candidate in 0..num_options {
-            let mut dist = 0.0f32;
-            for i in 0..nbits {
-                let target = if (candidate >> i) & 1 == 1 { 1.0f32 } else { 0.0 };
-                let actual = bits.get(i).copied().unwrap_or(0.0);
-                let d = actual - target;
-                dist += d * d;
+        let n_nib = nibbles_for_bits(nbits);
+        let mut composite = 0usize;
+        for nib in 0..n_nib {
+            let start = nib * 4;
+            let nib_bits = (nbits - start).min(4);
+            let mut best_val = 0usize;
+            let mut best_dist = f32::MAX;
+            for cand in 0..(1usize << nib_bits) {
+                let mut dist = 0.0f32;
+                for i in 0..nib_bits {
+                    let target = if (cand >> i) & 1 == 1 { 1.0f32 } else { 0.0 };
+                    let d = bits.get(start + i).copied().unwrap_or(0.0) - target;
+                    dist += d * d;
+                }
+                if dist < best_dist {
+                    best_dist = dist;
+                    best_val = cand;
+                }
             }
-            if dist < best_dist {
-                best_dist = dist;
-                best = candidate;
-            }
+            composite |= best_val << start;
         }
-        best
+        composite.min(num_options - 1)
     }
 
     /// Find the best matching archetype and slot values for a token sequence.
@@ -1241,6 +1264,11 @@ pub struct GroupGenEnv {
     /// Positive = favor cross-archetype mixing; negative = favor coherence.
     #[serde(skip)]
     pub diversity_bonus: f32,
+    /// Hex nibble encoding: each token ID is encoded as nibbles × 16 one-hot
+    /// values instead of raw binary + Hamming ECC. Gives error containment
+    /// per nibble and faster argmax decode.
+    #[serde(default)]
+    pub hex_mode: bool,
 }
 
 impl GroupGenEnv {
@@ -1249,14 +1277,26 @@ impl GroupGenEnv {
     }
 
     pub fn new_with_overrides(dictionary: TokenDictionary, ov: &GenEnvOverrides, rng: &mut impl Rng) -> Self {
-        let max_tok = ov.max_tokens.unwrap_or(MAX_TOKENS);
         let hidden = ov.hidden.unwrap_or(GEN_HIDDEN);
         let k = ov.k.unwrap_or(GEN_K);
         let cond_dim = ov.cond_dim.unwrap_or(GEN_COND_DIM);
         let bits_per_token = bits_for_dict(dictionary.len());
-        let parity_bits = hamming_parity_bits(bits_per_token);
-        let coded_bits_per_token = bits_per_token + parity_bits;
-        let output_dim = max_tok * coded_bits_per_token;
+        let hex = ov.hex_mode.unwrap_or(false);
+
+        let (coded_bits_per_token, output_dim) = if hex {
+            let hex_npt = hex_neurons_per_token(bits_per_token);
+            // Auto-scale max_tokens to keep output_dim comparable to binary mode
+            let binary_cbpt = bits_per_token + hamming_parity_bits(bits_per_token);
+            let binary_budget = ov.max_tokens.unwrap_or(MAX_TOKENS) * binary_cbpt;
+            let max_tok = ov.max_tokens.map(|m| m).unwrap_or(binary_budget / hex_npt);
+            (hex_npt, max_tok.max(8) * hex_npt)
+        } else {
+            let max_tok = ov.max_tokens.unwrap_or(MAX_TOKENS);
+            let parity_bits = hamming_parity_bits(bits_per_token);
+            let cbpt = bits_per_token + parity_bits;
+            (cbpt, max_tok * cbpt)
+        };
+
         let mut config = gen_env_config();
         config.competitive_k = k;
         if let Some(ms) = ov.max_synapses { config.max_synapses_per_neuron = ms; }
@@ -1277,6 +1317,7 @@ impl GroupGenEnv {
             last_selected_archetype: None,
             last_generation_confidence: 0.0,
             diversity_bonus: 0.0,
+            hex_mode: hex,
         }
     }
 
@@ -1324,6 +1365,7 @@ impl GroupGenEnv {
             last_selected_archetype: None,
             last_generation_confidence: 0.0,
             diversity_bonus: 0.0,
+            hex_mode: false,
         }
     }
 
@@ -1414,28 +1456,72 @@ impl GroupGenEnv {
         id.min(dict_size.saturating_sub(1) as u16)
     }
 
-    /// Soft decode: find the dictionary entry whose Gray-coded binary
-    /// representation is closest to the raw sigmoid outputs (Euclidean
-    /// distance). Tolerates 1-3 bit errors that hard thresholding would
-    /// propagate. With Gray coding, a 1-bit error maps to an adjacent
-    /// (semantically similar) token instead of an arbitrary one.
-    fn bits_to_id_soft(bits: &[f32], dict: &TokenDictionary, dict_size: usize, bpt: usize) -> u16 {
-        let mut best_id = 0u16;
-        let mut best_dist = f32::MAX;
-        for candidate in 0..dict_size as u16 {
-            let gray = dict.to_gray_id(candidate);
-            let mut dist = 0.0f32;
-            for i in 0..bpt {
-                let target_bit = if (gray >> i) & 1 == 1 { 1.0f32 } else { 0.0 };
-                let d = bits.get(i).copied().unwrap_or(0.0) - target_bit;
-                dist += d * d;
+    /// Hex nibble decode: split Gray-coded bits into 4-bit nibble groups and
+    /// find the best match within each nibble independently. O(nibbles × 16)
+    /// instead of O(dict_size). Errors in one nibble are contained and don't
+    /// cascade to other nibbles.
+    fn nibbles_to_id(bits: &[f32], _dict: &TokenDictionary, dict_size: usize, bpt: usize) -> u16 {
+        let n_nib = nibbles_for_bits(bpt);
+        let mut gray: u16 = 0;
+        for nib in 0..n_nib {
+            let start = nib * 4;
+            let nib_bits = (bpt - start).min(4);
+            let mut best_val = 0u16;
+            let mut best_dist = f32::MAX;
+            for cand in 0..(1u16 << nib_bits) {
+                let mut dist = 0.0f32;
+                for i in 0..nib_bits {
+                    let target = if (cand >> i) & 1 == 1 { 1.0f32 } else { 0.0 };
+                    let d = bits.get(start + i).copied().unwrap_or(0.0) - target;
+                    dist += d * d;
+                }
+                if dist < best_dist {
+                    best_dist = dist;
+                    best_val = cand;
+                }
             }
-            if dist < best_dist {
-                best_dist = dist;
-                best_id = candidate;
-            }
+            gray |= best_val << start;
         }
-        best_id
+        let id = from_gray(gray);
+        id.min(dict_size.saturating_sub(1) as u16)
+    }
+
+    /// Encode a token ID as hex nibble one-hot values.
+    /// Gray code → split into nibbles → one-hot (16 values per nibble).
+    fn id_to_hex(&self, id: u16) -> Vec<f32> {
+        let gray = self.dictionary.to_gray_id(id);
+        let n_nib = nibbles_for_bits(self.bits_per_token);
+        let npt = n_nib * 16;
+        let mut hex_vec = vec![0.0f32; npt];
+        for nib in 0..n_nib {
+            let val = ((gray >> (nib * 4)) & 0xF) as usize;
+            hex_vec[nib * 16 + val] = 1.0;
+        }
+        hex_vec
+    }
+
+    /// Decode hex nibble one-hot outputs back to a token ID.
+    /// Argmax within each 16-neuron group → compose Gray code → from_gray.
+    fn hex_to_id(output: &[f32], _dict: &TokenDictionary, dict_size: usize, bpt: usize) -> u16 {
+        let n_nib = nibbles_for_bits(bpt);
+        let mut gray: u16 = 0;
+        for nib in 0..n_nib {
+            let offset = nib * 16;
+            let nib_bits = (bpt - nib * 4).min(4);
+            let max_val = (1usize << nib_bits) - 1;
+            let mut best_val = 0usize;
+            let mut best_score = f32::NEG_INFINITY;
+            for v in 0..=max_val {
+                let score = output.get(offset + v).copied().unwrap_or(f32::NEG_INFINITY);
+                if score > best_score {
+                    best_score = score;
+                    best_val = v;
+                }
+            }
+            gray |= (best_val as u16) << (nib * 4);
+        }
+        let id = from_gray(gray);
+        id.min(dict_size.saturating_sub(1) as u16)
     }
 
     /// Encode a full target text into a flat binary target vector.
@@ -1459,6 +1545,20 @@ impl GroupGenEnv {
             return raw;
         }
 
+        if self.hex_mode {
+            // Hex nibble path: one-hot per nibble, no ECC needed
+            let mut target = vec![0.0f32; self.output_dim];
+            let npt = self.coded_bits_per_token; // hex_neurons_per_token in hex mode
+            let max_tok = self.output_dim / npt.max(1);
+            for (pos, &id) in token_ids.iter().take(max_tok).enumerate() {
+                let hex = self.id_to_hex(id);
+                let offset = pos * npt;
+                let len = hex.len().min(npt);
+                target[offset..offset + len].copy_from_slice(&hex[..len]);
+            }
+            return target;
+        }
+
         // Raw binary path (with ECC)
         let mut target = vec![0.0f32; self.output_dim];
         let cbpt = self.coded_bits_per_token;
@@ -1472,10 +1572,10 @@ impl GroupGenEnv {
         target
     }
 
-    /// Decode a flat binary output vector into text.
-    /// In slot-only mode: uses the stored selected archetype + slot bits.
-    /// In full algebraic mode: decodes archetype + slot bits together.
-    /// In raw binary mode: ECC correction → Gray decode → soft decode.
+    /// Decode output vector into text.
+    /// Codebook mode: archetype + slot bits.
+    /// Hex mode: per-nibble argmax → compose Gray code → token ID.
+    /// Binary mode: Hamming ECC → nibble-grouped decode.
     fn decode_output(&self, output: &[f32]) -> String {
         if let Some(ref cb) = self.codebook {
             if cb.has_prototypes() {
@@ -1484,11 +1584,6 @@ impl GroupGenEnv {
                 let ids = cb.decode_with_archetype(arch_idx, output);
                 let text = self.dictionary.decode(&ids);
 
-                // Distance-based truncation: archetype clusters can include
-                // trailing fixed tokens from longer, more distant samples.
-                // The median_content_length (set during training) is the
-                // primary bound. For older brains without it, fall back to
-                // sentence-boundary truncation at 80% of archetype length.
                 let bound = if arch.median_content_length > 0 {
                     arch.median_content_length + 2
                 } else {
@@ -1503,7 +1598,39 @@ impl GroupGenEnv {
             return self.dictionary.decode(&ids);
         }
 
-        // Raw binary path
+        if self.hex_mode {
+            // Hex nibble path: argmax per 16-neuron group
+            let dict_size = self.dictionary.len();
+            let bpt = self.bits_per_token;
+            let npt = self.coded_bits_per_token; // hex_neurons_per_token
+            let mut ids = Vec::new();
+            let max_tok = self.output_dim / npt.max(1);
+            let min_tokens = 3;
+            for pos in 0..max_tok {
+                let offset = pos * npt;
+                if offset + npt > output.len() { break; }
+                let slot = &output[offset..offset + npt];
+
+                // Confidence: max activation in any nibble group
+                let n_nib = nibbles_for_bits(bpt);
+                let max_confidence = (0..n_nib)
+                    .map(|nib| {
+                        let no = nib * 16;
+                        (0..16).map(|v| slot.get(no + v).copied().unwrap_or(0.0))
+                            .fold(0.0f32, f32::max)
+                    })
+                    .fold(0.0f32, f32::max);
+
+                if pos >= min_tokens && max_confidence < 0.15 { break; }
+
+                let id = Self::hex_to_id(slot, &self.dictionary, dict_size, bpt);
+                if pos >= min_tokens && id == 0 { break; }
+                if id > 0 { ids.push(id); }
+            }
+            return self.dictionary.decode(&ids);
+        }
+
+        // Binary path: Hamming ECC → nibble-grouped decode
         let dict_size = self.dictionary.len();
         let cbpt = self.coded_bits_per_token;
         let bpt = self.bits_per_token;
@@ -1528,7 +1655,7 @@ impl GroupGenEnv {
             let hard_bits: Vec<u8> = slot.iter().map(|&v| if v > 0.5 { 1u8 } else { 0u8 }).collect();
             let corrected_data = hamming_decode(&hard_bits, bpt);
             let corrected_soft: Vec<f32> = corrected_data.iter().map(|&b| b as f32).collect();
-            let id = Self::bits_to_id_soft(&corrected_soft, &self.dictionary, dict_size, bpt);
+            let id = Self::nibbles_to_id(&corrected_soft, &self.dictionary, dict_size, bpt);
 
             if pos >= min_tokens && id == 0 {
                 break;
@@ -3111,7 +3238,7 @@ mod tests {
             let hard: Vec<u8> = coded_bits.iter().map(|&v| if v > 0.5 { 1u8 } else { 0u8 }).collect();
             let corrected = hamming_decode(&hard, bpt);
             let soft: Vec<f32> = corrected.iter().map(|&b| b as f32).collect();
-            let back = GroupGenEnv::bits_to_id_soft(&soft, &env.dictionary, dict_size, bpt);
+            let back = GroupGenEnv::nibbles_to_id(&soft, &env.dictionary, dict_size, bpt);
             assert_eq!(id, back, "roundtrip failed for {}", id);
         }
     }
@@ -3127,6 +3254,17 @@ mod tests {
     }
 
     #[test]
+    fn test_nibbles_for_bits() {
+        assert_eq!(nibbles_for_bits(1), 1);
+        assert_eq!(nibbles_for_bits(4), 1);
+        assert_eq!(nibbles_for_bits(5), 2);
+        assert_eq!(nibbles_for_bits(8), 2);
+        assert_eq!(nibbles_for_bits(10), 3);
+        assert_eq!(nibbles_for_bits(11), 3);
+        assert_eq!(nibbles_for_bits(12), 3);
+    }
+
+    #[test]
     fn test_encode_decode_target() {
         let dict = test_dict();
         let mut rng = StdRng::seed_from_u64(42);
@@ -3138,6 +3276,41 @@ mod tests {
 
         let decoded = env.decode_output(&target);
         assert_eq!(decoded, text, "encode/decode roundtrip failed");
+    }
+
+    #[test]
+    fn test_hex_id_roundtrip() {
+        let dict = test_dict();
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut ov = GenEnvOverrides::default();
+        ov.hex_mode = Some(true);
+        let env = GroupGenEnv::new_with_overrides(dict, &ov, &mut rng);
+        assert!(env.hex_mode);
+
+        let bpt = env.bits_per_token;
+        let dict_size = env.dictionary.len();
+        for id in 0u16..(dict_size as u16) {
+            let hex = env.id_to_hex(id);
+            let back = GroupGenEnv::hex_to_id(&hex, &env.dictionary, dict_size, bpt);
+            assert_eq!(id, back, "hex roundtrip failed for {}", id);
+        }
+    }
+
+    #[test]
+    fn test_hex_encode_decode_target() {
+        let dict = test_dict();
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut ov = GenEnvOverrides::default();
+        ov.hex_mode = Some(true);
+        let env = GroupGenEnv::new_with_overrides(dict, &ov, &mut rng);
+        assert!(env.hex_mode);
+
+        let text = "reset your password";
+        let target = env.encode_target(text);
+        assert_eq!(target.len(), env.output_dim);
+
+        let decoded = env.decode_output(&target);
+        assert_eq!(decoded, text, "hex encode/decode roundtrip failed");
     }
 
     #[test]

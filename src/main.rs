@@ -251,6 +251,7 @@ fn retrain_single_gen(
             k: Some(ac.gen_k),
             max_synapses: Some(ac.max_synapses),
             energy_budget: Some(ac.energy_budget),
+            hex_mode: Some(true),
             ..Default::default()
         }
     });
@@ -1367,6 +1368,7 @@ fn train_brain(
             k: Some(ac.gen_k),
             max_synapses: Some(ac.max_synapses),
             energy_budget: Some(ac.energy_budget),
+            hex_mode: Some(true),
             ..Default::default()
         }
     });
