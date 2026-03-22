@@ -800,34 +800,47 @@ impl LanguageService {
             if let Some(op_topic) = crate::growformer_lang::infer_operation_topic(intent_text) {
                 topic_hint = Some(op_topic.clone());
 
-                // Cross-group topic search: if the current group doesn't have a sub-lattice
-                // for this topic, find a group that does and redirect there. This fixes
-                // misrouting where the classifier picks the wrong group but the topic
-                // is precisely identified (e.g., "iterator_error_handling" in coding_general).
+                // Cross-group topic search: find the group with the MOST programs for
+                // this topic, regardless of whether the current group also has it.
+                // This prevents false matches where a group has the topic label but
+                // few/irrelevant programs.
                 if let Some(current_g) = group_idx {
-                    let current_has_topic = dm.group_gen_envs.get(&current_g)
-                        .map(|env| env.topic_subindex.iter().any(|t| t.topic_name.eq_ignore_ascii_case(&op_topic)))
-                        .unwrap_or(false);
-                    if !current_has_topic {
-                        let mut best_redirect: Option<(usize, usize)> = None; // (group, prog_count)
-                        for (&gidx, env) in &dm.group_gen_envs {
-                            if gidx == current_g { continue; }
-                            for t in &env.topic_subindex {
-                                if t.topic_name.eq_ignore_ascii_case(&op_topic) && !t.lattice.programs.is_empty() {
-                                    let count = t.lattice.programs.len();
-                                    if best_redirect.map(|(_, c)| count > c).unwrap_or(true) {
-                                        best_redirect = Some((gidx, count));
-                                    }
+                    let current_count = dm.group_gen_envs.get(&current_g)
+                        .map(|env| env.topic_subindex.iter()
+                            .filter(|t| t.topic_name.eq_ignore_ascii_case(&op_topic))
+                            .map(|t| t.lattice.programs.len())
+                            .sum::<usize>())
+                        .unwrap_or(0);
+
+                    let mut best_redirect: Option<(usize, usize)> = None;
+                    for (&gidx, env) in &dm.group_gen_envs {
+                        if gidx == current_g { continue; }
+                        for t in &env.topic_subindex {
+                            if t.topic_name.eq_ignore_ascii_case(&op_topic) && !t.lattice.programs.is_empty() {
+                                let count = t.lattice.programs.len();
+                                if best_redirect.map(|(_, c)| count > c).unwrap_or(true) {
+                                    best_redirect = Some((gidx, count));
                                 }
                             }
                         }
-                        if let Some((redirect_g, prog_count)) = best_redirect {
+                    }
+                    if let Some((redirect_g, redirect_count)) = best_redirect {
+                        if redirect_count > current_count {
+                            println!("  [cross-group] topic '{}': group {} has {} progs vs current group {} with {}, redirecting",
+                                op_topic, redirect_g, redirect_count, current_g, current_count);
+                            group_idx = Some(redirect_g);
+                        } else if current_count == 0 {
                             println!("  [cross-group] topic '{}' not in group {}, redirecting to group {} ({} progs)",
-                                op_topic, current_g, redirect_g, prog_count);
+                                op_topic, current_g, redirect_g, redirect_count);
                             group_idx = Some(redirect_g);
                         }
                     }
+                    if current_count == 0 && best_redirect.is_none() {
+                        println!("  [topic-miss] '{}' not found in any group", op_topic);
+                    }
                 }
+            } else {
+                println!("  [topic-miss] no topic inferred for: {}", &intent_text[..intent_text.len().min(60)]);
             }
 
             // Use MetaBrain conditioning when available, else fall back to Clifford path
@@ -844,10 +857,16 @@ impl LanguageService {
             // --- Level 3: Check episodic memory for cached composition ---
             let _cached_groups = Self::retrieve_cached_composition(dm, &conditioned);
 
-            // Apply OCEAN Hopf diversity bonus to all gen envs
+            // Apply OCEAN Hopf diversity bonus and subject keywords to all gen envs
             let div_bonus = personality.hopf_diversity_bonus();
+            let subject_kw: Vec<String> = query_intent.subject
+                .split_whitespace()
+                .filter(|w| w.len() > 2)
+                .map(|w| w.to_ascii_lowercase())
+                .collect();
             for env in dm.group_gen_envs.values_mut() {
                 env.diversity_bonus = div_bonus;
+                env.subject_keywords = subject_kw.clone();
             }
 
             // --- Broad query detection: summarize across topic sub-lattices ---
@@ -2308,13 +2327,25 @@ impl LanguageService {
     /// schema templates and chunk codecs (neither is serialized).
     fn rebuild_schemas(&mut self) {
         let dm = self.active_dm_mut();
-        for env in dm.group_gen_envs.values_mut() {
+        for (&gidx, env) in dm.group_gen_envs.iter_mut() {
             env.build_schemas();
             env.build_chunk_codec();
+            if !env.topic_subindex.is_empty() {
+                let names: Vec<_> = env.topic_subindex.iter()
+                    .map(|t| format!("{}({})", t.topic_name, t.lattice.programs.len()))
+                    .collect();
+                println!("  [topics] group {} gen: {}", gidx, names.join(", "));
+            }
         }
-        for env in dm.group_code_envs.values_mut() {
+        for (&gidx, env) in dm.group_code_envs.iter_mut() {
             env.build_schemas();
             env.build_chunk_codec();
+            if !env.topic_subindex.is_empty() {
+                let names: Vec<_> = env.topic_subindex.iter()
+                    .map(|t| format!("{}({})", t.topic_name, t.lattice.programs.len()))
+                    .collect();
+                println!("  [topics] group {} code: {}", gidx, names.join(", "));
+            }
         }
     }
 

@@ -90,6 +90,15 @@ async fn main() {
     let log_path = std::env::var("GROWFORMER_NODE_LOG_PATH").ok();
     let mut service = LanguageService::new_default().expect("failed to initialize language service");
 
+    // Initialize topic knowledge graph (shared static, same as training binary)
+    let kg_path = std::env::var("GROWFORMER_KG_PATH")
+        .unwrap_or_else(|_| "data/knowledge_graph.toml".to_string());
+    if std::path::Path::new(&kg_path).exists() {
+        if let Err(e) = growformer::growformer_lang::init_topic_graph(&kg_path) {
+            eprintln!("Warning: failed to load topic graph: {}", e);
+        }
+    }
+
     // Auto-load trained brain(s)
     // - GROWFORMER_BRAIN_DIR: directory of .bin files → load each as name = filename stem, first = active
     // - GROWFORMER_BRAIN_PATH: single file → load as "default" (legacy)

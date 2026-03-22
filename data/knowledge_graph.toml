@@ -126,44 +126,12 @@ any = ["checked", "wrapping", "saturating", "overflow"]
 # ==========================================================================
 
 [[nodes]]
-topic = "linked_list"
+topic = "coding_implementation"
 concept = "DataStructure"
 category = "data_structure"
 priority = 15
 [[nodes.rules]]
-any = ["linked list"]
-
-[[nodes]]
-topic = "stack_implementation"
-concept = "DataStructure"
-category = "data_structure"
-priority = 15
-[[nodes.rules]]
-any = ["stack"]
-
-[[nodes]]
-topic = "queue_implementation"
-concept = "DataStructure"
-category = "data_structure"
-priority = 15
-[[nodes.rules]]
-any = ["queue"]
-
-[[nodes]]
-topic = "hashmap_implementation"
-concept = "DataStructure"
-category = "data_structure"
-priority = 15
-[[nodes.rules]]
-any = ["hash map", "hashmap"]
-
-[[nodes]]
-topic = "tree_implementation"
-concept = "DataStructure"
-category = "data_structure"
-priority = 15
-[[nodes.rules]]
-any = ["binary tree", "bst"]
+any = ["linked list", "stack", "queue", "hash map", "hashmap", "binary tree", "bst", "heap", "priority queue", "deque", "vector", "array list"]
 
 [[nodes]]
 topic = "lru_cache_operation"
@@ -176,24 +144,20 @@ any = ["lru cache"]
 all = ["lru", "cache"]
 
 # ==========================================================================
-# Algorithms
+# Algorithms (mapped to brain sub-lattice names)
 # ==========================================================================
 
 [[nodes]]
-topic = "search_algorithm"
+topic = "coding_implementation"
 concept = "SearchAlgorithm"
 category = "algorithm"
 priority = 15
 [[nodes.rules]]
 any = ["binary search", "linear search", "search algorithm", "bfs", "dfs", "breadth-first", "depth-first", "dijkstra", "a-star"]
-
-[[nodes]]
-topic = "sort_algorithm"
-concept = "SortAlgorithm"
-category = "algorithm"
-priority = 15
 [[nodes.rules]]
 any = ["sort", "quicksort", "mergesort", "bubble sort", "insertion sort", "heap sort", "radix sort"]
+[[nodes.rules]]
+any = ["implement a graph", "implement a tree", "implement a trie", "dynamic programming"]
 
 # ==========================================================================
 # Design patterns — behavioral
@@ -212,6 +176,8 @@ all = ["observer", "event"]
 all = ["observer", "subscri"]
 [[nodes.rules]]
 all = ["observer", "notif"]
+[[nodes.rules]]
+any = ["strategy pattern"]
 [[nodes.rules]]
 all = ["strategy", "algorithm"]
 [[nodes.rules]]
@@ -535,7 +501,7 @@ priority = 15
 any = ["middleware"]
 
 # ==========================================================================
-# General knowledge
+# General knowledge (mapped to brain sub-lattice names in group 9)
 # ==========================================================================
 
 [[nodes]]
@@ -544,7 +510,7 @@ concept = "GeneralKnowledge"
 category = "general_knowledge"
 priority = 12
 [[nodes.rules]]
-any = ["relativity", "einstein", "quantum mechanics", "thermodynamics"]
+any = ["relativity", "einstein", "quantum mechanics", "thermodynamics", "newton", "gravity", "electromagnetic", "optics", "waves"]
 
 [[nodes]]
 topic = "cs_fundamentals"
@@ -552,7 +518,7 @@ concept = "GeneralKnowledge"
 category = "general_knowledge"
 priority = 12
 [[nodes.rules]]
-any = ["halting problem", "computab", "decidab"]
+any = ["halting problem", "computab", "decidab", "big-o", "time complexity", "space complexity", "np-hard", "np-complete"]
 [[nodes.rules]]
 all = ["turing", "machine"]
 
@@ -562,7 +528,7 @@ concept = "GeneralKnowledge"
 category = "general_knowledge"
 priority = 12
 [[nodes.rules]]
-any = ["photosynthesis", "natural selection"]
+any = ["photosynthesis", "natural selection", "dna", "rna", "cell biology", "genetics", "mitosis", "meiosis", "ecosystem"]
 [[nodes.rules]]
 all = ["evolution", "darwin"]
 
@@ -572,9 +538,120 @@ concept = "GeneralKnowledge"
 category = "general_knowledge"
 priority = 12
 [[nodes.rules]]
-any = ["supply and demand", "gdp"]
+any = ["supply and demand", "gdp", "monetary policy", "fiscal policy"]
 [[nodes.rules]]
 all = ["inflation", "econom"]
+
+[[nodes]]
+topic = "networking"
+concept = "GeneralKnowledge"
+category = "general_knowledge"
+priority = 14
+[[nodes.rules]]
+any = ["tcp", "udp", "http", "dns", "ip address", "routing protocol", "congestion", "packet", "socket", "tls", "ssl", "vpn", "firewall", "load balancer", "osi model", "ethernet", "bandwidth"]
+[[nodes.rules]]
+all = ["network", "protocol"]
+
+[[nodes]]
+topic = "chemistry"
+concept = "GeneralKnowledge"
+category = "general_knowledge"
+priority = 12
+[[nodes.rules]]
+any = ["chemical bond", "periodic table", "molecule", "organic chemistry", "reaction rate", "catalyst", "electrochemistry"]
+
+[[nodes]]
+topic = "history"
+concept = "GeneralKnowledge"
+category = "general_knowledge"
+priority = 12
+[[nodes.rules]]
+any = ["world war", "renaissance", "industrial revolution", "ancient rome", "ancient greece", "cold war"]
+
+[[nodes]]
+topic = "computing"
+concept = "GeneralKnowledge"
+category = "general_knowledge"
+priority = 12
+[[nodes.rules]]
+any = ["operating system", "cpu", "memory management", "file system", "process scheduling", "virtual memory", "compiler", "interpreter"]
+
+# ==========================================================================
+# Mathematics (mapped to brain sub-lattice names in group 10)
+# ==========================================================================
+
+[[nodes]]
+topic = "geometry"
+concept = "GeneralKnowledge"
+category = "mathematics"
+priority = 14
+[[nodes.rules]]
+any = ["pythagorean", "triangle", "circle", "polygon", "euclidean", "trigonometry", "sine", "cosine", "tangent", "angle", "area of", "perimeter", "congruent", "similar triangles"]
+
+[[nodes]]
+topic = "calculus"
+concept = "GeneralKnowledge"
+category = "mathematics"
+priority = 14
+[[nodes.rules]]
+any = ["derivative", "integral", "limit", "differential equation", "l'hopital", "taylor series", "fourier", "laplace transform", "gradient"]
+not = ["gradient descent", "gradient memory"]
+
+[[nodes]]
+topic = "algebra"
+concept = "GeneralKnowledge"
+category = "mathematics"
+priority = 13
+[[nodes.rules]]
+any = ["quadratic", "polynomial", "linear equation", "system of equations", "factoring", "logarithm"]
+
+[[nodes]]
+topic = "linear_algebra"
+concept = "GeneralKnowledge"
+category = "mathematics"
+priority = 14
+[[nodes.rules]]
+any = ["matrix", "eigenvalue", "eigenvector", "determinant", "vector space", "linear transformation", "singular value"]
+
+[[nodes]]
+topic = "probability"
+concept = "GeneralKnowledge"
+category = "mathematics"
+priority = 13
+[[nodes.rules]]
+any = ["bayes theorem", "conditional probability", "random variable", "expected value", "variance", "standard deviation", "normal distribution", "poisson"]
+
+[[nodes]]
+topic = "statistics"
+concept = "GeneralKnowledge"
+category = "mathematics"
+priority = 13
+[[nodes.rules]]
+any = ["hypothesis test", "confidence interval", "regression", "correlation", "p-value", "chi-square", "t-test", "anova"]
+
+[[nodes]]
+topic = "combinatorics"
+concept = "GeneralKnowledge"
+category = "mathematics"
+priority = 13
+[[nodes.rules]]
+any = ["permutation", "combination", "binomial coefficient", "pigeonhole", "inclusion-exclusion"]
+
+[[nodes]]
+topic = "number_theory"
+concept = "GeneralKnowledge"
+category = "mathematics"
+priority = 13
+[[nodes.rules]]
+any = ["prime number", "modular arithmetic", "greatest common divisor", "fermat", "euler totient", "diophantine"]
+
+[[nodes]]
+topic = "set_theory"
+concept = "GeneralKnowledge"
+category = "mathematics"
+priority = 12
+[[nodes.rules]]
+any = ["set theory", "cardinality", "countable", "uncountable", "cantor"]
 
 # ==========================================================================
 # Support intents

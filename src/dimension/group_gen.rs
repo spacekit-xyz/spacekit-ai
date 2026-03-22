@@ -1264,6 +1264,9 @@ pub struct GroupGenEnv {
     /// Positive = favor cross-archetype mixing; negative = favor coherence.
     #[serde(skip)]
     pub diversity_bonus: f32,
+    /// Transient: query subject keywords for within-topic re-ranking.
+    #[serde(skip)]
+    pub subject_keywords: Vec<String>,
     /// Hex nibble encoding: each token ID is encoded as nibbles × 16 one-hot
     /// values instead of raw binary + Hamming ECC. Gives error containment
     /// per nibble and faster argmax decode.
@@ -1317,6 +1320,7 @@ impl GroupGenEnv {
             last_selected_archetype: None,
             last_generation_confidence: 0.0,
             diversity_bonus: 0.0,
+            subject_keywords: Vec::new(),
             hex_mode: hex,
         }
     }
@@ -1365,6 +1369,7 @@ impl GroupGenEnv {
             last_selected_archetype: None,
             last_generation_confidence: 0.0,
             diversity_bonus: 0.0,
+            subject_keywords: Vec::new(),
             hex_mode: false,
         }
     }
@@ -2218,6 +2223,9 @@ pub struct IndexedGenEnv {
     pub last_generation_confidence: f32,
     #[serde(skip)]
     pub diversity_bonus: f32,
+    /// Transient: query subject keywords for within-topic re-ranking.
+    #[serde(skip)]
+    pub subject_keywords: Vec<String>,
     pub frozen: bool,
     pub output_dim: usize,
 }
@@ -2330,6 +2338,7 @@ impl IndexedGenEnv {
             last_selected_archetype: None,
             last_generation_confidence: 0.0,
             diversity_bonus: 0.0,
+            subject_keywords: Vec::new(),
             frozen: false,
             output_dim,
         }
@@ -2359,6 +2368,7 @@ impl IndexedGenEnv {
             last_selected_archetype: None,
             last_generation_confidence: 0.0,
             diversity_bonus: 0.0,
+            subject_keywords: Vec::new(),
             frozen: false,
             output_dim,
         }
@@ -2393,6 +2403,7 @@ impl IndexedGenEnv {
             last_selected_archetype: None,
             last_generation_confidence: 0.0,
             diversity_bonus: 0.0,
+            subject_keywords: Vec::new(),
             frozen: false,
             output_dim,
         };
@@ -2686,20 +2697,59 @@ impl IndexedGenEnv {
     /// target language's markers are preferred, preventing Python code from being returned
     /// when Rust was requested.
     fn forced_topic_response(&self, cond: &[f32], forced_topic: &str) -> Option<(String, String, f32)> {
-        self.forced_topic_response_lang(cond, forced_topic, None)
+        self.forced_topic_response_lang(cond, forced_topic, None, None)
     }
 
-    fn forced_topic_response_lang(&self, cond: &[f32], forced_topic: &str, lang_hint: Option<&str>) -> Option<(String, String, f32)> {
-        self.topic_subindex.iter()
+    fn forced_topic_response_lang(&self, cond: &[f32], forced_topic: &str, lang_hint: Option<&str>, subject_keywords: Option<&[&str]>) -> Option<(String, String, f32)> {
+        // Exact match first, then fuzzy word-overlap fallback
+        let topic_match = self.topic_subindex.iter()
             .find(|t| t.topic_name.eq_ignore_ascii_case(forced_topic))
-            .and_then(|topic| {
+            .or_else(|| {
+                let hint_words: Vec<&str> = forced_topic.split('_')
+                    .filter(|w| w.len() > 2)
+                    .collect();
+                if hint_words.is_empty() { return None; }
+                let mut best: Option<(&TopicSubIndex, usize)> = None;
+                for t in &self.topic_subindex {
+                    if t.lattice.programs.is_empty() { continue; }
+                    let tname_lower = t.topic_name.to_ascii_lowercase();
+                    let tname_words: Vec<&str> = tname_lower.split('_')
+                        .filter(|w| w.len() > 2)
+                        .collect();
+                    let overlap = hint_words.iter()
+                        .filter(|hw| tname_words.iter().any(|tw| tw == *hw))
+                        .count();
+                    if overlap > 0 {
+                        if best.map(|(_, prev)| overlap > prev).unwrap_or(true) {
+                            best = Some((t, overlap));
+                        }
+                    }
+                }
+                if let Some((t, _)) = best {
+                    println!("    [fuzzy-topic] '{}' → fuzzy matched '{}' ({} progs)",
+                        forced_topic, t.topic_name, t.lattice.programs.len());
+                }
+                best.map(|(t, _)| t)
+            });
+
+        topic_match.and_then(|topic| {
                 if topic.lattice.programs.is_empty() { return None; }
 
-                // Score all programs in the sub-lattice, with language preference
+                // Score programs: cosine similarity + subject keyword relevance bonus
                 let mut scored: Vec<(usize, f32)> = topic.lattice.programs.iter().enumerate()
                     .map(|(i, prog)| {
                         let cosine = gen_cosine_sim(cond, &prog.ema_centroid);
-                        (i, cosine)
+                        let kw_bonus = if let Some(keywords) = subject_keywords {
+                            let text = self.dictionary.decode(&prog.token_sequence);
+                            let text_lower = text.to_ascii_lowercase();
+                            keywords.iter()
+                                .filter(|kw| kw.len() > 2 && text_lower.contains(&kw.to_ascii_lowercase()))
+                                .count() as f32
+                                * 0.08
+                        } else {
+                            0.0
+                        };
+                        (i, cosine + kw_bonus)
                     })
                     .collect();
                 scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -3029,7 +3079,9 @@ impl IndexedGenEnv {
         // When a specific operation topic is provided (e.g., "subtraction_operation"),
         // bypass cross-topic competition and directly query the matching sub-lattice.
         // This prevents addition's high cosine similarity from drowning out subtraction.
-        let forced = topic_hint.and_then(|h| self.forced_topic_response_lang(cond, h, lang_hint));
+        let kw_refs: Vec<&str> = self.subject_keywords.iter().map(|s| s.as_str()).collect();
+        let kw_opt: Option<&[&str]> = if kw_refs.is_empty() { None } else { Some(&kw_refs) };
+        let forced = topic_hint.and_then(|h| self.forced_topic_response_lang(cond, h, lang_hint, kw_opt));
         let forced_active = forced.is_some();
         let (text, lattice_conf, topic_selected) = if let Some((ft, fn_name, ft_conf)) = forced {
             if ft.len() > 5 && ft_conf > 0.10 {
@@ -3176,16 +3228,6 @@ impl IndexedGenEnv {
             return (text, lattice_conf);
         }
 
-        // Continuous chunk-level generation: compose K-token chunks in Cl(1,7)
-        // latent space, decode each chunk. Bypasses discrete codebook entirely.
-        if self.chunk_codec.is_some() {
-            if let Some((ctext, cconf)) = self.generate_continuous(cond, _max_len) {
-                if ctext.len() > 10 && !Self::has_tokenization_artifacts(&ctext) {
-                    return (ctext, cconf);
-                }
-            }
-        }
-
         // Schema-based generation: use extracted templates if available.
         // Schemas capture the invariant structure across similar programs,
         // only filling in the variable slots using the conditioning signal.
@@ -3262,6 +3304,17 @@ impl IndexedGenEnv {
                         self.last_generation_confidence = comp_conf;
                         return (composed, comp_conf);
                     }
+                }
+            }
+        }
+
+        // Continuous chunk codec: when the selected text has tokenization artifacts
+        // that survived all other paths, re-encode through the chunk codec for a
+        // clean reconstruction. The codec has 100% accuracy at K=8 chunk level.
+        if Self::has_tokenization_artifacts(&text) {
+            if let Some((ctext, cconf)) = self.generate_continuous(cond, _max_len) {
+                if ctext.len() > 10 && !Self::has_tokenization_artifacts(&ctext) {
+                    return (ctext, cconf);
                 }
             }
         }
