@@ -89,9 +89,12 @@ impl ToolRegistry {
     /// false positives on phrases like "what is the factory method pattern".
     pub fn match_tool(&self, text: &str) -> Option<ToolCallInfo> {
         let lower = text.to_ascii_lowercase();
-        let has_numeric_signal = lower.chars().any(|c| c.is_ascii_digit())
-            || lower.contains('*') || lower.contains('+') || lower.contains('/')
+        // Require actual arithmetic context: digits, or operators adjacent to spaces/digits.
+        // Reject '/' inside words like "async/await", "tcp/ip", "read/write".
+        let has_digit = lower.chars().any(|c| c.is_ascii_digit());
+        let has_arith_op = lower.contains(" * ") || lower.contains(" + ") || lower.contains(" / ")
             || lower.contains(" minus ") || lower.contains(" plus ") || lower.contains(" times ");
+        let has_numeric_signal = has_digit || has_arith_op;
         let mut best: Option<(usize, &ToolSchema)> = None;
 
         for schema in &self.tools {

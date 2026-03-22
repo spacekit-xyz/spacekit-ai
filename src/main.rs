@@ -87,6 +87,14 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 fn main() {
     let args = Args::parse();
 
+    // Initialize topic knowledge graph globally
+    let kg_path = "data/knowledge_graph.toml";
+    if std::path::Path::new(kg_path).exists() {
+        if let Err(e) = growformer::growformer_lang::init_topic_graph(kg_path) {
+            eprintln!("Warning: failed to load topic graph: {}", e);
+        }
+    }
+
     if args.train_brain || args.validate_brain_training {
         println!("=============================================================");
         println!("  Growformer — Brain Training");

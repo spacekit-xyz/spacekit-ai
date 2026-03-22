@@ -37,6 +37,7 @@ pub mod cloze;
 pub mod coherence;
 pub mod dimension;
 pub mod growformer_lang;
+pub mod topic_graph;
 pub mod micro_brain;
 pub mod understanding;
 pub mod environment;

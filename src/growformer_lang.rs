@@ -12,6 +12,30 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::OnceLock;
+
+use crate::topic_graph::TopicGraph;
+
+static TOPIC_GRAPH: OnceLock<TopicGraph> = OnceLock::new();
+
+/// Initialize the global TopicGraph from a TOML file.
+/// Called once at startup. If the file is not found, functions fall back
+/// to the legacy hardcoded rules (which should not happen in production).
+pub fn init_topic_graph(toml_path: &str) -> Result<(), String> {
+    let graph = TopicGraph::from_file(toml_path)?;
+    TOPIC_GRAPH.set(graph).map_err(|_| "TopicGraph already initialized".to_string())
+}
+
+/// Initialize from an inline TOML string (for tests or embedded configs).
+pub fn init_topic_graph_from_str(toml_str: &str) -> Result<(), String> {
+    let graph = TopicGraph::from_toml(toml_str)?;
+    TOPIC_GRAPH.set(graph).map_err(|_| "TopicGraph already initialized".to_string())
+}
+
+/// Get a reference to the global TopicGraph, if initialized.
+pub fn topic_graph() -> Option<&'static TopicGraph> {
+    TOPIC_GRAPH.get()
+}
 
 use crate::clifford::{
     Multivector, Rotor, embed_bridge_vector, structural_fingerprint,
@@ -471,13 +495,20 @@ fn is_domain_subject(subject: &str) -> bool {
 // Meta-concept inference from text
 // ---------------------------------------------------------------------------
 
+/// TODO: Derive from a knowledge graph of operations and their relationships.
 pub fn infer_concept(text: &str, semantic_intent: Option<&str>, action_target: Option<&str>) -> MetaConcept {
+    if let Some(graph) = TOPIC_GRAPH.get() {
+        return graph.infer_concept(text, semantic_intent, action_target);
+    }
+    // Legacy fallback
+    infer_concept_legacy(text, semantic_intent, action_target)
+}
+
+fn infer_concept_legacy(text: &str, semantic_intent: Option<&str>, action_target: Option<&str>) -> MetaConcept {
     let lower = text.to_lowercase();
     let intent = semantic_intent.unwrap_or("").to_lowercase();
     let target = action_target.unwrap_or("").to_lowercase();
 
-    // When action_target is available (training), use it as ground truth first.
-    // This prevents false-positive keyword matching from contaminating concept centroids.
     if !target.is_empty() {
         if let Some(concept) = concept_from_action_target(&target) {
             return concept;
@@ -744,7 +775,18 @@ pub fn is_broad_query(text: &str) -> bool {
 /// used in training data. Returns `None` for non-specific or unrecognized operations.
 /// This is finer-grained than `infer_concept` and is used as the `topic_hint` for
 /// within-group discrimination via topic sub-lattices.
+///
+/// Delegates to the TopicGraph knowledge graph when initialized;
+/// falls back to legacy hardcoded rules otherwise.
 pub fn infer_operation_topic(text: &str) -> Option<String> {
+    if let Some(graph) = TOPIC_GRAPH.get() {
+        return graph.infer_topic(text);
+    }
+    // Legacy fallback (should not be reached in production)
+    infer_operation_topic_legacy(text)
+}
+
+fn infer_operation_topic_legacy(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
 
     if lower.contains("addition") || lower.contains("add two") || lower.contains("add ") && lower.contains("number")
@@ -800,59 +842,67 @@ pub fn infer_operation_topic(text: &str) -> Option<String> {
     if lower.contains("hash map") || lower.contains("hashmap") { return Some("hashmap_implementation".into()); }
     if lower.contains("binary tree") || lower.contains("bst") { return Some("tree_implementation".into()); }
 
-    // Design pattern specifics — behavioral
+    // Design pattern specifics — behavioral (training intent: "behavioral")
     if lower.contains("observer pattern") || lower.contains("observer") && lower.contains("pattern")
         || lower.contains("observer") && (lower.contains("event") || lower.contains("subscri") || lower.contains("notif"))
     {
-        return Some("observer_pattern".into());
+        return Some("behavioral".into());
     }
     if lower.contains("strategy pattern") || lower.contains("strategy") && lower.contains("algorithm")
-        || lower.contains("swap algorithm")
+        || lower.contains("swap algorithm") || lower.contains("strategy") && lower.contains("state")
     {
-        return Some("strategy_pattern".into());
+        return Some("behavioral".into());
     }
     if lower.contains("command pattern") || lower.contains("undo") && lower.contains("redo") {
-        return Some("command_pattern".into());
+        return Some("behavioral".into());
     }
     if lower.contains("state pattern") || lower.contains("state machine") && lower.contains("pattern") {
-        return Some("state_pattern".into());
+        return Some("behavioral".into());
     }
-    if lower.contains("template method") { return Some("template_method_pattern".into()); }
+    if lower.contains("template method") { return Some("behavioral".into()); }
     if lower.contains("mediator pattern") || lower.contains("mediator") && lower.contains("coupl") {
-        return Some("mediator_pattern".into());
+        return Some("behavioral".into());
+    }
+    if lower.contains("visitor pattern") || lower.contains("chain of responsibility") || lower.contains("memento") {
+        return Some("behavioral".into());
     }
 
-    // Design pattern specifics — creational
+    // Design pattern specifics — creational (training intent: "creational")
     if lower.contains("factory pattern") || lower.contains("factory method") || lower.contains("abstract factory")
         || lower.contains("factory") && (lower.contains("creat") || lower.contains("instantiat") || lower.contains("construct"))
     {
-        return Some("factory_pattern".into());
+        return Some("creational".into());
     }
     if lower.contains("builder pattern") || lower.contains("builder") && lower.contains("construct") {
-        return Some("builder_pattern".into());
+        return Some("creational".into());
     }
-    if lower.contains("singleton") { return Some("singleton_pattern".into()); }
+    if lower.contains("singleton") { return Some("creational".into()); }
     if lower.contains("prototype pattern") || lower.contains("prototype") && lower.contains("clon") {
-        return Some("prototype_pattern".into());
+        return Some("creational".into());
     }
 
-    // Design pattern specifics — structural
+    // Design pattern specifics — structural (training intent: "structural")
     if lower.contains("adapter pattern") || lower.contains("adapter") && lower.contains("interface") {
-        return Some("adapter_pattern".into());
+        return Some("structural".into());
     }
-    if lower.contains("decorator pattern") || lower.contains("decorator") && (lower.contains("wrap") || lower.contains("extensib")) {
-        return Some("decorator_pattern".into());
+    if (lower.contains("decorator") || lower.contains("decorator pattern"))
+        && !lower.contains("python")
+    {
+        return Some("structural".into());
     }
     if lower.contains("facade pattern") || lower.contains("facade") && lower.contains("simplif") {
-        return Some("facade_pattern".into());
+        return Some("structural".into());
     }
     if lower.contains("bridge pattern") || lower.contains("bridge") && lower.contains("abstraction") {
-        return Some("bridge_pattern".into());
+        return Some("structural".into());
     }
     if lower.contains("composite pattern") || lower.contains("composite") && lower.contains("tree") {
-        return Some("composite_pattern".into());
+        return Some("structural".into());
     }
-    if lower.contains("flyweight") { return Some("flyweight_pattern".into()); }
+    if lower.contains("flyweight") { return Some("structural".into()); }
+    if lower.contains("subclass") && (lower.contains("extensib") || lower.contains("decorator") || lower.contains("composition")) {
+        return Some("structural".into());
+    }
 
     // Architectural patterns
     if lower.contains("microservice") {
@@ -902,11 +952,60 @@ pub fn infer_operation_topic(text: &str) -> Option<String> {
     if lower.contains("decorator") && lower.contains("python") || lower.contains("write a decorator") {
         return Some("decorator_operation".into());
     }
+    if lower.contains("async") && (lower.contains("await") || lower.contains("future") || lower.contains("tokio"))
+        || lower.contains("async/await")
+    {
+        return Some("async_pattern".into());
+    }
     if lower.contains("async") && (lower.contains("handler") || lower.contains("timeout") || lower.contains("retry")) {
         return Some("async_operation".into());
     }
     if lower.contains("refactor") && lower.contains("module") || lower.contains("es module") {
         return Some("coding_refactor".into());
+    }
+
+    // Language-specific coding patterns: use specific intents where available
+    if lower.contains("lru cache") || lower.contains("lru") && lower.contains("cache") {
+        return Some("lru_cache_operation".into());
+    }
+    if lower.contains("lifetime") && (lower.contains("annotation") || lower.contains("pattern") || lower.contains("rust") || lower.contains("elision")) {
+        return Some("lifetime_pattern".into());
+    }
+    if lower.contains("borrow") && (lower.contains("debug") || lower.contains("error") || lower.contains("checker")) {
+        return Some("coding_debug".into());
+    }
+    if lower.contains("recursion") && lower.contains("python")
+        || lower.contains("python") && (lower.contains("depth") || lower.contains("recursionerror") || lower.contains("recursion"))
+    {
+        return Some("python_debug".into());
+    }
+    if lower.contains("recursion") && (lower.contains("debug") || lower.contains("depth") || lower.contains("error") || lower.contains("infinite")) {
+        return Some("coding_debug".into());
+    }
+    if lower.contains("debounce") || lower.contains("throttle") {
+        return Some("debounce_throttle".into());
+    }
+    if lower.contains("middleware") {
+        return Some("middleware_operation".into());
+    }
+
+    // General knowledge topics (match semantic_intent values from training)
+    if lower.contains("relativity") || lower.contains("einstein") {
+        return Some("physics".into());
+    }
+    if lower.contains("halting problem") || lower.contains("turing") && lower.contains("machine")
+        || lower.contains("computab") || lower.contains("decidab")
+    {
+        return Some("cs_fundamentals".into());
+    }
+    if lower.contains("natural selection") || lower.contains("evolution") && lower.contains("darwin") {
+        return Some("biology".into());
+    }
+    if lower.contains("photosynthesis") {
+        return Some("biology".into());
+    }
+    if lower.contains("supply and demand") || lower.contains("gdp") || lower.contains("inflation") && lower.contains("econom") {
+        return Some("economics".into());
     }
 
     // Support intents — account, billing, cancellation, onboarding
