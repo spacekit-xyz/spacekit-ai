@@ -3043,6 +3043,39 @@ impl IndexedGenEnv {
             return (text, lattice_conf);
         }
 
+        // Medium-low confidence: SpaceTime Gradient Memory composition
+        // Retrieves k-nearest programs and optimizes a blended representation
+        // in Cl(1,7) STA space via test-time gradient descent.
+        {
+            use crate::gradient_memory::{GradientMemory, GradientMemoryConfig, MemorySource};
+            let top_k = self.nearest_responses_k(cond, 4);
+            if top_k.len() >= 2 {
+                let sources: Vec<MemorySource> = top_k.iter().map(|(text, pidx, conf)| {
+                    let token_ids = self.dictionary.encode(text);
+                    let centroid = if *pidx < self.lattice.programs.len() {
+                        self.lattice.programs[*pidx].ema_centroid.clone()
+                    } else {
+                        cond.to_vec()
+                    };
+                    MemorySource { centroid, token_ids, similarity: *conf }
+                }).collect();
+
+                let stgm_config = GradientMemoryConfig::default();
+                let target_dim = cond.len();
+                let mut gm = GradientMemory::new(cond, sources, target_dim, stgm_config);
+                let result = gm.optimize(cond, target_dim);
+
+                let composed = gm.decode_sentences(&self.dictionary);
+                if composed.len() > 10 && result.coherence.combined > 0.40
+                    && !Self::has_tokenization_artifacts(&composed)
+                {
+                    self.last_selected_archetype = None;
+                    self.last_generation_confidence = result.coherence.combined;
+                    return (composed, result.coherence.combined);
+                }
+            }
+        }
+
         // Low confidence: Hopf composition from top-K lattice responses
         if let (Some(ref cb), Some(ref hopf)) = (&self.codebook, &self.hopf_table) {
             if cb.has_prototypes() {
@@ -3239,6 +3272,17 @@ impl IndexedGenEnv {
         for sub in &mut self.topic_subindex {
             sub.lattice.consolidate_session(min_hits);
         }
+    }
+
+    /// Inject a user correction: degrade the wrong program, add/reinforce
+    /// the correct response in the lattice. Called from external feedback.
+    pub fn inject_correction(
+        &mut self,
+        wrong_program_idx: Option<usize>,
+        embedding: &[f32],
+        correction_text: &str,
+    ) {
+        self.lattice.inject_correction(wrong_program_idx, embedding, correction_text);
     }
 
     fn truncate_archetype(archetypes: &[ResponseArchetype], arch_idx: usize, ids: &[u16], text: &str) -> String {

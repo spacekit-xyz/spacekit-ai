@@ -204,17 +204,141 @@ impl OceanProfile {
     pub fn hopf_diversity_bonus(&self) -> f32 {
         (self.openness - self.conscientiousness).clamp(-0.3, 0.3)
     }
+
+    /// Gentle drift toward a target value on one dimension. `alpha` controls
+    /// step size (0.01–0.05 recommended). Clamps to [0.0, 1.0].
+    fn drift(val: &mut f32, direction: f32, alpha: f32) {
+        *val = (*val + direction * alpha).clamp(0.0, 1.0);
+    }
+
+    /// Apply emergent personality drift from a single feedback event.
+    /// Patterns:
+    ///   Accept → reward current profile (reduce neuroticism, boost agreeableness)
+    ///   Reject → increase caution and precision
+    ///   Correct with longer text → user wants detail (boost extraversion)
+    ///   Correct with shorter text → user wants conciseness (reduce extraversion)
+    pub fn apply_feedback_drift(
+        &mut self,
+        accepted: bool,
+        correction_len_ratio: Option<f32>, // correction_len / response_len; None if no correction
+    ) {
+        const ALPHA: f32 = 0.02;
+
+        if accepted {
+            Self::drift(&mut self.neuroticism, -1.0, ALPHA);
+            Self::drift(&mut self.agreeableness, 1.0, ALPHA * 0.5);
+        } else {
+            Self::drift(&mut self.conscientiousness, 1.0, ALPHA);
+            Self::drift(&mut self.neuroticism, 1.0, ALPHA * 0.5);
+
+            if let Some(ratio) = correction_len_ratio {
+                if ratio > 1.2 {
+                    Self::drift(&mut self.extraversion, 1.0, ALPHA);
+                } else if ratio < 0.6 {
+                    Self::drift(&mut self.extraversion, -1.0, ALPHA);
+                }
+            }
+        }
+    }
+
+    /// Select a conversational framing prefix based on personality and
+    /// conversation position. Returns None for low-extraversion/agreeableness
+    /// profiles (engineer, analyst) to keep responses terse.
+    pub fn conversational_prefix(&self, turn_count: usize, user_text: &str) -> Option<String> {
+        // Skip framing for terse personalities
+        if self.extraversion < 0.35 && self.agreeableness < 0.45 {
+            return None;
+        }
+
+        let warmth = (self.agreeableness + self.extraversion) / 2.0;
+        let lower = user_text.to_lowercase();
+
+        // First turn openers
+        if turn_count <= 1 {
+            if warmth > 0.65 {
+                if lower.starts_with("how") || lower.starts_with("what") || lower.starts_with("why")
+                    || lower.starts_with("explain") || lower.starts_with("describe")
+                {
+                    return Some(Self::pick_opener_warm(&lower));
+                }
+                if lower.starts_with("help") || lower.contains("can you") || lower.contains("could you") {
+                    return Some("Of course. ".to_string());
+                }
+                if lower.starts_with("implement") || lower.starts_with("write") || lower.starts_with("create")
+                    || lower.starts_with("build") || lower.starts_with("design")
+                {
+                    return Some(Self::pick_opener_warm(&lower));
+                }
+            }
+            return None;
+        }
+
+        // Continuation turns
+        if warmth > 0.6 {
+            if lower.starts_with("and ") || lower.starts_with("also") || lower.starts_with("what about") {
+                return Some("Building on that — ".to_string());
+            }
+            if lower.starts_with("but ") || lower.starts_with("however") || lower.starts_with("what if") {
+                return Some("Good point. ".to_string());
+            }
+            if lower.starts_with("can you") || lower.starts_with("could you") || lower.starts_with("please") {
+                return Some("Sure. ".to_string());
+            }
+            if lower.starts_with("why") {
+                return Some("Here's the reasoning: ".to_string());
+            }
+        }
+
+        None
+    }
+
+    fn pick_opener_warm(lower: &str) -> String {
+        if lower.contains("explain") || lower.contains("what is") || lower.contains("what are") {
+            "Let me break that down. ".to_string()
+        } else if lower.contains("how to") || lower.contains("how do") || lower.contains("how can") {
+            "Here's how. ".to_string()
+        } else if lower.contains("design") || lower.contains("architect") || lower.contains("build") {
+            "Here's an approach. ".to_string()
+        } else if lower.contains("implement") || lower.contains("write") || lower.contains("create") {
+            "Here's the implementation. ".to_string()
+        } else if lower.contains("compare") || lower.contains("difference") || lower.contains("vs") {
+            "Let me compare them. ".to_string()
+        } else {
+            String::new()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Continuum: online learning constants
+// Continuum: online learning configuration
 // ---------------------------------------------------------------------------
 
 /// Number of training steps per feedback event (small to avoid forgetting).
 const CONTINUUM_STEPS: usize = 3;
 
-/// Auto-checkpoint interval: save brain to disk every N feedback events.
-const CONTINUUM_CHECKPOINT_INTERVAL: u64 = 50;
+/// Configurable Continuum parameters for online learning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContinuumConfig {
+    /// Auto-checkpoint interval: save brain every N feedback events. 0 = disabled.
+    pub checkpoint_interval: u64,
+    /// Minimum session hits before consolidation commits drift to persistent centroids.
+    pub min_consolidation_hits: u32,
+    /// Maximum feedback events per minute per session (rate limit). 0 = unlimited.
+    pub rate_limit_per_minute: u32,
+    /// Path for auto-checkpoint files.
+    pub checkpoint_path: String,
+}
+
+impl Default for ContinuumConfig {
+    fn default() -> Self {
+        Self {
+            checkpoint_interval: 50,
+            min_consolidation_hits: 3,
+            rate_limit_per_minute: 0,
+            checkpoint_path: "brain_continuum.bin".to_string(),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Conversation Context (multi-turn)
@@ -317,6 +441,10 @@ pub struct TurnContext {
     pub message: String,
     pub group_id: Option<GroupId>,
     pub output: String,
+    /// Which IndexedGenEnv (by group order index) produced the response.
+    pub effective_gidx: Option<usize>,
+    /// Which lattice program within that env was selected.
+    pub program_idx: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -352,6 +480,12 @@ pub struct LanguageService {
     pub tool_registry: ToolRegistry,
     /// Continuum: count of feedback events since startup (for auto-checkpoint).
     continuum_feedback_count: u64,
+    /// Continuum: timestamp of last feedback (for rate limiting).
+    last_feedback_time: std::time::Instant,
+    /// Continuum: feedback count in current rate-limit window.
+    feedback_window_count: u32,
+    /// Continuum: configurable online learning parameters.
+    pub continuum_config: ContinuumConfig,
     /// Paramecium: lattice-only inference engine (optional, built from brain).
     pub paramecium: Option<InfraciliaryLattice>,
     /// Reasoning engine: hippocampal-prefrontal circuit for cross-group composition.
@@ -417,6 +551,9 @@ impl LanguageService {
             project_model: ProjectModel::new(),
             tool_registry: ToolRegistry::with_builtins(),
             continuum_feedback_count: 0,
+            last_feedback_time: std::time::Instant::now(),
+            feedback_window_count: 0,
+            continuum_config: ContinuumConfig::default(),
             paramecium: None,
             reasoning: None,
             meta_codebook: None,
@@ -1087,15 +1224,39 @@ impl LanguageService {
             user_text.to_string()
         };
 
-        let (action, resp) = self.generation(&context_prompt)?;
+        let (action, mut resp) = self.generation(&context_prompt)?;
+
+        // Conversational framing: personality-aware prefix for natural dialogue
+        let is_framed = resp.template_id != "identity"
+            && resp.template_id != "metacog_degradation"
+            && !resp.template_id.starts_with("tool_")
+            && resp.confidence > 0.3;
+        if is_framed {
+            if let Some(prefix) = self.personality.conversational_prefix(
+                self.conversation.turn_count(),
+                user_text,
+            ) {
+                if !prefix.is_empty() {
+                    resp.text = format!("{}{}", prefix, resp.text);
+                }
+            }
+        }
 
         self.conversation.push_agent(&resp.text);
 
-        // Store turn context for Continuum feedback
+        // Store turn context for Continuum feedback (including lattice routing info)
+        let effective_gidx = action.target_group_id.and_then(|gid| {
+            self.active_dm().main.group_order.iter().position(|&g| g == gid)
+        });
+        let program_idx = effective_gidx.and_then(|gidx| {
+            self.active_dm().group_gen_envs.get(&gidx).and_then(|e| e.last_selected_archetype)
+        });
         self.last_turn = Some(TurnContext {
             message: user_text.to_string(),
             group_id: action.target_group_id,
             output: resp.text.clone(),
+            effective_gidx,
+            program_idx,
         });
 
         Ok((action, resp))
@@ -1106,14 +1267,14 @@ impl LanguageService {
     /// high-quality, high-hit programs), then begins a fresh session.
     pub fn reset_conversation(&mut self) {
         // Consolidate outgoing session: commit drift to persistent centroids
-        // for programs that received enough positive interaction (≥3 hits).
-        const MIN_SESSION_HITS: u32 = 3;
+        // for programs that received enough positive interaction.
+        let min_hits = self.continuum_config.min_consolidation_hits;
         let dm = self.active_dm_mut();
         for env in dm.group_gen_envs.values_mut() {
-            env.consolidate_session(MIN_SESSION_HITS);
+            env.consolidate_session(min_hits);
         }
         for env in dm.group_code_envs.values_mut() {
-            env.consolidate_session(MIN_SESSION_HITS);
+            env.consolidate_session(min_hits);
         }
 
         self.conversation.clear();
@@ -1757,35 +1918,112 @@ impl LanguageService {
         crate::systems::checkpoint::serialize_checkpoint_to_bytes(self.active_dm())
     }
 
+    /// Export current personality as JSON bytes (for persistence alongside brain).
+    pub fn export_personality(&self) -> Result<Vec<u8>, String> {
+        serde_json::to_vec_pretty(&self.personality)
+            .map_err(|e| format!("personality serialize failed: {}", e))
+    }
+
+    /// Import personality from JSON bytes (restores emergent drift).
+    pub fn import_personality(&mut self, data: &[u8]) -> Result<(), String> {
+        let profile: OceanProfile = serde_json::from_slice(data)
+            .map_err(|e| format!("personality deserialize failed: {}", e))?;
+        self.personality = profile;
+        Ok(())
+    }
+
     /// Record this turn for feedback association. Call after each inference; next request may send feedback for this turn.
     pub fn record_turn(&mut self, message: &str, group_id: Option<GroupId>, output: &str) {
+        let effective_gidx = group_id.and_then(|gid| {
+            self.active_dm().main.group_order.iter().position(|&g| g == gid)
+        });
+        let program_idx = effective_gidx.and_then(|gidx| {
+            self.active_dm().group_gen_envs.get(&gidx).and_then(|e| e.last_selected_archetype)
+        });
         self.last_turn = Some(TurnContext {
             message: message.to_string(),
             group_id,
             output: output.to_string(),
+            effective_gidx,
+            program_idx,
         });
     }
 
-    /// Consume feedback for the last turn. Runs online training steps when
-    /// outcome is Reject or Correct, per CONTINUUM.md spec.
+    /// Consume feedback for the last turn. Updates both the neural network
+    /// path (router, gen head) and the Paramecium lattice (quality/reliability,
+    /// correction injection) per CONTINUUM.md spec.
     pub fn submit_feedback(&mut self, feedback: &Feedback) -> Result<(), String> {
         let turn = match self.last_turn.take() {
             Some(t) => t,
             None => return Ok(()),
         };
+        if !self.check_rate_limit() {
+            return Ok(());
+        }
+        self.continuum_feedback_count += 1;
+
+        let dm = self.active_dm_mut();
+        let encoded = dm.language_runtime.encode_and_bridge(&turn.message).ok();
+
         match feedback.outcome {
             FeedbackOutcome::Accept => {
-                self.continuum_feedback_count += 1;
+                // Lattice: positive reinforcement on the selected program
+                if let Some(gidx) = turn.effective_gidx {
+                    if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
+                        if let Some(pidx) = turn.program_idx {
+                            env.apply_quality_feedback(pidx, true, 0.85);
+                        }
+                    }
+                }
             }
-            FeedbackOutcome::Reject | FeedbackOutcome::Correct => {
-                self.continuum_feedback_count += 1;
-                let dm = self.active_dm_mut();
+            FeedbackOutcome::Reject => {
+                // 1. Lattice: negative reinforcement on the selected program
+                if let Some(gidx) = turn.effective_gidx {
+                    if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
+                        if let Some(pidx) = turn.program_idx {
+                            env.apply_quality_feedback(pidx, false, 0.7);
+                        }
+                    }
+                }
 
-                let encoded = dm.language_runtime.encode_and_bridge(&turn.message).ok();
+                // 2. Router correction: train toward correct group
+                if let Some((ref h_raw, ref bridged)) = encoded {
+                    let embedding = &bridged.routed_vector;
+                    if let Some(group_id) = turn.group_id {
+                        let mut rng = StdRng::from_entropy();
+                        if let Some(ref mut router) = dm.observer.learned_router {
+                            for _ in 0..CONTINUUM_STEPS {
+                                router.train_step(embedding, group_id, &mut rng);
+                            }
+                        }
+                    }
+                }
+            }
+            FeedbackOutcome::Correct => {
+                // 1. Lattice: degrade wrong program + inject correction
                 if let Some((ref h_raw, ref bridged)) = encoded {
                     let embedding = &bridged.routed_vector;
 
-                    // 1. Router correction: reinforce or correct group routing (uses shared bridge)
+                    if let Some(gidx) = turn.effective_gidx {
+                        if let Some(ref correction) = feedback.correction {
+                            if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
+                                env.inject_correction(
+                                    turn.program_idx,
+                                    embedding,
+                                    correction,
+                                );
+                            }
+                        } else {
+                            // Correct without correction text: just degrade
+                            if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
+                                if let Some(pidx) = turn.program_idx {
+                                    env.apply_quality_feedback(pidx, false, 0.7);
+                                }
+                            }
+                        }
+                    }
+
+                    // 2. Router correction
                     if let Some(group_id) = turn.group_id {
                         let mut rng = StdRng::from_entropy();
                         if let Some(ref mut router) = dm.observer.learned_router {
@@ -1795,7 +2033,7 @@ impl LanguageService {
                         }
                     }
 
-                    // 2. Generation head correction: if correction text provided, train on adapted vector
+                    // 3. Neural gen head correction with correction text
                     if let Some(ref correction) = feedback.correction {
                         if let Some(group_id) = turn.group_id {
                             let group_idx = dm.main.group_order.iter()
@@ -1818,20 +2056,49 @@ impl LanguageService {
             }
         }
 
+        // Emergent personality: drift OCEAN based on feedback patterns
+        let correction_ratio = feedback.correction.as_ref().map(|c| {
+            c.len() as f32 / turn.output.len().max(1) as f32
+        });
+        self.personality.apply_feedback_drift(
+            matches!(feedback.outcome, FeedbackOutcome::Accept),
+            correction_ratio,
+        );
+
         self.maybe_auto_checkpoint();
         Ok(())
     }
 
     /// Auto-save brain to disk after every N feedback events.
     fn maybe_auto_checkpoint(&self) {
+        let interval = self.continuum_config.checkpoint_interval;
+        if interval == 0 { return; }
         if self.continuum_feedback_count > 0
-            && self.continuum_feedback_count % CONTINUUM_CHECKPOINT_INTERVAL == 0
+            && self.continuum_feedback_count % interval == 0
         {
             if let Ok(bytes) = self.export_brain() {
-                let path = "brain_continuum.bin";
-                let _ = std::fs::write(path, bytes);
+                let _ = std::fs::write(&self.continuum_config.checkpoint_path, bytes);
+            }
+            // Persist emergent personality alongside brain
+            if let Ok(bytes) = self.export_personality() {
+                let personality_path = self.continuum_config.checkpoint_path
+                    .replace(".bin", "_personality.json");
+                let _ = std::fs::write(personality_path, bytes);
             }
         }
+    }
+
+    /// Check rate limit: returns true if this feedback should be processed.
+    fn check_rate_limit(&mut self) -> bool {
+        let limit = self.continuum_config.rate_limit_per_minute;
+        if limit == 0 { return true; }
+        let now = std::time::Instant::now();
+        if now.duration_since(self.last_feedback_time).as_secs() >= 60 {
+            self.last_feedback_time = now;
+            self.feedback_window_count = 0;
+        }
+        self.feedback_window_count += 1;
+        self.feedback_window_count <= limit
     }
 
     /// Load a brain as the default checkpoint (replaces current default / single-brain behavior).
@@ -2424,4 +2691,175 @@ fn build_language_calibration_dataset() -> CalibrationDataset {
         }
     }
     CalibrationDataset { samples }
+}
+
+// ===========================================================================
+// Unit tests
+// ===========================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // OCEAN emergent personality drift
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ocean_drift_accept_reduces_neuroticism() {
+        let mut p = OceanProfile::default();
+        let n_before = p.neuroticism;
+        p.apply_feedback_drift(true, None);
+        assert!(p.neuroticism < n_before,
+            "accept should reduce neuroticism: {} → {}", n_before, p.neuroticism);
+    }
+
+    #[test]
+    fn test_ocean_drift_accept_boosts_agreeableness() {
+        let mut p = OceanProfile::default();
+        let a_before = p.agreeableness;
+        p.apply_feedback_drift(true, None);
+        assert!(p.agreeableness > a_before,
+            "accept should boost agreeableness: {} → {}", a_before, p.agreeableness);
+    }
+
+    #[test]
+    fn test_ocean_drift_reject_boosts_conscientiousness() {
+        let mut p = OceanProfile::default();
+        let c_before = p.conscientiousness;
+        p.apply_feedback_drift(false, None);
+        assert!(p.conscientiousness > c_before,
+            "reject should boost conscientiousness: {} → {}", c_before, p.conscientiousness);
+    }
+
+    #[test]
+    fn test_ocean_drift_reject_boosts_neuroticism() {
+        let mut p = OceanProfile::default();
+        let n_before = p.neuroticism;
+        p.apply_feedback_drift(false, None);
+        assert!(p.neuroticism > n_before,
+            "reject should increase neuroticism: {} → {}", n_before, p.neuroticism);
+    }
+
+    #[test]
+    fn test_ocean_drift_long_correction_boosts_extraversion() {
+        let mut p = OceanProfile::default();
+        let e_before = p.extraversion;
+        // correction 2x longer than original → user wants more detail
+        p.apply_feedback_drift(false, Some(2.0));
+        assert!(p.extraversion > e_before,
+            "long correction should boost extraversion: {} → {}", e_before, p.extraversion);
+    }
+
+    #[test]
+    fn test_ocean_drift_short_correction_reduces_extraversion() {
+        let mut p = OceanProfile::default();
+        let e_before = p.extraversion;
+        // correction half the length → user wants conciseness
+        p.apply_feedback_drift(false, Some(0.4));
+        assert!(p.extraversion < e_before,
+            "short correction should reduce extraversion: {} → {}", e_before, p.extraversion);
+    }
+
+    #[test]
+    fn test_ocean_drift_stays_clamped() {
+        let mut p = OceanProfile::default();
+        // 200 accepts should not push anything out of [0, 1]
+        for _ in 0..200 { p.apply_feedback_drift(true, None); }
+        assert!(p.neuroticism >= 0.0 && p.neuroticism <= 1.0);
+        assert!(p.agreeableness >= 0.0 && p.agreeableness <= 1.0);
+
+        // 200 rejects
+        for _ in 0..200 { p.apply_feedback_drift(false, Some(3.0)); }
+        assert!(p.conscientiousness >= 0.0 && p.conscientiousness <= 1.0);
+        assert!(p.extraversion >= 0.0 && p.extraversion <= 1.0);
+        assert!(p.neuroticism >= 0.0 && p.neuroticism <= 1.0);
+    }
+
+    #[test]
+    fn test_ocean_drift_converges_to_personality() {
+        let mut p = OceanProfile::assistant();
+        let initial = p.clone();
+
+        // Lots of accepts → personality should drift toward lower neuroticism, higher agreeableness
+        for _ in 0..100 { p.apply_feedback_drift(true, None); }
+        assert!(p.neuroticism < initial.neuroticism);
+        assert!(p.agreeableness > initial.agreeableness);
+        // Openness and conscientiousness should be untouched by accepts
+        assert!((p.openness - initial.openness).abs() < 0.01);
+    }
+
+    // -----------------------------------------------------------------------
+    // Conversational framing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_framing_warm_personality_first_turn() {
+        let p = OceanProfile { openness: 0.7, conscientiousness: 0.5, extraversion: 0.7, agreeableness: 0.8, neuroticism: 0.2 };
+        let prefix = p.conversational_prefix(1, "explain the observer pattern");
+        assert!(prefix.is_some(), "warm personality should produce a prefix");
+        let text = prefix.unwrap();
+        assert!(!text.is_empty(), "prefix should not be empty");
+    }
+
+    #[test]
+    fn test_framing_terse_personality_no_prefix() {
+        let p = OceanProfile::engineer();
+        let prefix = p.conversational_prefix(1, "explain the observer pattern");
+        assert!(prefix.is_none(),
+            "engineer personality (low extraversion + agreeableness) should skip framing");
+    }
+
+    #[test]
+    fn test_framing_continuation_building_on() {
+        let p = OceanProfile { openness: 0.5, conscientiousness: 0.5, extraversion: 0.6, agreeableness: 0.7, neuroticism: 0.3 };
+        let prefix = p.conversational_prefix(3, "and what about error handling?");
+        assert_eq!(prefix, Some("Building on that — ".to_string()));
+    }
+
+    #[test]
+    fn test_framing_help_request() {
+        let p = OceanProfile { openness: 0.5, conscientiousness: 0.5, extraversion: 0.6, agreeableness: 0.8, neuroticism: 0.2 };
+        let prefix = p.conversational_prefix(1, "help me reset my password");
+        assert_eq!(prefix, Some("Of course. ".to_string()));
+    }
+
+    #[test]
+    fn test_framing_how_to_question() {
+        let p = OceanProfile { openness: 0.5, conscientiousness: 0.5, extraversion: 0.7, agreeableness: 0.7, neuroticism: 0.2 };
+        let prefix = p.conversational_prefix(1, "how to implement binary search");
+        assert!(prefix.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // ContinuumConfig
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_continuum_config_defaults() {
+        let cfg = ContinuumConfig::default();
+        assert_eq!(cfg.checkpoint_interval, 50);
+        assert_eq!(cfg.min_consolidation_hits, 3);
+        assert_eq!(cfg.rate_limit_per_minute, 0);
+        assert_eq!(cfg.checkpoint_path, "brain_continuum.bin");
+    }
+
+    // -----------------------------------------------------------------------
+    // OCEAN serialization round-trip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ocean_serde_roundtrip() {
+        let mut p = OceanProfile::creative();
+        for _ in 0..10 { p.apply_feedback_drift(true, None); }
+        for _ in 0..5 { p.apply_feedback_drift(false, Some(1.5)); }
+
+        let json = serde_json::to_string(&p).unwrap();
+        let restored: OceanProfile = serde_json::from_str(&json).unwrap();
+
+        assert!((restored.openness - p.openness).abs() < 1e-6);
+        assert!((restored.conscientiousness - p.conscientiousness).abs() < 1e-6);
+        assert!((restored.extraversion - p.extraversion).abs() < 1e-6);
+        assert!((restored.agreeableness - p.agreeableness).abs() < 1e-6);
+        assert!((restored.neuroticism - p.neuroticism).abs() < 1e-6);
+    }
 }

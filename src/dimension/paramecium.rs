@@ -707,6 +707,63 @@ impl InfraciliaryLattice {
         }
     }
 
+    /// Inject a user correction into the lattice. Degrades the wrong program
+    /// and either reinforces a nearby existing program or spawns a new one
+    /// with the correction text and query embedding.
+    pub fn inject_correction(
+        &mut self,
+        wrong_program_idx: Option<usize>,
+        embedding: &[f32],
+        correction_text: &str,
+    ) {
+        // Degrade the wrong program
+        if let Some(idx) = wrong_program_idx {
+            if idx < self.programs.len() {
+                self.apply_feedback(idx, false, 0.8);
+            }
+        }
+
+        // Check if an existing program is close enough to absorb the correction
+        let token_ids = self.dictionary.encode(correction_text);
+        if let Some((nearest_idx, similarity)) = self.nearest_program(embedding) {
+            if similarity >= 0.92 {
+                // Reinforce existing neighbor: shift centroid toward query
+                let prog = &mut self.programs[nearest_idx];
+                let alpha = self.learning_rate;
+                for (i, v) in embedding.iter().enumerate() {
+                    if i < prog.ema_centroid.len() {
+                        prog.ema_centroid[i] = prog.ema_centroid[i] * (1.0 - alpha) + v * alpha;
+                    }
+                }
+                prog.token_sequence = token_ids;
+                prog.activation_count += 1;
+                self.apply_feedback(nearest_idx, true, 0.9);
+                return;
+            }
+        }
+
+        // Spawn new program for the correction
+        let lattice_sig = E8Lattice::quantize_64d(embedding);
+        self.programs.push(BehavioralProgram {
+            centroid: embedding.to_vec(),
+            lattice_signature: lattice_sig,
+            token_sequence: token_ids,
+            activation_count: 1,
+            ema_centroid: embedding.to_vec(),
+            coherence: 1.0,
+            habituation: 0.0,
+            quality_score: 0.3,
+            reliability: 0.7,
+            total_retrievals: 0,
+            session_drift: Vec::new(),
+            session_hits: 0,
+            session_quality_sum: 0.0,
+            activation_level: 0.0,
+            refractory: false,
+        });
+        self.wave = WaveState::new(self.programs.len());
+    }
+
     /// Total memory footprint estimate in bytes.
     pub fn memory_bytes(&self) -> usize {
         let prog_bytes: usize = self.programs.iter().map(|p| {
@@ -1507,5 +1564,92 @@ mod tests {
             "session_drift should be empty after deserialization");
         assert_eq!(restored.programs[0].session_hits, 0,
             "session_hits should be zero after deserialization");
+    }
+
+    // ===================================================================
+    // Continuum: inject_correction (online learning from user feedback)
+    // ===================================================================
+
+    /// Produces an embedding orthogonal to the sin-based test_embedding by
+    /// alternating sign and using cos, avoiding periodicity collisions.
+    fn distant_embedding() -> Vec<f32> {
+        (0..crate::dimension::language::DEFAULT_BRIDGE_DIM)
+            .map(|i| {
+                let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+                sign * ((i as f32) * 0.73 + 3.14).cos()
+            }).collect()
+    }
+
+    #[test]
+    fn test_inject_correction_spawns_new_program() {
+        let mut lattice = make_two_program_lattice();
+        let before = lattice.program_count();
+
+        let far = distant_embedding();
+        lattice.inject_correction(
+            Some(0),
+            &far,
+            "completely new response",
+        );
+
+        assert_eq!(lattice.program_count(), before + 1,
+            "distant correction should spawn a new program");
+
+        let new_prog = lattice.programs.last().unwrap();
+        assert!(new_prog.quality_score > 0.0,
+            "new correction program should start with positive quality");
+        assert!(new_prog.reliability > 0.5,
+            "new correction program should start with above-average reliability");
+    }
+
+    #[test]
+    fn test_inject_correction_degrades_wrong_program() {
+        let mut lattice = make_two_program_lattice();
+
+        lattice.apply_feedback(0, true, 0.9);
+        lattice.apply_feedback(0, true, 0.9);
+        let q_before = lattice.programs[0].quality_score;
+
+        let far = distant_embedding();
+        lattice.inject_correction(
+            Some(0),
+            &far,
+            "corrected response",
+        );
+
+        assert!(lattice.programs[0].quality_score < q_before,
+            "wrong program should be degraded by correction");
+    }
+
+    #[test]
+    fn test_inject_correction_reinforces_nearby() {
+        let mut lattice = make_two_program_lattice();
+        let before = lattice.program_count();
+
+        let near_emb = test_embedding(1.001);
+        lattice.inject_correction(
+            Some(1),
+            &near_emb,
+            "updated nearby response",
+        );
+
+        assert_eq!(lattice.program_count(), before,
+            "correction near existing program should reinforce, not spawn");
+    }
+
+    #[test]
+    fn test_inject_correction_none_wrong_idx() {
+        let mut lattice = make_two_program_lattice();
+        let before = lattice.program_count();
+
+        let far = distant_embedding();
+        lattice.inject_correction(
+            None,
+            &far,
+            "new knowledge",
+        );
+
+        assert_eq!(lattice.program_count(), before + 1,
+            "should still spawn even without a wrong program index");
     }
 }
