@@ -2485,6 +2485,7 @@ impl IndexedGenEnv {
 
                     for &(idx, score) in &scored {
                         let text = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence);
+                        if Self::has_tokenization_artifacts(&text) { continue; }
                         let matches_lang = if is_rust {
                             text.contains("fn ") || text.contains("-> ") || text.contains("let ")
                                 || text.contains("i32") || text.contains("f64") || text.contains("impl ")
@@ -2502,17 +2503,17 @@ impl IndexedGenEnv {
                     }
                 }
 
-                // Fallback: use the top-scored program regardless of language
-                let (best_idx, best_score) = scored[0];
-                let text = self.dictionary.decode(&topic.lattice.programs[best_idx].token_sequence);
-                let snippet: String = text.chars().take(60).collect();
-                println!("    [forced-topic] '{}' → {} progs, conf={:.3}, text=\"{}...\"",
-                    forced_topic, topic.lattice.programs.len(), best_score, snippet);
-                if text.is_empty() || best_score < 0.10 {
-                    None
-                } else {
-                    Some((text, topic.topic_name.clone(), best_score))
+                // Fallback: use the top-scored clean program regardless of language
+                for &(idx, score) in &scored {
+                    if score < 0.10 { break; }
+                    let text = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence);
+                    if text.is_empty() || Self::has_tokenization_artifacts(&text) { continue; }
+                    let snippet: String = text.chars().take(60).collect();
+                    println!("    [forced-topic] '{}' → {} progs, conf={:.3}, text=\"{}...\"",
+                        forced_topic, topic.lattice.programs.len(), score, snippet);
+                    return Some((text, topic.topic_name.clone(), score));
                 }
+                None
             })
     }
 
@@ -2825,7 +2826,9 @@ impl IndexedGenEnv {
         // The sub-lattice already contains only programs for this specific operation,
         // so the field inhibition gate (which uses the GLOBAL lattice) would incorrectly
         // override the sub-lattice's authoritative result.
-        if forced_active && topic_selected.is_some() && text.len() > 5 {
+        if forced_active && topic_selected.is_some() && text.len() > 5
+            && !Self::has_tokenization_artifacts(&text)
+        {
             self.last_selected_archetype = None;
             self.last_generation_confidence = lattice_conf;
             return (text, lattice_conf);
@@ -2857,7 +2860,9 @@ impl IndexedGenEnv {
         };
 
         // High confidence AND in the program's rest frame: return lattice text directly
-        if lattice_conf >= 0.80 && text.len() > 5 && !field_inhibited {
+        if lattice_conf >= 0.80 && text.len() > 5 && !field_inhibited
+            && !Self::has_tokenization_artifacts(&text)
+        {
             self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
             self.last_generation_confidence = lattice_conf;
             return (text, lattice_conf);
@@ -2978,8 +2983,9 @@ impl IndexedGenEnv {
         };
 
         // Forced topic: return directly, bypass archetype reconstruction
-        if (forced_active && topic_selected.is_some() && text.len() > 5)
-            || (lattice_conf >= 0.80 && text.len() > 5)
+        if ((forced_active && topic_selected.is_some() && text.len() > 5)
+            || (lattice_conf >= 0.80 && text.len() > 5))
+            && !Self::has_tokenization_artifacts(&text)
         {
             self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
             self.last_generation_confidence = lattice_conf;

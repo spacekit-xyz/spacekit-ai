@@ -537,13 +537,21 @@ impl LanguageService {
             .and_then(|gid| dm.main.group_order.iter().position(|&g| g == gid));
 
         // GrowformerLang meta-routing: override traditional routing with concept-level routing.
+        // Gate: accept when margin is clear (≥0.05), OR confidence is high (≥0.90)
+        // even with low margin (the concept matched strongly, just close to another),
+        // OR the classifier had no group.
         let mut meta_routing: Option<crate::growformer_lang::MetaRoutingResult> = None;
         if let Some(mr) = meta_pre {
             if let Some(best_g) = mr.best_group() {
                 if best_g < dm.main.group_order.len() {
                     println!("  [meta-route] concept={}, lang={}, conf={:.3}, margin={:.3} → group {}",
                         mr.concept.name(), mr.language.name(), mr.confidence, mr.margin, best_g);
-                    group_idx = Some(best_g);
+                    if mr.margin >= 0.05 || mr.confidence >= 0.90 || group_idx.is_none() {
+                        group_idx = Some(best_g);
+                    } else {
+                        println!("  [meta-route] SKIP: low margin ({:.3}) + low conf ({:.3}), keeping classifier group {:?}",
+                            mr.margin, mr.confidence, group_idx);
+                    }
                 }
             }
             meta_routing = Some(mr);
@@ -563,8 +571,14 @@ impl LanguageService {
         }
 
         let mut topic_hint: Option<String> = None;
-        let is_broad = crate::growformer_lang::is_broad_query(text);
+        let query_intent = crate::growformer_lang::parse_query_intent(text);
+        let is_broad = query_intent.is_broad_overview();
         let mut broad_summary: Option<(String, f32)> = None;
+        println!("  [intent] action={}, subject=\"{}\", broad={}", query_intent.action.name(), query_intent.subject, is_broad);
+
+        // Hoisted for metacognition retry loop (survives the encoding block scope)
+        let mut retry_conditioning: Option<Vec<f32>> = None;
+        let mut retry_effective_gidx: Option<usize> = None;
 
         let resp = if let Some((ref h_raw, ref bridged)) = encoded {
             // Apply OCEAN personality conditioning to the routed vector.
@@ -610,7 +624,36 @@ impl LanguageService {
             // This gives the topic sub-lattice a precise key (e.g., "addition_operation")
             // instead of a generic label from the understanding layer.
             if let Some(op_topic) = crate::growformer_lang::infer_operation_topic(text) {
-                topic_hint = Some(op_topic);
+                topic_hint = Some(op_topic.clone());
+
+                // Cross-group topic search: if the current group doesn't have a sub-lattice
+                // for this topic, find a group that does and redirect there. This fixes
+                // misrouting where the classifier picks the wrong group but the topic
+                // is precisely identified (e.g., "iterator_error_handling" in coding_general).
+                if let Some(current_g) = group_idx {
+                    let current_has_topic = dm.group_gen_envs.get(&current_g)
+                        .map(|env| env.topic_subindex.iter().any(|t| t.topic_name.eq_ignore_ascii_case(&op_topic)))
+                        .unwrap_or(false);
+                    if !current_has_topic {
+                        let mut best_redirect: Option<(usize, usize)> = None; // (group, prog_count)
+                        for (&gidx, env) in &dm.group_gen_envs {
+                            if gidx == current_g { continue; }
+                            for t in &env.topic_subindex {
+                                if t.topic_name.eq_ignore_ascii_case(&op_topic) && !t.lattice.programs.is_empty() {
+                                    let count = t.lattice.programs.len();
+                                    if best_redirect.map(|(_, c)| count > c).unwrap_or(true) {
+                                        best_redirect = Some((gidx, count));
+                                    }
+                                }
+                            }
+                        }
+                        if let Some((redirect_g, prog_count)) = best_redirect {
+                            println!("  [cross-group] topic '{}' not in group {}, redirecting to group {} ({} progs)",
+                                op_topic, current_g, redirect_g, prog_count);
+                            group_idx = Some(redirect_g);
+                        }
+                    }
+                }
             }
 
             // Use MetaBrain conditioning when available, else fall back to Clifford path
@@ -779,6 +822,11 @@ impl LanguageService {
                 }
             };
 
+            // Capture conditioning + group for metacognition retry loop
+            retry_conditioning = Some(gen_conditioning.clone());
+            let eff_gidx = group_idx.or_else(|| meta_result.as_ref().and_then(|mr| mr.group_idx));
+            retry_effective_gidx = eff_gidx;
+
             if best_text.len() > 5 {
                 GeneratedResponse {
                     text: best_text,
@@ -795,6 +843,22 @@ impl LanguageService {
             Self::legacy_gen_from_encoded(head, &encoded, &action, &dm.main.group_order)
         } else {
             render_action_template(&action)
+        };
+
+        // Sentence-level coherence guard: strip trailing sentences that diverge
+        // from the prompt's topic (e.g., identity text appended to an IT query).
+        let resp = if let Some((_, ref bridged)) = encoded {
+            let truncated = Self::coherence_truncate(&bridged.routed_vector, &resp.text);
+            if truncated.len() != resp.text.len() {
+                GeneratedResponse {
+                    text: truncated,
+                    ..resp
+                }
+            } else {
+                resp
+            }
+        } else {
+            resp
         };
 
         // Reasoning fallback: invoke System 1.5 (wave settling) when primary
@@ -850,29 +914,124 @@ impl LanguageService {
             }
         } else { resp };
 
-        // MetaCognition: reflective quality gate on the final response.
+        // MetaCognition: reflective quality gate with retry-reconditioning loop.
         // For broad query summaries (already composed from multiple verified programs),
         // skip the gate — single-topic relevance scoring would incorrectly penalize
         // multi-topic compositions.
+        //
+        // Temporarily take metacognition out of self to break the borrow conflict
+        // between the immutable reflect() call and mutable active_dm_mut() for retry.
         let resp = if is_broad && broad_summary.is_some() {
             println!("  [metacog] SKIP: broad query summary (multi-topic composition)");
             resp
-        } else if let (Some(ref mc), Some((ref h_raw, ref bridged))) = (&self.metacognition, &encoded) {
-            if mc.is_ready() {
-                let prompt_emb = &bridged.routed_vector;
-                self.metacognition_gate(
-                    resp,
-                    prompt_emb,
-                    h_raw,
-                    text,
-                    topic_hint.as_deref(),
-                    &action,
-                )
+        } else {
+            let mc_taken = self.metacognition.take();
+            let prompt_emb_opt = encoded.as_ref().map(|(_, b)| b.routed_vector.clone());
+            let h_raw_opt = encoded.as_ref().map(|(h, _)| h.clone());
+
+            let mc_active = mc_taken.as_ref().map_or(false, |mc| mc.is_ready());
+            let has_encoding = prompt_emb_opt.is_some() && h_raw_opt.is_some();
+
+            let final_resp = if mc_active && has_encoding {
+                let mc = mc_taken.as_ref().unwrap();
+                let prompt_emb = prompt_emb_opt.as_ref().unwrap();
+                let h_raw_clone = h_raw_opt.as_ref().unwrap();
+                let max_retries = mc.config.max_retries;
+                let mut current_resp = resp;
+
+                for attempt in 0..=max_retries {
+                    let outcome = mc.reflect(
+                        prompt_emb,
+                        &Self::approximate_response_embedding(prompt_emb, &current_resp.text),
+                        &current_resp.text,
+                        topic_hint.as_deref(),
+                        attempt,
+                    );
+
+                    match outcome {
+                        ReflectionOutcome::Accept { scores } => {
+                            println!("  [metacog] ACCEPT: quality={:.3}", scores.quality);
+                            break;
+                        }
+                        ReflectionOutcome::Retry { scores, adjustment, attempt: att } => {
+                            println!(
+                                "  [metacog] RETRY: quality={:.3}, attempt {}, regenerating with adjustment",
+                                scores.quality, att + 1
+                            );
+                            let dm = self.active_dm_mut();
+                            if let (Some(gidx), Some(ref base_cond)) = (retry_effective_gidx, &retry_conditioning) {
+                                let mut adjusted_cond = base_cond.clone();
+                                for (i, v) in adjustment.iter().enumerate() {
+                                    if i < adjusted_cond.len() {
+                                        adjusted_cond[i] += v;
+                                    }
+                                }
+                                let recond = dm.adapt_for_group_clifford(gidx, &adjusted_cond, h_raw_clone, GEN_COND_DIM);
+                                if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
+                                    let (retry_text, retry_conf, _) = env.generate_with_e8_for_topic(
+                                        &recond, topic_hint.as_deref(), 300, 0.8,
+                                    );
+                                    if retry_text.len() > 5 && retry_conf > current_resp.confidence {
+                                        current_resp = GeneratedResponse {
+                                            text: retry_text,
+                                            template_id: format!("metacog_retry_{}", att + 1),
+                                            traceable: current_resp.traceable,
+                                            confidence: retry_conf,
+                                        };
+                                    }
+                                }
+                            }
+                        }
+                        ReflectionOutcome::Degrade { scores, message, attempts_exhausted } => {
+                            println!(
+                                "  [metacog] DEGRADE: quality={:.3} after {} attempts",
+                                scores.quality, attempts_exhausted
+                            );
+                            let s2_rescue = if let Some(ref reasoning) = self.reasoning {
+                                let mut cond_s2 = prompt_emb.clone();
+                                cond_s2.resize(GEN_COND_DIM, 0.0);
+                                let dm_ref = self.active_dm();
+                                let s2r = reasoning.reason_deliberate(
+                                    &cond_s2,
+                                    &dm_ref.group_gen_envs,
+                                    &dm_ref.group_rotors,
+                                    &self.system2_config,
+                                );
+                                if s2r.confidence > 0.30 && s2r.text.len() > 15 {
+                                    println!(
+                                        "  [metacog->system2] RESCUE: steps={}, coherence={:.3}",
+                                        s2r.steps_taken, s2r.final_coherence
+                                    );
+                                    Some(GeneratedResponse {
+                                        text: s2r.text,
+                                        template_id: format!("metacog_s2_rescue_{}_steps", s2r.steps_taken),
+                                        traceable: false,
+                                        confidence: s2r.confidence,
+                                    })
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+
+                            current_resp = s2_rescue.unwrap_or(GeneratedResponse {
+                                text: message,
+                                template_id: "metacog_degradation".to_string(),
+                                traceable: true,
+                                confidence: 0.0,
+                            });
+                            break;
+                        }
+                    }
+                }
+                current_resp
             } else {
                 resp
-            }
-        } else {
-            resp
+            };
+
+            self.metacognition = mc_taken;
+            final_resp
         };
 
         self.record_latency(start);
@@ -1744,70 +1903,82 @@ impl LanguageService {
     // M6: SLO tracking
     // -----------------------------------------------------------------------
 
-    /// MetaCognition quality gate: evaluate the candidate response and either
-    /// accept it, retry with adjusted conditioning, or degrade gracefully.
-    fn metacognition_gate(
-        &self,
-        candidate: GeneratedResponse,
-        prompt_emb: &[f32],
-        _h_raw: &[f32],
-        _original_text: &str,
-        topic_hint: Option<&str>,
-        _action: &ActionJson,
-    ) -> GeneratedResponse {
-        let mc = match &self.metacognition {
-            Some(mc) => mc,
-            None => return candidate,
-        };
-
-        // Approximate response embedding by hashing the response text through
-        // a simple projection of the prompt embedding modulated by text features.
-        // (Full re-encoding would require &mut self for the bridge; this geometric
-        // approximation is sufficient for the quality gate.)
-        let response_emb = Self::approximate_response_embedding(prompt_emb, &candidate.text);
-
-        let outcome = mc.reflect(
-            prompt_emb,
-            &response_emb,
-            &candidate.text,
-            topic_hint,
-            0,
-        );
-
-        match outcome {
-            ReflectionOutcome::Accept { scores } => {
-                println!(
-                    "  [metacog] ACCEPT: quality={:.3}",
-                    scores.quality
-                );
-                candidate
-            }
-            ReflectionOutcome::Retry { scores, adjustment, attempt } => {
-                println!(
-                    "  [metacog] RETRY: quality={:.3}, attempt {}",
-                    scores.quality, attempt + 1
-                );
-                // For now, return the candidate since full re-generation would
-                // require mutable access to the DimensionManager. The adjustment
-                // vector is computed but re-generation is deferred to a future
-                // integration pass that restructures the borrow graph.
-                // The quality score is logged for training the reflection brain.
-                let _ = adjustment;
-                candidate
-            }
-            ReflectionOutcome::Degrade { scores, message, attempts_exhausted } => {
-                println!(
-                    "  [metacog] DEGRADE: quality={:.3} after {} attempts",
-                    scores.quality, attempts_exhausted
-                );
-                GeneratedResponse {
-                    text: message,
-                    template_id: "metacog_degradation".to_string(),
-                    traceable: true,
-                    confidence: 0.0,
-                }
-            }
+    /// Sentence-level coherence guard: truncate trailing sentences that diverge
+    /// from the prompt's semantic space. Catches cross-domain contamination where
+    /// the primary response is correct but Hopf composition or multi-group blending
+    /// appended a fragment from an unrelated group (e.g., identity text on an
+    /// information theory query).
+    fn coherence_truncate(prompt_emb: &[f32], text: &str) -> String {
+        let sentences: Vec<&str> = text.split(". ")
+            .filter(|s| s.trim().len() > 5)
+            .collect();
+        if sentences.len() <= 1 {
+            return text.to_string();
         }
+
+        // Approximate semantic similarity of each sentence to the prompt
+        // by using the prompt embedding's hash-distance heuristic. Sentences
+        // whose character distribution diverges sharply from the first sentence
+        // are likely cross-domain contamination.
+        let first_sig = Self::sentence_signature(sentences[0]);
+        let _prompt_norm: f32 = prompt_emb.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+
+        let mut kept: Vec<&str> = vec![sentences[0]];
+        for &sent in &sentences[1..] {
+            let sent_sig = Self::sentence_signature(sent);
+            let overlap = Self::signature_overlap(&first_sig, &sent_sig);
+
+            // Also check for self-referential markers that indicate identity
+            // programs leaked into a domain-specific response
+            let has_self_ref = sent.contains("my neural substrate")
+                || sent.contains("my neural environment")
+                || sent.contains("my training")
+                || sent.contains("my brain")
+                || sent.contains("my lattice")
+                || (sent.contains("I ") && sent.contains("structural pattern"));
+
+            if has_self_ref {
+                println!("  [coherence-trunc] stripped self-referential tail: \"{}\"",
+                    &sent[..sent.len().min(60)]);
+                break;
+            }
+
+            // Low overlap with the leading sentence = likely off-topic tail
+            if overlap < 0.15 && kept.len() >= 1 {
+                println!("  [coherence-trunc] stripped divergent tail (overlap={:.3}): \"{}\"",
+                    overlap, &sent[..sent.len().min(60)]);
+                break;
+            }
+            kept.push(sent);
+        }
+
+        if kept.len() < sentences.len() {
+            kept.join(". ")
+        } else {
+            text.to_string()
+        }
+    }
+
+    /// Character bigram signature for fast sentence similarity.
+    fn sentence_signature(text: &str) -> Vec<(u16, f32)> {
+        let lower = text.to_lowercase();
+        let bytes: Vec<u8> = lower.bytes().filter(|b| b.is_ascii_alphabetic()).collect();
+        let mut counts: std::collections::HashMap<u16, u32> = std::collections::HashMap::new();
+        for window in bytes.windows(2) {
+            let key = (window[0] as u16) << 8 | window[1] as u16;
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        let total = counts.values().sum::<u32>().max(1) as f32;
+        counts.into_iter().map(|(k, v)| (k, v as f32 / total)).collect()
+    }
+
+    /// Cosine-like overlap between two bigram signatures.
+    fn signature_overlap(a: &[(u16, f32)], b: &[(u16, f32)]) -> f32 {
+        let b_map: std::collections::HashMap<u16, f32> = b.iter().copied().collect();
+        let dot: f32 = a.iter().map(|(k, v)| v * b_map.get(k).unwrap_or(&0.0)).sum();
+        let norm_a: f32 = a.iter().map(|(_, v)| v * v).sum::<f32>().sqrt().max(1e-8);
+        let norm_b: f32 = b.iter().map(|(_, v)| v * v).sum::<f32>().sqrt().max(1e-8);
+        dot / (norm_a * norm_b)
     }
 
     /// Approximate a response embedding without full re-encoding.

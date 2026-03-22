@@ -91,6 +91,7 @@ pub enum MetaConcept {
     Testing,
     Debugging,
     Refactoring,
+    InformationTheory,
     GeneralKnowledge,
     Support,
     Conversation,
@@ -104,8 +105,8 @@ impl MetaConcept {
             StructDefinition, EnumAlgebraic, TraitInterface,
             ErrorHandling, Iteration, PatternMatching, AsyncConcurrency,
             SearchAlgorithm, SortAlgorithm, DataStructure, Composition,
-            Testing, Debugging, Refactoring, GeneralKnowledge,
-            Support, Conversation,
+            Testing, Debugging, Refactoring, InformationTheory,
+            GeneralKnowledge, Support, Conversation,
         ]
     }
 
@@ -136,6 +137,7 @@ impl MetaConcept {
             Self::Testing => "testing",
             Self::Debugging => "debugging",
             Self::Refactoring => "refactoring",
+            Self::InformationTheory => "information_theory",
             Self::GeneralKnowledge => "general_knowledge",
             Self::Support => "support",
             Self::Conversation => "conversation",
@@ -283,6 +285,186 @@ pub fn detect_language(text: &str) -> TargetLanguage {
         3 => TargetLanguage::Go,
         _ => TargetLanguage::Generic,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Query Intent — structured two-phase understanding
+// Phase 1: Extract the ACTION (what/where/why/when/how/design/create/build)
+// Phase 2: Extract the SUBJECT (the conceptual target)
+// This replaces fragile keyword matching with structural parsing.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QueryAction {
+    Define,     // "What is X?" / "Define X"
+    Explain,    // "Explain X" / "How does X work?"
+    Locate,     // "Where is X?" / "Where does X happen?"
+    Reason,     // "Why does X?" / "Why is X important?"
+    Temporal,   // "When should I use X?" / "When does X apply?"
+    Compare,    // "Compare X and Y" / "Difference between X and Y"
+    Implement,  // "Write X" / "Create X" / "Build X" / "Implement X"
+    Design,     // "Design X" / "Architect X" / "Plan X"
+    Debug,      // "Fix X" / "Debug X" / "Why is X broken?"
+    List,       // "List X" / "What are the types of X?"
+    Retrieve,   // Direct noun phrase — "Rate-distortion tradeoff" / "Huffman coding"
+}
+
+impl QueryAction {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Define => "define",
+            Self::Explain => "explain",
+            Self::Locate => "locate",
+            Self::Reason => "reason",
+            Self::Temporal => "temporal",
+            Self::Compare => "compare",
+            Self::Implement => "implement",
+            Self::Design => "design",
+            Self::Debug => "debug",
+            Self::List => "list",
+            Self::Retrieve => "retrieve",
+        }
+    }
+
+    pub fn is_generative(&self) -> bool {
+        matches!(self, Self::Implement | Self::Design)
+    }
+
+    pub fn is_informational(&self) -> bool {
+        matches!(self, Self::Define | Self::Explain | Self::Reason | Self::Locate | Self::Temporal | Self::Compare | Self::List | Self::Retrieve)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct QueryIntent {
+    pub action: QueryAction,
+    /// The conceptual subject extracted from the query, with action words stripped.
+    /// e.g. "What is Rate-distortion tradeoff?" → subject = "rate-distortion tradeoff"
+    pub subject: String,
+    /// The full original query text (lowercased).
+    pub raw: String,
+}
+
+/// Parse a query into structured intent: action + subject.
+///
+/// This is the first pass of understanding — before any embedding-based routing.
+/// The action determines HOW to respond (define, explain, implement, etc.),
+/// and the subject determines WHAT domain to route to.
+pub fn parse_query_intent(text: &str) -> QueryIntent {
+    let lower = text.to_lowercase();
+    let trimmed = lower.trim();
+
+    // Phase 1: Extract action from query structure
+    let (action, subject_start) = extract_action(trimmed);
+
+    // Phase 2: Extract subject (everything after the action prefix)
+    let subject = trimmed[subject_start..].trim()
+        .trim_end_matches('?')
+        .trim_end_matches('.')
+        .trim()
+        .to_string();
+
+    QueryIntent {
+        action,
+        subject,
+        raw: lower,
+    }
+}
+
+fn extract_action(text: &str) -> (QueryAction, usize) {
+    // Interrogative patterns — ordered by specificity
+    let patterns: &[(&[&str], QueryAction)] = &[
+        // Compare
+        (&["compare ", "difference between ", "differences between ",
+          "contrast ", "versus ", " vs "], QueryAction::Compare),
+
+        // Why
+        (&["why does ", "why is ", "why do ", "why are ", "why should ",
+          "why can't ", "why would "], QueryAction::Reason),
+
+        // Where
+        (&["where is ", "where does ", "where do ", "where are ",
+          "where should "], QueryAction::Locate),
+
+        // When
+        (&["when should ", "when does ", "when do ", "when is ",
+          "when to "], QueryAction::Temporal),
+
+        // What-is (define)
+        (&["what is ", "what is a ", "what is an ", "what is the ",
+          "what are ", "what does ", "define "], QueryAction::Define),
+
+        // How (explain mechanism)
+        (&["how does ", "how do ", "how is ", "how are ", "how to ",
+          "how can ", "how would "], QueryAction::Explain),
+
+        // List
+        (&["list ", "list all ", "what types of ", "what kinds of ",
+          "enumerate "], QueryAction::List),
+
+        // Implement / create / build
+        (&["write ", "write a ", "write an ", "create ", "create a ",
+          "build ", "build a ", "implement ", "implement a ",
+          "code ", "code a ", "make ", "make a ", "generate "], QueryAction::Implement),
+
+        // Design / architect
+        (&["design ", "design a ", "architect ", "plan ",
+          "plan a "], QueryAction::Design),
+
+        // Debug / fix
+        (&["fix ", "debug ", "troubleshoot ", "diagnose ",
+          "why is my ", "why isn't ", "why doesn't "], QueryAction::Debug),
+
+        // Explain (weaker patterns)
+        (&["explain ", "describe ", "tell me about ", "tell me what ",
+          "overview of ", "introduction to "], QueryAction::Explain),
+    ];
+
+    for (prefixes, action) in patterns {
+        for prefix in *prefixes {
+            if text.starts_with(prefix) {
+                return (action.clone(), prefix.len());
+            }
+            if text.contains(prefix) && action == &QueryAction::Compare {
+                return (action.clone(), 0);
+            }
+        }
+    }
+
+    // No action prefix detected — treat as a direct concept retrieval
+    (QueryAction::Retrieve, 0)
+}
+
+impl QueryIntent {
+    /// Does this intent need a specific sub-lattice answer (not a broad summary)?
+    pub fn is_specific(&self) -> bool {
+        !self.subject.is_empty() && self.subject.split_whitespace().count() <= 8
+            && !self.action.is_generative()
+    }
+
+    /// Does this intent ask for a broad domain overview?
+    pub fn is_broad_overview(&self) -> bool {
+        if self.subject.is_empty() {
+            return false;
+        }
+        // "What is software architecture?" — Define + domain-level subject
+        let is_domain_level = is_domain_subject(&self.subject);
+        matches!(self.action, QueryAction::Define | QueryAction::List) && is_domain_level
+    }
+}
+
+/// Check if a subject is a domain-level concept (broad) vs a specific topic.
+fn is_domain_subject(subject: &str) -> bool {
+    let domains = [
+        "software architecture", "software engineering", "design patterns",
+        "system design", "programming paradigm", "machine learning",
+        "artificial intelligence", "cloud computing", "devops",
+        "web development", "data engineering", "computer science",
+        "distributed systems", "operating systems", "networking",
+        "information theory", "coding theory", "signal processing",
+        "database", "security", "cryptography",
+    ];
+    domains.iter().any(|d| subject.contains(d))
 }
 
 // ---------------------------------------------------------------------------
@@ -446,11 +628,32 @@ pub fn infer_concept(text: &str, semantic_intent: Option<&str>, action_target: O
         return MetaConcept::TraitInterface; // patterns are fundamentally about interfaces
     }
 
-    // Architecture
+    // Information theory
+    let it_keywords = ["entropy", "mutual information", "kl divergence", "kullback",
+        "channel capacity", "source coding", "shannon", "huffman",
+        "arithmetic coding", "lempel-ziv", "rate-distortion", "rate distortion",
+        "fisher information", "cramer-rao", "fano", "data processing inequality",
+        "cross-entropy", "cross entropy", "information bottleneck",
+        "error-correcting code", "error correcting code", "ldpc", "turbo code",
+        "binary symmetric channel", "awgn", "gaussian noise",
+        "kolmogorov complexity", "minimum description length", "mdl",
+        "typical set", "equipartition", "jensen-shannon", "hellinger",
+        "total variation", "renyi", "convolutional code", "linear block code",
+        "differential entropy", "conditional entropy", "joint entropy",
+        "entropy rate", "sufficient statistic", "information theory"];
+    if it_keywords.iter().any(|kw| lower.contains(kw))
+        || intent.contains("entropy") || intent.contains("coding")
+        || intent.contains("divergence") || intent.contains("channel")
+        || intent.contains("information")
+    {
+        return MetaConcept::InformationTheory;
+    }
+
+    // Architecture — routes to TraitInterface to match patterns training group
     if lower.contains("architecture") || lower.contains("microservice")
         || lower.contains("system design")
     {
-        return MetaConcept::Composition;
+        return MetaConcept::TraitInterface;
     }
 
     // Lifetime / borrow
@@ -523,7 +726,10 @@ pub fn is_broad_query(text: &str) -> bool {
         || lower.contains("computer science")
         || lower.contains("distributed systems")
         || lower.contains("operating systems")
-        || lower.contains("networking");
+        || lower.contains("networking")
+        || lower.contains("information theory")
+        || lower.contains("coding theory")
+        || lower.contains("signal processing");
 
     // If the query mentions a specific sub-topic, it's not broad even if phrased generally
     let has_specific = infer_operation_topic(text).is_some();
@@ -532,7 +738,6 @@ pub fn is_broad_query(text: &str) -> bool {
     }
 
     (definitional || overview || explain_broad || how_work) && domain_concept
-        || definitional && lower.split_whitespace().count() <= 6
 }
 
 /// Infer the specific operation-level topic from text, matching `semantic_intent` values
@@ -748,6 +953,133 @@ pub fn infer_operation_topic(text: &str) -> Option<String> {
         || lower.contains("opt out") || lower.contains("tracking")
     {
         return Some("data_privacy".into());
+    }
+
+    // Information theory concepts — match semantic_intent values from training data
+    if lower.contains("entropy") && (lower.contains("measure") || lower.contains("uncertainty")
+        || lower.contains("discrete") || lower.contains("random variable"))
+    {
+        return Some("entropy".into());
+    }
+    if lower.contains("differential entropy") || (lower.contains("entropy") && lower.contains("continuous")) {
+        return Some("differential_entropy".into());
+    }
+    if lower.contains("conditional entropy") {
+        return Some("conditional_entropy".into());
+    }
+    if lower.contains("joint entropy") {
+        return Some("joint_entropy".into());
+    }
+    if lower.contains("entropy rate") || lower.contains("stationary stochastic") {
+        return Some("entropy_rate".into());
+    }
+    if lower.contains("mutual information") {
+        if lower.contains("conditional") {
+            return Some("conditional_mutual_information".into());
+        }
+        if lower.contains("algorithmic") {
+            return Some("algorithmic_mutual_information".into());
+        }
+        return Some("mutual_information".into());
+    }
+    if lower.contains("multi-information") || lower.contains("total correlation") {
+        return Some("multi_information".into());
+    }
+    if lower.contains("interaction information") {
+        return Some("interaction_information".into());
+    }
+    if lower.contains("kl divergence") || lower.contains("kullback") {
+        return Some("kl_divergence".into());
+    }
+    if lower.contains("jensen-shannon") || lower.contains("jensen shannon") {
+        return Some("jensen_shannon".into());
+    }
+    if lower.contains("total variation") {
+        return Some("total_variation".into());
+    }
+    if lower.contains("hellinger") {
+        return Some("hellinger_distance".into());
+    }
+    if lower.contains("renyi") {
+        return Some("renyi_divergence".into());
+    }
+    if lower.contains("cross-entropy") || lower.contains("cross entropy") {
+        return Some("cross_entropy".into());
+    }
+    if lower.contains("rate-distortion") || lower.contains("rate distortion") {
+        return Some("rate_distortion".into());
+    }
+    if lower.contains("channel capacity") {
+        return Some("channel_capacity".into());
+    }
+    if lower.contains("source coding") || (lower.contains("shannon") && lower.contains("coding")) {
+        return Some("source_coding".into());
+    }
+    if lower.contains("shannon-hartley") || lower.contains("shannon hartley") || lower.contains("bandlimited") {
+        return Some("shannon_hartley".into());
+    }
+    if lower.contains("huffman") {
+        return Some("huffman_coding".into());
+    }
+    if lower.contains("arithmetic coding") {
+        return Some("arithmetic_coding".into());
+    }
+    if lower.contains("lempel-ziv") || lower.contains("lempel ziv") || lower.contains("lz77") || lower.contains("lz78") {
+        return Some("lempel_ziv".into());
+    }
+    if lower.contains("universal coding") || (lower.contains("universal") && lower.contains("compression")) {
+        return Some("universal_coding".into());
+    }
+    if lower.contains("binary symmetric channel") || lower.contains("bsc") {
+        return Some("binary_symmetric_channel".into());
+    }
+    if lower.contains("binary erasure channel") {
+        return Some("binary_erasure_channel".into());
+    }
+    if lower.contains("awgn") || lower.contains("additive white gaussian") {
+        return Some("awgn_channel".into());
+    }
+    if lower.contains("error-correcting") || lower.contains("error correcting code") {
+        return Some("error_correcting_codes".into());
+    }
+    if lower.contains("linear block code") {
+        return Some("linear_block_codes".into());
+    }
+    if lower.contains("convolutional code") {
+        return Some("convolutional_codes".into());
+    }
+    if lower.contains("turbo code") {
+        return Some("turbo_codes".into());
+    }
+    if lower.contains("ldpc") || lower.contains("low-density parity") {
+        return Some("ldpc_codes".into());
+    }
+    if lower.contains("fisher information") {
+        return Some("fisher_information".into());
+    }
+    if lower.contains("cramer-rao") || lower.contains("cramer rao") || lower.contains("cramér-rao") {
+        return Some("cramer_rao".into());
+    }
+    if lower.contains("fano") && lower.contains("inequality") {
+        return Some("fano".into());
+    }
+    if lower.contains("data processing inequality") {
+        return Some("data_processing".into());
+    }
+    if lower.contains("information bottleneck") {
+        return Some("information_bottleneck".into());
+    }
+    if lower.contains("minimum description length") || lower.contains("mdl principle") {
+        return Some("minimum_description_length".into());
+    }
+    if lower.contains("kolmogorov complexity") || lower.contains("algorithmic complexity") {
+        return Some("kolmogorov_complexity".into());
+    }
+    if lower.contains("sufficient statistic") {
+        return Some("sufficient_statistic".into());
+    }
+    if lower.contains("typical set") || lower.contains("asymptotic equipartition") || lower.contains("aep") {
+        return Some("asymptotic_equipartition".into());
     }
 
     None
@@ -1090,14 +1422,22 @@ fn concept_from_action_target(target: &str) -> Option<MetaConcept> {
         t if t.contains("arithmetic") => Some(MetaConcept::BinaryArithmetic),
         t if t.contains("data_structure") => Some(MetaConcept::DataStructure),
         t if t.contains("algorithm") => Some(MetaConcept::SearchAlgorithm),
-        t if t.contains("pattern") => Some(MetaConcept::TraitInterface),
-        t if t.contains("architecture") => Some(MetaConcept::Composition),
+        // "patterns" (design/architectural) → TraitInterface;
+        // "coding_patterns" (struct/impl/trait) → None, let keyword matching decide per-sample
+        "patterns" => Some(MetaConcept::TraitInterface),
+        t if t.contains("architecture") => Some(MetaConcept::TraitInterface),
         t if t.contains("refactoring") || t.contains("refactor") => Some(MetaConcept::Refactoring),
         t if t.contains("debugging") || t.contains("debug") => Some(MetaConcept::Debugging),
         t if t.contains("support") => Some(MetaConcept::Support),
         t if t.contains("conversation") || t.contains("identity") => Some(MetaConcept::Conversation),
         t if t.contains("general_knowledge") => Some(MetaConcept::GeneralKnowledge),
         t if t.contains("reasoning") => Some(MetaConcept::Composition),
+        "concepts" => Some(MetaConcept::InformationTheory),
+        "math" => Some(MetaConcept::GeneralKnowledge),
+        "safety" => Some(MetaConcept::Conversation),
+        // Broad coding categories: let keyword matching assign per-sample concepts
+        // so iterator+error → ErrorHandling, struct+methods → StructDefinition, etc.
+        "coding_general" | "coding" | "coding_patterns" => None,
         _ => None,
     }
 }

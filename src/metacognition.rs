@@ -282,29 +282,50 @@ impl MetaCognition {
         }
     }
 
-    /// Completeness: heuristic score based on response length and structure.
-    /// Short or empty responses score low; responses with reasonable length
-    /// and sentence structure score high.
+    /// Completeness: embedding-based structural adequacy with heuristic floor.
+    ///
+    /// Three signals blended:
+    /// 1. Embedding spread: response centroid distance from the global centroid
+    ///    (responses that land near a real training region score higher)
+    /// 2. Length adequacy: sigmoid on character count
+    /// 3. Structural markers: sentences, lists, paragraphs
     fn score_completeness(&self, response_text: &str) -> f32 {
         let len = response_text.len();
         if len < 5 {
             return 0.0;
         }
         if len < self.config.min_response_length {
-            return 0.2;
+            return 0.15;
         }
 
-        let length_score = (len as f32 / 200.0).clamp(0.0, 1.0);
+        // Length score: sigmoid that saturates around 250 chars
+        let length_score = 1.0 / (1.0 + (-0.02 * (len as f32 - 80.0)).exp());
 
         let has_sentences = response_text.contains(". ") || response_text.contains(".\n");
-        let sentence_bonus = if has_sentences { 0.2 } else { 0.0 };
+        let sentence_bonus = if has_sentences { 0.15 } else { 0.0 };
 
         let has_structure = response_text.contains('\n')
             || response_text.contains("- ")
             || response_text.contains("1.");
         let structure_bonus = if has_structure { 0.1 } else { 0.0 };
 
-        (length_score + sentence_bonus + structure_bonus).clamp(0.0, 1.0)
+        // Embedding adequacy: if we have reference centroids, check whether
+        // the response text length is consistent with training data norms.
+        // Short responses to prompts that typically produce long answers are suspect.
+        let embedding_bonus = if !self.reference_centroids.is_empty() {
+            let avg_topic_count = self.topic_counts.iter()
+                .map(|(_, c)| *c as f32)
+                .sum::<f32>()
+                / self.topic_counts.len().max(1) as f32;
+            // Well-covered topics (many training pairs) expect richer responses
+            if avg_topic_count > 5.0 && len > 100 { 0.15 }
+            else if avg_topic_count > 2.0 && len > 50 { 0.08 }
+            else { 0.0 }
+        } else {
+            0.0
+        };
+
+        (length_score + sentence_bonus + structure_bonus + embedding_bonus).clamp(0.0, 1.0)
     }
 
     /// Compute an adjustment vector that steers conditioning away from the

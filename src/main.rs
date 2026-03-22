@@ -375,8 +375,9 @@ fn run_inference(brain_path: &str, prompt: Option<&str>) -> Result<(), String> {
     for (gidx, env) in &dm.group_gen_envs {
         let hopf_info = if env.hopf_table.is_some() { "hopf=yes" } else { "hopf=no" };
         let cb_info = env.codebook.as_ref().map(|cb| format!("proto={} arch={}", cb.has_prototypes(), cb.archetypes.len())).unwrap_or_else(|| "no-codebook".to_string());
-        println!("    gen[{}]: {} tokens in dict, {} lattice programs, {}, {}",
-            gidx, env.dictionary.len(), env.program_count(), hopf_info, cb_info);
+        let sub_names: Vec<&str> = env.topic_subindex.iter().map(|t| t.topic_name.as_str()).collect();
+        println!("    gen[{}]: {} tokens, {} progs, {} topics {:?}, {}, {}",
+            gidx, env.dictionary.len(), env.program_count(), env.topic_subindex.len(), sub_names, hopf_info, cb_info);
     }
     for (gidx, env) in &dm.group_code_envs {
         println!("    code[{}]: {} tokens in dict, {} lattice programs",

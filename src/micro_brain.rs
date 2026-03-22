@@ -487,7 +487,11 @@ impl MetaBrain {
         // Build final conditioning: blend coordinator output with bridge + understanding.
         // Gate low-confidence topic predictions to prevent misclassified topics
         // (e.g. prompt_injection for legitimate coding prompts) from polluting conditioning.
-        let topic_emb = if topic_conf >= 0.45 {
+        // Also suppress adversarial catch-all topics that fire as false positives.
+        let is_adversarial_topic = topic_name == "prompt_injection"
+            || topic_name == "jailbreak"
+            || topic_name == "system_prompt_leak";
+        let topic_emb = if topic_conf >= 0.45 && !is_adversarial_topic {
             self.topic_embeddings.get(topic_idx)
                 .cloned().unwrap_or_else(|| vec![0.0f32; TOPIC_EMBED_DIM])
         } else {
