@@ -951,6 +951,15 @@ impl LanguageService {
                     match outcome {
                         ReflectionOutcome::Accept { scores } => {
                             println!("  [metacog] ACCEPT: quality={:.3}", scores.quality);
+                            // Continuum: positive feedback to the selected program
+                            if let Some(gidx) = retry_effective_gidx {
+                                let dm = self.active_dm_mut();
+                                if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
+                                    if let Some(pidx) = env.last_selected_archetype {
+                                        env.apply_quality_feedback(pidx, true, scores.quality);
+                                    }
+                                }
+                            }
                             break;
                         }
                         ReflectionOutcome::Retry { scores, adjustment, attempt: att } => {
@@ -987,6 +996,15 @@ impl LanguageService {
                                 "  [metacog] DEGRADE: quality={:.3} after {} attempts",
                                 scores.quality, attempts_exhausted
                             );
+                            // Continuum: negative feedback to the selected program
+                            if let Some(gidx) = retry_effective_gidx {
+                                let dm = self.active_dm_mut();
+                                if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
+                                    if let Some(pidx) = env.last_selected_archetype {
+                                        env.apply_quality_feedback(pidx, false, scores.quality);
+                                    }
+                                }
+                            }
                             let s2_rescue = if let Some(ref reasoning) = self.reasoning {
                                 let mut cond_s2 = prompt_emb.clone();
                                 cond_s2.resize(GEN_COND_DIM, 0.0);
@@ -1043,6 +1061,17 @@ impl LanguageService {
     pub fn converse(&mut self, user_text: &str) -> Result<(ActionJson, GeneratedResponse), String> {
         self.conversation.push_user(user_text);
 
+        // Continuum: decay activation levels between conversation turns
+        {
+            let dm = self.active_dm_mut();
+            for env in dm.group_gen_envs.values_mut() {
+                env.decay_between_turns();
+            }
+            for env in dm.group_code_envs.values_mut() {
+                env.decay_between_turns();
+            }
+        }
+
         // Modulate EMA alpha based on personality before encoding
         let base_alpha = self.active_dm().language_runtime.config.ema_alpha;
         let modulated_alpha = self.personality.modulated_ema_alpha(base_alpha);
@@ -1073,9 +1102,18 @@ impl LanguageService {
     }
 
     /// Reset conversation context (new session).
+    /// Also begins a fresh Continuum session across all gen/code lattices.
     pub fn reset_conversation(&mut self) {
         self.conversation.clear();
         self.active_dm_mut().language_runtime.smoother.reset();
+        // Begin fresh Continuum session: reset volatile + session state
+        let dm = self.active_dm_mut();
+        for env in dm.group_gen_envs.values_mut() {
+            env.begin_session();
+        }
+        for env in dm.group_code_envs.values_mut() {
+            env.begin_session();
+        }
     }
 
     // -------------------------------------------------------------------

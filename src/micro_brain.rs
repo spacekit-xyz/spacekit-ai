@@ -197,6 +197,14 @@ impl ArchetypeBrain {
                 ema_centroid: centroid.clone(),
                 coherence: 1.0,
                 habituation: 0.0,
+                quality_score: 0.0,
+                reliability: 0.5,
+                total_retrievals: 0,
+                session_drift: Vec::new(),
+                session_hits: 0,
+                session_quality_sum: 0.0,
+                activation_level: 0.0,
+                refractory: false,
             });
             program_meta.push(ArchetypeProgram {
                 group_idx: *group_idx,

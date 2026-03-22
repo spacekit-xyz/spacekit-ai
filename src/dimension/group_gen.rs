@@ -2420,16 +2420,16 @@ impl IndexedGenEnv {
         let mut best_score = f32::NEG_INFINITY;
 
         for (i, prog) in lattice.programs.iter().enumerate() {
-            let cosine = gen_cosine_sim(cond, &prog.ema_centroid);
+            // Use effective centroid (base + session drift) for in-context adaptation
+            let effective = lattice.effective_centroid(i);
+            let centroid = if effective.is_empty() { &prog.ema_centroid } else { &effective };
 
-            // Embed program into Cl(1,7) — full multivector, not just scalar
-            let prog_mv = embed_bridge_vector(&prog.ema_centroid);
+            let cosine = gen_cosine_sim(cond, centroid);
+
+            let prog_mv = embed_bridge_vector(centroid);
             let prog_spatial = spatial_fingerprint(&prog_mv);
             let prog_causal = causal_fingerprint(&prog_mv);
 
-            // EQUIVARIANT: spatial bivector alignment (21 rotation bivectors).
-            // These encode the relational/structural pattern of each program.
-            // add vs sub: same scalars, different rotation bivector orientations.
             let sp_dot: f32 = input_spatial.iter().zip(prog_spatial.iter())
                 .map(|(a, b)| a * b).sum();
             let sp_na: f32 = input_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -2437,8 +2437,6 @@ impl IndexedGenEnv {
             let spatial_align = if sp_na < 1e-8 || sp_nb < 1e-8 { 0.0 }
                 else { (sp_dot / (sp_na * sp_nb)).clamp(-1.0, 1.0) };
 
-            // EQUIVARIANT: causal bivector alignment (7 boost bivectors).
-            // These encode the temporal/causal direction of each program.
             let ca_dot: f32 = input_causal.iter().zip(prog_causal.iter())
                 .map(|(a, b)| a * b).sum();
             let ca_na: f32 = input_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -2446,23 +2444,23 @@ impl IndexedGenEnv {
             let causal_align = if ca_na < 1e-8 || ca_nb < 1e-8 { 0.0 }
                 else { (ca_dot / (ca_na * ca_nb)).clamp(-1.0, 1.0) };
 
-            // Inverse distance proximity
             let disp_norm_sq: f32 = cond.iter()
-                .zip(prog.ema_centroid.iter())
+                .zip(centroid.iter())
                 .map(|(a, b)| (a - b) * (a - b))
                 .sum();
             let proximity = if disp_norm_sq < 1e-8 { 1.0 }
                 else { (1.0 / disp_norm_sq).min(100.0).sqrt() / 10.0 };
 
-            // Equivariant score: scalar + bivector alignment
-            //   Scalar cosine (invariant): 30% — overall similarity
-            //   Spatial alignment (equivariant): 35% — rotation bivector match
-            //   Causal alignment (equivariant): 20% — boost bivector match
-            //   Proximity: 15% — inverse distance
-            let score = 0.30 * cosine.max(0.0)
+            // Base equivariant score
+            let base_score = 0.30 * cosine.max(0.0)
                 + 0.35 * (spatial_align + 1.0) / 2.0
                 + 0.20 * (causal_align + 1.0) / 2.0
                 + 0.15 * proximity;
+
+            // Apply multi-timescale retrieval bias (quality, reliability,
+            // refractory suppression, activation decay)
+            let bias = lattice.retrieval_bias(i);
+            let score = base_score * bias;
 
             if score > best_score {
                 best_score = score;
@@ -2644,17 +2642,18 @@ impl IndexedGenEnv {
             })
     }
 
-    /// Top-K nearest responses by cosine similarity (immutable).
-    /// Top-K using STA field scoring (displacement-aware, not just cosine).
+    /// Top-K nearest responses using STA field scoring with multi-timescale bias.
     fn nearest_responses_k(&self, cond: &[f32], k: usize) -> Vec<(String, usize, f32)> {
         if self.lattice.programs.is_empty() {
             return Vec::new();
         }
         let mut scored: Vec<(usize, f32)> = self.lattice.programs.iter().enumerate()
             .map(|(i, prog)| {
-                let cosine = gen_cosine_sim(cond, &prog.ema_centroid);
+                let effective = self.lattice.effective_centroid(i);
+                let centroid = if effective.is_empty() { &prog.ema_centroid } else { &effective };
+                let cosine = gen_cosine_sim(cond, centroid);
                 let displacement: Vec<f32> = cond.iter()
-                    .zip(prog.ema_centroid.iter())
+                    .zip(centroid.iter())
                     .map(|(a, b)| a - b)
                     .collect();
                 let disp_mv = embed_bridge_vector(&displacement);
@@ -2663,8 +2662,9 @@ impl IndexedGenEnv {
                 let spatial_penalty = (spatial_energy * 2.0).min(1.0);
                 let disp_norm_sq: f32 = displacement.iter().map(|d| d * d).sum();
                 let proximity = if disp_norm_sq < 1e-8 { 100.0 } else { (1.0 / disp_norm_sq).min(100.0) };
-                let score = 0.50 * cosine + 0.25 * (proximity / 100.0).sqrt() + 0.25 * (1.0 - spatial_penalty);
-                (i, score)
+                let base = 0.50 * cosine + 0.25 * (proximity / 100.0).sqrt() + 0.25 * (1.0 - spatial_penalty);
+                let bias = self.lattice.retrieval_bias(i);
+                (i, base * bias)
             })
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -2992,6 +2992,7 @@ impl IndexedGenEnv {
         {
             self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
             self.last_generation_confidence = lattice_conf;
+            self.lattice.on_retrieval(prog_idx, cond);
             return (text, lattice_conf);
         }
 
@@ -3065,6 +3066,8 @@ impl IndexedGenEnv {
         // Final fallback: return lattice text as-is
         self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
         self.last_generation_confidence = lattice_conf;
+        // Track retrieval for Continuum multi-timescale state
+        self.lattice.on_retrieval(prog_idx, cond);
         (text, lattice_conf)
     }
 
@@ -3190,6 +3193,53 @@ impl IndexedGenEnv {
 
     pub fn total_neurons(&self) -> usize { 0 }
     pub fn total_synapses(&self) -> usize { 0 }
+
+    // ===================================================================
+    // Continuum: session lifecycle management
+    // ===================================================================
+
+    /// Begin a new inference session. Resets volatile state across all lattices
+    /// (main lattice + topic sub-lattices). Call at conversation start.
+    pub fn begin_session(&mut self) {
+        self.lattice.begin_session();
+        for sub in &mut self.topic_subindex {
+            sub.lattice.begin_session();
+        }
+    }
+
+    /// Record that a program was retrieved. Delegates to the appropriate lattice.
+    pub fn on_program_retrieved(&mut self, program_idx: usize, query_embedding: &[f32]) {
+        self.lattice.on_retrieval(program_idx, query_embedding);
+    }
+
+    /// Record that a topic sub-lattice program was retrieved.
+    pub fn on_topic_program_retrieved(&mut self, topic_name: &str, program_idx: usize, query_embedding: &[f32]) {
+        if let Some(sub) = self.topic_subindex.iter_mut().find(|t| t.topic_name.eq_ignore_ascii_case(topic_name)) {
+            sub.lattice.on_retrieval(program_idx, query_embedding);
+        }
+    }
+
+    /// Apply MetaCognition feedback to a program.
+    pub fn apply_quality_feedback(&mut self, program_idx: usize, accepted: bool, quality: f32) {
+        self.lattice.apply_feedback(program_idx, accepted, quality);
+    }
+
+    /// Decay activations between conversation turns.
+    pub fn decay_between_turns(&mut self) {
+        self.lattice.decay_activations();
+        for sub in &mut self.topic_subindex {
+            sub.lattice.decay_activations();
+        }
+    }
+
+    /// End-of-session consolidation: commit session drift to persistent centroids
+    /// for programs that were accessed frequently with positive quality feedback.
+    pub fn consolidate_session(&mut self, min_hits: u32) {
+        self.lattice.consolidate_session(min_hits);
+        for sub in &mut self.topic_subindex {
+            sub.lattice.consolidate_session(min_hits);
+        }
+    }
 
     fn truncate_archetype(archetypes: &[ResponseArchetype], arch_idx: usize, ids: &[u16], text: &str) -> String {
         if let Some(arch) = archetypes.get(arch_idx) {

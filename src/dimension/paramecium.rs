@@ -40,6 +40,19 @@ pub struct CiliumNode {
 /// A behavioral program stored as a lattice attractor.
 /// Analogous to a ResponseArchetype but without the neural substrate —
 /// the program IS the lattice configuration, not a pattern learned by neurons.
+///
+/// Multi-timescale state modeled on Paramecium cell biology:
+///
+/// **Persistent (gene expression):** `centroid`, `token_sequence`, `quality_score`,
+///   `reliability` — durable configuration that survives serialization.
+///
+/// **Medium-term (post-translational):** `session_centroid_drift`, `session_access_count`,
+///   `session_quality_sum` — session-scoped state that accumulates across inference
+///   turns within a session but resets on load. Enables in-context learning.
+///
+/// **Short-term (ionic/membrane):** `activation_level`, `refractory` —
+///   per-inference volatile state that decays between turns. Prevents the
+///   nearest-neighbor monoculture problem.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BehavioralProgram {
     /// Centroid embedding in bridge space (for gradient sensing / selection).
@@ -48,7 +61,7 @@ pub struct BehavioralProgram {
     pub lattice_signature: Vec<f32>,
     /// The response token sequence this program produces.
     pub token_sequence: Vec<u16>,
-    /// Activation count (how many times this program has fired).
+    /// Activation count (how many times this program has fired during training).
     pub activation_count: u64,
     /// EMA of input embeddings that activated this program.
     /// Drifts the centroid toward the data distribution.
@@ -57,7 +70,50 @@ pub struct BehavioralProgram {
     pub coherence: f32,
     /// Habituation counter: dampens response when this program fires repeatedly.
     pub habituation: f32,
+
+    // === Persistent state (gene expression / long-term config) ===
+
+    /// Accumulated quality score from MetaCognition feedback.
+    /// Programs that consistently pass quality checks build higher scores,
+    /// biasing future retrieval toward proven-reliable responses.
+    /// Range: [-1.0, 1.0], initialized at 0.0 (neutral).
+    #[serde(default)]
+    pub quality_score: f32,
+    /// Reliability: ratio of successful MetaCognition passes to total retrievals.
+    /// EMA-smoothed so recent performance weighs more than distant history.
+    #[serde(default = "default_reliability")]
+    pub reliability: f32,
+    /// Total inference retrievals (lifetime, across all sessions).
+    #[serde(default)]
+    pub total_retrievals: u64,
+
+    // === Medium-term state (post-translational / session-scoped) ===
+
+    /// Session centroid drift: accumulated embedding bias from repeated queries
+    /// in the current session. Enables in-context adaptation without modifying
+    /// the persistent centroid. Applied as an additive offset during retrieval.
+    #[serde(skip)]
+    pub session_drift: Vec<f32>,
+    /// Access count within the current session.
+    #[serde(skip)]
+    pub session_hits: u32,
+    /// Cumulative quality feedback within this session (for session-level stats).
+    #[serde(skip)]
+    pub session_quality_sum: f32,
+
+    // === Short-term state (ionic / membrane potential) ===
+
+    /// Activation level: decays between inference turns. Recently-fired programs
+    /// have high activation, enabling refractory-period suppression.
+    #[serde(skip)]
+    pub activation_level: f32,
+    /// Refractory flag: when true, this program was just fired and should be
+    /// suppressed in the next retrieval to force compositional diversity.
+    #[serde(skip)]
+    pub refractory: bool,
 }
+
+fn default_reliability() -> f32 { 0.5 }
 
 /// Wave propagation state across the lattice.
 /// The metachronal wave is an EMA field that carries "what was just sensed"
@@ -199,6 +255,14 @@ impl InfraciliaryLattice {
                 ema_centroid: embedding.clone(),
                 coherence: 1.0,
                 habituation: 0.0,
+                quality_score: 0.0,
+                reliability: 0.5,
+                total_retrievals: 0,
+                session_drift: Vec::new(),
+                session_hits: 0,
+                session_quality_sum: 0.0,
+                activation_level: 0.0,
+                refractory: false,
             });
         }
 
@@ -496,6 +560,153 @@ impl InfraciliaryLattice {
         self.programs.len()
     }
 
+    // ===================================================================
+    // Continuum: multi-timescale state management
+    // ===================================================================
+
+    /// Begin a new session: reset all session-scoped and volatile state.
+    /// Call this at the start of a conversation or inference batch.
+    /// Persistent state (quality_score, reliability) is preserved.
+    pub fn begin_session(&mut self) {
+        for prog in &mut self.programs {
+            prog.session_drift = vec![0.0f32; prog.ema_centroid.len()];
+            prog.session_hits = 0;
+            prog.session_quality_sum = 0.0;
+            prog.activation_level = 0.0;
+            prog.refractory = false;
+        }
+    }
+
+    /// Record that a program was retrieved during inference.
+    /// Updates short-term activation, session counters, and persistent retrievals.
+    /// Also accumulates session centroid drift toward the query embedding.
+    pub fn on_retrieval(&mut self, program_idx: usize, query_embedding: &[f32]) {
+        if program_idx >= self.programs.len() { return; }
+
+        let prog = &mut self.programs[program_idx];
+        prog.total_retrievals += 1;
+        prog.session_hits += 1;
+        prog.activation_level = 1.0;
+        prog.refractory = true;
+
+        // Session centroid drift: gently pull toward the query that activated us.
+        // This is the "second messenger" — transient but accumulating within a session.
+        let drift_alpha = 0.1;
+        if prog.session_drift.is_empty() {
+            prog.session_drift = vec![0.0f32; prog.ema_centroid.len()];
+        }
+        let dim = prog.session_drift.len().min(query_embedding.len());
+        for i in 0..dim {
+            let delta = query_embedding[i] - prog.ema_centroid[i];
+            prog.session_drift[i] += drift_alpha * delta;
+        }
+    }
+
+    /// Apply MetaCognition feedback to a program after quality evaluation.
+    /// `accepted`: whether MetaCognition accepted the response.
+    /// `quality`: the MetaCognition quality score [0.0, 1.0].
+    ///
+    /// This is the "gene expression" pathway — persistent changes that
+    /// bias future retrieval toward proven-reliable programs.
+    pub fn apply_feedback(&mut self, program_idx: usize, accepted: bool, quality: f32) {
+        if program_idx >= self.programs.len() { return; }
+
+        let prog = &mut self.programs[program_idx];
+
+        // Quality score: EMA toward +1 (accepted) or -1 (rejected)
+        let feedback = if accepted { quality.clamp(0.0, 1.0) } else { -quality.clamp(0.0, 1.0) };
+        let alpha = 0.15;
+        prog.quality_score = (prog.quality_score * (1.0 - alpha) + feedback * alpha)
+            .clamp(-1.0, 1.0);
+
+        // Reliability: ratio of acceptances, EMA-smoothed
+        let hit = if accepted { 1.0f32 } else { 0.0 };
+        let rel_alpha = 0.1;
+        prog.reliability = (prog.reliability * (1.0 - rel_alpha) + hit * rel_alpha)
+            .clamp(0.0, 1.0);
+
+        // Session quality tracking
+        prog.session_quality_sum += if accepted { quality } else { -quality };
+    }
+
+    /// Decay short-term state between inference turns.
+    /// Activation levels decay toward zero; refractory flags clear.
+    /// Call this between turns in a multi-turn conversation.
+    pub fn decay_activations(&mut self) {
+        let decay_rate = 0.6; // membrane potential decay per turn
+        for prog in &mut self.programs {
+            prog.activation_level *= decay_rate;
+            if prog.activation_level < 0.05 {
+                prog.activation_level = 0.0;
+                prog.refractory = false;
+            }
+        }
+    }
+
+    /// Get the effective centroid for retrieval, incorporating session drift.
+    /// This is the "working centroid" that adapts to in-context queries.
+    pub fn effective_centroid(&self, program_idx: usize) -> Vec<f32> {
+        if program_idx >= self.programs.len() {
+            return Vec::new();
+        }
+        let prog = &self.programs[program_idx];
+        if prog.session_drift.is_empty() || prog.session_drift.iter().all(|&v| v == 0.0) {
+            return prog.ema_centroid.clone();
+        }
+        prog.ema_centroid.iter()
+            .zip(prog.session_drift.iter())
+            .map(|(&base, &drift)| base + drift)
+            .collect()
+    }
+
+    /// Compute a retrieval bias for a program based on its multi-timescale state.
+    /// Returns a multiplier in [0.5, 1.5] that adjusts the raw similarity score:
+    ///   > 1.0 = boost (high quality, high reliability, low activation)
+    ///   < 1.0 = suppress (low quality, refractory, over-activated)
+    pub fn retrieval_bias(&self, program_idx: usize) -> f32 {
+        if program_idx >= self.programs.len() { return 1.0; }
+        let prog = &self.programs[program_idx];
+
+        // Persistent: quality and reliability boost/suppress
+        let quality_factor = 1.0 + prog.quality_score * 0.15; // [-0.85, 1.15]
+        let reliability_factor = 0.7 + prog.reliability * 0.6;  // [0.7, 1.3]
+
+        // Short-term: refractory suppression prevents monoculture
+        let refractory_penalty = if prog.refractory { 0.7 } else { 1.0 };
+        let activation_penalty = 1.0 - (prog.activation_level * 0.3).min(0.3); // [0.7, 1.0]
+
+        (quality_factor * reliability_factor * refractory_penalty * activation_penalty)
+            .clamp(0.5, 1.5)
+    }
+
+    /// Commit session drift to persistent centroid (end-of-session consolidation).
+    /// Only commits if the program was accessed enough times in the session
+    /// to indicate genuine in-context learning, not noise.
+    pub fn consolidate_session(&mut self, min_session_hits: u32) {
+        let consolidation_alpha = 0.02; // very gentle persistent drift
+        for prog in &mut self.programs {
+            if prog.session_hits >= min_session_hits && !prog.session_drift.is_empty() {
+                let avg_quality = if prog.session_hits > 0 {
+                    prog.session_quality_sum / prog.session_hits as f32
+                } else { 0.0 };
+
+                // Only consolidate if session quality was net-positive
+                if avg_quality > 0.0 {
+                    let dim = prog.ema_centroid.len().min(prog.session_drift.len());
+                    for i in 0..dim {
+                        prog.ema_centroid[i] += prog.session_drift[i] * consolidation_alpha;
+                    }
+                }
+            }
+            // Reset session state regardless
+            prog.session_drift.clear();
+            prog.session_hits = 0;
+            prog.session_quality_sum = 0.0;
+            prog.activation_level = 0.0;
+            prog.refractory = false;
+        }
+    }
+
     /// Total memory footprint estimate in bytes.
     pub fn memory_bytes(&self) -> usize {
         let prog_bytes: usize = self.programs.iter().map(|p| {
@@ -526,6 +737,14 @@ impl InfraciliaryLattice {
                 ema_centroid: centroid.clone(),
                 coherence: 1.0,
                 habituation: 0.0,
+                quality_score: 0.0,
+                reliability: 0.5,
+                total_retrievals: 0,
+                session_drift: Vec::new(),
+                session_hits: 0,
+                session_quality_sum: 0.0,
+                activation_level: 0.0,
+                refractory: false,
             });
         }
         lattice.wave = WaveState::new(lattice.programs.len());
@@ -843,5 +1062,450 @@ mod tests {
             "wave conditioning vector should have one element per program");
         assert!(wc.iter().any(|&v| v > 0.0),
             "at least one program should be activated");
+    }
+
+    // ===================================================================
+    // Continuum foundation: multi-timescale state management
+    // ===================================================================
+
+    fn make_two_program_lattice() -> InfraciliaryLattice {
+        let dict = test_dict();
+        let mut lattice = InfraciliaryLattice::new(dict);
+        lattice.develop(&[
+            (test_embedding(1.0), "reset your password".to_string()),
+            (test_embedding(100.0), "implement binary search".to_string()),
+        ], 0.99);
+        assert!(lattice.program_count() >= 2);
+        lattice
+    }
+
+    #[test]
+    fn test_new_programs_have_neutral_state() {
+        let lattice = make_two_program_lattice();
+        for prog in &lattice.programs {
+            assert_eq!(prog.quality_score, 0.0, "new programs start with neutral quality");
+            assert!((prog.reliability - 0.5).abs() < 0.01, "new programs start with 0.5 reliability");
+            assert_eq!(prog.total_retrievals, 0, "no retrievals yet");
+            assert_eq!(prog.activation_level, 0.0, "no activation yet");
+            assert!(!prog.refractory, "not refractory");
+        }
+    }
+
+    #[test]
+    fn test_begin_session_resets_volatile_state() {
+        let mut lattice = make_two_program_lattice();
+
+        // Simulate some activity
+        lattice.on_retrieval(0, &test_embedding(1.1));
+        assert_eq!(lattice.programs[0].activation_level, 1.0);
+        assert!(lattice.programs[0].refractory);
+        assert_eq!(lattice.programs[0].session_hits, 1);
+
+        // Begin new session
+        lattice.begin_session();
+        for prog in &lattice.programs {
+            assert_eq!(prog.activation_level, 0.0, "activation reset");
+            assert!(!prog.refractory, "refractory reset");
+            assert_eq!(prog.session_hits, 0, "session hits reset");
+            assert!(!prog.session_drift.is_empty(), "session drift initialized");
+            assert!(prog.session_drift.iter().all(|&v| v == 0.0), "session drift zeroed");
+        }
+    }
+
+    #[test]
+    fn test_on_retrieval_updates_all_timescales() {
+        let mut lattice = make_two_program_lattice();
+        lattice.begin_session();
+
+        let query = test_embedding(1.1);
+        lattice.on_retrieval(0, &query);
+
+        let prog = &lattice.programs[0];
+        assert_eq!(prog.total_retrievals, 1, "persistent retrieval count incremented");
+        assert_eq!(prog.session_hits, 1, "session hit count incremented");
+        assert_eq!(prog.activation_level, 1.0, "activation set to 1.0");
+        assert!(prog.refractory, "refractory flag set");
+        assert!(prog.session_drift.iter().any(|&v| v != 0.0),
+            "session drift should shift toward query");
+
+        // Second program should be untouched
+        let other = &lattice.programs[1];
+        assert_eq!(other.total_retrievals, 0);
+        assert_eq!(other.session_hits, 0);
+        assert_eq!(other.activation_level, 0.0);
+    }
+
+    #[test]
+    fn test_session_drift_accumulates_toward_queries() {
+        let mut lattice = make_two_program_lattice();
+        lattice.begin_session();
+
+        let base_centroid = lattice.programs[0].ema_centroid.clone();
+
+        // Hit program 0 multiple times with slightly different queries
+        for offset in &[1.05, 1.1, 1.15] {
+            lattice.on_retrieval(0, &test_embedding(*offset));
+        }
+
+        assert_eq!(lattice.programs[0].session_hits, 3);
+
+        // Effective centroid should be shifted from base
+        let effective = lattice.effective_centroid(0);
+        let drift_magnitude: f32 = effective.iter()
+            .zip(base_centroid.iter())
+            .map(|(e, b)| (e - b) * (e - b))
+            .sum::<f32>()
+            .sqrt();
+
+        assert!(drift_magnitude > 0.0,
+            "effective centroid should drift from base after 3 hits");
+
+        // Persistent centroid should be unchanged
+        assert_eq!(lattice.programs[0].ema_centroid, base_centroid,
+            "persistent centroid must not change from session drift");
+    }
+
+    #[test]
+    fn test_decay_activations_reduces_levels() {
+        let mut lattice = make_two_program_lattice();
+        lattice.begin_session();
+
+        lattice.on_retrieval(0, &test_embedding(1.1));
+        assert_eq!(lattice.programs[0].activation_level, 1.0);
+        assert!(lattice.programs[0].refractory);
+
+        // One decay step
+        lattice.decay_activations();
+        let level_after_1 = lattice.programs[0].activation_level;
+        assert!(level_after_1 < 1.0 && level_after_1 > 0.0,
+            "activation should decay but not vanish: {}", level_after_1);
+
+        // Several more decay steps should clear it
+        for _ in 0..10 {
+            lattice.decay_activations();
+        }
+        assert_eq!(lattice.programs[0].activation_level, 0.0,
+            "activation should reach zero after many decay steps");
+        assert!(!lattice.programs[0].refractory,
+            "refractory should clear when activation drops below threshold");
+    }
+
+    #[test]
+    fn test_apply_feedback_positive_increases_quality() {
+        let mut lattice = make_two_program_lattice();
+
+        let q_before = lattice.programs[0].quality_score;
+        let r_before = lattice.programs[0].reliability;
+
+        lattice.apply_feedback(0, true, 0.8);
+
+        assert!(lattice.programs[0].quality_score > q_before,
+            "positive feedback should increase quality: {} → {}",
+            q_before, lattice.programs[0].quality_score);
+        assert!(lattice.programs[0].reliability > r_before,
+            "accept should increase reliability: {} → {}",
+            r_before, lattice.programs[0].reliability);
+    }
+
+    #[test]
+    fn test_apply_feedback_negative_decreases_quality() {
+        let mut lattice = make_two_program_lattice();
+
+        // Give initial positive feedback so quality is above zero
+        lattice.apply_feedback(0, true, 0.9);
+        lattice.apply_feedback(0, true, 0.9);
+        let q_before = lattice.programs[0].quality_score;
+        let r_before = lattice.programs[0].reliability;
+
+        lattice.apply_feedback(0, false, 0.7);
+
+        assert!(lattice.programs[0].quality_score < q_before,
+            "negative feedback should decrease quality: {} → {}",
+            q_before, lattice.programs[0].quality_score);
+        assert!(lattice.programs[0].reliability < r_before,
+            "reject should decrease reliability: {} → {}",
+            r_before, lattice.programs[0].reliability);
+    }
+
+    #[test]
+    fn test_apply_feedback_quality_clamped() {
+        let mut lattice = make_two_program_lattice();
+
+        // Lots of positive feedback
+        for _ in 0..100 {
+            lattice.apply_feedback(0, true, 1.0);
+        }
+        assert!(lattice.programs[0].quality_score <= 1.0,
+            "quality must be clamped to 1.0");
+        assert!(lattice.programs[0].reliability <= 1.0,
+            "reliability must be clamped to 1.0");
+
+        // Lots of negative feedback
+        for _ in 0..200 {
+            lattice.apply_feedback(0, false, 1.0);
+        }
+        assert!(lattice.programs[0].quality_score >= -1.0,
+            "quality must be clamped to -1.0");
+        assert!(lattice.programs[0].reliability >= 0.0,
+            "reliability must be clamped to 0.0");
+    }
+
+    #[test]
+    fn test_retrieval_bias_neutral_for_fresh_programs() {
+        let lattice = make_two_program_lattice();
+        let bias = lattice.retrieval_bias(0);
+        // quality=0 → factor 1.0, reliability=0.5 → factor 1.0,
+        // no activation, no refractory
+        assert!((bias - 1.0).abs() < 0.15,
+            "fresh program bias should be near 1.0, got {}", bias);
+    }
+
+    #[test]
+    fn test_retrieval_bias_rewards_high_quality() {
+        let mut lattice = make_two_program_lattice();
+
+        // Build up quality on program 0
+        for _ in 0..20 {
+            lattice.apply_feedback(0, true, 0.9);
+        }
+
+        let bias_good = lattice.retrieval_bias(0);
+        let bias_neutral = lattice.retrieval_bias(1);
+
+        assert!(bias_good > bias_neutral,
+            "high-quality program should have higher bias: {} vs {}",
+            bias_good, bias_neutral);
+    }
+
+    #[test]
+    fn test_retrieval_bias_suppresses_refractory() {
+        let mut lattice = make_two_program_lattice();
+        lattice.begin_session();
+
+        let bias_before = lattice.retrieval_bias(0);
+
+        lattice.on_retrieval(0, &test_embedding(1.1));
+        let bias_after = lattice.retrieval_bias(0);
+
+        assert!(bias_after < bias_before,
+            "refractory program should have lower bias: {} → {}",
+            bias_before, bias_after);
+    }
+
+    #[test]
+    fn test_refractory_forces_diversity() {
+        let mut lattice = make_two_program_lattice();
+        lattice.begin_session();
+
+        // Fire program 0
+        lattice.on_retrieval(0, &test_embedding(1.1));
+
+        // Program 0 is refractory, program 1 is not
+        let bias_0 = lattice.retrieval_bias(0);
+        let bias_1 = lattice.retrieval_bias(1);
+
+        assert!(bias_0 < bias_1,
+            "refractory program 0 should have lower bias than fresh program 1: {} vs {}",
+            bias_0, bias_1);
+    }
+
+    #[test]
+    fn test_consolidate_session_commits_drift() {
+        let mut lattice = make_two_program_lattice();
+        lattice.begin_session();
+
+        let original_centroid = lattice.programs[0].ema_centroid.clone();
+
+        // Simulate a session with multiple positive hits
+        for _ in 0..5 {
+            lattice.on_retrieval(0, &test_embedding(1.2));
+            lattice.apply_feedback(0, true, 0.8);
+        }
+
+        assert_eq!(lattice.programs[0].session_hits, 5);
+
+        // Consolidate with min_hits=3 (should commit)
+        lattice.consolidate_session(3);
+
+        let consolidated_centroid = &lattice.programs[0].ema_centroid;
+        let drift: f32 = consolidated_centroid.iter()
+            .zip(original_centroid.iter())
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum::<f32>()
+            .sqrt();
+
+        assert!(drift > 0.0,
+            "consolidation should shift persistent centroid slightly");
+
+        // Session state should be reset after consolidation
+        assert_eq!(lattice.programs[0].session_hits, 0);
+        assert!(lattice.programs[0].session_drift.is_empty());
+        assert_eq!(lattice.programs[0].activation_level, 0.0);
+    }
+
+    #[test]
+    fn test_consolidate_session_skips_low_hit_programs() {
+        let mut lattice = make_two_program_lattice();
+        lattice.begin_session();
+
+        let original_centroid = lattice.programs[0].ema_centroid.clone();
+
+        // Only 1 hit (below min_hits threshold of 3)
+        lattice.on_retrieval(0, &test_embedding(1.5));
+        lattice.apply_feedback(0, true, 0.9);
+
+        lattice.consolidate_session(3);
+
+        assert_eq!(lattice.programs[0].ema_centroid, original_centroid,
+            "low-hit programs should not have their centroid modified");
+    }
+
+    #[test]
+    fn test_consolidate_session_skips_negative_quality() {
+        let mut lattice = make_two_program_lattice();
+        lattice.begin_session();
+
+        let original_centroid = lattice.programs[0].ema_centroid.clone();
+
+        // Multiple hits but all negative feedback
+        for _ in 0..5 {
+            lattice.on_retrieval(0, &test_embedding(1.2));
+            lattice.apply_feedback(0, false, 0.5);
+        }
+
+        lattice.consolidate_session(3);
+
+        assert_eq!(lattice.programs[0].ema_centroid, original_centroid,
+            "programs with net-negative session quality should not consolidate drift");
+    }
+
+    #[test]
+    fn test_effective_centroid_without_session_is_base() {
+        let lattice = make_two_program_lattice();
+        let effective = lattice.effective_centroid(0);
+        assert_eq!(effective, lattice.programs[0].ema_centroid,
+            "without session, effective centroid should equal base centroid");
+    }
+
+    #[test]
+    fn test_effective_centroid_with_session_differs() {
+        let mut lattice = make_two_program_lattice();
+        lattice.begin_session();
+
+        lattice.on_retrieval(0, &test_embedding(1.5));
+        lattice.on_retrieval(0, &test_embedding(1.5));
+
+        let effective = lattice.effective_centroid(0);
+        let base = &lattice.programs[0].ema_centroid;
+
+        let diff: f32 = effective.iter()
+            .zip(base.iter())
+            .map(|(e, b)| (e - b).abs())
+            .sum();
+
+        assert!(diff > 0.0,
+            "effective centroid should differ from base after session hits");
+    }
+
+    #[test]
+    fn test_multi_session_lifecycle() {
+        let mut lattice = make_two_program_lattice();
+
+        // === Session 1: positive experience with program 0 ===
+        lattice.begin_session();
+        for _ in 0..5 {
+            lattice.on_retrieval(0, &test_embedding(1.1));
+            lattice.apply_feedback(0, true, 0.85);
+            lattice.decay_activations();
+        }
+        lattice.consolidate_session(3);
+
+        let q_after_s1 = lattice.programs[0].quality_score;
+        let r_after_s1 = lattice.programs[0].reliability;
+        assert!(q_after_s1 > 0.0, "quality should be positive after good session");
+        assert!(r_after_s1 > 0.5, "reliability should increase from 0.5");
+        assert_eq!(lattice.programs[0].total_retrievals, 5);
+
+        // === Session 2: negative experience ===
+        lattice.begin_session();
+        for _ in 0..4 {
+            lattice.on_retrieval(0, &test_embedding(1.3));
+            lattice.apply_feedback(0, false, 0.6);
+            lattice.decay_activations();
+        }
+        lattice.consolidate_session(3);
+
+        let q_after_s2 = lattice.programs[0].quality_score;
+        let r_after_s2 = lattice.programs[0].reliability;
+        assert!(q_after_s2 < q_after_s1, "quality should decrease after bad session");
+        assert!(r_after_s2 < r_after_s1, "reliability should decrease");
+        assert_eq!(lattice.programs[0].total_retrievals, 9);
+
+        // Program 1 should be completely unaffected
+        assert_eq!(lattice.programs[1].quality_score, 0.0);
+        assert_eq!(lattice.programs[1].total_retrievals, 0);
+    }
+
+    #[test]
+    fn test_retrieval_bias_range() {
+        let mut lattice = make_two_program_lattice();
+        lattice.begin_session();
+
+        // Test every combination of states
+        // Fresh
+        let b = lattice.retrieval_bias(0);
+        assert!(b >= 0.5 && b <= 1.5, "bias out of range: {}", b);
+
+        // After positive feedback
+        for _ in 0..50 { lattice.apply_feedback(0, true, 1.0); }
+        let b = lattice.retrieval_bias(0);
+        assert!(b >= 0.5 && b <= 1.5, "bias out of range after positive: {}", b);
+
+        // After retrieval (refractory)
+        lattice.on_retrieval(0, &test_embedding(1.0));
+        let b = lattice.retrieval_bias(0);
+        assert!(b >= 0.5 && b <= 1.5, "bias out of range when refractory: {}", b);
+
+        // After lots of negative feedback
+        for _ in 0..100 { lattice.apply_feedback(0, false, 1.0); }
+        let b = lattice.retrieval_bias(0);
+        assert!(b >= 0.5 && b <= 1.5, "bias out of range after negative: {}", b);
+    }
+
+    #[test]
+    fn test_serde_preserves_persistent_drops_volatile() {
+        let mut lattice = make_two_program_lattice();
+        lattice.begin_session();
+
+        // Accumulate persistent state
+        lattice.on_retrieval(0, &test_embedding(1.1));
+        lattice.apply_feedback(0, true, 0.9);
+        lattice.apply_feedback(0, true, 0.9);
+
+        let q_before = lattice.programs[0].quality_score;
+        let r_before = lattice.programs[0].reliability;
+        let retrievals_before = lattice.programs[0].total_retrievals;
+
+        // Serialize and deserialize via JSON
+        let serialized = serde_json::to_string(&lattice).expect("serialize");
+        let restored: InfraciliaryLattice = serde_json::from_str(&serialized).expect("deserialize");
+
+        // Persistent state preserved
+        assert!((restored.programs[0].quality_score - q_before).abs() < 1e-6,
+            "quality_score should survive serialization");
+        assert!((restored.programs[0].reliability - r_before).abs() < 1e-6,
+            "reliability should survive serialization");
+        assert_eq!(restored.programs[0].total_retrievals, retrievals_before,
+            "total_retrievals should survive serialization");
+
+        // Volatile state dropped (serde(skip))
+        assert_eq!(restored.programs[0].activation_level, 0.0,
+            "activation_level should be zero after deserialization");
+        assert!(!restored.programs[0].refractory,
+            "refractory should be false after deserialization");
+        assert!(restored.programs[0].session_drift.is_empty(),
+            "session_drift should be empty after deserialization");
+        assert_eq!(restored.programs[0].session_hits, 0,
+            "session_hits should be zero after deserialization");
     }
 }
