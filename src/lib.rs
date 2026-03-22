@@ -36,6 +36,7 @@ pub mod clifford;
 pub mod cloze;
 pub mod coherence;
 pub mod gradient_memory;
+pub mod predictive_coder;
 pub mod dimension;
 pub mod growformer_lang;
 pub mod topic_graph;

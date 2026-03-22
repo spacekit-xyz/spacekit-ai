@@ -621,9 +621,20 @@ impl LanguageService {
     }
 
     pub fn generation(&mut self, text: &str) -> Result<(ActionJson, GeneratedResponse), String> {
+        self.generation_with_intent_override(text, text)
+    }
+
+    /// Like `generation()` but parses intent from `intent_text` instead of the
+    /// full `text`. Used by `converse()` to prevent previous-turn context from
+    /// dominating topic routing for the current query.
+    pub fn generation_with_intent_override(
+        &mut self,
+        text: &str,
+        intent_text: &str,
+    ) -> Result<(ActionJson, GeneratedResponse), String> {
         let start = portable_instant();
 
-        if Self::is_identity_query(text) {
+        if Self::is_identity_query(intent_text) {
             let action = self.active_dm_mut().route_text_to_action_stateless(text)?;
             self.record_latency(start);
             return Ok((action, self.identity_response()));
@@ -632,7 +643,7 @@ impl LanguageService {
         // Tool call interception: if the registry matches a tool, return a
         // ToolCall action with the call info. The caller executes the tool
         // and optionally calls generation_with_tool_result for a composed response.
-        if let Some(tool_call) = self.tool_registry.match_tool(text) {
+        if let Some(tool_call) = self.tool_registry.match_tool(intent_text) {
             let action = ActionJson {
                 action_type: ActionType::ToolCall,
                 target_group_id: None,
@@ -657,19 +668,32 @@ impl LanguageService {
 
         let personality = self.personality.clone();
 
-        // Pre-compute meta-routing BEFORE taking the mutable dm borrow.
-        // The meta-codebook is immutable and doesn't need dm.
+        // Dual encoding for multi-turn: route on the raw user message (intent_text)
+        // to prevent previous-turn context from dominating topic routing, but use
+        // the full context-augmented prompt (text) for generation conditioning so
+        // the response can reference conversation history.
+        let has_context = intent_text != text;
+
+        // Pre-compute meta-routing using intent_text (raw message, no context pollution).
         let meta_pre = self.meta_codebook.as_ref().and_then(|mcb| {
             let dm_ref = &self.dm;
-            let bridged = dm_ref.language_runtime.bridge_text_stateless(text).ok()?;
-            let mr = mcb.route_and_project(&bridged.routed_vector, text);
+            let bridged = dm_ref.language_runtime.bridge_text_stateless(intent_text).ok()?;
+            let mr = mcb.route_and_project(&bridged.routed_vector, intent_text);
             if mr.confidence > 0.3 { Some(mr) } else { None }
         });
 
         let dm = self.active_dm_mut();
-        let action = dm.route_text_to_action_stateless(text)?;
+        let action = dm.route_text_to_action_stateless(intent_text)?;
 
-        let encoded = dm.language_runtime.encode_and_bridge(text).ok();
+        // Routing encoding: from raw user message (clean signal for group selection).
+        let encoded = dm.language_runtime.encode_and_bridge(intent_text).ok();
+        // Context encoding: from full context prompt (richer signal for generation).
+        // Only computed when there's actually conversation context to leverage.
+        let context_encoded = if has_context {
+            dm.language_runtime.encode_and_bridge(text).ok()
+        } else {
+            None
+        };
         let mut group_idx = action.target_group_id
             .and_then(|gid| dm.main.group_order.iter().position(|&g| g == gid));
 
@@ -708,7 +732,7 @@ impl LanguageService {
         }
 
         let mut topic_hint: Option<String> = None;
-        let query_intent = crate::growformer_lang::parse_query_intent(text);
+        let query_intent = crate::growformer_lang::parse_query_intent(intent_text);
         let is_broad = query_intent.is_broad_overview();
         let mut broad_summary: Option<(String, f32)> = None;
         println!("  [intent] action={}, subject=\"{}\", broad={}", query_intent.action.name(), query_intent.subject, is_broad);
@@ -718,23 +742,36 @@ impl LanguageService {
         let mut retry_effective_gidx: Option<usize> = None;
 
         let resp = if let Some((ref h_raw, ref bridged)) = encoded {
-            // Apply OCEAN personality conditioning to the routed vector.
-            // When language projector is active, blend projected embedding into conditioning.
-            let conditioned = if let Some(ref mr) = meta_routing {
+            // Build the conditioning vector. For routing we use the intent_text
+            // encoding (clean, no context bleed). For generation conditioning,
+            // blend in the context-encoded embedding so the response can
+            // reference conversation history.
+            let base_vector = if let Some(ref mr) = meta_routing {
                 if !mr.projected_embedding.is_empty() {
-                    let mut proj = mr.projected_embedding.clone();
-                    personality.condition_vector(&mut proj);
-                    proj
+                    mr.projected_embedding.clone()
                 } else {
-                    let mut c = bridged.routed_vector.clone();
-                    personality.condition_vector(&mut c);
-                    c
+                    bridged.routed_vector.clone()
                 }
             } else {
-                let mut c = bridged.routed_vector.clone();
-                personality.condition_vector(&mut c);
-                c
+                bridged.routed_vector.clone()
             };
+
+            // Multi-turn: blend context embedding into the base routing vector.
+            // 70% intent (what the user is asking NOW) + 30% context (conversation history).
+            let blended = if let Some((_, ref ctx_bridged)) = context_encoded {
+                let ctx_vec = &ctx_bridged.routed_vector;
+                let dim = base_vector.len().min(ctx_vec.len());
+                let mut v = vec![0.0f32; dim];
+                for i in 0..dim {
+                    v[i] = base_vector[i] * 0.7 + ctx_vec[i] * 0.3;
+                }
+                v
+            } else {
+                base_vector
+            };
+
+            let mut conditioned = blended;
+            personality.condition_vector(&mut conditioned);
 
             // --- MetaBrain path: unified routing + conditioning + archetype selection ---
             let meta_result = if let Some(ref mut mb) = dm.meta_brain {
@@ -760,7 +797,7 @@ impl LanguageService {
             // Override topic_hint with operation-specific intent from GrowformerLang.
             // This gives the topic sub-lattice a precise key (e.g., "addition_operation")
             // instead of a generic label from the understanding layer.
-            if let Some(op_topic) = crate::growformer_lang::infer_operation_topic(text) {
+            if let Some(op_topic) = crate::growformer_lang::infer_operation_topic(intent_text) {
                 topic_hint = Some(op_topic.clone());
 
                 // Cross-group topic search: if the current group doesn't have a sub-lattice
@@ -816,13 +853,46 @@ impl LanguageService {
             // --- Broad query detection: summarize across topic sub-lattices ---
             // For categorical/definitional questions ("What is software architecture?"),
             // compose from multiple sub-topics instead of returning a single program.
+            // Cross-group search: find the group whose topic sub-lattices best match
+            // the query subject, rather than blindly trusting the classifier.
             broad_summary = if is_broad {
-                let effective_gidx = group_idx.or_else(|| meta_result.as_ref().and_then(|mr| mr.group_idx));
+                let subject_lower = query_intent.subject.to_ascii_lowercase();
+                let subject_words: Vec<&str> = subject_lower.split_whitespace().collect();
+
+                // Score each group by how many of its topic names overlap with the query subject.
+                let mut best_broad_group: Option<(usize, usize)> = None; // (gidx, relevance_score)
+                for (&gidx, env) in &dm.group_gen_envs {
+                    if env.topic_subindex.len() < 2 { continue; }
+                    let mut relevance = 0usize;
+                    for t in &env.topic_subindex {
+                        let tname = t.topic_name.to_ascii_lowercase().replace('_', " ");
+                        for w in &subject_words {
+                            if w.len() > 2 && tname.contains(w) {
+                                relevance += 1;
+                            }
+                        }
+                    }
+                    if relevance > best_broad_group.map(|(_, r)| r).unwrap_or(0) {
+                        best_broad_group = Some((gidx, relevance));
+                    }
+                }
+
+                // Use the best-matching group if it scores > 0, otherwise fallback to classified group
+                let effective_gidx = best_broad_group
+                    .filter(|&(_, rel)| rel > 0)
+                    .map(|(gidx, _)| gidx)
+                    .or_else(|| group_idx)
+                    .or_else(|| meta_result.as_ref().and_then(|mr| mr.group_idx));
+
+                if let Some(bbg) = best_broad_group {
+                    println!("  [broad-query] best group by topic match: group {} (relevance={})", bbg.0, bbg.1);
+                }
+
                 effective_gidx.and_then(|gidx| {
                     let adapted = dm.adapt_for_group_clifford(gidx, &conditioned, h_raw, GEN_COND_DIM);
                     dm.group_gen_envs.get(&gidx).and_then(|env| {
-                        if env.topic_subindex.len() < 3 {
-                            return None; // not enough sub-topics to summarize
+                        if env.topic_subindex.len() < 2 {
+                            return None;
                         }
                         let (summary, conf, topics, ens_coh) = env.summarize_across_topics(&adapted, 6, 500);
                         if summary.len() > 30 && !topics.is_empty() {
@@ -830,12 +900,12 @@ impl LanguageService {
                                 "  [broad-query] summarized {} topics from group {}: {:?}, conf={:.3}, coherence={:.3}",
                                 topics.len(), gidx, topics, conf, ens_coh
                             );
-                            // If ensemble coherence is too low, the programs
-                            // don't synchronize — fall back to single-program
                             if ens_coh < 0.15 {
                                 println!("  [broad-query] REJECT: ensemble coherence too low ({:.3}), falling back", ens_coh);
                                 None
                             } else {
+                                // Override group_idx so downstream generation uses this group
+                                // (avoids classifier's group producing irrelevant content)
                                 Some((summary, conf))
                             }
                         } else {
@@ -1099,19 +1169,30 @@ impl LanguageService {
                             }
                             break;
                         }
-                        ReflectionOutcome::Retry { scores, adjustment, attempt: att } => {
+                        ReflectionOutcome::Retry { scores, adjustment: _, attempt: att } => {
                             println!(
-                                "  [metacog] RETRY: quality={:.3}, attempt {}, regenerating with adjustment",
+                                "  [metacog] RETRY: quality={:.3}, attempt {}, predictive coding refinement",
                                 scores.quality, att + 1
                             );
                             let dm = self.active_dm_mut();
                             if let (Some(gidx), Some(ref base_cond)) = (retry_effective_gidx, &retry_conditioning) {
-                                let mut adjusted_cond = base_cond.clone();
-                                for (i, v) in adjustment.iter().enumerate() {
-                                    if i < adjusted_cond.len() {
-                                        adjusted_cond[i] += v;
+                                // Predictive Coding: STA grade-decomposed error correction
+                                // replaces crude "push toward topic centroid" adjustment.
+                                let response_emb = Self::approximate_response_embedding(prompt_emb, &current_resp.text);
+                                let pc = crate::predictive_coder::PredictiveCoder::new(
+                                    crate::predictive_coder::PredictiveCodingConfig::default()
+                                );
+                                let refinement = pc.refine(prompt_emb, base_cond, &response_emb);
+                                let adjusted_cond = if refinement.improved {
+                                    if let Some(ref ge) = refinement.last_grade_error {
+                                        println!("    [pc] dominant grade={}, error={:.4}, coherence={:.3}",
+                                            ge.dominant_grade, ge.total_error, refinement.coherence.combined);
                                     }
-                                }
+                                    refinement.conditioning
+                                } else {
+                                    base_cond.clone()
+                                };
+
                                 let recond = dm.adapt_for_group_clifford(gidx, &adjusted_cond, h_raw_clone, GEN_COND_DIM);
                                 if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
                                     let (retry_text, retry_conf, _) = env.generate_with_e8_for_topic(
@@ -1196,6 +1277,13 @@ impl LanguageService {
     /// Conversational generation: uses conversation context + personality.
     /// Tracks multi-turn history and applies EMA modulation based on OCEAN.
     pub fn converse(&mut self, user_text: &str) -> Result<(ActionJson, GeneratedResponse), String> {
+        // Build context BEFORE pushing user turn to avoid duplicating it in the window.
+        let context_prefix = if self.conversation.turn_count() > 0 {
+            Some(self.conversation.context_window(self.conversation.context_window_size))
+        } else {
+            None
+        };
+
         self.conversation.push_user(user_text);
 
         // Continuum: decay activation levels between conversation turns
@@ -1214,17 +1302,21 @@ impl LanguageService {
         let modulated_alpha = self.personality.modulated_ema_alpha(base_alpha);
         self.active_dm_mut().language_runtime.smoother.alpha = modulated_alpha;
 
-        // Build context-augmented prompt: recent history + current message.
-        // The EMA smoother in the bridge already blends temporal context,
-        // but explicit history prepending improves semantic grounding.
-        let context_prompt = if self.conversation.turn_count() > 1 {
-            let ctx = self.conversation.context_window(self.conversation.context_window_size);
-            format!("{} | user: {}", ctx, user_text)
-        } else {
-            user_text.to_string()
+        // Anaphora resolution: when the user says "that", "it", "this" without
+        // a clear noun subject, substitute with the previous turn's topic so the
+        // intent parser can route correctly.
+        let resolved_intent = self.resolve_anaphora(user_text);
+        let intent_for_routing = resolved_intent.as_deref().unwrap_or(user_text);
+
+        // Context-augmented prompt: recent history provides semantic grounding
+        // for the encoder, but intent parsing uses the raw user message to avoid
+        // previous-turn topics dominating the current query's routing.
+        let context_prompt = match context_prefix {
+            Some(ctx) => format!("{} | user: {}", ctx, user_text),
+            None => user_text.to_string(),
         };
 
-        let (action, mut resp) = self.generation(&context_prompt)?;
+        let (action, mut resp) = self.generation_with_intent_override(&context_prompt, intent_for_routing)?;
 
         // Conversational framing: personality-aware prefix for natural dialogue
         let is_framed = resp.template_id != "identity"
@@ -1260,6 +1352,94 @@ impl LanguageService {
         });
 
         Ok((action, resp))
+    }
+
+    /// Resolve anaphoric pronouns ("that", "it", "this") by substituting
+    /// the previous turn's topic/subject. Returns `Some(expanded)` when a
+    /// pronoun was resolved, `None` if the message is self-contained.
+    fn resolve_anaphora(&self, text: &str) -> Option<String> {
+        let prev = self.last_turn.as_ref()?;
+
+        let lower = text.to_ascii_lowercase();
+        let words: Vec<&str> = lower.split_whitespace().collect();
+
+        // Only resolve when the message contains a pronoun that stands in for a noun.
+        // Look for patterns like "implement that", "do that", "explain this",
+        // "use it", "how does it work", etc.
+        let pronoun_patterns = [
+            " that ", " that?", " that.", " that,",
+            " this ", " this?", " this.", " this,",
+            " it ", " it?", " it.", " it,",
+        ];
+        let starts_with_pronoun = lower.starts_with("that ") || lower.starts_with("this ") || lower.starts_with("it ");
+        let ends_with_pronoun = lower.ends_with(" that") || lower.ends_with(" this") || lower.ends_with(" it");
+
+        let has_pronoun = starts_with_pronoun
+            || ends_with_pronoun
+            || pronoun_patterns.iter().any(|p| lower.contains(p));
+
+        if !has_pronoun { return None; }
+
+        // Avoid false positives: if the sentence already has a clear noun subject
+        // (more than 5 content words besides the pronoun), it's likely self-contained.
+        let content_words: Vec<&str> = words.iter()
+            .filter(|w| w.len() > 2 && !["the", "that", "this", "how", "would", "you", "can", "could", "what", "does", "with", "for", "from", "into"].contains(w))
+            .copied()
+            .collect();
+        if content_words.len() >= 4 { return None; }
+
+        // Extract the referent from the previous turn's message via intent parsing
+        let prev_intent = crate::growformer_lang::parse_query_intent(&prev.message);
+        let referent = if !prev_intent.subject.is_empty() {
+            prev_intent.subject.clone()
+        } else {
+            // Fallback: use first 6 words of the previous message
+            prev.message.split_whitespace().take(6).collect::<Vec<_>>().join(" ")
+        };
+
+        if referent.is_empty() { return None; }
+
+        // Replace the pronoun with the referent
+        let mut resolved = text.to_string();
+        for pronoun in &["that", "this", "it"] {
+            // Case-insensitive word-boundary replacement (first occurrence only)
+            let re_patterns = [
+                format!(" {} ", pronoun),
+                format!(" {}?", pronoun),
+                format!(" {}.", pronoun),
+                format!(" {},", pronoun),
+            ];
+            for pat in &re_patterns {
+                if let Some(pos) = resolved.to_ascii_lowercase().find(pat) {
+                    let suffix_char = pat.chars().last().unwrap();
+                    let replacement = if suffix_char == ' ' {
+                        format!(" {} ", referent)
+                    } else {
+                        format!(" {}{}", referent, suffix_char)
+                    };
+                    resolved = format!("{}{}{}", &resolved[..pos], replacement, &resolved[pos + pat.len()..]);
+                    println!("  [anaphora] '{}' → '{}' (referent: {})", text, resolved, referent);
+                    return Some(resolved);
+                }
+            }
+            // Handle trailing pronoun (e.g., "implement that")
+            let trailing = format!(" {}", pronoun);
+            if resolved.to_ascii_lowercase().ends_with(&trailing) {
+                let cut = resolved.len() - trailing.len();
+                resolved = format!("{} {}", &resolved[..cut], referent);
+                println!("  [anaphora] '{}' → '{}' (referent: {})", text, resolved, referent);
+                return Some(resolved);
+            }
+            // Handle leading pronoun
+            let leading = format!("{} ", pronoun);
+            if resolved.to_ascii_lowercase().starts_with(&leading) {
+                resolved = format!("{} {}", referent, &resolved[leading.len()..]);
+                println!("  [anaphora] '{}' → '{}' (referent: {})", text, resolved, referent);
+                return Some(resolved);
+            }
+        }
+
+        None
     }
 
     /// Reset conversation context (new session).
@@ -2120,7 +2300,20 @@ impl LanguageService {
         self.rebuild_meta_codebook();
         self.rebuild_metacognition();
         self.rebuild_reasoning();
+        self.rebuild_schemas();
         Ok(())
+    }
+
+    /// Rebuild schema templates from lattice programs (needed after load_brain
+    /// since schemas are transient and not serialized).
+    fn rebuild_schemas(&mut self) {
+        let dm = self.active_dm_mut();
+        for env in dm.group_gen_envs.values_mut() {
+            env.build_schemas();
+        }
+        for env in dm.group_code_envs.values_mut() {
+            env.build_schemas();
+        }
     }
 
     /// Load an additional brain under a name. Use `set_active_brain(name)` to switch to it.

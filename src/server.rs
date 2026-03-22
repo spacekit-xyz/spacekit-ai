@@ -167,6 +167,8 @@ async fn main() {
         .route("/v1/mode", post(set_mode))
         .route("/v1/brain/save", post(brain_save))
         .route("/v1/feedback", post(feedback))
+        .route("/v1/reset", post(reset_conversation))
+        .route("/v1/personality", get(get_personality))
         .layer(cors)
         .with_state(state.clone());
 
@@ -387,6 +389,12 @@ async fn run_chat(
             };
             (action, text.clone(), text)
         }
+        "converse" => {
+            let (action, resp) = svc
+                .converse(&req.message)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("converse failed: {}", e)))?;
+            (action, resp.text.clone(), resp.text)
+        }
         "paramecium" => {
             let (action, resp) = svc
                 .paramecium_respond(&req.message)
@@ -396,7 +404,7 @@ async fn run_chat(
         other => {
             return Err((
                 StatusCode::BAD_REQUEST,
-                format!("unsupported mode '{}'; use action|generation|codegen|paramecium", other),
+                format!("unsupported mode '{}'; use action|generation|codegen|converse|paramecium", other),
             ))
         }
     };
@@ -445,6 +453,30 @@ async fn run_chat(
             },
         },
     })
+}
+
+async fn reset_conversation(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    authorize(&headers, &state)?;
+    let mut svc = state.service.lock().await;
+    svc.reset_conversation();
+    Ok(Json(json!({ "ok": true, "message": "conversation reset, session consolidated" })))
+}
+
+async fn get_personality(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let svc = state.service.lock().await;
+    match svc.export_personality() {
+        Ok(bytes) => {
+            let val: serde_json::Value = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| json!({ "error": "invalid personality json" }));
+            Ok(Json(val))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
+    }
 }
 
 fn authorize(headers: &HeaderMap, state: &AppState) -> Result<(), (StatusCode, String)> {

@@ -262,7 +262,6 @@ fn builtin_calculator() -> ToolSchema {
         triggers: vec![
             "calculate".to_string(),
             "compute".to_string(),
-            "what is".to_string(),
         ],
     }
 }

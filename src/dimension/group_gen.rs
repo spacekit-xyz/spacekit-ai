@@ -2205,6 +2205,9 @@ pub struct IndexedGenEnv {
     pub dictionary: TokenDictionary,
     pub codebook: Option<AlgebraicCodebook>,
     pub hopf_table: Option<HopfCompositionTable>,
+    /// Schemas extracted from program patterns for template-based generation.
+    #[serde(skip)]
+    pub schemas: Vec<crate::predictive_coder::Schema>,
     #[serde(skip)]
     pub last_selected_archetype: Option<usize>,
     #[serde(skip)]
@@ -2318,6 +2321,7 @@ impl IndexedGenEnv {
             dictionary: dict,
             codebook: Some(cb),
             hopf_table: Some(hopf),
+            schemas: Vec::new(),
             last_selected_archetype: None,
             last_generation_confidence: 0.0,
             diversity_bonus: 0.0,
@@ -2345,6 +2349,7 @@ impl IndexedGenEnv {
             dictionary,
             codebook: Some(codebook),
             hopf_table: Some(hopf),
+            schemas: Vec::new(),
             last_selected_archetype: None,
             last_generation_confidence: 0.0,
             diversity_bonus: 0.0,
@@ -2371,18 +2376,31 @@ impl IndexedGenEnv {
         let mut lattice = InfraciliaryLattice::new(dictionary.clone());
         lattice.develop(&training_pairs, spawn_threshold);
 
-        Self {
+        let mut env = Self {
             lattice,
             topic_subindex,
             dictionary,
             codebook: Some(codebook),
             hopf_table: Some(hopf),
+            schemas: Vec::new(),
             last_selected_archetype: None,
             last_generation_confidence: 0.0,
             diversity_bonus: 0.0,
             frozen: false,
             output_dim,
-        }
+        };
+        env.build_schemas();
+        env
+    }
+
+    /// Extract reusable schemas from program patterns.
+    /// Finds positions that are invariant across similar programs (fixed)
+    /// vs positions that vary (slots), enabling template-based generation.
+    pub fn build_schemas(&mut self) {
+        let programs: Vec<(Vec<u16>, f32)> = self.lattice.programs.iter()
+            .map(|p| (p.token_sequence.clone(), p.quality_score))
+            .collect();
+        self.schemas = crate::predictive_coder::extract_schemas(&programs, 2, 0.35);
     }
 
     /// Generate a response from a conditioning vector.
@@ -3026,7 +3044,38 @@ impl IndexedGenEnv {
                         cb.encode_slot_only(&slot_tokens)
                     };
 
-                    let decoded_ids = cb.decode_with_archetype(arch_idx, &slot_bits);
+                    // Differentiable slot optimization: SPSA-optimize slot bits
+                    // to maximize relevance of decoded tokens to the conditioning.
+                    let optimized_bits = if field_inhibited {
+                        let cond_ref = cond;
+                        let dict_ref = &self.dictionary;
+                        let programs_ref = &self.lattice.programs;
+                        let cb_ref = cb;
+                        let a_idx = arch_idx;
+                        crate::predictive_coder::optimize_slot_bits(
+                            &slot_bits, 6, 0.08, 0.03,
+                            &|bits: &[f32]| {
+                                let ids = cb_ref.decode_with_archetype(a_idx, bits);
+                                let txt = dict_ref.decode(&ids);
+                                if txt.len() < 5 { return -1.0; }
+                                let tok_ids = dict_ref.encode(&txt);
+                                let mut score = 0.0f32;
+                                for pid in 0..programs_ref.len().min(5) {
+                                    let p = &programs_ref[pid];
+                                    let overlap = tok_ids.iter()
+                                        .filter(|t| p.token_sequence.contains(t))
+                                        .count();
+                                    let sim = gen_cosine_sim(cond_ref, &p.ema_centroid).max(0.0);
+                                    score += overlap as f32 * sim;
+                                }
+                                score
+                            },
+                        )
+                    } else {
+                        slot_bits.clone()
+                    };
+
+                    let decoded_ids = cb.decode_with_archetype(arch_idx, &optimized_bits);
                     let decoded_text = self.dictionary.decode(&decoded_ids);
                     let decoded_text = Self::truncate_archetype(
                         &cb.archetypes, arch_idx, &decoded_ids, &decoded_text,
@@ -3041,6 +3090,33 @@ impl IndexedGenEnv {
             self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
             self.last_generation_confidence = lattice_conf;
             return (text, lattice_conf);
+        }
+
+        // Schema-based generation: use extracted templates if available.
+        // Schemas capture the invariant structure across similar programs,
+        // only filling in the variable slots using the conditioning signal.
+        if !self.schemas.is_empty() {
+            let mut best_schema_text = String::new();
+            let mut best_schema_score = 0.0f32;
+
+            for schema in &self.schemas {
+                if schema.support < 2 || schema.fixed.is_empty() { continue; }
+                let tokens = crate::predictive_coder::fill_schema(schema, cond);
+                let text = self.dictionary.decode(&tokens);
+                if text.len() > 10 && !Self::has_tokenization_artifacts(&text) {
+                    let score = schema.avg_quality * schema.support as f32 * 0.1;
+                    if score > best_schema_score {
+                        best_schema_score = score;
+                        best_schema_text = text;
+                    }
+                }
+            }
+
+            if best_schema_text.len() > 10 && best_schema_score > 0.3 {
+                self.last_selected_archetype = None;
+                self.last_generation_confidence = best_schema_score.min(0.75);
+                return (best_schema_text, best_schema_score.min(0.75));
+            }
         }
 
         // Medium-low confidence: SpaceTime Gradient Memory composition
