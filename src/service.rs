@@ -1102,10 +1102,23 @@ impl LanguageService {
     }
 
     /// Reset conversation context (new session).
-    /// Also begins a fresh Continuum session across all gen/code lattices.
+    /// Consolidates the previous Continuum session (commits drift for
+    /// high-quality, high-hit programs), then begins a fresh session.
     pub fn reset_conversation(&mut self) {
+        // Consolidate outgoing session: commit drift to persistent centroids
+        // for programs that received enough positive interaction (≥3 hits).
+        const MIN_SESSION_HITS: u32 = 3;
+        let dm = self.active_dm_mut();
+        for env in dm.group_gen_envs.values_mut() {
+            env.consolidate_session(MIN_SESSION_HITS);
+        }
+        for env in dm.group_code_envs.values_mut() {
+            env.consolidate_session(MIN_SESSION_HITS);
+        }
+
         self.conversation.clear();
         self.active_dm_mut().language_runtime.smoother.reset();
+
         // Begin fresh Continuum session: reset volatile + session state
         let dm = self.active_dm_mut();
         for env in dm.group_gen_envs.values_mut() {
