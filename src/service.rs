@@ -2304,15 +2304,17 @@ impl LanguageService {
         Ok(())
     }
 
-    /// Rebuild schema templates from lattice programs (needed after load_brain
-    /// since schemas are transient and not serialized).
+    /// Rebuild transient structures from lattice programs after brain load:
+    /// schema templates and chunk codecs (neither is serialized).
     fn rebuild_schemas(&mut self) {
         let dm = self.active_dm_mut();
         for env in dm.group_gen_envs.values_mut() {
             env.build_schemas();
+            env.build_chunk_codec();
         }
         for env in dm.group_code_envs.values_mut() {
             env.build_schemas();
+            env.build_chunk_codec();
         }
     }
 

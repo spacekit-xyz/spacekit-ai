@@ -2208,6 +2208,10 @@ pub struct IndexedGenEnv {
     /// Schemas extracted from program patterns for template-based generation.
     #[serde(skip)]
     pub schemas: Vec<crate::predictive_coder::Schema>,
+    /// Chunk-level continuous codec: encodes K-token chunks into Cl(1,7)
+    /// multivectors for trajectory-based generation (bypasses discrete decode).
+    #[serde(skip)]
+    pub chunk_codec: Option<crate::text_autoencoder::ChunkCodec>,
     #[serde(skip)]
     pub last_selected_archetype: Option<usize>,
     #[serde(skip)]
@@ -2322,6 +2326,7 @@ impl IndexedGenEnv {
             codebook: Some(cb),
             hopf_table: Some(hopf),
             schemas: Vec::new(),
+            chunk_codec: None,
             last_selected_archetype: None,
             last_generation_confidence: 0.0,
             diversity_bonus: 0.0,
@@ -2350,6 +2355,7 @@ impl IndexedGenEnv {
             codebook: Some(codebook),
             hopf_table: Some(hopf),
             schemas: Vec::new(),
+            chunk_codec: None,
             last_selected_archetype: None,
             last_generation_confidence: 0.0,
             diversity_bonus: 0.0,
@@ -2383,6 +2389,7 @@ impl IndexedGenEnv {
             codebook: Some(codebook),
             hopf_table: Some(hopf),
             schemas: Vec::new(),
+            chunk_codec: None,
             last_selected_archetype: None,
             last_generation_confidence: 0.0,
             diversity_bonus: 0.0,
@@ -2390,6 +2397,7 @@ impl IndexedGenEnv {
             output_dim,
         };
         env.build_schemas();
+        env.build_chunk_codec();
         env
     }
 
@@ -2401,6 +2409,82 @@ impl IndexedGenEnv {
             .map(|p| (p.token_sequence.clone(), p.quality_score))
             .collect();
         self.schemas = crate::predictive_coder::extract_schemas(&programs, 2, 0.35);
+    }
+
+    /// Build the chunk-level continuous codec for trajectory-based generation.
+    /// Called after brain load to enable the continuous decode path.
+    pub fn build_chunk_codec(&mut self) {
+        self.chunk_codec = Some(crate::text_autoencoder::ChunkCodec::new(
+            self.dictionary.tokens.len(),
+        ));
+    }
+
+    /// Generate text by composing program trajectories in continuous Cl(1,7)
+    /// chunk space, then decoding each chunk back to tokens. Returns None if
+    /// the codec isn't initialised or there aren't enough programs.
+    pub fn generate_continuous(
+        &mut self,
+        cond: &[f32],
+        max_tokens: usize,
+    ) -> Option<(String, f32)> {
+        let codec = self.chunk_codec.as_ref()?;
+        if self.lattice.programs.len() < 2 { return None; }
+
+        // Retrieve top-k nearest programs by conditioning similarity
+        let k = 4.min(self.lattice.programs.len());
+        let mut scored: Vec<(usize, f32)> = self.lattice.programs.iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let dot: f32 = cond.iter().zip(p.ema_centroid.iter())
+                    .map(|(a, b)| a * b).sum();
+                let na: f32 = cond.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let nb: f32 = p.ema_centroid.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let sim = if na > 1e-8 && nb > 1e-8 { dot / (na * nb) } else { 0.0 };
+                let bias = self.lattice.retrieval_bias(i);
+                (i, sim * bias)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k);
+
+        if scored.is_empty() || scored[0].1 < 0.1 { return None; }
+
+        // Encode each program's tokens into chunk sequences
+        let source_seqs: Vec<(crate::text_autoencoder::ChunkSequence, f32)> = scored.iter()
+            .map(|&(idx, sim)| {
+                let seq = codec.encode_sequence(&self.lattice.programs[idx].token_sequence);
+                (seq, sim)
+            })
+            .collect();
+
+        // Determine target number of chunks from the best program's length
+        let target_chunks = source_seqs[0].0.num_chunks();
+        if target_chunks == 0 { return None; }
+
+        // Compose trajectories: weighted blend of chunk sequences
+        let composed = crate::text_autoencoder::compose_trajectories(
+            &source_seqs, target_chunks,
+        );
+
+        // Decode composed chunks back to tokens
+        let chunk_lengths: Vec<usize> = source_seqs[0].0.chunk_lengths.clone();
+        let mut all_tokens = Vec::new();
+        for (i, chunk) in composed.iter().enumerate() {
+            let len = chunk_lengths.get(i).copied()
+                .unwrap_or(crate::text_autoencoder::CHUNK_K);
+            let tokens = codec.decode_chunk(chunk, len);
+            all_tokens.extend_from_slice(&tokens);
+        }
+        all_tokens.truncate(max_tokens);
+
+        let text = self.dictionary.decode(&all_tokens);
+        if text.len() < 5 { return None; }
+
+        let confidence = scored[0].1.min(0.95);
+        self.last_selected_archetype = Some(scored[0].0);
+        self.last_generation_confidence = confidence;
+
+        Some((text, confidence))
     }
 
     /// Generate a response from a conditioning vector.
@@ -3090,6 +3174,16 @@ impl IndexedGenEnv {
             self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
             self.last_generation_confidence = lattice_conf;
             return (text, lattice_conf);
+        }
+
+        // Continuous chunk-level generation: compose K-token chunks in Cl(1,7)
+        // latent space, decode each chunk. Bypasses discrete codebook entirely.
+        if self.chunk_codec.is_some() {
+            if let Some((ctext, cconf)) = self.generate_continuous(cond, _max_len) {
+                if ctext.len() > 10 && !Self::has_tokenization_artifacts(&ctext) {
+                    return (ctext, cconf);
+                }
+            }
         }
 
         // Schema-based generation: use extracted templates if available.
