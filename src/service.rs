@@ -363,11 +363,32 @@ pub struct ConversationContext {
     pub max_turns: usize,
     /// How many recent turns to include in the conditioning prompt for inference.
     pub context_window_size: usize,
+    /// Geometric context: running embedding that accumulates across turns
+    /// via exponential decay blending. Recent turns dominate, earlier turns
+    /// fade but never fully disappear. Dimension matches bridge output (128D).
+    pub context_embedding: Vec<f32>,
+    /// Per-turn embeddings for geometric trajectory analysis.
+    turn_embeddings: Vec<(Vec<f32>, Vec<f32>)>,
+    /// Current topic thread — biases retrieval toward continuity.
+    pub current_topic: Option<String>,
+    /// Current group — for topic continuity detection.
+    pub current_group: Option<usize>,
+    /// Decay factor for geometric blending (0.0 = no memory, 1.0 = perfect memory).
+    pub context_decay: f32,
 }
 
 impl Default for ConversationContext {
     fn default() -> Self {
-        Self { history: Vec::new(), max_turns: 50, context_window_size: 8 }
+        Self {
+            history: Vec::new(),
+            max_turns: 50,
+            context_window_size: 8,
+            context_embedding: Vec::new(),
+            turn_embeddings: Vec::new(),
+            current_topic: None,
+            current_group: None,
+            context_decay: 0.65,
+        }
     }
 }
 
@@ -386,6 +407,9 @@ impl ConversationContext {
         while self.history.len() > self.max_turns * 2 {
             self.history.remove(0);
         }
+        while self.turn_embeddings.len() > self.max_turns {
+            self.turn_embeddings.remove(0);
+        }
     }
 
     pub fn turn_count(&self) -> usize {
@@ -398,6 +422,86 @@ impl ConversationContext {
 
     pub fn clear(&mut self) {
         self.history.clear();
+        self.context_embedding.clear();
+        self.turn_embeddings.clear();
+        self.current_topic = None;
+        self.current_group = None;
+    }
+
+    /// Blend a new turn's query and response embeddings into the running
+    /// geometric context. Uses exponential decay so recent turns dominate
+    /// but earlier context never fully disappears.
+    pub fn update_geometric_context(
+        &mut self,
+        query_emb: &[f32],
+        response_emb: &[f32],
+    ) {
+        let dim = query_emb.len().max(response_emb.len());
+        if dim == 0 { return; }
+
+        // Midpoint of query + response captures the turn's semantic center
+        let mut turn_center = vec![0.0f32; dim];
+        for i in 0..dim {
+            let q = query_emb.get(i).copied().unwrap_or(0.0);
+            let r = response_emb.get(i).copied().unwrap_or(0.0);
+            turn_center[i] = (q + r) * 0.5;
+        }
+
+        if self.context_embedding.is_empty() {
+            self.context_embedding = turn_center.clone();
+        } else {
+            // Geometric blend: context = decay * old_context + (1 - decay) * new_turn
+            let d = self.context_decay;
+            self.context_embedding.resize(dim, 0.0);
+            for i in 0..dim {
+                self.context_embedding[i] = d * self.context_embedding[i]
+                    + (1.0 - d) * turn_center[i];
+            }
+            // L2-normalize to keep on the unit sphere
+            let norm: f32 = self.context_embedding.iter()
+                .map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 1e-8 {
+                for v in &mut self.context_embedding { *v /= norm; }
+            }
+        }
+
+        self.turn_embeddings.push((query_emb.to_vec(), response_emb.to_vec()));
+    }
+
+    /// Modulate a raw query embedding with accumulated conversation context.
+    /// Returns a blended embedding that carries forward topic continuity
+    /// while preserving the current query's semantic direction.
+    pub fn contextualize_query(&self, raw_query: &[f32], context_weight: f32) -> Vec<f32> {
+        if self.context_embedding.is_empty() || context_weight <= 0.0 {
+            return raw_query.to_vec();
+        }
+        let dim = raw_query.len().min(self.context_embedding.len());
+        let mut blended = vec![0.0f32; raw_query.len()];
+        let qw = 1.0 - context_weight;
+        for i in 0..dim {
+            blended[i] = qw * raw_query[i] + context_weight * self.context_embedding[i];
+        }
+        for i in dim..raw_query.len() {
+            blended[i] = qw * raw_query[i];
+        }
+        let norm: f32 = blended.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 1e-8 {
+            for v in &mut blended { *v /= norm; }
+        }
+        blended
+    }
+
+    /// Detect if the current query is shifting topic based on cosine similarity
+    /// with the accumulated context. Low similarity = topic shift.
+    pub fn is_topic_shift(&self, query_emb: &[f32], threshold: f32) -> bool {
+        if self.context_embedding.is_empty() { return false; }
+        let dim = query_emb.len().min(self.context_embedding.len());
+        let dot: f32 = (0..dim).map(|i| query_emb[i] * self.context_embedding[i]).sum();
+        let nq: f32 = query_emb.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let nc: f32 = self.context_embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if nq < 1e-8 || nc < 1e-8 { return true; }
+        let sim = dot / (nq * nc);
+        sim < threshold
     }
 
     /// Format conversation history as context string for the encoder.
@@ -604,6 +708,33 @@ impl LanguageService {
         patterns.iter().any(|p| lower.contains(p))
     }
 
+    fn is_greeting(text: &str) -> bool {
+        let lower = text.to_lowercase();
+        let trimmed = lower.trim().trim_end_matches(|c: char| c.is_ascii_punctuation());
+        let exact = [
+            "hi", "hello", "hey", "howdy", "greetings", "yo", "sup",
+            "good morning", "good afternoon", "good evening",
+            "how are you", "how are you doing", "how's it going",
+            "what's up", "whats up", "how do you do",
+            "hey there", "hi there", "hello there",
+        ];
+        exact.iter().any(|p| trimmed == *p || trimmed.starts_with(&format!("{} ", p)))
+    }
+
+    fn greeting_response(&self) -> GeneratedResponse {
+        GeneratedResponse {
+            text: format!(
+                "I'm doing well, thank you for asking! I'm {}, ready to help. \
+                 I can assist with programming, mathematics, system design, \
+                 information theory, and general knowledge. What would you like to explore?",
+                self.agent_name
+            ),
+            template_id: "greeting".to_string(),
+            traceable: false,
+            confidence: 1.0,
+        }
+    }
+
     fn identity_response(&self) -> GeneratedResponse {
         let text = format!(
             "I am {}, a Growformer Agent by {}. I'm a self-organizing neural substrate \
@@ -638,6 +769,12 @@ impl LanguageService {
             let action = self.active_dm_mut().route_text_to_action_stateless(text)?;
             self.record_latency(start);
             return Ok((action, self.identity_response()));
+        }
+
+        if Self::is_greeting(intent_text) {
+            let action = self.active_dm_mut().route_text_to_action_stateless(text)?;
+            self.record_latency(start);
+            return Ok((action, self.greeting_response()));
         }
 
         // Tool call interception: if the registry matches a tool, return a
@@ -681,6 +818,9 @@ impl LanguageService {
             let mr = mcb.route_and_project(&bridged.routed_vector, intent_text);
             if mr.confidence > 0.3 { Some(mr) } else { None }
         });
+
+        // Snapshot conversation context before mutable borrow of DimensionManager
+        let conv_ctx_snapshot = self.conversation.context_embedding.clone();
 
         let dm = self.active_dm_mut();
         let action = dm.route_text_to_action_stateless(intent_text)?;
@@ -846,7 +986,7 @@ impl LanguageService {
             }
 
             // Use MetaBrain conditioning when available, else fall back to Clifford path
-            let gen_conditioning = if let Some(ref mr) = meta_result {
+            let mut gen_conditioning = if let Some(ref mr) = meta_result {
                 mr.conditioning.clone()
             } else if let Some(gidx) = group_idx {
                 dm.adapt_for_group_clifford(gidx, &conditioned, h_raw, GEN_COND_DIM)
@@ -855,6 +995,18 @@ impl LanguageService {
                 c.resize(GEN_COND_DIM, 0.0);
                 c
             };
+
+            // Geometric conversation context: blend accumulated turn embeddings
+            // into the generation conditioning so retrieval is biased toward
+            // topic continuity. Only applies when conversation has history.
+            if !conv_ctx_snapshot.is_empty() {
+                let blend = 0.15f32;
+                let dim = gen_conditioning.len().min(conv_ctx_snapshot.len());
+                for i in 0..dim {
+                    gen_conditioning[i] = (1.0 - blend) * gen_conditioning[i]
+                        + blend * conv_ctx_snapshot[i];
+                }
+            }
 
             // --- Level 3: Check episodic memory for cached composition ---
             let _cached_groups = Self::retrieve_cached_composition(dm, &conditioned);
@@ -1057,7 +1209,33 @@ impl LanguageService {
             let eff_gidx = group_idx.or_else(|| meta_result.as_ref().and_then(|mr| mr.group_idx));
             retry_effective_gidx = eff_gidx;
 
-            if best_text.len() > 5 {
+            // Knowledge boundary: if retrieval confidence is below the floor,
+            // the query is outside the lattice's coverage. Return an honest
+            // decline instead of a low-confidence wrong answer.
+            const RETRIEVAL_CONFIDENCE_FLOOR: f32 = 0.25;
+            if best_conf < RETRIEVAL_CONFIDENCE_FLOOR || best_text.len() <= 5 {
+                let topic_label = topic_hint.as_deref()
+                    .map(|t| t.replace('_', " "))
+                    .unwrap_or_default();
+                let decline_msg = if topic_label.is_empty() {
+                    "I don't have enough information to give you a confident answer on this topic. \
+                     Could you rephrase or ask about something more specific?".to_string()
+                } else {
+                    format!(
+                        "I don't have enough information about '{}' to give you a confident answer. \
+                         This may be outside my current knowledge. Could you rephrase or ask about a related topic?",
+                        topic_label
+                    )
+                };
+                println!("  [knowledge-boundary] conf={:.3} < floor={:.3}, declining",
+                    best_conf, RETRIEVAL_CONFIDENCE_FLOOR);
+                GeneratedResponse {
+                    text: decline_msg,
+                    template_id: "knowledge_boundary".to_string(),
+                    traceable: true,
+                    confidence: 0.0,
+                }
+            } else if best_text.len() > 5 {
                 GeneratedResponse {
                     text: best_text,
                     template_id: format!("growformer_gen_{}", best_gidx),
@@ -1091,11 +1269,18 @@ impl LanguageService {
             resp
         };
 
+        // If the response is already a knowledge boundary decline, skip all
+        // downstream reasoning and metacog — there's nothing to improve.
+        let is_decline = resp.template_id == "knowledge_boundary"
+            || resp.template_id == "metacog_degradation";
+
         // Reasoning fallback: invoke System 1.5 (wave settling) when primary
         // confidence is genuinely low AND text is short/unhelpful, OR invoke
         // System 2 (deliberate chaining) when confidence is in the uncertain
         // middle and cross-domain ambiguity is detected.
-        let resp = if let (Some(ref reasoning), Some((ref _h_raw, ref bridged))) = (&self.reasoning, &encoded) {
+        let resp = if is_decline {
+            resp
+        } else if let (Some(ref reasoning), Some((ref _h_raw, ref bridged))) = (&self.reasoning, &encoded) {
             let mut cond = bridged.routed_vector.clone();
             cond.resize(GEN_COND_DIM, 0.0);
             let dm_ref = self.active_dm();
@@ -1145,13 +1330,11 @@ impl LanguageService {
         } else { resp };
 
         // MetaCognition: reflective quality gate with retry-reconditioning loop.
-        // For broad query summaries (already composed from multiple verified programs),
-        // skip the gate — single-topic relevance scoring would incorrectly penalize
-        // multi-topic compositions.
-        //
-        // Temporarily take metacognition out of self to break the borrow conflict
-        // between the immutable reflect() call and mutable active_dm_mut() for retry.
-        let resp = if is_broad && broad_summary.is_some() {
+        // Skip for: broad query summaries, knowledge boundary declines, degradation.
+        let resp = if is_decline {
+            println!("  [metacog] SKIP: knowledge boundary decline");
+            resp
+        } else if is_broad && broad_summary.is_some() {
             println!("  [metacog] SKIP: broad query summary (multi-topic composition)");
             resp
         } else {
@@ -1234,10 +1417,9 @@ impl LanguageService {
                         }
                         ReflectionOutcome::Degrade { scores, message, attempts_exhausted } => {
                             println!(
-                                "  [metacog] DEGRADE: quality={:.3} after {} attempts",
+                                "  [metacog] DEGRADE: quality={:.3} after {} attempts → honest decline",
                                 scores.quality, attempts_exhausted
                             );
-                            // Continuum: negative feedback to the selected program
                             if let Some(gidx) = retry_effective_gidx {
                                 let dm = self.active_dm_mut();
                                 if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
@@ -1246,40 +1428,12 @@ impl LanguageService {
                                     }
                                 }
                             }
-                            let s2_rescue = if let Some(ref reasoning) = self.reasoning {
-                                let mut cond_s2 = prompt_emb.clone();
-                                cond_s2.resize(GEN_COND_DIM, 0.0);
-                                let dm_ref = self.active_dm();
-                                let s2r = reasoning.reason_deliberate(
-                                    &cond_s2,
-                                    &dm_ref.group_gen_envs,
-                                    &dm_ref.group_rotors,
-                                    &self.system2_config,
-                                );
-                                if s2r.confidence > 0.30 && s2r.text.len() > 15 {
-                                    println!(
-                                        "  [metacog->system2] RESCUE: steps={}, coherence={:.3}",
-                                        s2r.steps_taken, s2r.final_coherence
-                                    );
-                                    Some(GeneratedResponse {
-                                        text: s2r.text,
-                                        template_id: format!("metacog_s2_rescue_{}_steps", s2r.steps_taken),
-                                        traceable: false,
-                                        confidence: s2r.confidence,
-                                    })
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            };
-
-                            current_resp = s2_rescue.unwrap_or(GeneratedResponse {
+                            current_resp = GeneratedResponse {
                                 text: message,
                                 template_id: "metacog_degradation".to_string(),
                                 traceable: true,
                                 confidence: 0.0,
-                            });
+                            };
                             break;
                         }
                     }
@@ -1299,6 +1453,8 @@ impl LanguageService {
 
     /// Conversational generation: uses conversation context + personality.
     /// Tracks multi-turn history and applies EMA modulation based on OCEAN.
+    /// Geometric context: blends accumulated turn embeddings into the query
+    /// so retrieval is biased toward topic continuity across turns.
     pub fn converse(&mut self, user_text: &str) -> Result<(ActionJson, GeneratedResponse), String> {
         // Build context BEFORE pushing user turn to avoid duplicating it in the window.
         let context_prefix = if self.conversation.turn_count() > 0 {
@@ -1331,6 +1487,21 @@ impl LanguageService {
         let resolved_intent = self.resolve_anaphora(user_text);
         let intent_for_routing = resolved_intent.as_deref().unwrap_or(user_text);
 
+        // Embed the raw query for geometric context operations
+        let query_bridge = self.active_dm()
+            .language_runtime.bridge_text_stateless(user_text).ok();
+        let query_emb = query_bridge.as_ref().map(|b| b.routed_vector.clone());
+
+        // Topic shift detection: if the new query is geometrically distant
+        // from accumulated context, reset topic thread to avoid stale bias.
+        if let Some(ref qe) = query_emb {
+            if self.conversation.is_topic_shift(qe, 0.15) {
+                println!("  [conv] topic shift detected, resetting topic thread");
+                self.conversation.current_topic = None;
+                self.conversation.current_group = None;
+            }
+        }
+
         // Context-augmented prompt: recent history provides semantic grounding
         // for the encoder, but intent parsing uses the raw user message to avoid
         // previous-turn topics dominating the current query's routing.
@@ -1341,9 +1512,27 @@ impl LanguageService {
 
         let (action, mut resp) = self.generation_with_intent_override(&context_prompt, intent_for_routing)?;
 
+        // Update geometric context with this turn's embeddings
+        if let Some(ref qe) = query_emb {
+            let resp_emb = self.active_dm()
+                .language_runtime.bridge_text_stateless(&resp.text)
+                .map(|b| b.routed_vector)
+                .unwrap_or_else(|_| qe.clone());
+            self.conversation.update_geometric_context(qe, &resp_emb);
+        }
+
+        // Track topic and group continuity
+        if let Some(ref gidx) = action.target_group_id.and_then(|gid| {
+            self.active_dm().main.group_order.iter().position(|&g| g == gid)
+        }) {
+            self.conversation.current_group = Some(*gidx);
+        }
+
         // Conversational framing: personality-aware prefix for natural dialogue
         let is_framed = resp.template_id != "identity"
+            && resp.template_id != "greeting"
             && resp.template_id != "metacog_degradation"
+            && resp.template_id != "knowledge_boundary"
             && !resp.template_id.starts_with("tool_")
             && resp.confidence > 0.3;
         if is_framed {

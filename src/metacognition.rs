@@ -487,14 +487,12 @@ impl MetaCognition {
     fn degradation_message(&self, topic_hint: Option<&str>) -> String {
         match topic_hint {
             Some(topic) => format!(
-                "I don't have sufficient knowledge about '{}' to give you a confident answer. \
-                 This topic is outside my current training scope. \
-                 Could you rephrase or ask about a related topic I might know better?",
+                "I don't have enough information about '{}' to give you a confident answer. \
+                 I'd rather be honest than guess. Could you rephrase, or ask about a related topic?",
                 topic.replace('_', " ")
             ),
-            None => "I'm not confident in my answer to this question. \
-                     It may be outside my current training scope. \
-                     Could you rephrase or provide more context?"
+            None => "I don't have enough information to answer this confidently. \
+                     I'd rather be honest than guess. Could you rephrase or ask about something more specific?"
                 .to_string(),
         }
     }
@@ -543,7 +541,7 @@ mod tests {
         let outcome = mc.reflect(&prompt, &bad_response, "", None, 3);
         match outcome {
             ReflectionOutcome::Degrade { message, .. } => {
-                assert!(message.contains("not confident") || message.contains("outside"));
+                assert!(message.contains("don't have enough") || message.contains("honest"));
             }
             _ => panic!("Expected degradation for bad response after max retries"),
         }
