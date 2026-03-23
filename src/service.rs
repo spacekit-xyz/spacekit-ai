@@ -2126,7 +2126,8 @@ impl LanguageService {
                     "  [metacog codegen] quality={:.3}, coherence={:.3}, relevance={:.3}",
                     scores.quality, scores.coherence, scores.relevance
                 );
-                if scores.quality >= mc.config.accept_threshold * 0.8 {
+                if scores.quality >= mc.config.accept_threshold * 0.8
+                    || (scores.coherence >= 0.95 && scores.quality >= 0.15) {
                     Some(cg)
                 } else {
                     println!("  [metacog codegen] REJECTED: quality below threshold");

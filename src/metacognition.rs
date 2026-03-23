@@ -81,7 +81,7 @@ pub struct MetaCognitionConfig {
 impl Default for MetaCognitionConfig {
     fn default() -> Self {
         Self {
-            accept_threshold: 0.45,
+            accept_threshold: 0.35,
             max_retries: 2,
             coherence_weight: 0.45,
             relevance_weight: 0.35,
@@ -215,7 +215,19 @@ impl MetaCognition {
             scores.quality, self.config.accept_threshold
         );
 
-        if scores.quality >= self.config.accept_threshold {
+        // Two-gate acceptance: quality above threshold AND coherence above floor.
+        // The lowered threshold (0.35) recovers correct paraphrase responses that
+        // score low on relevance but are linguistically sound. The coherence floor
+        // (0.95) prevents garbled generation from slipping through the lower gate.
+        const COHERENCE_FLOOR: f32 = 0.95;
+        if scores.quality >= self.config.accept_threshold && scores.coherence >= COHERENCE_FLOOR {
+            return ReflectionOutcome::Accept { scores };
+        }
+        // High coherence with marginal quality: accept if clearly above a
+        // soft floor — catches correct responses dragged down by one sub-metric.
+        if scores.coherence >= COHERENCE_FLOOR && scores.quality >= 0.20 {
+            println!("  [metacog] ACCEPT (coherence-floor override): quality={:.3}, coherence={:.3}",
+                scores.quality, scores.coherence);
             return ReflectionOutcome::Accept { scores };
         }
 
