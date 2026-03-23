@@ -2403,40 +2403,86 @@ impl TokenDictionary {
     }
 
     /// Encode text to a sequence of token IDs.
-    /// Unknown tokens are split into individual characters as fallback.
+    /// Every word maps to exactly one token — words are irreducible
+    /// geometric objects (Dirac particles), never decomposed into characters.
+    /// Unknown words are converted to the nearest known word by edit distance.
     pub fn encode(&self, text: &str) -> Vec<u16> {
         let raw_tokens = tokenize(text);
         let mut ids = Vec::new();
         for tok in &raw_tokens {
             if let Some(&id) = self.lookup.get(tok.as_str()) {
                 ids.push(id);
-            } else {
-                for ch in tok.chars() {
-                    let s = ch.to_string();
-                    if let Some(&id) = self.lookup.get(&s) {
-                        ids.push(id);
-                    }
-                    // skip chars not in dictionary
-                }
+            } else if let Some((id, _, _)) = self.nearest_by_edit(tok) {
+                ids.push(id);
             }
         }
         ids
     }
 
-    /// Decode token IDs back to text. Stops at EOS_ID.
-    pub fn decode(&self, ids: &[u16]) -> String {
-        let mut result = String::new();
-        for &id in ids {
-            if id == EOS_ID {
-                break;
+    /// Encode text, returning both token IDs and a parallel `word_start`
+    /// vector. With one-word-one-token encoding, every entry is a word
+    /// start — but the interface is retained for callers that check alignment.
+    pub fn encode_with_word_boundaries(&self, text: &str) -> (Vec<u16>, Vec<bool>) {
+        let ids = self.encode(text);
+        let word_starts = vec![true; ids.len()];
+        (ids, word_starts)
+    }
+
+    /// Word boundaries for a token ID sequence. With one-word-one-token
+    /// encoding every position is a word start, but legacy sequences (from
+    /// char-decomposed OOV words) are detected: consecutive single alphabetic
+    /// characters are treated as interior fragments.
+    pub fn infer_word_boundaries(&self, ids: &[u16]) -> Vec<bool> {
+        ids.iter().enumerate().map(|(i, &id)| {
+            if i == 0 { return true; }
+            let tok = self.tokens.get(id as usize).map(|s| s.as_str()).unwrap_or("");
+            if tok.len() == 1 && tok.chars().next().map_or(false, |c| c.is_alphabetic()) {
+                let prev = self.tokens.get(ids[i - 1] as usize)
+                    .map(|s| s.as_str()).unwrap_or("");
+                if prev.len() == 1 && prev.chars().next().map_or(false, |c| c.is_alphabetic()) {
+                    return false;
+                }
             }
-            if let Some(tok) = self.tokens.get(id as usize) {
+            true
+        }).collect()
+    }
+
+    /// Decode token IDs back to text. Stops at EOS_ID.
+    /// Runs of 3+ consecutive single-alphabetic tokens (legacy char-split
+    /// fragments) are rejoined into a single word — preserving the Dirac
+    /// particle invariant even for data encoded before one-word-one-token.
+    pub fn decode(&self, ids: &[u16]) -> String {
+        let toks: Vec<&str> = ids.iter()
+            .take_while(|&&id| id != EOS_ID)
+            .filter_map(|&id| self.tokens.get(id as usize).map(|s| s.as_str()))
+            .collect();
+
+        let mut result = String::new();
+        let mut i = 0;
+        while i < toks.len() {
+            let is_sa = |s: &str| s.len() == 1 && s.chars().next().map_or(false, |c| c.is_alphabetic());
+
+            if is_sa(toks[i]) {
+                let start = i;
+                while i < toks.len() && is_sa(toks[i]) { i += 1; }
+                let run = i - start;
+                if run >= 3 {
+                    if !result.is_empty() { result.push(' '); }
+                    for j in start..i { result.push_str(toks[j]); }
+                } else {
+                    for j in start..i {
+                        if !result.is_empty() { result.push(' '); }
+                        result.push_str(toks[j]);
+                    }
+                }
+            } else {
                 if !result.is_empty()
-                    && !tok.starts_with(|c: char| c.is_ascii_punctuation())
+                    && !toks[i].starts_with(|c: char| c.is_ascii_punctuation())
                 {
                     result.push(' ');
                 }
-                result.push_str(tok);
+                result.push_str(toks[i]);
+                i += 1;
             }
         }
         result

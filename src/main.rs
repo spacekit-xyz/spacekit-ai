@@ -1201,6 +1201,31 @@ fn train_brain(
                 augmented_samples.len(), original_count);
             samples.extend(augmented_samples);
         }
+
+        // RTD (Replaced Token Detection): create corrupted versions of responses
+        // as hard negatives. The corrupted texts are added as additional training
+        // samples that the lattice should NOT match to the original query.
+        let rtd_dict = TokenDictionary::build(
+            &samples.iter().filter_map(|s| s.expected_response.as_deref()).collect::<Vec<_>>(),
+            4096,
+        );
+        let mut rtd_augmented = Vec::new();
+        for (i, sample) in samples.iter().enumerate() {
+            if let Some(ref response) = sample.expected_response {
+                if let Some((corrupted, _mask)) = growformer::training_objectives::replace_salient_tokens(
+                    response, lexicon, &rtd_dict, 0.15,
+                    (i as u64).wrapping_mul(0x94d049bb133111eb),
+                ) {
+                    let mut neg = sample.clone();
+                    neg.expected_response = Some(corrupted);
+                    rtd_augmented.push(neg);
+                }
+            }
+        }
+        if !rtd_augmented.is_empty() {
+            println!("  [rtd] Generated {} RTD hard-negative samples", rtd_augmented.len());
+            samples.extend(rtd_augmented);
+        }
     }
 
     // Discover groups dynamically from the training data's action_target values.
@@ -1840,8 +1865,58 @@ fn train_brain(
     println!("  Total: {} contrastive repulsions (margin={}, rate={})",
         total_repulsions, contrastive_margin, contrastive_rate);
 
-    // (Legacy thread scope with NeuralEnvironment training removed —
-    // replaced by one-pass Paramecium lattice indexing above)
+    // ---------------------------------------------------------------
+    // STA-CALM Orchestrated Training: per-grade semantic pressure
+    // Runs 3-phase pipeline on lattice programs to activate the
+    // Cl(1,7) grade structure with semantic meaning.
+    // ---------------------------------------------------------------
+    println!("\n--- STA-CALM Orchestrated Training ---");
+    {
+        let t_sta = std::time::Instant::now();
+        let mut total_programs = 0usize;
+        for (&gidx, env) in svc.dm.group_gen_envs.iter_mut() {
+            let vocab_size = env.dictionary.tokens.len();
+            let mut orchestrator = growformer::training_objectives::TrainingOrchestrator::new(vocab_size);
+
+            let mut programs: Vec<(String, Vec<u16>, Vec<f32>)> = Vec::new();
+            for topic in &env.topic_subindex {
+                for prog in &topic.lattice.programs {
+                    programs.push((
+                        topic.topic_name.clone(),
+                        prog.token_sequence.clone(),
+                        prog.ema_centroid.clone(),
+                    ));
+                }
+            }
+
+            if programs.len() < 4 { continue; }
+
+            let diags = orchestrator.run_full_pipeline(
+                &mut programs,
+                3,  // phase 1: grade pretraining epochs
+                2,  // phase 2: rotor predictor epochs
+                2,  // phase 3: joint fine-tuning epochs
+            );
+
+            // Write back adjusted centroids to the lattice programs
+            let mut prog_idx = 0;
+            for topic in &mut env.topic_subindex {
+                for prog in &mut topic.lattice.programs {
+                    if prog_idx < programs.len() {
+                        prog.ema_centroid = programs[prog_idx].2.clone();
+                        prog_idx += 1;
+                    }
+                }
+            }
+
+            total_programs += prog_idx;
+            if let Some(last) = diags.last() {
+                println!("  gen[g{}]: {} programs, final loss={:.4}, rotor_conf={:.3}",
+                    gidx, prog_idx, last.avg_total_loss, last.rotor_prediction_confidence);
+            }
+        }
+        println!("  STA-CALM: {} total programs trained in {:?}", total_programs, t_sta.elapsed());
+    }
 
     // Register per-group structural fingerprints (grade-2 bivectors in Cl(8))
     // for understanding-based routing on novel/OOD inputs.

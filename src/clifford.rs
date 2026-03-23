@@ -42,6 +42,19 @@ pub const BOOST_BIVECTOR_COUNT: usize = 7;
 /// Number of rotation bivectors (spacelike ∧ spacelike): 21
 pub const ROTATION_BIVECTOR_COUNT: usize = 21;
 
+/// Spacetime interval classification in Cl(1,7).
+///
+/// The Minkowski metric induces three interval types between events:
+///   Timelike  (s² < 0): causal/sequential — one chunk causes/precedes the next
+///   Spacelike (s² > 0): associative/lateral — parallel concepts, enumeration
+///   Lightlike (s² ≈ 0): semantic boundary — topic transition, maximum reachability
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum IntervalType {
+    Timelike,
+    Spacelike,
+    Lightlike,
+}
+
 /// Binomial coefficients C(8,k) — dimensions of each grade
 pub const GRADE_DIMS: [usize; 9] = [1, 8, 28, 56, 70, 56, 28, 8, 1];
 
@@ -343,6 +356,31 @@ impl Multivector {
         }
         result
     }
+
+    /// Extract the even-grade components (grades 0, 2, 4, 6, 8).
+    /// These form the even subalgebra (spinor space) — 128 components total.
+    /// In Cl(1,7), the even subalgebra is isomorphic to the Dirac spinor space.
+    pub fn even_grade_components(&self) -> Vec<f32> {
+        let mut out = Vec::with_capacity(128);
+        for &g in &[0usize, 2, 4, 6, 8] {
+            let start = GRADE_OFFSETS[g];
+            let dim = GRADE_DIMS[g];
+            out.extend_from_slice(&self.components[start..start + dim]);
+        }
+        out
+    }
+
+    /// Extract the odd-grade components (grades 1, 3, 5, 7).
+    /// These form the odd part of the algebra — 128 components total.
+    pub fn odd_grade_components(&self) -> Vec<f32> {
+        let mut out = Vec::with_capacity(128);
+        for &g in &[1usize, 3, 5, 7] {
+            let start = GRADE_OFFSETS[g];
+            let dim = GRADE_DIMS[g];
+            out.extend_from_slice(&self.components[start..start + dim]);
+        }
+        out
+    }
 }
 
 impl Rotor {
@@ -407,6 +445,17 @@ impl Rotor {
         // grade 8: 1 component
         mv.components[GRADE_OFFSETS[8]] = self.components[127];
         mv
+    }
+
+    /// Normalize the rotor to unit magnitude.
+    /// A proper rotor satisfies R R̃ = 1 (scalar).
+    pub fn normalize(&mut self) {
+        let norm_sq: f32 = self.components.iter().map(|x| x * x).sum();
+        let norm = norm_sq.sqrt();
+        if norm > 1e-10 {
+            let inv = 1.0 / norm;
+            for c in &mut self.components { *c *= inv; }
+        }
     }
 
     /// Number of trainable parameters (just the bivector part for simple rotors).
@@ -638,6 +687,44 @@ pub fn structural_similarity(a: &Multivector, b: &Multivector) -> f32 {
     dot / (na * nb)
 }
 
+/// Minkowski interval between two multivectors, computed from grade-1.
+///
+/// Uses the Cl(1,7) metric: s² = −(Δx₀)² + (Δx₁)² + ⋯ + (Δx₇)²
+/// where x₀ is the timelike component and x₁…x₇ are spacelike.
+/// Negative → timelike (causal), positive → spacelike (associative),
+/// near-zero → lightlike (semantic boundary).
+pub fn minkowski_interval(a: &Multivector, b: &Multivector) -> f32 {
+    let ga = a.grade(1);
+    let gb = b.grade(1);
+    let mut s_sq = 0.0f32;
+    for i in 0..CL8_VECTOR_DIM {
+        let d = gb[i] - ga[i];
+        if i == 0 {
+            s_sq -= d * d; // timelike: negative contribution
+        } else {
+            s_sq += d * d; // spacelike: positive contribution
+        }
+    }
+    s_sq
+}
+
+/// Classify the Minkowski interval type from a squared-interval value.
+pub fn classify_interval(s_squared: f32) -> IntervalType {
+    const LIGHTLIKE_EPS: f32 = 0.01;
+    if s_squared.abs() < LIGHTLIKE_EPS {
+        IntervalType::Lightlike
+    } else if s_squared < 0.0 {
+        IntervalType::Timelike
+    } else {
+        IntervalType::Spacelike
+    }
+}
+
+/// Compute the interval type between two multivectors directly.
+pub fn interval_between(a: &Multivector, b: &Multivector) -> IntervalType {
+    classify_interval(minkowski_interval(a, b))
+}
+
 /// Abstraction: project a multivector to grade-2+, zeroing grade-0 and
 /// grade-1.  The result retains relational/structural information while
 /// discarding topic-specific features.  Two inputs that are "about the
@@ -649,6 +736,20 @@ pub fn abstract_mv(mv: &Multivector) -> Multivector {
         result.components[i] = 0.0;
     }
     result
+}
+
+/// Multiply a multivector by the pseudoscalar I (grade-8 element).
+///
+/// In Cl(1,7), the pseudoscalar is I = e₀e₁e₂e₃e₄e₅e₆e₇ (all basis vectors).
+/// Multiplying by I performs Hodge duality: grade-k maps to grade-(8-k).
+/// This is algebraically exact negation/complement — a concept's dual
+/// in the full algebra, not a learned approximation.
+///
+/// I² = e₀²·e₁²·…·e₇² = (−1)·(+1)⁷ = −1 in Cl(1,7).
+pub fn pseudoscalar_product(mv: &Multivector) -> Multivector {
+    let mut pseudo = Multivector::zero();
+    pseudo.components[GRADE_OFFSETS[8]] = 1.0;
+    mv.geo(&pseudo)
 }
 
 /// Cross-domain transfer: given a source rotor (learned on domain A) and a
@@ -1059,5 +1160,72 @@ mod tests {
         let v = Multivector::vector(&[1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         let sim = geometric_similarity(&v, &v);
         assert!(sim.abs() < 1e-5, "lightlike vector self-product should be ~0: {}", sim);
+    }
+
+    #[test]
+    fn test_minkowski_interval_timelike() {
+        let mut a = Multivector::zero();
+        let mut b = Multivector::zero();
+        // Only timelike component differs
+        a.components[GRADE_OFFSETS[1]] = 0.0;
+        b.components[GRADE_OFFSETS[1]] = 1.0;
+        let s2 = minkowski_interval(&a, &b);
+        assert!(s2 < 0.0, "pure timelike separation should give s² < 0: {}", s2);
+        assert_eq!(classify_interval(s2), IntervalType::Timelike);
+    }
+
+    #[test]
+    fn test_minkowski_interval_spacelike() {
+        let mut a = Multivector::zero();
+        let mut b = Multivector::zero();
+        // Only spacelike component e1 differs
+        a.components[GRADE_OFFSETS[1] + 1] = 0.0;
+        b.components[GRADE_OFFSETS[1] + 1] = 1.0;
+        let s2 = minkowski_interval(&a, &b);
+        assert!(s2 > 0.0, "pure spacelike separation should give s² > 0: {}", s2);
+        assert_eq!(classify_interval(s2), IntervalType::Spacelike);
+    }
+
+    #[test]
+    fn test_minkowski_interval_lightlike() {
+        let mut a = Multivector::zero();
+        let mut b = Multivector::zero();
+        // Equal change in e0 and e1: −1² + 1² = 0
+        b.components[GRADE_OFFSETS[1]] = 1.0;
+        b.components[GRADE_OFFSETS[1] + 1] = 1.0;
+        let s2 = minkowski_interval(&a, &b);
+        assert!(s2.abs() < 0.02, "equal timelike+spacelike change should be lightlike: {}", s2);
+        assert_eq!(classify_interval(s2), IntervalType::Lightlike);
+    }
+
+    #[test]
+    fn test_pseudoscalar_product_duality() {
+        // Multiplying a grade-0 element by I should produce a grade-8 element.
+        let mut scalar = Multivector::zero();
+        scalar.components[0] = 1.0;
+        let dual = pseudoscalar_product(&scalar);
+        // The result should have significant grade-8 content
+        assert!(dual.components[GRADE_OFFSETS[8]].abs() > 0.5,
+            "scalar * I should produce pseudoscalar: grade-8 = {}", dual.components[GRADE_OFFSETS[8]]);
+    }
+
+    #[test]
+    fn test_pseudoscalar_squared_is_minus_one() {
+        // I² = −1 in Cl(1,7) because the metric has one timelike dimension
+        let mut pseudo = Multivector::zero();
+        pseudo.components[GRADE_OFFSETS[8]] = 1.0;
+        let i_squared = pseudo.geo(&pseudo);
+        // Should be close to -1 scalar
+        assert!((i_squared.components[0] + 1.0).abs() < 1e-5,
+            "I² should be -1: got {}", i_squared.components[0]);
+    }
+
+    #[test]
+    fn test_interval_between() {
+        let mut a = Multivector::zero();
+        let b = Multivector::zero();
+        a.components[GRADE_OFFSETS[1] + 3] = 2.0; // spacelike e3
+        let it = interval_between(&a, &b);
+        assert_eq!(it, IntervalType::Spacelike);
     }
 }

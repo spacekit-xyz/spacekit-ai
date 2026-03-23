@@ -2716,7 +2716,9 @@ impl IndexedGenEnv {
 
         let source_seqs: Vec<(crate::text_autoencoder::ChunkSequence, f32)> = scored.iter()
             .map(|&(idx, sim)| {
-                let seq = codec.encode_sequence(&topic.lattice.programs[idx].token_sequence);
+                let toks = &topic.lattice.programs[idx].token_sequence;
+                let wb = self.dictionary.infer_word_boundaries(toks);
+                let seq = codec.encode_sequence_word_aligned(toks, &wb);
                 (seq, sim)
             })
             .collect();
@@ -2724,43 +2726,82 @@ impl IndexedGenEnv {
         let target_chunks = source_seqs[0].0.num_chunks();
         if target_chunks == 0 { return None; }
 
-        // Algebraic composition: grade-aware blending using geometric product
-        let composed = crate::text_autoencoder::compose_algebraic(
-            &source_seqs, target_chunks,
-        );
+        // Propagator-based composition: build SpacetimeChunk trajectories
+        // from program centroids (semantically-rich grade structure) rather
+        // than CDMA chunks (quasi-random grades).  CDMA chunks are only used
+        // for the final token decode step.
+        let st_sources: Vec<(Vec<crate::text_autoencoder::SpacetimeChunk>, f32)> = scored.iter()
+            .map(|&(idx, sim)| {
+                let centroid = &topic.lattice.programs[idx].ema_centroid;
+                let st = crate::text_autoencoder::SpacetimeChunk::from_centroid(centroid);
+                (vec![st], sim)
+            })
+            .collect();
 
-        // Rotor-based extension: if the composed trajectory is long enough,
-        // try to predict additional chunks via transition rotor extrapolation.
+        let has_multi_chunk = st_sources.iter().any(|(t, _)| t.len() >= 2);
+        let composed = if has_multi_chunk {
+            // Use propagator composition for richer semantic blending
+            let mass = crate::text_autoencoder::trajectory_mass(
+                &st_sources[0].0
+            );
+            let propagator = crate::text_autoencoder::SemanticPropagator::new(mass, 0.4);
+            propagator.compose_trajectories(&st_sources, target_chunks)
+        } else {
+            // Fall back to algebraic composition for single-chunk sources
+            crate::text_autoencoder::compose_algebraic(&source_seqs, target_chunks)
+        };
+
+        // Propagator-based extension: predict additional chunks via
+        // Dirac-style rotor propagation with semantic inertia.
         let mut extended = composed;
         let max_chunks = (max_tokens + crate::text_autoencoder::CHUNK_K - 1)
             / crate::text_autoencoder::CHUNK_K;
         if extended.len() >= 2 && extended.len() < max_chunks {
-            let graded: Vec<crate::text_autoencoder::GradedChunk> = extended.iter()
-                .map(|c| crate::text_autoencoder::GradedChunk::from_chunk(c))
+            let st_trajectory: Vec<crate::text_autoencoder::SpacetimeChunk> = extended.iter()
+                .map(|c| crate::text_autoencoder::SpacetimeChunk::from_centroid(c))
                 .collect();
-            // Extrapolate up to 2 additional chunks via rotor prediction
+            let mass = crate::text_autoencoder::trajectory_mass(&st_trajectory);
+            let mut propagator = crate::text_autoencoder::SemanticPropagator::from_trajectory(
+                &st_trajectory, mass, 0.4,
+            );
+
             let extra = 2.min(max_chunks - extended.len());
-            let mut trajectory = graded;
             for _ in 0..extra {
-                let next = crate::text_autoencoder::predict_next_algebraic(&trajectory);
-                let next_graded = crate::text_autoencoder::GradedChunk::from_chunk(&next);
-                // Only keep if the predicted chunk is semantically coherent
-                // with the trajectory (cosine > 0.3 with the last chunk)
-                if trajectory.last()
-                    .map(|last| next_graded.semantic_similarity(last) > 0.3)
-                    .unwrap_or(false)
-                {
-                    extended.push(next);
-                    trajectory.push(next_graded);
+                if let Some((next_chunk, _interval, confidence)) = propagator.predict_next() {
+                    if confidence < 0.1 { break; }
+                    let next_st = crate::text_autoencoder::SpacetimeChunk::from_centroid(&next_chunk);
+                    // Coherence check: predicted chunk should be semantically related
+                    if st_trajectory.last()
+                        .map(|last| next_st.semantic_similarity(last) > 0.2)
+                        .unwrap_or(false)
+                    {
+                        propagator.observe(&next_st);
+                        extended.push(next_chunk);
+                    } else {
+                        break;
+                    }
                 } else {
                     break;
                 }
             }
         }
 
+        // Apply per-grade temperature sampling before decoding.
+        // This gives fine-grained control over which aspects of generation
+        // are varied vs deterministic.
+        let grade_temp = crate::text_autoencoder::GradeTemperature::default();
+        let tempered: Vec<[f32; crate::text_autoencoder::CATA_DIM]> = extended.iter()
+            .enumerate()
+            .map(|(i, chunk)| {
+                let seed = (i as u64).wrapping_mul(0x517cc1b727220a95)
+                    .wrapping_add(topic_name.len() as u64);
+                crate::text_autoencoder::apply_grade_temperature(chunk, &grade_temp, seed)
+            })
+            .collect();
+
         let chunk_lengths: Vec<usize> = source_seqs[0].0.chunk_lengths.clone();
         let mut all_tokens = Vec::new();
-        for (i, chunk) in extended.iter().enumerate() {
+        for (i, chunk) in tempered.iter().enumerate() {
             let len = chunk_lengths.get(i).copied()
                 .unwrap_or(crate::text_autoencoder::CHUNK_K);
             let tokens = codec.decode_chunk(chunk, len);
@@ -2825,10 +2866,12 @@ impl IndexedGenEnv {
 
         if scored.is_empty() || scored[0].1 < 0.1 { return None; }
 
-        // Encode each program's tokens into chunk sequences
+        // Encode each program's tokens into chunk sequences (word-aligned)
         let source_seqs: Vec<(crate::text_autoencoder::ChunkSequence, f32)> = scored.iter()
             .map(|&(idx, sim)| {
-                let seq = codec.encode_sequence(&self.lattice.programs[idx].token_sequence);
+                let toks = &self.lattice.programs[idx].token_sequence;
+                let wb = self.dictionary.infer_word_boundaries(toks);
+                let seq = codec.encode_sequence_word_aligned(toks, &wb);
                 (seq, sim)
             })
             .collect();
@@ -3277,7 +3320,8 @@ impl IndexedGenEnv {
                     for &(idx, score) in &scored {
                         let text = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence);
                         let opening: String = text.chars().take(300).collect();
-                        if Self::has_tokenization_artifacts(&opening) { continue; }
+                        let centroid = &topic.lattice.programs[idx].ema_centroid;
+                        if Self::should_reject_text(&opening, Some(centroid), Some(cond)) { continue; }
                         let matches_lang = if is_rust {
                             text.contains("fn ") || text.contains("-> ") || text.contains("let ")
                                 || text.contains("i32") || text.contains("f64") || text.contains("impl ")
@@ -3313,10 +3357,12 @@ impl IndexedGenEnv {
                     let text = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence);
                     if text.is_empty() { continue; }
 
-                    // Skip artifact check when graph is confident about this program
+                    // Two-signal artifact check: surface + semantic alignment.
+                    // Graph-confident programs skip entirely.
                     if !graph_confident {
                         let opening: String = text.chars().take(300).collect();
-                        if Self::has_tokenization_artifacts(&opening) {
+                        let centroid = &topic.lattice.programs[idx].ema_centroid;
+                        if Self::should_reject_text(&opening, Some(centroid), Some(cond)) {
                             let snippet: String = text.chars().take(40).collect();
                             println!("    [skip-artifact] prog={}, score={:.3}, text=\"{}...\"",
                                 idx, score, snippet);
@@ -3415,12 +3461,17 @@ impl IndexedGenEnv {
                 text = t;
                 conf = c;
             }
-            if text.is_empty() || text.len() < 10 || Self::has_tokenization_artifacts(&text) {
+            let topic_centroid_ref: &[f32] = &topic.centroid;
+            if text.is_empty() || text.len() < 10
+                || Self::should_reject_text(&text, Some(topic_centroid_ref), Some(cond))
+            {
                 continue;
             }
 
             let opening = Self::extract_opening(&text, 200);
-            if opening.is_empty() || Self::has_tokenization_artifacts(&opening) {
+            if opening.is_empty()
+                || Self::should_reject_text(&opening, Some(topic_centroid_ref), Some(cond))
+            {
                 continue;
             }
 
@@ -3533,43 +3584,145 @@ impl IndexedGenEnv {
     }
 
     /// Detect tokenization artifacts in decoded text.
+    /// Two-signal artifact decision: surface artifacts AND semantic alignment.
+    /// Stored program text that has surface artifacts (from legacy char-splits)
+    /// but is semantically aligned with the query → accept.
+    /// Generated text with surface artifacts and low alignment → reject.
+    fn should_reject_text(
+        text: &str,
+        program_centroid: Option<&[f32]>,
+        query_emb: Option<&[f32]>,
+    ) -> bool {
+        if !Self::has_tokenization_artifacts(text) {
+            return false;
+        }
+        // Surface artifacts detected — check semantic alignment as second signal
+        if let (Some(centroid), Some(qemb)) = (program_centroid, query_emb) {
+            let alignment = gen_cosine_sim(qemb, centroid);
+            if alignment > 0.40 {
+                return false; // high alignment overrides surface artifacts
+            }
+        }
+        true
+    }
+
     /// Garbled programs have isolated single characters, excessive spacing,
-    /// or parenthetical artifacts from imperfect dictionary decoding.
+    /// repetition loops, low lexical diversity, or broken propositional
+    /// coherence (sentences that don't connect to their neighbors).
     fn has_tokenization_artifacts(text: &str) -> bool {
         let words: Vec<&str> = text.split_whitespace().collect();
         if words.is_empty() {
             return true;
         }
 
-        // Count single-character "words" (excluding common articles/prepositions/punctuation)
+        let wc = words.len();
+
+        // Count single-character "words" (excluding only punctuation/operators)
         let single_char_count = words.iter()
             .filter(|w| {
-                w.len() == 1 && !matches!(w.to_lowercase().as_str(),
-                    "a" | "i" | "(" | ")" | "-" | "+" | "=" | "," | "." | ":" | ";" | "&"
-                    | "x" | "y" | "n" | "k" | "e" | "r" | "b" | "c" | "f" | "t" | "p"
+                w.len() == 1 && !matches!(w.as_bytes().first(),
+                    Some(b'(' | b')' | b'-' | b'+' | b'=' | b',' | b'.' | b':' | b';' | b'&' | b'*' | b'/' | b'?' | b'!')
                 )
             })
             .count();
 
-        // More than 20% single-character words is a strong artifact signal
-        if single_char_count as f32 / words.len() as f32 > 0.20 {
+        if single_char_count as f32 / wc as f32 > 0.20 {
+            return true;
+        }
+
+        // All single alphabetic chars (no exclusions) — catches garble that
+        // sprinkles common letters (a, e, t, s) throughout real words.
+        let all_single_alpha = words.iter()
+            .filter(|w| w.len() == 1 && w.chars().next().map_or(false, |c| c.is_alphabetic()))
+            .count();
+        if all_single_alpha >= 5 && all_single_alpha as f32 / wc as f32 > 0.12 {
             return true;
         }
 
         // Sequences of space-separated single characters: "e a d g s"
-        // Only flag truly garbled sequences (4+ consecutive, not 3)
-        let mut consecutive_singles = 0;
-        let mut max_consecutive = 0;
+        let mut consecutive_singles = 0u32;
+        let mut max_consecutive_singles = 0u32;
         for w in &words {
             if w.len() == 1 && w.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false) {
                 consecutive_singles += 1;
-                max_consecutive = max_consecutive.max(consecutive_singles);
+                max_consecutive_singles = max_consecutive_singles.max(consecutive_singles);
             } else {
                 consecutive_singles = 0;
             }
         }
-        if max_consecutive >= 4 {
+        if max_consecutive_singles >= 3 {
             return true;
+        }
+
+        // Repetition loop: same word repeated 3+ times consecutively
+        if wc >= 8 {
+            let mut max_repeat = 1u32;
+            let mut cur_repeat = 1u32;
+            for pair in words.windows(2) {
+                if pair[0] == pair[1] {
+                    cur_repeat += 1;
+                    max_repeat = max_repeat.max(cur_repeat);
+                } else {
+                    cur_repeat = 1;
+                }
+            }
+            if max_repeat >= 3 {
+                return true;
+            }
+
+            // Bigram repetition: same 2-word pair appears 3+ times
+            let bigrams: Vec<(&str, &str)> = words.windows(2)
+                .map(|w| (w[0], w[1]))
+                .collect();
+            let mut bigram_counts: std::collections::HashMap<(&str, &str), u32> =
+                std::collections::HashMap::new();
+            for &bg in &bigrams {
+                *bigram_counts.entry(bg).or_default() += 1;
+            }
+            if bigram_counts.values().any(|&c| c >= 3) {
+                return true;
+            }
+        }
+
+        // Low lexical diversity: word salad with very few unique words
+        if wc >= 12 {
+            let unique: std::collections::HashSet<&str> = words.iter().copied().collect();
+            let ratio = unique.len() as f32 / wc as f32;
+            if ratio < 0.45 {
+                return true;
+            }
+        }
+
+        // Propositional coherence: consecutive sentences must share content
+        // words. Garbled text has domain words in random order with broken
+        // semantic trajectory — each sentence is an island.
+        if wc >= 15 {
+            let sentences: Vec<std::collections::HashSet<&str>> = text
+                .split(|c: char| c == '.' || c == '!' || c == '?')
+                .map(|s| {
+                    s.split_whitespace()
+                        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+                        .filter(|w| w.len() > 3)
+                        .collect::<std::collections::HashSet<&str>>()
+                })
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            if sentences.len() >= 3 {
+                let mut connected = 0usize;
+                for i in 0..sentences.len() {
+                    let has_prev = i == 0 || sentences[i - 1].intersection(&sentences[i]).count() > 0;
+                    let has_next = i == sentences.len() - 1
+                        || sentences[i].intersection(&sentences[i + 1]).count() > 0;
+                    if has_prev || has_next {
+                        connected += 1;
+                    }
+                }
+                let connectivity = connected as f32 / sentences.len() as f32;
+                if connectivity < 0.5 {
+                    return true;
+                }
+            }
         }
 
         false
@@ -3671,8 +3824,9 @@ impl IndexedGenEnv {
         // override the sub-lattice's authoritative result.
         // Check artifacts only on the opening portion the user will see
         let opening_check: String = text.chars().take(300).collect();
+        let prog_centroid = &self.lattice.programs[prog_idx].ema_centroid;
         if forced_active && topic_selected.is_some() && text.len() > 5
-            && !Self::has_tokenization_artifacts(&opening_check)
+            && !Self::should_reject_text(&opening_check, Some(prog_centroid), Some(cond))
         {
             self.last_selected_archetype = None;
             self.last_generation_confidence = lattice_conf;
@@ -3706,7 +3860,7 @@ impl IndexedGenEnv {
 
         // High confidence AND in the program's rest frame: return lattice text directly
         if lattice_conf >= 0.80 && text.len() > 5 && !field_inhibited
-            && !Self::has_tokenization_artifacts(&opening_check)
+            && !Self::should_reject_text(&opening_check, Some(prog_centroid), Some(cond))
         {
             self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
             self.last_generation_confidence = lattice_conf;
@@ -3945,9 +4099,10 @@ impl IndexedGenEnv {
 
         // Forced topic: return directly, bypass archetype reconstruction
         let opening_check2: String = text.chars().take(300).collect();
+        let prog_centroid2 = &self.lattice.programs[prog_idx].ema_centroid;
         if ((forced_active && topic_selected.is_some() && text.len() > 5)
             || (lattice_conf >= 0.80 && text.len() > 5))
-            && !Self::has_tokenization_artifacts(&opening_check2)
+            && !Self::should_reject_text(&opening_check2, Some(prog_centroid2), Some(cond))
         {
             self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
             self.last_generation_confidence = lattice_conf;

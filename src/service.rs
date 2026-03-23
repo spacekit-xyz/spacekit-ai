@@ -1847,6 +1847,16 @@ impl LanguageService {
                 }
             };
 
+            // Propagate subject keywords to code envs so BM25 re-ranking
+            // works in the codegen retrieval pass (not just text gen).
+            let code_subject_kw: Vec<String> = text.split_whitespace()
+                .filter(|w| w.len() > 2)
+                .map(|w| w.to_ascii_lowercase())
+                .collect();
+            for env in dm.group_code_envs.values_mut() {
+                env.subject_keywords = code_subject_kw.clone();
+            }
+
             // --- Level 1: Competitive multi-head inference for code ---
             let primary = group_idx.and_then(|gidx| {
                 let mut adapted = dm.adapt_for_group_clifford(gidx, base_cond, h_raw, GEN_COND_DIM);
