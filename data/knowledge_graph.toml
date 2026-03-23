@@ -36,6 +36,7 @@ category = "arithmetic"
 priority = 20
 [[nodes.rules]]
 any = ["subtraction", "subtract", "minus", "difference function", "a - b"]
+not = ["solve", "equation", "quadratic", "squared", "x minus"]
 
 [[nodes]]
 topic = "multiplication_operation"
@@ -70,6 +71,7 @@ category = "arithmetic"
 priority = 20
 [[nodes.rules]]
 any = ["power", "exponent", "pow"]
+not = ["power set", "power series", "power rule"]
 
 [[nodes]]
 topic = "absolute_value_operation"

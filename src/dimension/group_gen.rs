@@ -2277,7 +2277,13 @@ impl ProgramGraph {
         }
         let n_f = n as f32;
 
-        // Signature keywords: high IDF = distinctive to this program
+        // Signature keywords: IDF-weighted terms distinctive to each program.
+        // For small topics (N < 8) use a lower threshold so that important
+        // terms appearing in multiple programs still get indexed — otherwise
+        // a key query term like "dna" is invisible when it appears in all docs.
+        let specificity_threshold = if n < 8 { 0.55 } else { 1.05 };
+        let max_sig_size = if n < 8 { 40 } else { 25 };
+
         let mut signatures: Vec<Vec<DiscriminativeKeyword>> = Vec::with_capacity(n);
         for words in &docs {
             let unique: HashSet<&str> = words.iter().map(|s| s.as_str()).collect();
@@ -2285,7 +2291,7 @@ impl ProgramGraph {
                 .filter_map(|w: &&str| {
                     let doc_freq = df.get(*w).copied().unwrap_or(0) as f32;
                     let specificity = (n_f / (doc_freq + 1.0)).ln() + 1.0;
-                    if specificity > 1.05 {
+                    if specificity > specificity_threshold {
                         Some(DiscriminativeKeyword { keyword: w.to_string(), specificity })
                     } else {
                         None
@@ -2293,7 +2299,7 @@ impl ProgramGraph {
                 })
                 .collect();
             sig.sort_by(|a, b| b.specificity.partial_cmp(&a.specificity).unwrap_or(std::cmp::Ordering::Equal));
-            sig.truncate(25);
+            sig.truncate(max_sig_size);
             signatures.push(sig);
         }
 
@@ -2385,10 +2391,14 @@ impl ProgramGraph {
             return None;
         }
         let own_score = self.signature_score(program_idx, query_keywords);
+        // Only redirect if the neighbor is overwhelmingly better (3x) and
+        // the current program has near-zero match. This prevents false
+        // redirects like Strategy → State when both have partial matches.
+        if own_score > 1.0 { return None; } // current match is decent, don't redirect
         let mut best: Option<(usize, f32)> = None;
         for edge in &self.adjacency[program_idx] {
             let neighbor_score = self.signature_score(edge.target_idx, query_keywords);
-            if neighbor_score > own_score * 1.5 && neighbor_score > 2.0 {
+            if neighbor_score > own_score * 3.0 && neighbor_score > 3.0 {
                 if best.map(|(_, s)| neighbor_score > s).unwrap_or(true) {
                     best = Some((edge.target_idx, neighbor_score));
                 }
@@ -2657,19 +2667,23 @@ impl IndexedGenEnv {
     /// lattice programs, or to refresh the keyword inverted index.
     pub fn rebuild_program_graphs(&mut self) {
         for topic in &mut self.topic_subindex {
-            match topic.graph {
-                Some(ref mut g) => g.rebuild_keyword_index(),
-                None => {
-                    topic.graph = Some(ProgramGraph::build(&topic.lattice, &self.dictionary));
-                }
-            }
+            // Always rebuild from scratch — signatures depend on IDF thresholds
+            // that may have been updated since the brain was trained.
+            topic.graph = Some(ProgramGraph::build(&topic.lattice, &self.dictionary));
         }
     }
 
-    /// Topic-aware continuous generation: compose trajectories from programs
-    /// within a specific topic sub-lattice, then decode. This gives the
-    /// ChunkCodec the precision of topic routing + the compositional power
-    /// of trajectory blending. Returns None if the topic has < 2 programs.
+    /// Topic-aware continuous generation using grade-aware algebraic composition.
+    ///
+    /// Instead of flat weighted averaging, this uses the Cl(1,7) algebraic
+    /// structure to compose program trajectories:
+    ///   - Grade 1 (topic vectors) are slerped for smooth semantic blending
+    ///   - Grade 2 (relational context) is composed via geometric product,
+    ///     capturing both shared structure and novel combinations
+    ///   - Grade 3+ uses weighted blending for stability
+    ///
+    /// If the composed trajectory has enough chunks, rotor extrapolation
+    /// can extend it (predict continuation via the transition rotor pattern).
     pub fn generate_continuous_for_topic(
         &mut self,
         cond: &[f32],
@@ -2710,13 +2724,43 @@ impl IndexedGenEnv {
         let target_chunks = source_seqs[0].0.num_chunks();
         if target_chunks == 0 { return None; }
 
-        let composed = crate::text_autoencoder::compose_trajectories(
+        // Algebraic composition: grade-aware blending using geometric product
+        let composed = crate::text_autoencoder::compose_algebraic(
             &source_seqs, target_chunks,
         );
 
+        // Rotor-based extension: if the composed trajectory is long enough,
+        // try to predict additional chunks via transition rotor extrapolation.
+        let mut extended = composed;
+        let max_chunks = (max_tokens + crate::text_autoencoder::CHUNK_K - 1)
+            / crate::text_autoencoder::CHUNK_K;
+        if extended.len() >= 2 && extended.len() < max_chunks {
+            let graded: Vec<crate::text_autoencoder::GradedChunk> = extended.iter()
+                .map(|c| crate::text_autoencoder::GradedChunk::from_chunk(c))
+                .collect();
+            // Extrapolate up to 2 additional chunks via rotor prediction
+            let extra = 2.min(max_chunks - extended.len());
+            let mut trajectory = graded;
+            for _ in 0..extra {
+                let next = crate::text_autoencoder::predict_next_algebraic(&trajectory);
+                let next_graded = crate::text_autoencoder::GradedChunk::from_chunk(&next);
+                // Only keep if the predicted chunk is semantically coherent
+                // with the trajectory (cosine > 0.3 with the last chunk)
+                if trajectory.last()
+                    .map(|last| next_graded.semantic_similarity(last) > 0.3)
+                    .unwrap_or(false)
+                {
+                    extended.push(next);
+                    trajectory.push(next_graded);
+                } else {
+                    break;
+                }
+            }
+        }
+
         let chunk_lengths: Vec<usize> = source_seqs[0].0.chunk_lengths.clone();
         let mut all_tokens = Vec::new();
-        for (i, chunk) in composed.iter().enumerate() {
+        for (i, chunk) in extended.iter().enumerate() {
             let len = chunk_lengths.get(i).copied()
                 .unwrap_or(crate::text_autoencoder::CHUNK_K);
             let tokens = codec.decode_chunk(chunk, len);
@@ -2725,7 +2769,24 @@ impl IndexedGenEnv {
         all_tokens.truncate(max_tokens);
 
         let text = self.dictionary.decode(&all_tokens);
-        if text.len() < 5 { return None; }
+
+        // Quality guard: if the algebraic composition produced garbled text,
+        // fall back to decoding the primary source program directly.
+        let garbled = Self::has_tokenization_artifacts(&text) || text.len() < 5;
+        if garbled {
+            let primary_idx = scored[0].0;
+            let primary_text = self.dictionary.decode(
+                &topic.lattice.programs[primary_idx].token_sequence);
+            if primary_text.len() >= 5 && !Self::has_tokenization_artifacts(&primary_text) {
+                println!("    [codec-fallback] algebraic composition garbled, using primary prog {}",
+                    primary_idx);
+                let confidence = scored[0].1.min(0.90);
+                self.last_selected_archetype = None;
+                self.last_generation_confidence = confidence;
+                return Some((primary_text, confidence));
+            }
+            return None;
+        }
 
         let confidence = scored[0].1.min(0.95);
         self.last_selected_archetype = None;
@@ -3145,13 +3206,39 @@ impl IndexedGenEnv {
                 // ── Stage 3: Graph signature re-rank ──
                 // Use discriminative keyword signatures from the ProgramGraph to
                 // further separate confusable programs that cosine+BM25 can't distinguish.
+                println!("    [retrieval-diag] topic='{}', {} progs, query_terms={:?}",
+                    forced_topic, n, query_terms);
+                for (rank, &(idx, score)) in scored.iter().enumerate().take(3) {
+                    let snippet: String = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence)
+                        .chars().take(50).collect();
+                    println!("      pre-graph[{}]: prog={}, score={:.3}, text=\"{}...\"",
+                        rank, idx, score, snippet);
+                }
                 if let Some(ref graph) = topic.graph {
                     if !query_terms.is_empty() {
-                        // Compute raw signature scores
                         let sig_scores: Vec<f32> = scored.iter()
                             .map(|&(idx, _)| graph.signature_score(idx, &query_terms))
                             .collect();
                         let sig_max = sig_scores.iter().cloned().fold(0.0f32, f32::max);
+
+                        // Diagnostic: show signature scores for top candidates
+                        for (rank, (&(idx, combined), &sig)) in scored.iter().zip(sig_scores.iter()).enumerate().take(4) {
+                            let sigs_for_prog: Vec<String> = graph.signatures.get(idx)
+                                .map(|s| s.iter().take(5).map(|dk| format!("{}:{:.2}", dk.keyword, dk.specificity)).collect())
+                                .unwrap_or_default();
+                            println!("      graph[{}]: prog={}, combined={:.3}, sig_score={:.3}, top_keys=[{}]",
+                                rank, idx, combined, sig, sigs_for_prog.join(", "));
+                        }
+
+                        // Also show what keyword_lookup returns
+                        let lookup = graph.keyword_lookup(&query_terms);
+                        if !lookup.is_empty() {
+                            let top3: Vec<String> = lookup.iter().take(3)
+                                .map(|(idx, s)| format!("prog{}={:.2}", idx, s))
+                                .collect();
+                            println!("      keyword_lookup: [{}]", top3.join(", "));
+                        }
+
                         if sig_max > 0.0 {
                             let sig_lambda = 0.30f32;
                             for (di, &mut (ref _idx, ref mut score)) in scored.iter_mut().enumerate() {
@@ -3159,8 +3246,6 @@ impl IndexedGenEnv {
                             }
                         }
 
-                        // Neighbor redirect: if the top candidate has a graph neighbor
-                        // that better matches the query keywords, promote that neighbor.
                         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                         if let Some(&(top_idx, top_score)) = scored.first() {
                             if let Some(redirect_idx) = graph.neighbor_redirect(top_idx, &query_terms) {
@@ -3172,8 +3257,16 @@ impl IndexedGenEnv {
                             }
                         }
                     }
+                } else {
+                    println!("      [no-graph] topic '{}' has no ProgramGraph", forced_topic);
                 }
                 scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                for (rank, &(idx, score)) in scored.iter().enumerate().take(3) {
+                    let snippet: String = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence)
+                        .chars().take(50).collect();
+                    println!("      post-graph[{}]: prog={}, score={:.3}, text=\"{}...\"",
+                        rank, idx, score, snippet);
+                }
 
                 // When a language hint is provided, try to find a program matching that language
                 if let Some(lang) = lang_hint {
@@ -3183,7 +3276,8 @@ impl IndexedGenEnv {
 
                     for &(idx, score) in &scored {
                         let text = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence);
-                        if Self::has_tokenization_artifacts(&text) { continue; }
+                        let opening: String = text.chars().take(300).collect();
+                        if Self::has_tokenization_artifacts(&opening) { continue; }
                         let matches_lang = if is_rust {
                             text.contains("fn ") || text.contains("-> ") || text.contains("let ")
                                 || text.contains("i32") || text.contains("f64") || text.contains("impl ")
@@ -3201,14 +3295,37 @@ impl IndexedGenEnv {
                     }
                 }
 
-                // Fallback: use the top-scored clean program regardless of language
+                // Select the top-scored program. When the graph gave a keyword
+                // match for the top-ranked program, trust it even if the text has
+                // minor encoding artifacts — the graph validated relevance.
+                let top_prog_idx = scored.first().map(|&(idx, _)| idx);
+                let graph_confident = top_prog_idx.map(|top_idx| {
+                    topic.graph.as_ref()
+                        .map(|g| {
+                            let sig_score = g.signature_score(top_idx, &query_terms);
+                            sig_score > 0.5
+                        })
+                        .unwrap_or(false)
+                }).unwrap_or(false);
+
                 for &(idx, score) in &scored {
                     if score < 0.10 { break; }
                     let text = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence);
-                    if text.is_empty() || Self::has_tokenization_artifacts(&text) { continue; }
+                    if text.is_empty() { continue; }
+
+                    // Skip artifact check when graph is confident about this program
+                    if !graph_confident {
+                        let opening: String = text.chars().take(300).collect();
+                        if Self::has_tokenization_artifacts(&opening) {
+                            let snippet: String = text.chars().take(40).collect();
+                            println!("    [skip-artifact] prog={}, score={:.3}, text=\"{}...\"",
+                                idx, score, snippet);
+                            continue;
+                        }
+                    }
                     let snippet: String = text.chars().take(60).collect();
-                    println!("    [forced-topic] '{}' → {} progs, conf={:.3}, text=\"{}...\"",
-                        forced_topic, topic.lattice.programs.len(), score, snippet);
+                    println!("    [forced-topic] '{}' → {} progs, conf={:.3}, graph_conf={}, text=\"{}...\"",
+                        forced_topic, topic.lattice.programs.len(), score, graph_confident, snippet);
                     return Some((text, topic.topic_name.clone(), score));
                 }
                 None
@@ -3424,19 +3541,23 @@ impl IndexedGenEnv {
             return true;
         }
 
-        // Count single-character "words" (excluding common articles/prepositions)
+        // Count single-character "words" (excluding common articles/prepositions/punctuation)
         let single_char_count = words.iter()
             .filter(|w| {
-                w.len() == 1 && !matches!(w.to_lowercase().as_str(), "a" | "i" | "(" | ")" | "-" | "+" | "=" | "," | "." | ":" | ";" | "&")
+                w.len() == 1 && !matches!(w.to_lowercase().as_str(),
+                    "a" | "i" | "(" | ")" | "-" | "+" | "=" | "," | "." | ":" | ";" | "&"
+                    | "x" | "y" | "n" | "k" | "e" | "r" | "b" | "c" | "f" | "t" | "p"
+                )
             })
             .count();
 
-        // More than 15% single-character words is a strong artifact signal
-        if single_char_count as f32 / words.len() as f32 > 0.15 {
+        // More than 20% single-character words is a strong artifact signal
+        if single_char_count as f32 / words.len() as f32 > 0.20 {
             return true;
         }
 
         // Sequences of space-separated single characters: "e a d g s"
+        // Only flag truly garbled sequences (4+ consecutive, not 3)
         let mut consecutive_singles = 0;
         let mut max_consecutive = 0;
         for w in &words {
@@ -3447,7 +3568,7 @@ impl IndexedGenEnv {
                 consecutive_singles = 0;
             }
         }
-        if max_consecutive >= 3 {
+        if max_consecutive >= 4 {
             return true;
         }
 
@@ -3548,8 +3669,10 @@ impl IndexedGenEnv {
         // The sub-lattice already contains only programs for this specific operation,
         // so the field inhibition gate (which uses the GLOBAL lattice) would incorrectly
         // override the sub-lattice's authoritative result.
+        // Check artifacts only on the opening portion the user will see
+        let opening_check: String = text.chars().take(300).collect();
         if forced_active && topic_selected.is_some() && text.len() > 5
-            && !Self::has_tokenization_artifacts(&text)
+            && !Self::has_tokenization_artifacts(&opening_check)
         {
             self.last_selected_archetype = None;
             self.last_generation_confidence = lattice_conf;
@@ -3583,7 +3706,7 @@ impl IndexedGenEnv {
 
         // High confidence AND in the program's rest frame: return lattice text directly
         if lattice_conf >= 0.80 && text.len() > 5 && !field_inhibited
-            && !Self::has_tokenization_artifacts(&text)
+            && !Self::has_tokenization_artifacts(&opening_check)
         {
             self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
             self.last_generation_confidence = lattice_conf;
@@ -3821,9 +3944,10 @@ impl IndexedGenEnv {
         };
 
         // Forced topic: return directly, bypass archetype reconstruction
+        let opening_check2: String = text.chars().take(300).collect();
         if ((forced_active && topic_selected.is_some() && text.len() > 5)
             || (lattice_conf >= 0.80 && text.len() > 5))
-            && !Self::has_tokenization_artifacts(&text)
+            && !Self::has_tokenization_artifacts(&opening_check2)
         {
             self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
             self.last_generation_confidence = lattice_conf;

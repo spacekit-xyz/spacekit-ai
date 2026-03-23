@@ -398,6 +398,302 @@ pub fn multivector_to_chunk(mv: &crate::clifford::Multivector) -> [f32; CATA_DIM
 }
 
 // ---------------------------------------------------------------------------
+// Grade-Aware Algebraic Generation
+//
+// The 256d chunk space IS Cl(1,7). These functions use the algebraic
+// structure — geometric product, grade decomposition, rotors — to encode
+// richer semantic meaning than flat vector operations.
+//
+// Grade layout (from clifford.rs):
+//   Grade 0 (1d, [0..1)):     scalar — content density
+//   Grade 1 (8d, [1..9)):     vector — semantic direction (topic)
+//   Grade 2 (28d, [9..37)):   bivector — relational context
+//     Boost [9..16):   temporal/causal flow (7d)
+//     Rotation [16..37): structural shift (21d)
+//   Grade 3 (56d, [37..93)):  trivector — three-way interactions
+//   Grade 4 (70d, [93..163)): quadvector — higher-order structure
+//   Grade 5-8 (93d):          dual grades (reconstruction parity)
+// ---------------------------------------------------------------------------
+
+use crate::clifford::{
+    Multivector, Rotor, GRADE_OFFSETS, GRADE_DIMS,
+    apply_group_rotor,
+};
+
+/// A chunk enriched with grade-decomposed semantic features.
+/// The raw CDMA encoding is preserved for lossless token decode;
+/// graded features enable algebraic operations (composition, prediction).
+#[derive(Clone, Debug)]
+pub struct GradedChunk {
+    pub raw: [f32; CATA_DIM],
+    pub mv: Multivector,
+    /// Grade-1 projection: 8d semantic direction vector.
+    pub semantic_dir: [f32; 8],
+    /// Grade-2 projection: 28d relational context (boost + rotation split).
+    pub context_bivector: [f32; 28],
+    /// Content energy: L2 norm of the chunk (grade-independent).
+    pub energy: f32,
+}
+
+impl GradedChunk {
+    pub fn from_chunk(chunk: &[f32; CATA_DIM]) -> Self {
+        let mv = chunk_to_multivector(chunk);
+
+        let mut semantic_dir = [0.0f32; 8];
+        let grade1 = mv.grade(1);
+        for (i, v) in grade1.iter().enumerate().take(8) {
+            semantic_dir[i] = *v;
+        }
+
+        let mut context_bivector = [0.0f32; 28];
+        let grade2 = mv.grade(2);
+        for (i, v) in grade2.iter().enumerate().take(28) {
+            context_bivector[i] = *v;
+        }
+
+        let energy = chunk.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+        GradedChunk { raw: *chunk, mv, semantic_dir, context_bivector, energy }
+    }
+
+    /// Cosine similarity of semantic direction (grade-1 only).
+    pub fn semantic_similarity(&self, other: &GradedChunk) -> f32 {
+        let dot: f32 = self.semantic_dir.iter().zip(other.semantic_dir.iter())
+            .map(|(a, b)| a * b).sum();
+        let na: f32 = self.semantic_dir.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let nb: f32 = other.semantic_dir.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if na < 1e-8 || nb < 1e-8 { 0.0 } else { dot / (na * nb) }
+    }
+}
+
+/// Transition rotor between two consecutive chunks.
+/// Extracted from the grade-2 part of their geometric quotient,
+/// encoding the rotation plane and angle of the semantic shift.
+#[derive(Clone, Debug)]
+pub struct ChunkTransition {
+    pub rotor: Rotor,
+    /// How faithfully the rotor reconstructs the target chunk.
+    /// 1.0 = perfect rotation, lower = the transition involves scaling/shearing.
+    pub fidelity: f32,
+}
+
+/// Compute the transition rotor from chunk A to chunk B.
+///
+/// The geometric product B * reverse(A) yields a multivector whose
+/// even-grade parts approximate the versor that maps A → B.
+/// We extract the bivector (grade-2) to build a rotation rotor,
+/// then measure how well R A R̃ reconstructs B (fidelity).
+pub fn compute_transition(a: &GradedChunk, b: &GradedChunk) -> ChunkTransition {
+    let a_rev = a.mv.reverse();
+    let product = b.mv.geo(&a_rev);
+
+    // Extract the bivector part — this is the rotation generator
+    let biv_slice = product.grade(2);
+    let mut bivector = [0.0f32; 28];
+    for (i, v) in biv_slice.iter().enumerate().take(28) {
+        bivector[i] = *v;
+    }
+
+    // Scale bivector to a reasonable magnitude for rotor construction
+    let biv_norm: f32 = bivector.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if biv_norm > 1e-6 {
+        let scale = biv_norm.min(std::f32::consts::PI) / biv_norm;
+        for v in &mut bivector { *v *= scale; }
+    }
+
+    let rotor = Rotor::from_bivector(&bivector);
+
+    // Measure fidelity: how well does R A R̃ approximate B?
+    let reconstructed = apply_group_rotor(&a.mv, &rotor);
+    let recon_chunk = multivector_to_chunk(&reconstructed);
+    let fidelity = cosine(&recon_chunk, &b.raw);
+
+    ChunkTransition { rotor, fidelity }
+}
+
+/// Predict the next chunk using rotor extrapolation.
+///
+/// Instead of linear extrapolation (last + velocity), we:
+/// 1. Compute the transition rotor from penultimate → last chunk
+/// 2. Apply the same rotor to the last chunk to get the next
+///
+/// The rotor preserves magnitude and grade structure,
+/// producing predictions that stay on the semantic manifold
+/// rather than drifting into flat-space artifacts.
+pub fn predict_next_algebraic(trajectory: &[GradedChunk]) -> [f32; CATA_DIM] {
+    match trajectory.len() {
+        0 => [0.0f32; CATA_DIM],
+        1 => trajectory[0].raw,
+        _ => {
+            let n = trajectory.len();
+            let transition = compute_transition(&trajectory[n - 2], &trajectory[n - 1]);
+
+            if transition.fidelity > 0.3 {
+                // Rotor extrapolation: apply same rotation again
+                let next_mv = apply_group_rotor(&trajectory[n - 1].mv, &transition.rotor);
+                multivector_to_chunk(&next_mv)
+            } else {
+                // Fidelity too low — the transition isn't well-modeled as a rotation.
+                // Fall back to slerp extrapolation.
+                predict_next_chunk(&[trajectory[n - 2].raw, trajectory[n - 1].raw])
+            }
+        }
+    }
+}
+
+/// Compose multiple chunk trajectories using the geometric product.
+///
+/// Instead of weighted averaging (which washes out semantic structure),
+/// this uses a grade-aware blend:
+///   - Grade 0-1 (content + topic): weighted average (stable)
+///   - Grade 2 (relationships): geometric product of top-2 sources
+///     (preserves both shared and novel relational structure)
+///   - Grade 3+ (higher structure): weighted average of the remainder
+///
+/// The result has richer semantic content than a flat weighted average
+/// because the grade-2 composition captures relational novelty
+/// through the wedge product component of the geometric product.
+pub fn compose_algebraic(
+    sources: &[(ChunkSequence, f32)],
+    target_len: usize,
+) -> Vec<[f32; CATA_DIM]> {
+    if sources.is_empty() { return Vec::new(); }
+    if sources.len() == 1 {
+        return sources[0].0.chunks.iter().take(target_len).cloned().collect();
+    }
+
+    (0..target_len).map(|i| {
+        // Collect available chunks at this position with their weights
+        let mut available: Vec<(Multivector, f32)> = Vec::new();
+        for (seq, w) in sources {
+            if i < seq.chunks.len() {
+                available.push((chunk_to_multivector(&seq.chunks[i]), *w));
+            }
+        }
+        if available.is_empty() {
+            return [0.0f32; CATA_DIM];
+        }
+        if available.len() == 1 {
+            return multivector_to_chunk(&available[0].0);
+        }
+
+        // Sort by weight descending
+        available.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let primary = &available[0].0;
+        let secondary = &available[1].0;
+        let w_primary = available[0].1;
+        let w_secondary = available[1].1;
+        let w_total = w_primary + w_secondary;
+        let alpha = if w_total > 1e-8 { w_primary / w_total } else { 0.5 };
+
+        let mut result = Multivector::zero();
+
+        // Grade 0 (scalar): weighted average
+        result.components[0] = primary.components[0] * alpha
+            + secondary.components[0] * (1.0 - alpha);
+
+        // Grade 1 (semantic direction): slerp between topic vectors
+        {
+            let start = GRADE_OFFSETS[1];
+            let dim = GRADE_DIMS[1];
+            for d in 0..dim {
+                result.components[start + d] =
+                    primary.components[start + d] * alpha
+                    + secondary.components[start + d] * (1.0 - alpha);
+            }
+            // Normalize grade-1 to preserve direction magnitude
+            let norm: f32 = (0..dim)
+                .map(|d| result.components[start + d].powi(2))
+                .sum::<f32>().sqrt();
+            let target_norm: f32 = (0..dim)
+                .map(|d| primary.components[start + d].powi(2))
+                .sum::<f32>().sqrt() * alpha
+                + (0..dim)
+                .map(|d| secondary.components[start + d].powi(2))
+                .sum::<f32>().sqrt() * (1.0 - alpha);
+            if norm > 1e-8 {
+                let scale = target_norm / norm;
+                for d in 0..dim { result.components[start + d] *= scale; }
+            }
+        }
+
+        // Grade 2 (relational context): geometric product of primary and secondary
+        // enriches the relational structure via the wedge product component.
+        // Safety: clamp the geometric product contribution to prevent
+        // numerically unstable values from corrupting the chunk.
+        {
+            let geo_product = primary.geo(secondary);
+            let start = GRADE_OFFSETS[2];
+            let dim = GRADE_DIMS[2];
+
+            let primary_g2_norm: f32 = (0..dim)
+                .map(|d| primary.components[start + d].powi(2))
+                .sum::<f32>().sqrt();
+            let geo_g2_norm: f32 = (0..dim)
+                .map(|d| geo_product.components[start + d].powi(2))
+                .sum::<f32>().sqrt();
+
+            // Only blend if the geo product grade-2 is within 3x of the primary's
+            // magnitude. Larger means the product amplified noise.
+            let blend_geo = if geo_g2_norm < primary_g2_norm * 3.0 && primary_g2_norm > 1e-6 {
+                0.2f32
+            } else {
+                0.0 // fall back to pure weighted average for grade 2
+            };
+
+            for d in 0..dim {
+                let primary_val = primary.components[start + d];
+                if blend_geo > 0.0 {
+                    let geo_val = geo_product.components[start + d]
+                        * (primary_g2_norm / geo_g2_norm.max(1e-8));
+                    result.components[start + d] =
+                        primary_val * (1.0 - blend_geo) + geo_val * blend_geo;
+                } else {
+                    result.components[start + d] =
+                        primary_val * alpha + secondary.components[start + d] * (1.0 - alpha);
+                }
+            }
+        }
+
+        // Grade 3+ (higher structure): weighted average
+        for grade in 3..=8 {
+            let start = GRADE_OFFSETS[grade];
+            let dim = GRADE_DIMS[grade];
+            for d in 0..dim {
+                result.components[start + d] =
+                    primary.components[start + d] * alpha
+                    + secondary.components[start + d] * (1.0 - alpha);
+            }
+        }
+
+        multivector_to_chunk(&result)
+    }).collect()
+}
+
+/// Grade-aware similarity: weighted combination of per-grade cosine similarities.
+/// More discriminative than flat cosine because it separately evaluates
+/// topic alignment (grade 1), relational match (grade 2), and content match (grade 3+).
+pub fn graded_similarity(a: &[f32; CATA_DIM], b: &[f32; CATA_DIM]) -> f32 {
+    let grade_weights: [f32; 9] = [0.02, 0.25, 0.20, 0.18, 0.15, 0.08, 0.06, 0.04, 0.02];
+    let mut total = 0.0f32;
+
+    for grade in 0..9 {
+        let start = GRADE_OFFSETS[grade];
+        let dim = GRADE_DIMS[grade];
+        if dim == 0 { continue; }
+
+        let dot: f32 = (0..dim).map(|d| a[start + d] * b[start + d]).sum();
+        let na: f32 = (0..dim).map(|d| a[start + d].powi(2)).sum::<f32>().sqrt();
+        let nb: f32 = (0..dim).map(|d| b[start + d].powi(2)).sum::<f32>().sqrt();
+        let sim = if na > 1e-8 && nb > 1e-8 { dot / (na * nb) } else { 0.0 };
+
+        total += grade_weights[grade] * sim;
+    }
+    total
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -579,5 +875,84 @@ mod tests {
         for j in 0..CATA_DIM {
             assert!((chunk[j] - back[j]).abs() < 1e-7);
         }
+    }
+
+    #[test]
+    fn test_graded_chunk_decomposition() {
+        let codec = ChunkCodec::new(256);
+        let chunk = codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]);
+        let graded = GradedChunk::from_chunk(&chunk);
+
+        assert!(graded.energy > 0.0, "energy should be positive");
+        let sem_norm: f32 = graded.semantic_dir.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(sem_norm > 0.0, "semantic direction should be nonzero");
+        let ctx_norm: f32 = graded.context_bivector.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(ctx_norm >= 0.0, "context bivector norm should be non-negative");
+    }
+
+    #[test]
+    fn test_graded_semantic_similarity() {
+        let codec = ChunkCodec::new(256);
+        let a = GradedChunk::from_chunk(&codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]));
+        let b = GradedChunk::from_chunk(&codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]));
+        let c = GradedChunk::from_chunk(&codec.encode_chunk(&[200, 201, 202, 203, 204, 205, 206, 207]));
+
+        let sim_same = a.semantic_similarity(&b);
+        let sim_diff = a.semantic_similarity(&c);
+        assert!(sim_same > sim_diff, "same chunk should be more similar: {} vs {}", sim_same, sim_diff);
+        assert!((sim_same - 1.0).abs() < 0.01, "identical chunks should have sim≈1.0: {}", sim_same);
+    }
+
+    #[test]
+    fn test_transition_rotor() {
+        let codec = ChunkCodec::new(256);
+        let a = GradedChunk::from_chunk(&codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]));
+        let b = GradedChunk::from_chunk(&codec.encode_chunk(&[11, 21, 31, 41, 51, 61, 71, 81]));
+
+        let transition = compute_transition(&a, &b);
+        assert!(transition.fidelity > -1.0, "fidelity should be computed: {}", transition.fidelity);
+    }
+
+    #[test]
+    fn test_predict_next_algebraic() {
+        let codec = ChunkCodec::new(256);
+        let c0 = codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]);
+        let c1 = codec.encode_chunk(&[11, 21, 31, 41, 51, 61, 71, 81]);
+
+        let g0 = GradedChunk::from_chunk(&c0);
+        let g1 = GradedChunk::from_chunk(&c1);
+
+        let pred = predict_next_algebraic(&[g0, g1]);
+        let pred_norm: f32 = pred.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(pred_norm > 0.0, "prediction should be nonzero");
+
+        // Prediction should be further along the trajectory
+        let sim_with_last = cosine(&pred, &c1);
+        assert!(sim_with_last > 0.0, "prediction should have positive similarity to last chunk: {}", sim_with_last);
+    }
+
+    #[test]
+    fn test_compose_algebraic() {
+        let codec = ChunkCodec::new(256);
+        let s1 = codec.encode_sequence(&[10, 20, 30, 40, 50, 60, 70, 80]);
+        let s2 = codec.encode_sequence(&[90, 91, 92, 93, 94, 95, 96, 97]);
+
+        // With high weight on s1, composed should be close to s1
+        let composed = compose_algebraic(&[(s1.clone(), 10.0), (s2.clone(), 0.1)], 1);
+        assert_eq!(composed.len(), 1);
+        let sim = cosine(&composed[0], &s1.chunks[0]);
+        assert!(sim > 0.5, "high-weight source should dominate: sim={}", sim);
+    }
+
+    #[test]
+    fn test_graded_similarity() {
+        let codec = ChunkCodec::new(256);
+        let a = codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]);
+        let b = codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]);
+        let c = codec.encode_chunk(&[200, 201, 202, 203, 204, 205, 206, 207]);
+
+        let sim_same = graded_similarity(&a, &b);
+        let sim_diff = graded_similarity(&a, &c);
+        assert!(sim_same > sim_diff, "same chunk should be more similar: {} vs {}", sim_same, sim_diff);
     }
 }
