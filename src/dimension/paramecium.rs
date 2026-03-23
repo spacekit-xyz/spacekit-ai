@@ -269,6 +269,71 @@ impl InfraciliaryLattice {
         self.wave = WaveState::new(self.programs.len());
     }
 
+    /// Contrastive refinement: push apart program centroids that are
+    /// too similar. Called after `develop()` to sharpen decision boundaries.
+    ///
+    /// `margin`: minimum cosine similarity to trigger repulsion (e.g. 0.85)
+    /// `rate`: how much to push apart per repulsion step (e.g. 0.05)
+    /// Returns the number of repulsion operations performed.
+    pub fn contrastive_refine(&mut self, margin: f32, rate: f32) -> usize {
+        let n = self.programs.len();
+        if n < 2 { return 0; }
+
+        let mut repulsions = 0;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let sim = {
+                    let a = &self.programs[i].ema_centroid;
+                    let b = &self.programs[j].ema_centroid;
+                    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+                    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    if na < 1e-8 || nb < 1e-8 { 0.0 } else { dot / (na * nb) }
+                };
+
+                if sim > margin {
+                    let tokens_match = self.programs[i].token_sequence == self.programs[j].token_sequence;
+                    if tokens_match { continue; }
+
+                    let dim = self.programs[i].ema_centroid.len().min(self.programs[j].ema_centroid.len());
+                    for d in 0..dim {
+                        let delta = self.programs[i].ema_centroid[d] - self.programs[j].ema_centroid[d];
+                        self.programs[i].ema_centroid[d] += delta * rate;
+                        self.programs[j].ema_centroid[d] -= delta * rate;
+                    }
+                    repulsions += 1;
+                }
+            }
+        }
+        repulsions
+    }
+
+    /// Develop with RTD negative repulsion: process pairs where some are
+    /// marked as negatives (from replaced token detection). Negatives
+    /// push AWAY from their nearest program instead of attracting.
+    pub fn develop_with_negatives(
+        &mut self,
+        positives: &[(Vec<f32>, String)],
+        negatives: &[Vec<f32>],
+        spawn_threshold: f32,
+        repulsion_rate: f32,
+    ) {
+        self.develop(positives, spawn_threshold);
+
+        for neg_embedding in negatives {
+            if let Some((idx, similarity)) = self.nearest_program(neg_embedding) {
+                if similarity > 0.5 {
+                    let prog = &mut self.programs[idx];
+                    let dim = prog.ema_centroid.len().min(neg_embedding.len());
+                    for d in 0..dim {
+                        let delta = prog.ema_centroid[d] - neg_embedding[d];
+                        prog.ema_centroid[d] += delta * repulsion_rate;
+                    }
+                }
+            }
+        }
+    }
+
     /// Sense + respond: the complete paramecium inference loop.
     ///
     /// 1. **Gradient sensing (chemotaxis):** compute similarity to all programs

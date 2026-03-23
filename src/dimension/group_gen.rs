@@ -2196,6 +2196,207 @@ pub fn e8_compose_sentences_quantum(
 // ---------------------------------------------------------------------------
 
 use crate::dimension::paramecium::InfraciliaryLattice;
+use std::collections::HashSet;
+
+// ---------------------------------------------------------------------------
+// ProgramGraph — graph over lattice nodes for structural disambiguation
+//
+// Each node is a BehavioralProgram in a topic sub-lattice.
+// Edges connect semantically similar (confusable) programs.
+// Signature keywords per node enable discriminative retrieval:
+//   high-IDF keywords that distinguish this program from its neighbors.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DiscriminativeKeyword {
+    pub keyword: String,
+    /// Inverse document frequency within the topic: higher = more distinctive.
+    pub specificity: f32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProgramEdge {
+    pub target_idx: usize,
+    pub cosine_sim: f32,
+    pub shared_terms: u16,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ProgramGraph {
+    /// Per-program discriminative keywords sorted by specificity descending.
+    pub signatures: Vec<Vec<DiscriminativeKeyword>>,
+    /// Per-program adjacency list: edges to similar/confusable programs.
+    pub adjacency: Vec<Vec<ProgramEdge>>,
+    /// Inverted index: keyword → program indices (rebuilt at load time).
+    #[serde(skip)]
+    pub keyword_index: HashMap<String, Vec<usize>>,
+}
+
+impl ProgramGraph {
+    const STOP: &'static [&'static str] = &[
+        "the", "is", "are", "was", "were", "be", "been", "being",
+        "have", "has", "had", "do", "does", "did", "will", "would",
+        "could", "should", "may", "might", "can", "shall",
+        "not", "but", "and", "or", "for", "nor", "so", "yet",
+        "a", "an", "of", "in", "to", "on", "at", "by", "with",
+        "from", "that", "this", "it", "its", "as", "if", "than",
+        "then", "too", "very", "just", "about", "into", "through",
+        "during", "before", "after", "above", "below", "between",
+        "under", "over", "such", "each", "every", "all", "any",
+        "both", "few", "more", "most", "other", "some", "also",
+        "which", "who", "whom", "what", "when", "where", "how", "why",
+        "one", "two", "used", "using", "use", "like", "example",
+    ];
+
+    pub fn build(lattice: &InfraciliaryLattice, dictionary: &TokenDictionary) -> Self {
+        let n = lattice.programs.len();
+        if n == 0 {
+            return Self::default();
+        }
+        let stop_set: HashSet<&str> = Self::STOP.iter().copied().collect();
+
+        // Decode all programs to tokenized word bags
+        let docs: Vec<Vec<String>> = lattice.programs.iter()
+            .map(|p| {
+                let text = dictionary.decode(&p.token_sequence);
+                text.to_ascii_lowercase()
+                    .split(|c: char| !c.is_alphanumeric() && c != '\'' && c != '-')
+                    .filter(|w| w.len() > 2 && !stop_set.contains(w))
+                    .map(|w| w.to_string())
+                    .collect()
+            })
+            .collect();
+
+        // Document frequency per keyword across programs in this topic
+        let mut df: HashMap<String, usize> = HashMap::new();
+        for words in &docs {
+            let unique: HashSet<&str> = words.iter().map(|s| s.as_str()).collect();
+            for w in unique {
+                *df.entry(w.to_string()).or_default() += 1;
+            }
+        }
+        let n_f = n as f32;
+
+        // Signature keywords: high IDF = distinctive to this program
+        let mut signatures: Vec<Vec<DiscriminativeKeyword>> = Vec::with_capacity(n);
+        for words in &docs {
+            let unique: HashSet<&str> = words.iter().map(|s| s.as_str()).collect();
+            let mut sig: Vec<DiscriminativeKeyword> = unique.iter()
+                .filter_map(|w: &&str| {
+                    let doc_freq = df.get(*w).copied().unwrap_or(0) as f32;
+                    let specificity = (n_f / (doc_freq + 1.0)).ln() + 1.0;
+                    if specificity > 1.05 {
+                        Some(DiscriminativeKeyword { keyword: w.to_string(), specificity })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            sig.sort_by(|a, b| b.specificity.partial_cmp(&a.specificity).unwrap_or(std::cmp::Ordering::Equal));
+            sig.truncate(25);
+            signatures.push(sig);
+        }
+
+        // Adjacency: connect programs with cosine similarity > 0.5
+        let mut adjacency: Vec<Vec<ProgramEdge>> = vec![Vec::new(); n];
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let sim = gen_cosine_sim(&lattice.programs[i].ema_centroid, &lattice.programs[j].ema_centroid);
+                if sim > 0.5 {
+                    let shared = docs[i].iter()
+                        .collect::<HashSet<_>>()
+                        .intersection(&docs[j].iter().collect())
+                        .count();
+                    adjacency[i].push(ProgramEdge { target_idx: j, cosine_sim: sim, shared_terms: shared as u16 });
+                    adjacency[j].push(ProgramEdge { target_idx: i, cosine_sim: sim, shared_terms: shared as u16 });
+                }
+            }
+        }
+
+        let mut graph = ProgramGraph { signatures, adjacency, keyword_index: HashMap::new() };
+        graph.rebuild_keyword_index();
+        graph
+    }
+
+    /// Reconstruct the inverted index (call after deserialization).
+    pub fn rebuild_keyword_index(&mut self) {
+        self.keyword_index.clear();
+        for (prog_idx, sig) in self.signatures.iter().enumerate() {
+            for dk in sig {
+                self.keyword_index.entry(dk.keyword.clone()).or_default().push(prog_idx);
+            }
+        }
+    }
+
+    /// Score how well a program's discriminative signature matches query keywords.
+    pub fn signature_score(&self, program_idx: usize, query_keywords: &[String]) -> f32 {
+        if program_idx >= self.signatures.len() || query_keywords.is_empty() {
+            return 0.0;
+        }
+        let sig = &self.signatures[program_idx];
+        let mut score = 0.0f32;
+        for qk in query_keywords {
+            for dk in sig {
+                if dk.keyword == *qk
+                    || dk.keyword.contains(qk.as_str())
+                    || qk.contains(dk.keyword.as_str())
+                {
+                    score += dk.specificity;
+                    break;
+                }
+            }
+        }
+        score
+    }
+
+    /// Find programs whose signature keywords best match the query.
+    /// Returns (program_index, accumulated_specificity) sorted descending.
+    pub fn keyword_lookup(&self, query_keywords: &[String]) -> Vec<(usize, f32)> {
+        let mut scores: HashMap<usize, f32> = HashMap::new();
+        for qk in query_keywords {
+            let qk_lower = qk.to_ascii_lowercase();
+            if let Some(prog_indices) = self.keyword_index.get(&qk_lower) {
+                for &pidx in prog_indices {
+                    let specificity = self.signatures[pidx].iter()
+                        .find(|dk| dk.keyword == qk_lower)
+                        .map(|dk| dk.specificity)
+                        .unwrap_or(1.0);
+                    *scores.entry(pidx).or_default() += specificity;
+                }
+            }
+            // Substring match for compound terms
+            for (kw, prog_indices) in &self.keyword_index {
+                if kw != &qk_lower && (kw.contains(qk_lower.as_str()) || qk_lower.contains(kw.as_str())) {
+                    for &pidx in prog_indices {
+                        *scores.entry(pidx).or_default() += 0.5;
+                    }
+                }
+            }
+        }
+        let mut result: Vec<(usize, f32)> = scores.into_iter().collect();
+        result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        result
+    }
+
+    /// Check if a neighbor of `program_idx` has a significantly better
+    /// keyword match for the query. Returns the neighbor index if so.
+    pub fn neighbor_redirect(&self, program_idx: usize, query_keywords: &[String]) -> Option<usize> {
+        if program_idx >= self.adjacency.len() || query_keywords.is_empty() {
+            return None;
+        }
+        let own_score = self.signature_score(program_idx, query_keywords);
+        let mut best: Option<(usize, f32)> = None;
+        for edge in &self.adjacency[program_idx] {
+            let neighbor_score = self.signature_score(edge.target_idx, query_keywords);
+            if neighbor_score > own_score * 1.5 && neighbor_score > 2.0 {
+                if best.map(|(_, s)| neighbor_score > s).unwrap_or(true) {
+                    best = Some((edge.target_idx, neighbor_score));
+                }
+            }
+        }
+        best.map(|(idx, _)| idx)
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TopicSubIndex {
@@ -2207,6 +2408,9 @@ pub struct TopicSubIndex {
     pub causal_centroid: [f32; BOOST_BIVECTOR_COUNT],
     pub lattice: InfraciliaryLattice,
     pub sample_count: usize,
+    /// Graph over lattice nodes: discriminative keyword signatures + confusability edges.
+    #[serde(default)]
+    pub graph: Option<ProgramGraph>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -2290,12 +2494,18 @@ impl IndexedGenEnv {
 
             let mut lattice = InfraciliaryLattice::new(dictionary.clone());
             lattice.develop(&pairs, spawn_threshold);
+            let graph = ProgramGraph::build(&lattice, dictionary);
+            let n_edges: usize = graph.adjacency.iter().map(|a| a.len()).sum();
+            let n_sigs: usize = graph.signatures.iter().map(|s| s.len()).sum();
+            println!("    [program-graph] '{}': {} nodes, {} edges, {} signature keywords",
+                topic_name, lattice.programs.len(), n_edges / 2, n_sigs);
             out.push(TopicSubIndex {
                 topic_name,
                 centroid,
                 causal_centroid,
                 lattice,
                 sample_count: pairs.len(),
+                graph: Some(graph),
             });
         }
         out
@@ -2440,6 +2650,88 @@ impl IndexedGenEnv {
         self.chunk_codec = Some(crate::text_autoencoder::ChunkCodec::new(
             self.dictionary.tokens.len(),
         ));
+    }
+
+    /// Rebuild program graphs for all topic sub-lattices.
+    /// Called after brain deserialization to reconstruct graphs from existing
+    /// lattice programs, or to refresh the keyword inverted index.
+    pub fn rebuild_program_graphs(&mut self) {
+        for topic in &mut self.topic_subindex {
+            match topic.graph {
+                Some(ref mut g) => g.rebuild_keyword_index(),
+                None => {
+                    topic.graph = Some(ProgramGraph::build(&topic.lattice, &self.dictionary));
+                }
+            }
+        }
+    }
+
+    /// Topic-aware continuous generation: compose trajectories from programs
+    /// within a specific topic sub-lattice, then decode. This gives the
+    /// ChunkCodec the precision of topic routing + the compositional power
+    /// of trajectory blending. Returns None if the topic has < 2 programs.
+    pub fn generate_continuous_for_topic(
+        &mut self,
+        cond: &[f32],
+        topic_name: &str,
+        max_tokens: usize,
+    ) -> Option<(String, f32)> {
+        let codec = self.chunk_codec.as_ref()?;
+
+        let topic = self.topic_subindex.iter()
+            .find(|t| t.topic_name == topic_name)?;
+
+        if topic.lattice.programs.len() < 2 { return None; }
+
+        let k = 4.min(topic.lattice.programs.len());
+        let mut scored: Vec<(usize, f32)> = topic.lattice.programs.iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let dot: f32 = cond.iter().zip(p.ema_centroid.iter())
+                    .map(|(a, b)| a * b).sum();
+                let na: f32 = cond.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let nb: f32 = p.ema_centroid.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let sim = if na > 1e-8 && nb > 1e-8 { dot / (na * nb) } else { 0.0 };
+                (i, sim)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k);
+
+        if scored.is_empty() || scored[0].1 < 0.1 { return None; }
+
+        let source_seqs: Vec<(crate::text_autoencoder::ChunkSequence, f32)> = scored.iter()
+            .map(|&(idx, sim)| {
+                let seq = codec.encode_sequence(&topic.lattice.programs[idx].token_sequence);
+                (seq, sim)
+            })
+            .collect();
+
+        let target_chunks = source_seqs[0].0.num_chunks();
+        if target_chunks == 0 { return None; }
+
+        let composed = crate::text_autoencoder::compose_trajectories(
+            &source_seqs, target_chunks,
+        );
+
+        let chunk_lengths: Vec<usize> = source_seqs[0].0.chunk_lengths.clone();
+        let mut all_tokens = Vec::new();
+        for (i, chunk) in composed.iter().enumerate() {
+            let len = chunk_lengths.get(i).copied()
+                .unwrap_or(crate::text_autoencoder::CHUNK_K);
+            let tokens = codec.decode_chunk(chunk, len);
+            all_tokens.extend_from_slice(&tokens);
+        }
+        all_tokens.truncate(max_tokens);
+
+        let text = self.dictionary.decode(&all_tokens);
+        if text.len() < 5 { return None; }
+
+        let confidence = scored[0].1.min(0.95);
+        self.last_selected_archetype = None;
+        self.last_generation_confidence = confidence;
+
+        Some((text, confidence))
     }
 
     /// Generate text by composing program trajectories in continuous Cl(1,7)
@@ -2849,6 +3141,38 @@ impl IndexedGenEnv {
                     combined.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                     combined
                 };
+
+                // ── Stage 3: Graph signature re-rank ──
+                // Use discriminative keyword signatures from the ProgramGraph to
+                // further separate confusable programs that cosine+BM25 can't distinguish.
+                if let Some(ref graph) = topic.graph {
+                    if !query_terms.is_empty() {
+                        // Compute raw signature scores
+                        let sig_scores: Vec<f32> = scored.iter()
+                            .map(|&(idx, _)| graph.signature_score(idx, &query_terms))
+                            .collect();
+                        let sig_max = sig_scores.iter().cloned().fold(0.0f32, f32::max);
+                        if sig_max > 0.0 {
+                            let sig_lambda = 0.30f32;
+                            for (di, &mut (ref _idx, ref mut score)) in scored.iter_mut().enumerate() {
+                                *score += sig_lambda * (sig_scores[di] / sig_max);
+                            }
+                        }
+
+                        // Neighbor redirect: if the top candidate has a graph neighbor
+                        // that better matches the query keywords, promote that neighbor.
+                        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                        if let Some(&(top_idx, top_score)) = scored.first() {
+                            if let Some(redirect_idx) = graph.neighbor_redirect(top_idx, &query_terms) {
+                                if let Some(entry) = scored.iter_mut().find(|e| e.0 == redirect_idx) {
+                                    entry.1 = top_score + 0.05;
+                                    println!("    [graph-redirect] prog {} → neighbor {} (better keyword match)",
+                                        top_idx, redirect_idx);
+                                }
+                            }
+                        }
+                    }
+                }
                 scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
                 // When a language hint is provided, try to find a program matching that language
@@ -3401,6 +3725,17 @@ impl IndexedGenEnv {
                     self.last_selected_archetype = None;
                     self.last_generation_confidence = result.coherence.combined;
                     return (composed, result.coherence.combined);
+                }
+            }
+        }
+
+        // Topic-aware continuous composition: when a forced topic was identified,
+        // compose trajectories from that topic's programs via ChunkCodec.
+        // This gives compositional generation with topic precision.
+        if let Some(ref topic_name) = topic_selected {
+            if let Some((ctext, cconf)) = self.generate_continuous_for_topic(cond, topic_name, _max_len) {
+                if ctext.len() > 10 && !Self::has_tokenization_artifacts(&ctext) && cconf > 0.35 {
+                    return (ctext, cconf);
                 }
             }
         }

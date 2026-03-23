@@ -262,6 +262,15 @@ fn builtin_calculator() -> ToolSchema {
         triggers: vec![
             "calculate".to_string(),
             "compute".to_string(),
+            "what is".to_string(),
+            "how much".to_string(),
+            "evaluate".to_string(),
+            "multiply".to_string(),
+            "divide".to_string(),
+            "add".to_string(),
+            "subtract".to_string(),
+            "sum of".to_string(),
+            "product of".to_string(),
         ],
     }
 }

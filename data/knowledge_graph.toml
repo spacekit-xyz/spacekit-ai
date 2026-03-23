@@ -510,7 +510,7 @@ concept = "GeneralKnowledge"
 category = "general_knowledge"
 priority = 12
 [[nodes.rules]]
-any = ["relativity", "einstein", "quantum mechanics", "thermodynamics", "newton", "gravity", "electromagnetic", "optics", "waves"]
+any = ["relativity", "einstein", "quantum mechanics", "thermodynamics", "newton", "gravity", "electromagnetic", "optics", "waves", "force", "acceleration", "momentum", "kinetic energy", "potential energy"]
 
 [[nodes]]
 topic = "cs_fundamentals"
@@ -518,7 +518,7 @@ concept = "GeneralKnowledge"
 category = "general_knowledge"
 priority = 12
 [[nodes.rules]]
-any = ["halting problem", "computab", "decidab", "big-o", "time complexity", "space complexity", "np-hard", "np-complete"]
+any = ["halting problem", "computab", "decidab", "big-o", "big o", "time complexity", "space complexity", "np-hard", "np-complete", "cap theorem", "data structure", "algorithm complexity", "recursion", "dynamic programming"]
 [[nodes.rules]]
 all = ["turing", "machine"]
 
@@ -558,7 +558,7 @@ concept = "GeneralKnowledge"
 category = "general_knowledge"
 priority = 12
 [[nodes.rules]]
-any = ["chemical bond", "periodic table", "molecule", "organic chemistry", "reaction rate", "catalyst", "electrochemistry"]
+any = ["chemical bond", "covalent bond", "ionic bond", "periodic table", "molecule", "organic chemistry", "reaction rate", "catalyst", "electrochemistry", "atom", "element"]
 
 [[nodes]]
 topic = "history"
@@ -603,7 +603,8 @@ concept = "GeneralKnowledge"
 category = "mathematics"
 priority = 13
 [[nodes.rules]]
-any = ["quadratic", "polynomial", "linear equation", "system of equations", "factoring", "logarithm"]
+any = ["quadratic", "polynomial", "linear equation", "system of equations", "factoring", "logarithm", "solve", "equation", "equals"]
+not = ["differential equation"]
 
 [[nodes]]
 topic = "linear_algebra"
@@ -619,15 +620,15 @@ concept = "GeneralKnowledge"
 category = "mathematics"
 priority = 13
 [[nodes.rules]]
-any = ["bayes theorem", "conditional probability", "random variable", "expected value", "variance", "standard deviation", "normal distribution", "poisson"]
+any = ["bayes theorem", "conditional probability", "random variable", "expected value", "normal distribution", "poisson"]
 
 [[nodes]]
 topic = "statistics"
 concept = "GeneralKnowledge"
 category = "mathematics"
-priority = 13
+priority = 14
 [[nodes.rules]]
-any = ["hypothesis test", "confidence interval", "regression", "correlation", "p-value", "chi-square", "t-test", "anova"]
+any = ["standard deviation", "variance", "hypothesis test", "confidence interval", "regression", "correlation", "p-value", "chi-square", "t-test", "anova", "mean and median", "sample size"]
 
 [[nodes]]
 topic = "combinatorics"
@@ -635,7 +636,7 @@ concept = "GeneralKnowledge"
 category = "mathematics"
 priority = 13
 [[nodes.rules]]
-any = ["permutation", "combination", "binomial coefficient", "pigeonhole", "inclusion-exclusion"]
+any = ["permutation", "combination", "binomial coefficient", "pigeonhole", "inclusion-exclusion", "choose", "ways to", "how many ways", "counting"]
 
 [[nodes]]
 topic = "number_theory"
@@ -651,7 +652,7 @@ concept = "GeneralKnowledge"
 category = "mathematics"
 priority = 12
 [[nodes.rules]]
-any = ["set theory", "cardinality", "countable", "uncountable", "cantor"]
+any = ["set theory", "cardinality", "countable", "uncountable", "cantor", "power set", "subset", "union", "intersection", "complement"]
 
 # ==========================================================================
 # Support intents
@@ -744,6 +745,8 @@ topic = "entropy"
 concept = "InformationTheory"
 category = "information_theory"
 priority = 15
+[[nodes.rules]]
+any = ["shannon entropy"]
 [[nodes.rules]]
 all = ["entropy", "measure"]
 [[nodes.rules]]

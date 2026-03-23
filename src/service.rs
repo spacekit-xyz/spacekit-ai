@@ -2334,6 +2334,7 @@ impl LanguageService {
         for (&gidx, env) in dm.group_gen_envs.iter_mut() {
             env.build_schemas();
             env.build_chunk_codec();
+            env.rebuild_program_graphs();
             if !env.topic_subindex.is_empty() {
                 let names: Vec<_> = env.topic_subindex.iter()
                     .map(|t| format!("{}({})", t.topic_name, t.lattice.programs.len()))
@@ -2344,6 +2345,7 @@ impl LanguageService {
         for (&gidx, env) in dm.group_code_envs.iter_mut() {
             env.build_schemas();
             env.build_chunk_codec();
+            env.rebuild_program_graphs();
             if !env.topic_subindex.is_empty() {
                 let names: Vec<_> = env.topic_subindex.iter()
                     .map(|t| format!("{}({})", t.topic_name, t.lattice.programs.len()))

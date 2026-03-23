@@ -53,5 +53,6 @@ pub mod reasoning;
 pub mod service;
 pub mod spectral;
 pub mod text_autoencoder;
+pub mod training_objectives;
 #[cfg(feature = "wasm-bindgen")]
 pub mod wasm;

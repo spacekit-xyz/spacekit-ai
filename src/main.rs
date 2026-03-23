@@ -1170,6 +1170,39 @@ fn train_brain(
         println!("  shuffled and truncated to {} (support={}, coding={}, other={})", samples.len(), support_n, coding_n, other_n);
     }
 
+    // Build saliency lexicon from knowledge graph for training augmentation.
+    let saliency_lexicon = growformer::growformer_lang::topic_graph().map(|graph| {
+        let keywords = graph.all_keywords();
+        let lexicon = growformer::training_objectives::SaliencyLexicon::from_keywords(keywords);
+        println!("  [saliency] Built lexicon with {} keywords for training augmentation", lexicon.keyword_count());
+        lexicon
+    });
+
+    // Augment training data with salient span masking + RTD.
+    // Masked augments reinforce salient-keyword representations.
+    // RTD negatives are stored separately for contrastive development.
+    if let Some(ref lexicon) = saliency_lexicon {
+        let original_count = samples.len();
+        let mut augmented_samples = Vec::new();
+        for (i, sample) in samples.iter().enumerate() {
+            if let Some(ref response) = sample.expected_response {
+                let masked_versions = growformer::training_objectives::mask_salient_spans(
+                    response, lexicon, 2, (i as u64).wrapping_mul(0x517cc1b727220a95),
+                );
+                for masked_resp in masked_versions {
+                    let mut aug = sample.clone();
+                    aug.expected_response = Some(masked_resp);
+                    augmented_samples.push(aug);
+                }
+            }
+        }
+        if !augmented_samples.is_empty() {
+            println!("  [salient-mask] Generated {} augmented samples from {} originals",
+                augmented_samples.len(), original_count);
+            samples.extend(augmented_samples);
+        }
+    }
+
     // Discover groups dynamically from the training data's action_target values.
     let discovered_group_names = discover_group_names(&samples);
     println!("Discovered {} groups from data: {:?}", discovered_group_names.len(), discovered_group_names);
@@ -1774,6 +1807,38 @@ fn train_brain(
     let t_index_elapsed = t_index_start.elapsed();
     println!("  Indexed {} gen + {} code groups in {:?}",
         svc.dm.group_gen_envs.len(), svc.dm.group_code_envs.len(), t_index_elapsed);
+
+    // Contrastive refinement: push apart program centroids within each group's
+    // topic sub-lattices that are too similar but represent different content.
+    println!("\n--- Contrastive Lattice Refinement ---");
+    let contrastive_margin = 0.92;
+    let contrastive_rate = 0.05;
+    let mut total_repulsions = 0;
+    for (&gidx, env) in svc.dm.group_gen_envs.iter_mut() {
+        let mut group_repulsions = 0;
+        for topic in &mut env.topic_subindex {
+            let r = topic.lattice.contrastive_refine(contrastive_margin, contrastive_rate);
+            group_repulsions += r;
+        }
+        env.lattice.contrastive_refine(contrastive_margin, contrastive_rate);
+        if group_repulsions > 0 {
+            println!("  gen[g{}]: {} contrastive repulsions", gidx, group_repulsions);
+        }
+        total_repulsions += group_repulsions;
+    }
+    for (&gidx, env) in svc.dm.group_code_envs.iter_mut() {
+        let mut group_repulsions = 0;
+        for topic in &mut env.topic_subindex {
+            let r = topic.lattice.contrastive_refine(contrastive_margin, contrastive_rate);
+            group_repulsions += r;
+        }
+        if group_repulsions > 0 {
+            println!("  code[g{}]: {} contrastive repulsions", gidx, group_repulsions);
+        }
+        total_repulsions += group_repulsions;
+    }
+    println!("  Total: {} contrastive repulsions (margin={}, rate={})",
+        total_repulsions, contrastive_margin, contrastive_rate);
 
     // (Legacy thread scope with NeuralEnvironment training removed —
     // replaced by one-pass Paramecium lattice indexing above)

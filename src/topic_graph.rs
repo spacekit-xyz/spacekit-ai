@@ -161,6 +161,29 @@ impl TopicGraph {
 
     pub fn node_count(&self) -> usize { self.nodes.len() }
 
+    /// Collect all unique keywords from all rule `any`/`all` lists
+    /// and `concept_keywords` arrays. Used as the saliency lexicon
+    /// for salient span masking during training.
+    pub fn all_keywords(&self) -> Vec<String> {
+        let mut set = std::collections::HashSet::new();
+        for node in &self.nodes {
+            for rule in &node.rules {
+                for kw in &rule.any {
+                    set.insert(kw.to_ascii_lowercase());
+                }
+                for kw in &rule.all {
+                    set.insert(kw.to_ascii_lowercase());
+                }
+            }
+        }
+        for keywords in self.concept_keywords.values() {
+            for kw in keywords {
+                set.insert(kw.to_ascii_lowercase());
+            }
+        }
+        set.into_iter().collect()
+    }
+
     // -----------------------------------------------------------------------
     // Topic inference (replaces infer_operation_topic)
     // -----------------------------------------------------------------------
