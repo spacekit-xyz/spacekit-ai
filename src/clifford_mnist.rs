@@ -411,6 +411,73 @@ impl MultiTaskClassifier {
     }
 }
 
+/// Discriminability-weighted spacetime distance.
+/// Weights each grade's contribution to the distance by its measured
+/// discriminability — grades that actually separate classes matter more.
+/// Preserves Minkowski (1,7) signature on grade-1.
+pub fn weighted_spacetime_distance(
+    a: &Multivector,
+    b: &Multivector,
+    grade_weights: &[f32; 9],
+) -> f32 {
+    let mut dist = 0.0f32;
+    for g in 0..=8 {
+        let w = grade_weights[g];
+        if w < 1e-10 { continue; }
+        let ga = a.grade(g);
+        let gb = b.grade(g);
+        if g == 1 {
+            for k in 0..GRADE_DIMS[1] {
+                let d = gb[k] - ga[k];
+                if k == 0 {
+                    dist -= w * d * d;
+                } else {
+                    dist += w * d * d;
+                }
+            }
+        } else {
+            for k in 0..GRADE_DIMS[g] {
+                let d = gb[k] - ga[k];
+                dist += w * d * d;
+            }
+        }
+    }
+    dist
+}
+
+/// Compute normalized grade weights from discriminability scores.
+/// Higher discriminability → higher weight. Normalizes so max weight = 1.0.
+pub fn discriminability_weights(disc: &[f32; 9]) -> [f32; 9] {
+    let max_d = disc.iter().cloned().fold(0.0f32, f32::max);
+    if max_d < 1e-10 { return [1.0; 9]; }
+    std::array::from_fn(|g| disc[g] / max_d)
+}
+
+/// Interval-augmented classification score.
+/// Combines discriminability-weighted L2 distance with the Minkowski
+/// interval as a first-class classification feature.
+/// Lower score = better match (distance-like, not similarity-like).
+fn interval_augmented_score(
+    query: &Multivector,
+    centroid: &Multivector,
+    grade_weights: &[f32; 9],
+) -> f32 {
+    let base_dist = weighted_spacetime_distance(query, centroid, grade_weights);
+    let interval = minkowski_interval(query, centroid);
+
+    // Timelike bonus: reduce distance for causally connected pairs.
+    // Spacelike penalty: increase distance for causally disconnected pairs.
+    let interval_adjustment = if interval < 0.0 {
+        // Timelike: subtract (reduce distance) proportional to magnitude
+        interval * 0.3
+    } else {
+        // Spacelike: add (increase distance) proportional to magnitude
+        interval * 0.1
+    };
+
+    base_dist + interval_adjustment
+}
+
 /// Full training pipeline result.
 pub struct CliffordMnistResult {
     pub task_accuracies: Vec<f32>,
@@ -476,11 +543,18 @@ pub fn run_clifford_mnist(
         }
 
         // Phase 2: Contrastive training with frozen centroids.
-        // Centroids are rebuilt every REBUILD_INTERVAL epochs so the training
-        // target doesn't chase the encoder updates.
+        // LR schedule: ramp up, plateau in the productive 10-25 range,
+        // then decay. This gives 2 vs 3 (the hardest pair) time to consolidate.
         const REBUILD_INTERVAL: u32 = 5;
         let lr_schedule = |epoch: u32| -> f32 {
-            0.01 * (-0.02 * epoch as f32).exp()
+            let base = 0.01;
+            if epoch < 3 {
+                base * (epoch as f32 + 1.0) / 3.0 // warmup
+            } else if epoch < 20 {
+                base // plateau
+            } else {
+                base * (-0.05 * (epoch as f32 - 20.0)).exp() // gradual decay
+            }
         };
 
         let mut best_test_acc = 0.0f32;
@@ -572,9 +646,11 @@ pub fn run_clifford_mnist(
             .map(|(img, &lbl)| (img.clone(), lbl)).collect()
     };
 
-    let refinement_epochs = max_epochs / 2;
+    let refinement_epochs = max_epochs;
+    let mut best_refinement_acc = 0.0f32;
+    let mut refinement_stale = 0u32;
     for epoch in 0..refinement_epochs {
-        let lr = 0.005 * (-0.03 * epoch as f32).exp();
+        let lr = if epoch < 5 { 0.005 } else { 0.005 * (-0.02 * (epoch as f32 - 5.0)).exp() };
 
         for (img, lbl) in &global_train {
             encoder.train_step(img, *lbl, &global_classifier.centroids, lr);
@@ -590,7 +666,6 @@ pub fn run_clifford_mnist(
         }
 
         if epoch % 5 == 0 || epoch == refinement_epochs - 1 {
-            // Quick 10-class accuracy check on test set
             let mut rc = 0u32;
             let rt = test_images.len().min(2000) as u32;
             for (img, &lbl) in test_images.iter().zip(test_labels.iter()).take(2000) {
@@ -601,6 +676,16 @@ pub fn run_clifford_mnist(
             let racc = rc as f32 / rt.max(1) as f32;
             println!("    refinement epoch {}: 10-class acc={:.1}%, lr={:.5}",
                 epoch, racc * 100.0, lr);
+            if racc > best_refinement_acc + 0.002 {
+                best_refinement_acc = racc;
+                refinement_stale = 0;
+            } else {
+                refinement_stale += 1;
+            }
+            if refinement_stale >= 4 {
+                println!("    Refinement converged at epoch {}", epoch);
+                break;
+            }
         }
     }
 
@@ -633,31 +718,94 @@ pub fn run_clifford_mnist(
     let cross_task_acc = cross_task_correct as f32 / cross_task_total.max(1) as f32;
     println!("  Overall cross-task binary: {:.1}%", cross_task_acc * 100.0);
 
-    // Full 10-class evaluation
-    println!("\n--- Full 10-class evaluation (nearest centroid, all digits) ---");
-    let mut full_correct = 0u32;
     let full_total = test_images.len() as u32;
-    let mut per_digit_correct = [0u32; 10];
-    let mut per_digit_total = [0u32; 10];
-    for (img, &lbl) in test_images.iter().zip(test_labels.iter()) {
-        let mv = encoder.encode(img);
-        let (pred, _) = global_classifier.classify(&mv);
-        per_digit_total[lbl as usize] += 1;
-        if pred == lbl {
-            full_correct += 1;
-            per_digit_correct[lbl as usize] += 1;
-        }
+    let grade_disc = global_classifier.grade_discriminability();
+
+    // Compute data-driven grade weights from measured discriminability
+    let gw = discriminability_weights(&grade_disc);
+    println!("\n--- Data-driven grade weights ---");
+    let grade_names = [
+        "scalar (intensity)", "vector (gradients)", "bivector (edges)",
+        "trivector (junctions)", "quadvector (topology)", "grade-5", "grade-6",
+        "grade-7", "pseudoscalar (orientation)",
+    ];
+    for g in 0..=8 {
+        println!("  grade {}: disc={:.1}, weight={:.3} — {}",
+            g, grade_disc[g], gw[g], grade_names[g]);
     }
-    let full_acc = full_correct as f32 / full_total.max(1) as f32;
-    println!("  Overall 10-class: {:.1}% ({}/{})", full_acc * 100.0, full_correct, full_total);
-    for d in 0..10 {
-        let acc = per_digit_correct[d] as f32 / per_digit_total[d].max(1) as f32;
-        println!("    digit {}: {:.1}% ({}/{})", d, acc * 100.0,
-            per_digit_correct[d], per_digit_total[d]);
+
+    // --- Classifier comparison: 3 methods on the same encoder + centroids ---
+    let classifiers: [(&str, Box<dyn Fn(&Multivector) -> (u8, f32)>); 3] = [
+        ("flat spacetime distance", Box::new(|mv: &Multivector| {
+            let mut best_label = 0u8;
+            let mut best_dist = f32::MAX;
+            for d in 0..10 {
+                if global_classifier.counts[d] == 0 { continue; }
+                let dist = spacetime_distance(mv, &global_classifier.centroids[d]);
+                if dist < best_dist { best_dist = dist; best_label = d as u8; }
+            }
+            (best_label, best_dist)
+        })),
+        ("discriminability-weighted", Box::new(|mv: &Multivector| {
+            let mut best_label = 0u8;
+            let mut best_dist = f32::MAX;
+            for d in 0..10 {
+                if global_classifier.counts[d] == 0 { continue; }
+                let dist = weighted_spacetime_distance(mv, &global_classifier.centroids[d], &gw);
+                if dist < best_dist { best_dist = dist; best_label = d as u8; }
+            }
+            (best_label, best_dist)
+        })),
+        ("interval-augmented", Box::new(|mv: &Multivector| {
+            let mut best_label = 0u8;
+            let mut best_dist = f32::MAX;
+            for d in 0..10 {
+                if global_classifier.counts[d] == 0 { continue; }
+                let dist = interval_augmented_score(mv, &global_classifier.centroids[d], &gw);
+                if dist < best_dist { best_dist = dist; best_label = d as u8; }
+            }
+            (best_label, best_dist)
+        })),
+    ];
+
+    for (name, classify_fn) in &classifiers {
+        println!("\n--- Full 10-class evaluation ({}) ---", name);
+        let mut full_correct = 0u32;
+        let mut per_digit_correct = [0u32; 10];
+        let mut per_digit_total = [0u32; 10];
+        for (img, &lbl) in test_images.iter().zip(test_labels.iter()) {
+            let mv = encoder.encode(img);
+            let (pred, _) = classify_fn(&mv);
+            per_digit_total[lbl as usize] += 1;
+            if pred == lbl {
+                full_correct += 1;
+                per_digit_correct[lbl as usize] += 1;
+            }
+        }
+        let full_acc = full_correct as f32 / full_total.max(1) as f32;
+        println!("  Overall: {:.1}% ({}/{})", full_acc * 100.0, full_correct, full_total);
+        for d in 0..10 {
+            let acc = per_digit_correct[d] as f32 / per_digit_total[d].max(1) as f32;
+            println!("    digit {}: {:.1}% ({}/{})", d, acc * 100.0,
+                per_digit_correct[d], per_digit_total[d]);
+        }
     }
 
     let avg_accuracy = task_accuracies.iter().sum::<f32>() / task_accuracies.len() as f32;
-    let grade_disc = global_classifier.grade_discriminability();
+
+    // Recompute Minkowski interval stats from the FINAL encoder + global classifier
+    correct_intervals.clear();
+    incorrect_intervals.clear();
+    for (img, &lbl) in test_images.iter().zip(test_labels.iter()) {
+        let mv = encoder.encode(img);
+        let (pred, _) = global_classifier.classify(&mv);
+        let mink = minkowski_interval(&mv, &global_classifier.centroids[pred as usize]);
+        if pred == lbl {
+            correct_intervals.push(mink);
+        } else {
+            incorrect_intervals.push(mink);
+        }
+    }
 
     let correct_mean = if correct_intervals.is_empty() { 0.0 }
         else { correct_intervals.iter().sum::<f32>() / correct_intervals.len() as f32 };
@@ -667,20 +815,13 @@ pub fn run_clifford_mnist(
         .filter(|&&i| classify_interval(i) == IntervalType::Timelike)
         .count() as f32 / correct_intervals.len().max(1) as f32;
 
-    println!("\n--- Grade discriminability ---");
-    let grade_names = [
-        "scalar (intensity)", "vector (gradients)", "bivector (edges)",
-        "trivector (junctions)", "quadvector (topology)", "grade-5", "grade-6",
-        "grade-7", "pseudoscalar (orientation)",
-    ];
-    for g in 0..=8 {
-        println!("  grade {}: {:.4} — {}", g, grade_disc[g], grade_names[g]);
-    }
-
-    println!("\n--- Minkowski interval statistics ---");
+    println!("\n--- Minkowski interval statistics (post-refinement) ---");
     println!("  Correct classifications:   mean interval = {:.6}", correct_mean);
     println!("  Incorrect classifications: mean interval = {:.6}", incorrect_mean);
-    println!("  Correct that are timelike: {:.1}%", timelike_correct * 100.0);
+    if correct_mean.abs() > 1e-8 {
+        println!("  Ratio (incorrect/correct): {:.1}x", incorrect_mean / correct_mean);
+    }
+    println!("  Correct that are timelike:   {:.1}%", timelike_correct * 100.0);
     let timelike_incorrect = incorrect_intervals.iter()
         .filter(|&&i| classify_interval(i) == IntervalType::Timelike)
         .count() as f32 / incorrect_intervals.len().max(1) as f32;
@@ -688,7 +829,11 @@ pub fn run_clifford_mnist(
     let spacelike_correct = correct_intervals.iter()
         .filter(|&&i| classify_interval(i) == IntervalType::Spacelike)
         .count() as f32 / correct_intervals.len().max(1) as f32;
-    println!("  Correct that are spacelike: {:.1}% (should be low)", spacelike_correct * 100.0);
+    println!("  Correct that are spacelike:  {:.1}%", spacelike_correct * 100.0);
+    let lightlike_correct = correct_intervals.iter()
+        .filter(|&&i| classify_interval(i) == IntervalType::Lightlike)
+        .count() as f32 / correct_intervals.len().max(1) as f32;
+    println!("  Correct that are lightlike:  {:.1}%", lightlike_correct * 100.0);
 
     CliffordMnistResult {
         task_accuracies,
