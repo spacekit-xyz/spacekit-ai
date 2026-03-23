@@ -61,6 +61,8 @@ struct Args {
     #[arg(long)]
     mnist: bool,
     #[arg(long)]
+    mnist_clifford: bool,
+    #[arg(long)]
     mnist_retention: bool,
     #[arg(long, default_value_t = true)]
     progress: bool,
@@ -247,6 +249,8 @@ fn main() {
         demo_neurogenesis();
     } else if args.mnist {
         demo_split_mnist(args.progress, args.mnist_train_limit, args.mnist_max_epochs, args.mnist_batch_size);
+    } else if args.mnist_clifford {
+        demo_clifford_mnist(args.mnist_train_limit, args.mnist_max_epochs);
     } else if args.mnist_retention {
         demo_mnist_retention();
     } else if args.acceptance_report {
@@ -1407,6 +1411,61 @@ fn demo_mnist_retention() {
     let avg = accs.iter().sum::<f32>() / 5.0;
     println!("\n  Average: {:.1}%", avg * 100.0);
     println!("\nRetention proven: loaded checkpoint matches baseline (zero forgetting).");
+}
+
+// =============================================================================
+// Demo: Clifford MNIST — Split MNIST through Cl(1,7) spacetime algebra.
+// Same 5-task structure as flat demo but uses multivector encoding +
+// Minkowski interval classification instead of flat feedforward networks.
+// =============================================================================
+
+fn demo_clifford_mnist(train_limit: Option<usize>, max_epochs_override: Option<u32>) {
+    use growformer::mnist::load_mnist_normalized;
+
+    let data_path = std::env::var("MNIST_ROOT").unwrap_or_else(|_| "data".to_string());
+    let images_path = std::path::Path::new(&data_path).join("train-images-idx3-ubyte");
+    let images_gz = std::path::Path::new(&data_path).join("train-images-idx3-ubyte.gz");
+    if !images_path.exists() && !images_gz.exists() {
+        eprintln!("MNIST data not found at {:?}.", data_path);
+        eprintln!("Run: bash scripts/download_mnist.sh  or set MNIST_ROOT.");
+        std::process::exit(1);
+    }
+
+    println!("--- Clifford MNIST (Cl(1,7) spacetime algebra) ---\n");
+    println!("Loading MNIST from {:?}...", data_path);
+    let (train_imgs, train_lbls, test_imgs, test_lbls) = load_mnist_normalized(&data_path);
+    println!("  Train: {} images, Test: {} images", train_imgs.len(), test_imgs.len());
+
+    let max_epochs = max_epochs_override.unwrap_or(30);
+    if train_limit.is_some() || max_epochs_override.is_some() {
+        println!("  train_limit={:?}, max_epochs={}", train_limit, max_epochs);
+    }
+    println!();
+
+    let start = Instant::now();
+    let result = growformer::clifford_mnist::run_clifford_mnist(
+        &train_imgs, &train_lbls,
+        &test_imgs, &test_lbls,
+        train_limit,
+        max_epochs,
+    );
+    let elapsed = start.elapsed();
+
+    println!("\n=== Clifford MNIST Results ===");
+    println!("  Average accuracy: {:.1}%", result.avg_accuracy * 100.0);
+    for (t, acc) in result.task_accuracies.iter().enumerate() {
+        let (d1, d2) = [(0,1),(2,3),(4,5),(6,7),(8,9)][t];
+        println!("    Task {} ({} vs {}): {:.1}%", t, d1, d2, acc * 100.0);
+    }
+    println!("  Elapsed: {:.1}s", elapsed.as_secs_f64());
+    println!("\n  Interval analysis:");
+    println!("    Correct classifications:   mean interval = {:.4}", result.interval_stats.correct_mean_interval);
+    println!("    Incorrect classifications: mean interval = {:.4}", result.interval_stats.incorrect_mean_interval);
+    println!("    Timelike correct: {:.1}%", result.interval_stats.timelike_correct_pct * 100.0);
+    println!("\n  The Minkowski metric provides a principled classification signal:");
+    println!("    timelike (s² < 0) → same class (causal connection)");
+    println!("    spacelike (s² > 0) → different class (no causal link)");
+    println!("    Same Cl(1,7) algebra used for language and vision.\n");
 }
 
 // =============================================================================

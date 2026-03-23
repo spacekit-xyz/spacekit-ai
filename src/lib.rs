@@ -45,6 +45,8 @@ pub mod understanding;
 pub mod environment;
 #[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 pub mod mnist;
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+pub mod clifford_mnist;
 pub mod neuron;
 pub mod systems;
 pub mod types;

@@ -58,6 +58,20 @@ pub fn filter_digit_pair(
     out
 }
 
+/// Filter to one digit pair, preserving original labels (not binary).
+/// Returns (image 784-dim, original_label).
+pub fn filter_digit_pair_raw(
+    images: &[Vec<f32>],
+    labels: &[u8],
+    digit_a: u8,
+    digit_b: u8,
+) -> Vec<(Vec<f32>, u8)> {
+    images.iter().zip(labels.iter())
+        .filter(|(_, &lbl)| lbl == digit_a || lbl == digit_b)
+        .map(|(img, &lbl)| (img.clone(), lbl))
+        .collect()
+}
+
 /// Fixed random projection 784 -> 64 with L2 normalization. Same projection for all tasks.
 pub struct RandomProjection {
     matrix: Vec<Vec<f32>>,
