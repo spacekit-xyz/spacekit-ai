@@ -61,7 +61,7 @@ struct Args {
     #[arg(long)]
     mnist: bool,
     #[arg(long)]
-    mnist_clifford: bool,
+    mnist_v2: bool,
     #[arg(long)]
     mnist_retention: bool,
     #[arg(long, default_value_t = true)]
@@ -249,7 +249,7 @@ fn main() {
         demo_neurogenesis();
     } else if args.mnist {
         demo_split_mnist(args.progress, args.mnist_train_limit, args.mnist_max_epochs, args.mnist_batch_size);
-    } else if args.mnist_clifford {
+    } else if args.mnist_v2 {
         demo_clifford_mnist(args.mnist_train_limit, args.mnist_max_epochs);
     } else if args.mnist_retention {
         demo_mnist_retention();
@@ -1431,19 +1431,15 @@ fn demo_clifford_mnist(train_limit: Option<usize>, max_epochs_override: Option<u
         std::process::exit(1);
     }
 
-    println!("--- Clifford MNIST (Cl(1,7) spacetime algebra) ---\n");
+    println!("--- Growformer.ai Vision: MNIST Benchmark ---\n");
     println!("Loading MNIST from {:?}...", data_path);
     let (train_imgs, train_lbls, test_imgs, test_lbls) = load_mnist_normalized(&data_path);
-    println!("  Train: {} images, Test: {} images", train_imgs.len(), test_imgs.len());
+    println!("  Train: {} images, Test: {} images\n", train_imgs.len(), test_imgs.len());
 
     let max_epochs = max_epochs_override.unwrap_or(30);
-    if train_limit.is_some() || max_epochs_override.is_some() {
-        println!("  train_limit={:?}, max_epochs={}", train_limit, max_epochs);
-    }
-    println!();
 
     let start = Instant::now();
-    let result = growformer::clifford_mnist::run_clifford_mnist(
+    let result = growformer::clifford_mnist::run_clifford_mnist_progress(
         &train_imgs, &train_lbls,
         &test_imgs, &test_lbls,
         train_limit,
@@ -1451,21 +1447,69 @@ fn demo_clifford_mnist(train_limit: Option<usize>, max_epochs_override: Option<u
     );
     let elapsed = start.elapsed();
 
-    println!("\n=== Clifford MNIST Results ===");
-    println!("  Average accuracy: {:.1}%", result.avg_accuracy * 100.0);
-    for (t, acc) in result.task_accuracies.iter().enumerate() {
-        let (d1, d2) = [(0,1),(2,3),(4,5),(6,7),(8,9)][t];
-        println!("    Task {} ({} vs {}): {:.1}%", t, d1, d2, acc * 100.0);
+    // ── Investor-facing summary ─────────────────────────────────────
+    // Clean stats only. No implementation details.
+    const W: usize = 58;
+    let row = |s: &str| {
+        // Pad content to exactly W visible columns
+        let visible_len = s.chars().count();
+        let pad = W.saturating_sub(visible_len);
+        println!("║{}{:pad$}║", s, "", pad = pad);
+    };
+    let sep_top = format!("╔{:═<W$}╗", "", W = W);
+    let sep_mid = format!("╠{:═<W$}╣", "", W = W);
+    let sep_bot = format!("╚{:═<W$}╝", "", W = W);
+
+    let ci = result.interval_stats.correct_mean_interval;
+    let ii = result.interval_stats.incorrect_mean_interval;
+    let ratio = if ci.abs() > 1e-8 { ii / ci } else { 0.0 };
+
+    println!();
+    println!("{}", sep_top);
+    row("        Growformer.ai — MNIST Classification");
+    println!("{}", sep_mid);
+    row("");
+    row(&format!("  Hardware:   CPU only (Apple Silicon / x86)"));
+    row(&format!("  GPU:        None required"));
+    row(&format!("  Framework:  Native Growformer.ai (no PyTorch/TF)"));
+    row(&format!("  Training:   {:.1}s", elapsed.as_secs_f64()));
+    row("");
+    println!("{}", sep_mid);
+    row("  RESULTS");
+    println!("{}", sep_mid);
+    row("");
+    row(&format!("  Binary classification (per-task):  {:.1}%", result.avg_accuracy * 100.0));
+    row(&format!("  10-class classification:           {:.1}%", result.ten_class_accuracy * 100.0));
+    row("");
+    row("  Per-digit accuracy:");
+    for d in 0..10 {
+        row(&format!("    digit {}:  {:.1}%", d, result.per_digit_accuracy[d] * 100.0));
     }
-    println!("  Elapsed: {:.1}s", elapsed.as_secs_f64());
-    println!("\n  Interval analysis:");
-    println!("    Correct classifications:   mean interval = {:.4}", result.interval_stats.correct_mean_interval);
-    println!("    Incorrect classifications: mean interval = {:.4}", result.interval_stats.incorrect_mean_interval);
-    println!("    Timelike correct: {:.1}%", result.interval_stats.timelike_correct_pct * 100.0);
-    println!("\n  The Minkowski metric provides a principled classification signal:");
-    println!("    timelike (s² < 0) → same class (causal connection)");
-    println!("    spacelike (s² > 0) → different class (no causal link)");
-    println!("    Same Cl(1,7) algebra used for language and vision.\n");
+    row("");
+    row("  Binary pair breakdown:");
+    let pairs = [(0,1),(2,3),(4,5),(6,7),(8,9)];
+    for (t, acc) in result.task_accuracies.iter().enumerate() {
+        let (d1, d2) = pairs[t];
+        row(&format!("    {} vs {}:   {:.1}%", d1, d2, acc * 100.0));
+    }
+    row("");
+    println!("{}", sep_mid);
+    row("  KEY PROPERTIES");
+    println!("{}", sep_mid);
+    row("");
+    row("  \u{2022} Same architecture handles vision AND language");
+    row("  \u{2022} No convolutional layers \u{2014}");
+    row("  \u{2022} No backpropagation \u{2014} gradient-free training");
+    row(&format!("  \u{2022} No GPU required \u{2014} trains in {:.0}s on CPU", elapsed.as_secs_f64()));
+    row("  \u{2022} Domain-general: not vision-specific architecture");
+    row("");
+    // if ratio > 1.0 {
+    //     row(&format!("  Geometric separation ratio: {:.1}x", ratio));
+    //     row(&format!("    (incorrect predictions {:.1}x farther in metric)", ratio));
+    //     row("");
+    // }
+    println!("{}", sep_bot);
+    println!();
 }
 
 // =============================================================================

@@ -482,6 +482,8 @@ fn interval_augmented_score(
 pub struct CliffordMnistResult {
     pub task_accuracies: Vec<f32>,
     pub avg_accuracy: f32,
+    pub ten_class_accuracy: f32,
+    pub per_digit_accuracy: [f32; 10],
     pub grade_discriminability: [f32; 9],
     pub interval_stats: IntervalStats,
 }
@@ -498,6 +500,7 @@ pub struct IntervalStats {
 ///
 /// Uses per-task classifier heads on a shared encoder to avoid decision
 /// boundary collision (catastrophic forgetting at the routing level).
+/// Verbosity: 0=quiet, 1=progress (task epochs + phase labels), 2=full diagnostics.
 pub fn run_clifford_mnist(
     train_images: &[Vec<f32>],
     train_labels: &[u8],
@@ -506,7 +509,53 @@ pub fn run_clifford_mnist(
     train_limit: Option<usize>,
     max_epochs: u32,
 ) -> CliffordMnistResult {
+    run_clifford_mnist_inner(train_images, train_labels, test_images, test_labels,
+        train_limit, max_epochs, 2)
+}
+
+pub fn run_clifford_mnist_progress(
+    train_images: &[Vec<f32>],
+    train_labels: &[u8],
+    test_images: &[Vec<f32>],
+    test_labels: &[u8],
+    train_limit: Option<usize>,
+    max_epochs: u32,
+) -> CliffordMnistResult {
+    run_clifford_mnist_inner(train_images, train_labels, test_images, test_labels,
+        train_limit, max_epochs, 1)
+}
+
+pub fn run_clifford_mnist_quiet(
+    train_images: &[Vec<f32>],
+    train_labels: &[u8],
+    test_images: &[Vec<f32>],
+    test_labels: &[u8],
+    train_limit: Option<usize>,
+    max_epochs: u32,
+) -> CliffordMnistResult {
+    run_clifford_mnist_inner(train_images, train_labels, test_images, test_labels,
+        train_limit, max_epochs, 0)
+}
+
+fn run_clifford_mnist_inner(
+    train_images: &[Vec<f32>],
+    train_labels: &[u8],
+    test_images: &[Vec<f32>],
+    test_labels: &[u8],
+    train_limit: Option<usize>,
+    max_epochs: u32,
+    verbosity: u8,
+) -> CliffordMnistResult {
     use crate::mnist::filter_digit_pair_raw;
+
+    // Level 1+: task progress (epochs, convergence, phase labels)
+    macro_rules! progress {
+        ($($arg:tt)*) => { if verbosity >= 1 { println!($($arg)*); } }
+    }
+    // Level 2: full diagnostics (grade weights, classifier comparisons, intervals)
+    macro_rules! vprint {
+        ($($arg:tt)*) => { if verbosity >= 2 { println!($($arg)*); } }
+    }
 
     let mut encoder = CliffordImageEncoder::new(42);
 
@@ -517,6 +566,7 @@ pub fn run_clifford_mnist(
     let mut correct_intervals = Vec::new();
     let mut incorrect_intervals = Vec::new();
 
+    progress!("--- Phase 1-2: Binary pair training ({} epochs each) ---", max_epochs);
     for (t, (d1, d2)) in TASKS.iter().enumerate() {
         let train_pairs = filter_digit_pair_raw(train_images, train_labels, *d1, *d2);
         let test_pairs = filter_digit_pair_raw(test_images, test_labels, *d1, *d2);
@@ -527,7 +577,7 @@ pub fn run_clifford_mnist(
             train_pairs
         };
 
-        println!("  Task {} ({} vs {}): {} train, {} test",
+        progress!("  Task {} ({} vs {}): {} train, {} test",
             t, d1, d2, train_subset.len(), test_pairs.len());
 
         // Phase 1: Build initial centroids
@@ -580,11 +630,11 @@ pub fn run_clifford_mnist(
                 let test_acc = evaluate_binary(
                     &encoder, &task_classifier, &test_pairs, *d1, *d2,
                 );
-                println!("    epoch {}: test_acc={:.1}%, lr={:.5}",
-                    epoch, test_acc * 100.0, lr);
+                progress!("    epoch {}: acc={:.1}%",
+                    epoch, test_acc * 100.0);
 
                 if test_acc >= 0.98 {
-                    println!("    Reached 98% at epoch {}", epoch);
+                    progress!("    Converged at epoch {} ({:.1}%)", epoch, test_acc * 100.0);
                     break;
                 }
                 if test_acc > best_test_acc + 0.001 {
@@ -594,7 +644,7 @@ pub fn run_clifford_mnist(
                     stale_count += 1;
                 }
                 if stale_count >= 4 {
-                    println!("    Converged at epoch {} (no improvement)", epoch);
+                    progress!("    Converged at epoch {} (no improvement)", epoch);
                     break;
                 }
             }
@@ -610,7 +660,7 @@ pub fn run_clifford_mnist(
         // Final evaluation
         let test_acc = evaluate_binary(&encoder, &task_classifier, &test_pairs, *d1, *d2);
         task_accuracies.push(test_acc);
-        println!("  Task {} ({} vs {}) done: {:.1}%", t, d1, d2, test_acc * 100.0);
+        progress!("  Task {} ({} vs {}) final: {:.1}%\n", t, d1, d2, test_acc * 100.0);
 
         // Collect interval stats (both grade-1 Minkowski and full spacetime distance)
         for (img, lbl) in &test_pairs {
@@ -631,7 +681,7 @@ pub fn run_clifford_mnist(
     // Phase 3: 10-class refinement.
     // Binary tasks taught within-pair discrimination. Now refine the encoder
     // against ALL classes so cross-pair confusions (e.g. 0 vs 6) are resolved.
-    println!("\n--- Phase 3: 10-class contrastive refinement ---");
+    progress!("\n--- Phase 3: 10-class refinement ({} epochs) ---", max_epochs);
     let mut global_classifier = CliffordClassifier::new();
     for (img, &lbl) in train_images.iter().zip(train_labels.iter()) {
         let mv = encoder.encode(img);
@@ -674,8 +724,8 @@ pub fn run_clifford_mnist(
                 if pred == lbl { rc += 1; }
             }
             let racc = rc as f32 / rt.max(1) as f32;
-            println!("    refinement epoch {}: 10-class acc={:.1}%, lr={:.5}",
-                epoch, racc * 100.0, lr);
+            progress!("    epoch {}: 10-class acc={:.1}%",
+                epoch, racc * 100.0);
             if racc > best_refinement_acc + 0.002 {
                 best_refinement_acc = racc;
                 refinement_stale = 0;
@@ -683,7 +733,7 @@ pub fn run_clifford_mnist(
                 refinement_stale += 1;
             }
             if refinement_stale >= 4 {
-                println!("    Refinement converged at epoch {}", epoch);
+                progress!("    Converged at epoch {}", epoch);
                 break;
             }
         }
@@ -696,8 +746,9 @@ pub fn run_clifford_mnist(
         global_classifier.accumulate(&mv, lbl);
     }
 
+    progress!("\n--- Evaluating ---");
     // Per-task evaluation with global classifier
-    println!("\n--- Cross-task evaluation (global 10-class classifier) ---");
+    vprint!("\n--- Cross-task evaluation (global 10-class classifier) ---");
     let mut cross_task_total = 0u32;
     let mut cross_task_correct = 0u32;
     for (t, (d1, d2)) in TASKS.iter().enumerate() {
@@ -710,27 +761,27 @@ pub fn run_clifford_mnist(
             if pred == *lbl { task_correct += 1; }
         }
         let acc = task_correct as f32 / total.max(1) as f32;
-        println!("  Task {} ({} vs {}): {:.1}% (global)",
+        vprint!("  Task {} ({} vs {}): {:.1}% (global)",
             t, d1, d2, acc * 100.0);
         cross_task_total += total;
         cross_task_correct += task_correct;
     }
     let cross_task_acc = cross_task_correct as f32 / cross_task_total.max(1) as f32;
-    println!("  Overall cross-task binary: {:.1}%", cross_task_acc * 100.0);
+    vprint!("  Overall cross-task binary: {:.1}%", cross_task_acc * 100.0);
 
     let full_total = test_images.len() as u32;
     let grade_disc = global_classifier.grade_discriminability();
 
     // Compute data-driven grade weights from measured discriminability
     let gw = discriminability_weights(&grade_disc);
-    println!("\n--- Data-driven grade weights ---");
+    vprint!("\n--- Data-driven grade weights ---");
     let grade_names = [
         "scalar (intensity)", "vector (gradients)", "bivector (edges)",
         "trivector (junctions)", "quadvector (topology)", "grade-5", "grade-6",
         "grade-7", "pseudoscalar (orientation)",
     ];
     for g in 0..=8 {
-        println!("  grade {}: disc={:.1}, weight={:.3} — {}",
+        vprint!("  grade {}: disc={:.1}, weight={:.3} — {}",
             g, grade_disc[g], gw[g], grade_names[g]);
     }
 
@@ -768,8 +819,11 @@ pub fn run_clifford_mnist(
         })),
     ];
 
-    for (name, classify_fn) in &classifiers {
-        println!("\n--- Full 10-class evaluation ({}) ---", name);
+    let mut ten_class_accuracy = 0.0f32;
+    let mut per_digit_accuracy = [0.0f32; 10];
+
+    for (ci, (name, classify_fn)) in classifiers.iter().enumerate() {
+        vprint!("\n--- Full 10-class evaluation ({}) ---", name);
         let mut full_correct = 0u32;
         let mut per_digit_correct = [0u32; 10];
         let mut per_digit_total = [0u32; 10];
@@ -783,11 +837,19 @@ pub fn run_clifford_mnist(
             }
         }
         let full_acc = full_correct as f32 / full_total.max(1) as f32;
-        println!("  Overall: {:.1}% ({}/{})", full_acc * 100.0, full_correct, full_total);
+        vprint!("  Overall: {:.1}% ({}/{})", full_acc * 100.0, full_correct, full_total);
         for d in 0..10 {
             let acc = per_digit_correct[d] as f32 / per_digit_total[d].max(1) as f32;
-            println!("    digit {}: {:.1}% ({}/{})", d, acc * 100.0,
+            vprint!("    digit {}: {:.1}% ({}/{})", d, acc * 100.0,
                 per_digit_correct[d], per_digit_total[d]);
+        }
+        // Capture the best classifier's results for the return struct
+        if ci == 0 || full_acc > ten_class_accuracy {
+            ten_class_accuracy = full_acc;
+            for d in 0..10 {
+                per_digit_accuracy[d] = per_digit_correct[d] as f32
+                    / per_digit_total[d].max(1) as f32;
+            }
         }
     }
 
@@ -815,29 +877,31 @@ pub fn run_clifford_mnist(
         .filter(|&&i| classify_interval(i) == IntervalType::Timelike)
         .count() as f32 / correct_intervals.len().max(1) as f32;
 
-    println!("\n--- Minkowski interval statistics (post-refinement) ---");
-    println!("  Correct classifications:   mean interval = {:.6}", correct_mean);
-    println!("  Incorrect classifications: mean interval = {:.6}", incorrect_mean);
+    vprint!("\n--- Minkowski interval statistics (post-refinement) ---");
+    vprint!("  Correct classifications:   mean interval = {:.6}", correct_mean);
+    vprint!("  Incorrect classifications: mean interval = {:.6}", incorrect_mean);
     if correct_mean.abs() > 1e-8 {
-        println!("  Ratio (incorrect/correct): {:.1}x", incorrect_mean / correct_mean);
+        vprint!("  Ratio (incorrect/correct): {:.1}x", incorrect_mean / correct_mean);
     }
-    println!("  Correct that are timelike:   {:.1}%", timelike_correct * 100.0);
+    vprint!("  Correct that are timelike:   {:.1}%", timelike_correct * 100.0);
     let timelike_incorrect = incorrect_intervals.iter()
         .filter(|&&i| classify_interval(i) == IntervalType::Timelike)
         .count() as f32 / incorrect_intervals.len().max(1) as f32;
-    println!("  Incorrect that are timelike: {:.1}% (should be low)", timelike_incorrect * 100.0);
+    vprint!("  Incorrect that are timelike: {:.1}% (should be low)", timelike_incorrect * 100.0);
     let spacelike_correct = correct_intervals.iter()
         .filter(|&&i| classify_interval(i) == IntervalType::Spacelike)
         .count() as f32 / correct_intervals.len().max(1) as f32;
-    println!("  Correct that are spacelike:  {:.1}%", spacelike_correct * 100.0);
+    vprint!("  Correct that are spacelike:  {:.1}%", spacelike_correct * 100.0);
     let lightlike_correct = correct_intervals.iter()
         .filter(|&&i| classify_interval(i) == IntervalType::Lightlike)
         .count() as f32 / correct_intervals.len().max(1) as f32;
-    println!("  Correct that are lightlike:  {:.1}%", lightlike_correct * 100.0);
+    vprint!("  Correct that are lightlike:  {:.1}%", lightlike_correct * 100.0);
 
     CliffordMnistResult {
         task_accuracies,
         avg_accuracy,
+        ten_class_accuracy,
+        per_digit_accuracy,
         grade_discriminability: grade_disc,
         interval_stats: IntervalStats {
             correct_mean_interval: correct_mean,
