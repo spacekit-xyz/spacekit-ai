@@ -2,3 +2,9 @@
 target/
 src/.DS_Store
 ./src/.DS_Store
+
+docs
+data/routekit-agent
+data/test-agent
+micro-brains
+visualizer
