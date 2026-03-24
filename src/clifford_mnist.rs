@@ -486,6 +486,8 @@ pub struct CliffordMnistResult {
     pub per_digit_accuracy: [f32; 10],
     pub grade_discriminability: [f32; 9],
     pub interval_stats: IntervalStats,
+    pub encoder: CliffordImageEncoder,
+    pub classifier: CliffordClassifier,
 }
 
 /// Statistics on Minkowski intervals for correct vs incorrect classifications.
@@ -786,72 +788,74 @@ fn run_clifford_mnist_inner(
     }
 
     // --- Classifier comparison: 3 methods on the same encoder + centroids ---
-    let classifiers: [(&str, Box<dyn Fn(&Multivector) -> (u8, f32)>); 3] = [
-        ("flat spacetime distance", Box::new(|mv: &Multivector| {
-            let mut best_label = 0u8;
-            let mut best_dist = f32::MAX;
-            for d in 0..10 {
-                if global_classifier.counts[d] == 0 { continue; }
-                let dist = spacetime_distance(mv, &global_classifier.centroids[d]);
-                if dist < best_dist { best_dist = dist; best_label = d as u8; }
-            }
-            (best_label, best_dist)
-        })),
-        ("discriminability-weighted", Box::new(|mv: &Multivector| {
-            let mut best_label = 0u8;
-            let mut best_dist = f32::MAX;
-            for d in 0..10 {
-                if global_classifier.counts[d] == 0 { continue; }
-                let dist = weighted_spacetime_distance(mv, &global_classifier.centroids[d], &gw);
-                if dist < best_dist { best_dist = dist; best_label = d as u8; }
-            }
-            (best_label, best_dist)
-        })),
-        ("interval-augmented", Box::new(|mv: &Multivector| {
-            let mut best_label = 0u8;
-            let mut best_dist = f32::MAX;
-            for d in 0..10 {
-                if global_classifier.counts[d] == 0 { continue; }
-                let dist = interval_augmented_score(mv, &global_classifier.centroids[d], &gw);
-                if dist < best_dist { best_dist = dist; best_label = d as u8; }
-            }
-            (best_label, best_dist)
-        })),
-    ];
-
+    // Wrapped in a block so closures that borrow global_classifier drop before
+    // we move it into the result struct.
     let mut ten_class_accuracy = 0.0f32;
     let mut per_digit_accuracy = [0.0f32; 10];
+    {
+        let classifiers: [(&str, Box<dyn Fn(&Multivector) -> (u8, f32)>); 3] = [
+            ("flat spacetime distance", Box::new(|mv: &Multivector| {
+                let mut best_label = 0u8;
+                let mut best_dist = f32::MAX;
+                for d in 0..10 {
+                    if global_classifier.counts[d] == 0 { continue; }
+                    let dist = spacetime_distance(mv, &global_classifier.centroids[d]);
+                    if dist < best_dist { best_dist = dist; best_label = d as u8; }
+                }
+                (best_label, best_dist)
+            })),
+            ("discriminability-weighted", Box::new(|mv: &Multivector| {
+                let mut best_label = 0u8;
+                let mut best_dist = f32::MAX;
+                for d in 0..10 {
+                    if global_classifier.counts[d] == 0 { continue; }
+                    let dist = weighted_spacetime_distance(mv, &global_classifier.centroids[d], &gw);
+                    if dist < best_dist { best_dist = dist; best_label = d as u8; }
+                }
+                (best_label, best_dist)
+            })),
+            ("interval-augmented", Box::new(|mv: &Multivector| {
+                let mut best_label = 0u8;
+                let mut best_dist = f32::MAX;
+                for d in 0..10 {
+                    if global_classifier.counts[d] == 0 { continue; }
+                    let dist = interval_augmented_score(mv, &global_classifier.centroids[d], &gw);
+                    if dist < best_dist { best_dist = dist; best_label = d as u8; }
+                }
+                (best_label, best_dist)
+            })),
+        ];
 
-    for (ci, (name, classify_fn)) in classifiers.iter().enumerate() {
-        vprint!("\n--- Full 10-class evaluation ({}) ---", name);
-        let mut full_correct = 0u32;
-        let mut per_digit_correct = [0u32; 10];
-        let mut per_digit_total = [0u32; 10];
-        for (img, &lbl) in test_images.iter().zip(test_labels.iter()) {
-            let mv = encoder.encode(img);
-            let (pred, _) = classify_fn(&mv);
-            per_digit_total[lbl as usize] += 1;
-            if pred == lbl {
-                full_correct += 1;
-                per_digit_correct[lbl as usize] += 1;
+        for (ci, (name, classify_fn)) in classifiers.iter().enumerate() {
+            vprint!("\n--- Full 10-class evaluation ({}) ---", name);
+            let mut full_correct = 0u32;
+            let mut per_digit_correct = [0u32; 10];
+            let mut per_digit_total = [0u32; 10];
+            for (img, &lbl) in test_images.iter().zip(test_labels.iter()) {
+                let mv = encoder.encode(img);
+                let (pred, _) = classify_fn(&mv);
+                per_digit_total[lbl as usize] += 1;
+                if pred == lbl {
+                    full_correct += 1;
+                    per_digit_correct[lbl as usize] += 1;
+                }
             }
-        }
-        let full_acc = full_correct as f32 / full_total.max(1) as f32;
-        vprint!("  Overall: {:.1}% ({}/{})", full_acc * 100.0, full_correct, full_total);
-        for d in 0..10 {
-            let acc = per_digit_correct[d] as f32 / per_digit_total[d].max(1) as f32;
-            vprint!("    digit {}: {:.1}% ({}/{})", d, acc * 100.0,
-                per_digit_correct[d], per_digit_total[d]);
-        }
-        // Capture the best classifier's results for the return struct
-        if ci == 0 || full_acc > ten_class_accuracy {
-            ten_class_accuracy = full_acc;
+            let full_acc = full_correct as f32 / full_total.max(1) as f32;
+            vprint!("  Overall: {:.1}% ({}/{})", full_acc * 100.0, full_correct, full_total);
             for d in 0..10 {
-                per_digit_accuracy[d] = per_digit_correct[d] as f32
-                    / per_digit_total[d].max(1) as f32;
+                let acc = per_digit_correct[d] as f32 / per_digit_total[d].max(1) as f32;
+                vprint!("    digit {}: {:.1}% ({}/{})", d, acc * 100.0,
+                    per_digit_correct[d], per_digit_total[d]);
+            }
+            if ci == 0 || full_acc > ten_class_accuracy {
+                ten_class_accuracy = full_acc;
+                for d in 0..10 {
+                    per_digit_accuracy[d] = per_digit_correct[d] as f32
+                        / per_digit_total[d].max(1) as f32;
+                }
             }
         }
-    }
+    } // classifiers dropped here, releasing borrow on global_classifier
 
     let avg_accuracy = task_accuracies.iter().sum::<f32>() / task_accuracies.len() as f32;
 
@@ -908,6 +912,8 @@ fn run_clifford_mnist_inner(
             incorrect_mean_interval: incorrect_mean,
             timelike_correct_pct: timelike_correct,
         },
+        encoder,
+        classifier: global_classifier,
     }
 }
 
@@ -928,6 +934,250 @@ fn evaluate_binary(
     }
     if total == 0 { return 0.0; }
     correct as f32 / total as f32
+}
+
+// ─── Clifford Image Decoder (Autoencoder) ────────────────────────────────
+//
+// Reconstructs 28×28 images from Cl(1,7) multivector encodings.
+// Single-pass closed-form least-squares: W = (Z^T Z + λI)^{-1} Z^T Y
+// No epochs, no learning rate, no gradient descent — just linear algebra.
+
+const DECODER_INPUT_DIM: usize = CL8_DIM + 1; // 256 multivector + 1 bias
+
+/// Linear decoder solved in closed form via normal equations.
+/// Maps 256D Cl(1,7) multivector → 784D pixel image.
+pub struct CliffordDecoder {
+    weights: Vec<[f32; IMAGE_DIM]>, // DECODER_INPUT_DIM rows × IMAGE_DIM cols
+}
+
+impl CliffordDecoder {
+    /// Fit the decoder in a single pass over the training data.
+    /// Solves W = (Z^T Z + λI)^{-1} Z^T Y where Z = [multivectors | 1].
+    pub fn fit(
+        encoder: &CliffordImageEncoder,
+        images: &[Vec<f32>],
+        lambda: f32,
+        verbosity: u8,
+    ) -> Self {
+        let d = DECODER_INPUT_DIM;
+        if verbosity >= 1 { println!("  Accumulating {} samples...", images.len()); }
+
+        // Accumulate Z^T Z (d×d) and Z^T Y (d×784) in a single pass
+        let mut ztz = vec![vec![0.0f64; d]; d];
+        let mut zty = vec![[0.0f64; IMAGE_DIM]; d];
+
+        for (idx, img) in images.iter().enumerate() {
+            let mv = encoder.encode(img);
+            let mut z = [0.0f64; DECODER_INPUT_DIM];
+            for i in 0..CL8_DIM { z[i] = mv.components[i] as f64; }
+            z[CL8_DIM] = 1.0; // bias
+
+            for i in 0..d {
+                if z[i].abs() < 1e-12 { continue; }
+                for j in i..d {
+                    ztz[i][j] += z[i] * z[j];
+                }
+                for j in 0..IMAGE_DIM {
+                    zty[i][j] += z[i] * img[j] as f64;
+                }
+            }
+
+            if verbosity >= 1 && (idx + 1) % 10000 == 0 {
+                println!("    {}/{}", idx + 1, images.len());
+            }
+        }
+
+        // Symmetrise Z^T Z
+        for i in 0..d {
+            for j in 0..i {
+                ztz[i][j] = ztz[j][i];
+            }
+        }
+
+        // Tikhonov regularisation
+        for i in 0..d {
+            ztz[i][i] += lambda as f64;
+        }
+
+        if verbosity >= 1 { println!("  Solving {}×{} normal equations...", d, d); }
+        let inv = invert_symmetric(ztz);
+
+        // W = inv(Z^T Z) * Z^T Y
+        let mut weights: Vec<[f32; IMAGE_DIM]> = vec![[0.0f32; IMAGE_DIM]; d];
+        for i in 0..d {
+            for j in 0..IMAGE_DIM {
+                let mut s = 0.0f64;
+                for k in 0..d {
+                    s += inv[i][k] * zty[k][j];
+                }
+                weights[i][j] = s as f32;
+            }
+        }
+        if verbosity >= 1 { println!("  Decoder solved."); }
+
+        CliffordDecoder { weights }
+    }
+
+    /// Reconstruct an image from its multivector encoding.
+    pub fn decode(&self, mv: &Multivector) -> Vec<f32> {
+        let mut pixels = vec![0.0f32; IMAGE_DIM];
+        for j in 0..IMAGE_DIM {
+            let mut s = self.weights[CL8_DIM][j]; // bias term
+            for i in 0..CL8_DIM {
+                s += self.weights[i][j] * mv.components[i];
+            }
+            pixels[j] = s.clamp(0.0, 1.0);
+        }
+        pixels
+    }
+}
+
+/// Invert a symmetric positive-definite matrix via Gauss-Jordan with
+/// partial pivoting.  Operates in f64 for numerical stability.
+fn invert_symmetric(m: Vec<Vec<f64>>) -> Vec<Vec<f64>> {
+    let n = m.len();
+    // Augmented [M | I]
+    let mut a: Vec<Vec<f64>> = m.into_iter().map(|row| {
+        let mut aug = Vec::with_capacity(2 * n);
+        aug.extend_from_slice(&row);
+        aug.resize(2 * n, 0.0);
+        aug
+    }).collect();
+    for i in 0..n { a[i][n + i] = 1.0; }
+
+    for col in 0..n {
+        // Partial pivot
+        let mut best = a[col][col].abs();
+        let mut pivot_row = col;
+        for row in (col + 1)..n {
+            let v = a[row][col].abs();
+            if v > best { best = v; pivot_row = row; }
+        }
+        a.swap(col, pivot_row);
+
+        let pivot = a[col][col];
+        if pivot.abs() < 1e-30 { continue; }
+        let inv_pivot = 1.0 / pivot;
+        for j in 0..(2 * n) { a[col][j] *= inv_pivot; }
+
+        for row in 0..n {
+            if row == col { continue; }
+            let factor = a[row][col];
+            if factor.abs() < 1e-30 { continue; }
+            for j in 0..(2 * n) {
+                a[row][j] -= factor * a[col][j];
+            }
+        }
+    }
+
+    a.into_iter().map(|row| row[n..].to_vec()).collect()
+}
+
+/// SSIM-like structural similarity (simplified single-scale).
+fn compute_ssim(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len() as f32;
+    let mu_a: f32 = a.iter().sum::<f32>() / n;
+    let mu_b: f32 = b.iter().sum::<f32>() / n;
+    let var_a: f32 = a.iter().map(|x| (x - mu_a) * (x - mu_a)).sum::<f32>() / n;
+    let var_b: f32 = b.iter().map(|x| (x - mu_b) * (x - mu_b)).sum::<f32>() / n;
+    let cov: f32 = a.iter().zip(b.iter())
+        .map(|(x, y)| (x - mu_a) * (y - mu_b)).sum::<f32>() / n;
+    let c1 = 0.0001f32;
+    let c2 = 0.0009f32;
+    let num = (2.0 * mu_a * mu_b + c1) * (2.0 * cov + c2);
+    let den = (mu_a * mu_a + mu_b * mu_b + c1) * (var_a + var_b + c2);
+    (num / den).clamp(0.0, 1.0)
+}
+
+/// Result of the autoencoder pipeline.
+pub struct AutoencoderResult {
+    pub final_mse: f32,
+    pub final_ssim: f32,
+    pub classifier_accuracy: f32,
+    pub sample_reconstructions: Vec<(u8, Vec<f32>, Vec<f32>)>,
+}
+
+/// Run the Clifford autoencoder: encode images → solve decoder → evaluate.
+/// Single forward pass through data, closed-form solve, no epochs.
+pub fn run_clifford_autoencoder(
+    encoder: &CliffordImageEncoder,
+    train_images: &[Vec<f32>],
+    train_labels: &[u8],
+    test_images: &[Vec<f32>],
+    test_labels: &[u8],
+    train_limit: Option<usize>,
+    classifier: &CliffordClassifier,
+    verbosity: u8,
+) -> AutoencoderResult {
+    macro_rules! progress {
+        ($($arg:tt)*) => { if verbosity >= 1 { println!($($arg)*); } }
+    }
+
+    let train_subset: Vec<_> = if let Some(lim) = train_limit {
+        train_images.iter().take(lim).cloned().collect()
+    } else {
+        train_images.to_vec()
+    };
+
+    // Single-pass solve
+    progress!("--- Fitting decoder (single-pass least squares) ---");
+    let decoder = CliffordDecoder::fit(encoder, &train_subset, 1.0, verbosity);
+
+    // Evaluate on test set
+    progress!("\n--- Evaluating reconstruction ---");
+    let eval_n = test_images.len().min(2000);
+    let mut total_mse = 0.0f32;
+    let mut total_ssim = 0.0f32;
+    let mut recon_correct = 0u32;
+    let mut samples = Vec::new();
+    let mut seen = [false; 10];
+
+    for (img, &lbl) in test_images.iter().zip(test_labels.iter()).take(eval_n) {
+        let mv = encoder.encode(img);
+        let recon = decoder.decode(&mv);
+
+        let mse: f32 = recon.iter().zip(img.iter())
+            .map(|(r, t)| (r - t) * (r - t)).sum::<f32>() / IMAGE_DIM as f32;
+        total_mse += mse;
+        total_ssim += compute_ssim(&recon, img);
+
+        let recon_mv = encoder.encode(&recon);
+        let (pred, _) = classifier.classify(&recon_mv);
+        if pred == lbl { recon_correct += 1; }
+
+        if !seen[lbl as usize] {
+            seen[lbl as usize] = true;
+            samples.push((lbl, img.clone(), recon));
+        }
+    }
+
+    let n = eval_n as f32;
+    let final_mse = total_mse / n;
+    let final_ssim = total_ssim / n;
+    let classifier_acc = recon_correct as f32 / n;
+
+    progress!("  Pixel MSE:               {:.5}", final_mse);
+    progress!("  SSIM:                    {:.3}", final_ssim);
+    progress!("  Classifier on generated: {:.1}%", classifier_acc * 100.0);
+
+    AutoencoderResult {
+        final_mse,
+        final_ssim,
+        classifier_accuracy: classifier_acc,
+        sample_reconstructions: samples,
+    }
+}
+
+/// Render a 28×28 image as ASCII art for terminal display.
+pub fn render_ascii(pixels: &[f32], width: usize) -> String {
+    let chars = [' ', '·', '░', '▒', '▓', '█'];
+    let mut out = String::new();
+    for (i, &p) in pixels.iter().enumerate() {
+        let idx = ((p.clamp(0.0, 1.0)) * (chars.len() - 1) as f32).round() as usize;
+        out.push(chars[idx.min(chars.len() - 1)]);
+        if (i + 1) % width == 0 { out.push('\n'); }
+    }
+    out
 }
 
 #[cfg(test)]

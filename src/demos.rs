@@ -63,6 +63,8 @@ struct Args {
     #[arg(long)]
     mnist_v2: bool,
     #[arg(long)]
+    mnist_v2_gen: bool,
+    #[arg(long)]
     mnist_retention: bool,
     #[arg(long, default_value_t = true)]
     progress: bool,
@@ -251,6 +253,8 @@ fn main() {
         demo_split_mnist(args.progress, args.mnist_train_limit, args.mnist_max_epochs, args.mnist_batch_size);
     } else if args.mnist_v2 {
         demo_clifford_mnist(args.mnist_train_limit, args.mnist_max_epochs);
+    } else if args.mnist_v2_gen {
+        demo_clifford_mnist_gen(args.mnist_train_limit, args.mnist_max_epochs);
     } else if args.mnist_retention {
         demo_mnist_retention();
     } else if args.acceptance_report {
@@ -1462,7 +1466,7 @@ fn demo_clifford_mnist(train_limit: Option<usize>, max_epochs_override: Option<u
 
     let ci = result.interval_stats.correct_mean_interval;
     let ii = result.interval_stats.incorrect_mean_interval;
-    let ratio = if ci.abs() > 1e-8 { ii / ci } else { 0.0 };
+    let _ratio = if ci.abs() > 1e-8 { ii / ci } else { 0.0 };
 
     println!();
     println!("{}", sep_top);
@@ -1510,6 +1514,90 @@ fn demo_clifford_mnist(train_limit: Option<usize>, max_epochs_override: Option<u
     // }
     println!("{}", sep_bot);
     println!();
+}
+
+// =============================================================================
+// Demo: Clifford MNIST Autoencoder — Image Generation from Cl(1,7) encodings
+// =============================================================================
+
+fn demo_clifford_mnist_gen(train_limit: Option<usize>, max_epochs_override: Option<u32>) {
+    use growformer::mnist::load_mnist_normalized;
+    use growformer::clifford_mnist::{
+        run_clifford_mnist_progress, run_clifford_autoencoder, render_ascii,
+    };
+
+    let data_path = std::env::var("MNIST_ROOT").unwrap_or_else(|_| "data".to_string());
+    let images_path = std::path::Path::new(&data_path).join("train-images-idx3-ubyte");
+    let images_gz = std::path::Path::new(&data_path).join("train-images-idx3-ubyte.gz");
+    if !images_path.exists() && !images_gz.exists() {
+        eprintln!("MNIST data not found at {:?}.", data_path);
+        eprintln!("Run: bash scripts/download_mnist.sh  or set MNIST_ROOT.");
+        std::process::exit(1);
+    }
+
+    println!("═══════════════════════════════════════════════════════════");
+    println!("  Growformer Vision: Growformer Autoencoder");
+    println!("  Encode → Cl(1,7) multivector → Decode → Image");
+    println!("═══════════════════════════════════════════════════════════\n");
+
+    println!("Loading MNIST from {:?}...", data_path);
+    let (train_imgs, train_lbls, test_imgs, test_lbls) = load_mnist_normalized(&data_path);
+    println!("  Train: {} images, Test: {} images\n", train_imgs.len(), test_imgs.len());
+
+    // Step 1: Train the encoder via classification (or reuse if already trained)
+    let max_epochs = max_epochs_override.unwrap_or(30);
+    println!("--- Step 1: Training encoder via classification ---\n");
+    let start = Instant::now();
+    let class_result = run_clifford_mnist_progress(
+        &train_imgs, &train_lbls,
+        &test_imgs, &test_lbls,
+        train_limit, max_epochs,
+    );
+    let class_elapsed = start.elapsed();
+    println!("\n  Classification: {:.1}% avg binary, {:.1}% 10-class ({:.1}s)\n",
+        class_result.avg_accuracy * 100.0,
+        class_result.ten_class_accuracy * 100.0,
+        class_elapsed.as_secs_f64());
+
+    let encoder = class_result.encoder;
+    let classifier = class_result.classifier;
+
+    // Step 2: Solve decoder (single-pass least squares)
+    println!("--- Step 2: Decoder (single-pass solve) ---\n");
+    let ae_start = Instant::now();
+    let ae_result = run_clifford_autoencoder(
+        &encoder,
+        &train_imgs, &train_lbls,
+        &test_imgs, &test_lbls,
+        train_limit,
+        &classifier,
+        1,
+    );
+    let ae_elapsed = ae_start.elapsed();
+
+    println!("\n═══════════════════════════════════════════════════════════");
+    println!("  AUTOENCODER RESULTS");
+    println!("═══════════════════════════════════════════════════════════");
+    println!("  Pixel MSE:               {:.5}", ae_result.final_mse);
+    println!("  SSIM:                    {:.3}", ae_result.final_ssim);
+    println!("  Classifier on generated: {:.1}%", ae_result.classifier_accuracy * 100.0);
+    println!("  Solve time:              {:.1}s", ae_elapsed.as_secs_f64());
+    println!("═══════════════════════════════════════════════════════════\n");
+
+    // Display sample reconstructions as ASCII
+    println!("--- Sample Reconstructions (original → reconstructed) ---\n");
+    for (label, original, reconstructed) in &ae_result.sample_reconstructions {
+        println!("  Digit {}:", label);
+        let orig_ascii = render_ascii(original, 28);
+        let recon_ascii = render_ascii(reconstructed, 28);
+        let orig_lines: Vec<&str> = orig_ascii.lines().collect();
+        let recon_lines: Vec<&str> = recon_ascii.lines().collect();
+        println!("  {:>28}    {:>28}", "Original", "Reconstructed");
+        for i in 0..orig_lines.len().min(recon_lines.len()) {
+            println!("  {}    {}", orig_lines[i], recon_lines[i]);
+        }
+        println!();
+    }
 }
 
 // =============================================================================
