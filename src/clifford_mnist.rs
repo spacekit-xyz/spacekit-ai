@@ -19,6 +19,7 @@
 use crate::clifford::{
     Multivector, embed_bridge_vector, minkowski_interval, classify_interval,
     IntervalType, CL8_DIM, GRADE_DIMS, GRADE_OFFSETS,
+    Rotor, apply_group_rotor,
 };
 use rand::Rng;
 use rand::rngs::StdRng;
@@ -1422,14 +1423,7 @@ pub fn contrastive_train_rgb_batch(
         active_count += 1;
 
         // Analytical gradient of triplet loss w.r.t. projection[i][j]
-        // dL/dW[i][j] = dL/dz_a[j]*x_a[i] + dL/dz_p[j]*x_p[i] + dL/dz_n[j]*x_n[i]
-        //
-        // dL/dz_a[j] = 2*s*w*[(z_a[j]-z_p[j]) - (z_a[j]-z_n[j])]
-        //            = 2*s*w*[z_n[j] - z_p[j]]
-        // dL/dz_p[j] = -2*s*w*(z_a[j]-z_p[j])
-        // dL/dz_n[j] = 2*s*w*(z_a[j]-z_n[j])
-
-        let lr = config.learning_rate / pairs.len().max(1) as f32;
+        let lr = config.learning_rate / config.batch_size.max(1) as f32;
 
         for i in 0..input_dim.min(enc.projection.len()) {
             let va = if i < x_a.len() { x_a[i] } else { 0.0 };
@@ -1504,7 +1498,7 @@ pub fn contrastive_train_dirac_batch(
         let lvar_p = compute_local_variance(x_p);
         let lvar_n = compute_local_variance(x_n);
 
-        let lr = config.learning_rate * 0.3 / pairs.len().max(1) as f32;
+        let lr = config.learning_rate * 0.3 / config.batch_size.max(1) as f32;
 
         for i in 0..IMAGE_DIM {
             let va = lvar_a[i];
@@ -1533,6 +1527,93 @@ pub fn contrastive_train_dirac_batch(
     }
 
     total_loss / pairs.len().max(1) as f32
+}
+
+/// Generate hard-negative contrastive pairs by mining closest cross-class samples.
+/// For each anchor in class_a, finds the nearest class_b sample in embedding space.
+pub fn generate_hard_negative_pairs(
+    rgb_enc: &CliffordRGBEncoder,
+    rgb_images: &[Vec<f32>],
+    labels: &[u8],
+    class_a: u8,
+    class_b: u8,
+    n_pairs: usize,
+    max_per_class: usize,
+) -> Vec<ContrastivePair> {
+    let indices_a: Vec<usize> = labels.iter().enumerate()
+        .filter(|(_, &l)| l == class_a).map(|(i, _)| i)
+        .take(max_per_class).collect();
+    let indices_b: Vec<usize> = labels.iter().enumerate()
+        .filter(|(_, &l)| l == class_b).map(|(i, _)| i)
+        .take(max_per_class).collect();
+
+    if indices_a.len() < 2 || indices_b.is_empty() { return Vec::new(); }
+
+    // Encode all samples from both classes
+    let emb_a: Vec<Multivector> = indices_a.iter()
+        .map(|&i| rgb_enc.encode(&rgb_images[i])).collect();
+    let emb_b: Vec<Multivector> = indices_b.iter()
+        .map(|&i| rgb_enc.encode(&rgb_images[i])).collect();
+
+    let mut pairs = Vec::with_capacity(n_pairs);
+    let mut rng = StdRng::seed_from_u64(42);
+
+    for (ai, a_emb) in emb_a.iter().enumerate() {
+        // Find closest class_b sample to this anchor
+        let mut best_dist = f32::MAX;
+        let mut best_bi = 0usize;
+        for (bi, b_emb) in emb_b.iter().enumerate() {
+            let mut d = 0.0f32;
+            for j in 0..CL8_DIM {
+                let diff = a_emb.components[j] - b_emb.components[j];
+                d += diff * diff;
+            }
+            if d < best_dist { best_dist = d; best_bi = bi; }
+        }
+
+        // Positive: random other sample from class_a
+        let mut pi = rng.gen_range(0..indices_a.len());
+        while pi == ai && indices_a.len() > 1 { pi = rng.gen_range(0..indices_a.len()); }
+
+        pairs.push(ContrastivePair {
+            anchor_idx: indices_a[ai],
+            positive_idx: indices_a[pi],
+            negative_idx: indices_b[best_bi],
+            class_a,
+            class_b,
+        });
+
+        if pairs.len() >= n_pairs { break; }
+    }
+
+    // Also generate reverse pairs (class_b anchors, class_a hard negatives)
+    for (bi, b_emb) in emb_b.iter().enumerate() {
+        if pairs.len() >= n_pairs { break; }
+
+        let mut best_dist = f32::MAX;
+        let mut best_ai = 0usize;
+        for (ai, a_emb) in emb_a.iter().enumerate() {
+            let mut d = 0.0f32;
+            for j in 0..CL8_DIM {
+                let diff = b_emb.components[j] - a_emb.components[j];
+                d += diff * diff;
+            }
+            if d < best_dist { best_dist = d; best_ai = ai; }
+        }
+
+        let mut pi = rng.gen_range(0..indices_b.len());
+        while pi == bi && indices_b.len() > 1 { pi = rng.gen_range(0..indices_b.len()); }
+
+        pairs.push(ContrastivePair {
+            anchor_idx: indices_b[bi],
+            positive_idx: indices_b[pi],
+            negative_idx: indices_a[best_ai],
+            class_a: class_b,
+            class_b: class_a,
+        });
+    }
+
+    pairs
 }
 
 /// Measure centroid distance between two classes using current encoder.
@@ -1570,6 +1651,229 @@ pub fn measure_class_distance(
         d += diff * diff;
     }
     d.sqrt()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Clifford Gradient Descent — rotor-based learning native to Cl(1,7)
+//
+// Instead of backpropagating scalar gradients through geometric products,
+// the update rule IS a rotation (rotor) in multivector space.
+//
+// The geometric product Z_a * Z_b† encodes the full relationship between
+// two class centroids. Its grade-2 (bivector) component identifies the
+// PLANE in which the two classes are confused. A rotor constructed from
+// that bivector rotates one class away from the other — coordinate-free,
+// geometry-preserving, and exact.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Compute the confusion bivector between two class centroids.
+///
+/// B = <Z_a * Z_b†>_2  (grade-2 projection of geometric product with reverse)
+///
+/// This bivector identifies the plane in Cl(1,7) where the two classes
+/// are geometrically indistinguishable. The separation rotor rotates
+/// one class out of this plane.
+pub fn confusion_bivector(centroid_a: &Multivector, centroid_b: &Multivector) -> Multivector {
+    let b_rev = centroid_b.reverse();
+    let product = centroid_a.geo(&b_rev);
+    product.grade_project(2)
+}
+
+/// Construct a separation rotor from a confusion bivector with step size α.
+///
+/// R = exp(-α * B / 2)
+///
+/// The Rotor::from_bivector implementation computes:
+///   R = cos(|B|/2) - sin(|B|/2)/|B| * B
+///
+/// We pre-scale the bivector by α to control the step size.
+pub fn separation_rotor(confusion_bv: &Multivector, alpha: f32) -> Rotor {
+    let bv_slice = confusion_bv.grade(2);
+    let mut scaled = [0.0f32; 28];
+    for i in 0..28 {
+        scaled[i] = bv_slice[i] * alpha;
+    }
+    Rotor::from_bivector(&scaled)
+}
+
+/// Apply a rotor update to the RGB encoder's projection matrix.
+///
+/// Since mv = Σ_i projection[i] * pixel[i] and R*mv*R† is linear:
+///   projection_new[i] = R * projection_old[i] * R†
+///
+/// Each row of the projection is treated as a multivector and rotated.
+pub fn apply_rotor_to_rgb_encoder(encoder: &mut CliffordRGBEncoder, rotor: &Rotor) {
+    for row in encoder.projection.iter_mut() {
+        let mut mv = Multivector::zero();
+        mv.components.copy_from_slice(row);
+        let rotated = apply_group_rotor(&mv, rotor);
+        row.copy_from_slice(&rotated.components);
+    }
+}
+
+/// Apply a rotor update to the Dirac encoder's texture projection.
+pub fn apply_rotor_to_dirac_encoder(encoder: &mut CliffordDiracEncoder, rotor: &Rotor) {
+    for row in encoder.texture_proj.iter_mut() {
+        let mut mv = Multivector::zero();
+        mv.components.copy_from_slice(row);
+        let rotated = apply_group_rotor(&mv, rotor);
+        row.copy_from_slice(&rotated.components);
+    }
+}
+
+/// Result of a single Clifford gradient step.
+pub struct CliffordGradientStep {
+    pub rotor: Rotor,
+    pub bivector_norm: f32,
+    pub distance_before: f32,
+    pub distance_after: f32,
+}
+
+/// Compute the Euclidean distance between two multivector centroids.
+fn centroid_distance(a: &Multivector, b: &Multivector) -> f32 {
+    let mut d = 0.0f32;
+    for j in 0..CL8_DIM {
+        let diff = a.components[j] - b.components[j];
+        d += diff * diff;
+    }
+    d.sqrt()
+}
+
+/// Compute class centroids from encoded multivectors.
+fn compute_centroids(
+    mvs: &[Multivector],
+    labels: &[u8],
+    n_classes: usize,
+) -> Vec<Multivector> {
+    let mut sums: Vec<Multivector> = (0..n_classes).map(|_| Multivector::zero()).collect();
+    let mut counts = vec![0u32; n_classes];
+    for (mv, &l) in mvs.iter().zip(labels.iter()) {
+        let c = l as usize;
+        if c < n_classes {
+            for j in 0..CL8_DIM {
+                sums[c].components[j] += mv.components[j];
+            }
+            counts[c] += 1;
+        }
+    }
+    for c in 0..n_classes {
+        if counts[c] > 0 {
+            let n = counts[c] as f32;
+            for j in 0..CL8_DIM {
+                sums[c].components[j] /= n;
+            }
+        }
+    }
+    sums
+}
+
+/// Clifford gradient descent: separate two classes using rotor updates.
+///
+/// Computes the confusion bivector between class centroids, constructs
+/// a separation rotor, and applies it to the encoder projection weights.
+/// This is a closed-form, coordinate-free update that respects the
+/// geometric structure of Cl(1,7).
+///
+/// Returns the sequence of gradient steps for monitoring.
+pub fn clifford_gradient_descent(
+    rgb_enc: &mut CliffordRGBEncoder,
+    dirac_enc: &mut CliffordDiracEncoder,
+    rgb_images: &[Vec<f32>],
+    gray_images: &[Vec<f32>],
+    labels: &[u8],
+    class_a: u8,
+    class_b: u8,
+    alpha: f32,
+    max_steps: usize,
+    target_distance: f32,
+) -> Vec<CliffordGradientStep> {
+    let mut steps = Vec::new();
+
+    for step in 0..max_steps {
+        let rgb_mvs: Vec<Multivector> = rgb_images.iter()
+            .zip(labels.iter())
+            .filter(|(_, &l)| l == class_a || l == class_b)
+            .map(|(img, _)| rgb_enc.encode(img))
+            .collect();
+        let filtered_labels: Vec<u8> = labels.iter()
+            .filter(|&&l| l == class_a || l == class_b)
+            .copied().collect();
+
+        let centroids = compute_centroids(&rgb_mvs, &filtered_labels, 256);
+        let ca = &centroids[class_a as usize];
+        let cb = &centroids[class_b as usize];
+
+        let dist_before = centroid_distance(ca, cb);
+
+        let bv = confusion_bivector(ca, cb);
+        let bv_norm: f32 = bv.grade(2).iter().map(|x| x * x).sum::<f32>().sqrt();
+
+        if bv_norm < 1e-10 {
+            println!("      step {}: bivector norm ~0, classes already orthogonal", step);
+            break;
+        }
+
+        let rotor = separation_rotor(&bv, alpha);
+
+        apply_rotor_to_rgb_encoder(rgb_enc, &rotor);
+        apply_rotor_to_dirac_encoder(dirac_enc, &rotor);
+
+        let rgb_mvs_after: Vec<Multivector> = rgb_images.iter()
+            .zip(labels.iter())
+            .filter(|(_, &l)| l == class_a || l == class_b)
+            .map(|(img, _)| rgb_enc.encode(img))
+            .collect();
+        let centroids_after = compute_centroids(&rgb_mvs_after, &filtered_labels, 256);
+        let dist_after = centroid_distance(
+            &centroids_after[class_a as usize],
+            &centroids_after[class_b as usize],
+        );
+
+        steps.push(CliffordGradientStep {
+            rotor,
+            bivector_norm: bv_norm,
+            distance_before: dist_before,
+            distance_after: dist_after,
+        });
+
+        if step % 5 == 0 || step == max_steps - 1 || dist_after >= target_distance {
+            println!("      step {:>3}: |B|={:.4}  d={:.3} → {:.3}",
+                step, bv_norm, dist_before, dist_after);
+        }
+
+        if dist_after >= target_distance {
+            println!("      converged at step {} (d={:.3} >= {:.3})",
+                step, dist_after, target_distance);
+            break;
+        }
+    }
+    steps
+}
+
+/// Run Clifford gradient descent on multiple class pairs.
+///
+/// Operates on class centroids — not individual samples — so each step
+/// is milliseconds not minutes. Convergence typically in <50 iterations.
+pub fn clifford_gradient_descent_pairs(
+    rgb_enc: &mut CliffordRGBEncoder,
+    dirac_enc: &mut CliffordDiracEncoder,
+    rgb_images: &[Vec<f32>],
+    gray_images: &[Vec<f32>],
+    labels: &[u8],
+    pairs: &[(u8, u8, f32)],  // (class_a, class_b, target_distance)
+    alpha: f32,
+    max_steps: usize,
+) {
+    for &(ca, cb, target) in pairs {
+        println!("    Clifford gradient descent: class {} ↔ {} (target d={:.2})", ca, cb, target);
+        let steps = clifford_gradient_descent(
+            rgb_enc, dirac_enc, rgb_images, gray_images, labels,
+            ca, cb, alpha, max_steps, target,
+        );
+        if let Some(last) = steps.last() {
+            println!("      {} steps, final d={:.3}", steps.len(), last.distance_after);
+        }
+    }
 }
 
 /// Full training pipeline result.

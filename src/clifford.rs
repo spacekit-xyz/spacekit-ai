@@ -336,6 +336,15 @@ impl Multivector {
         result
     }
 
+    /// Subtract two multivectors.
+    pub fn sub(&self, other: &Multivector) -> Multivector {
+        let mut result = Multivector::zero();
+        for i in 0..CL8_DIM {
+            result.components[i] = self.components[i] - other.components[i];
+        }
+        result
+    }
+
     /// Scale by a scalar.
     pub fn scale(&self, s: f32) -> Multivector {
         let mut result = self.clone();
