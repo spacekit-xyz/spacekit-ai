@@ -1514,6 +1514,20 @@ fn content_bbox(grid: &Grid, bg: u8) -> Option<(usize, usize, usize, usize)> {
     Some((min_r, min_c, max_r - min_r + 1, max_c - min_c + 1))
 }
 
+/// Unique-subgrid extraction: output is the only subgrid of its dimensions
+/// that exists exactly once in the input. Validated on training, applied to test.
+fn solve_subgrid_unique(task: &ArcTask) -> Option<()> {
+    if task.train.is_empty() { return None; }
+    for ex in &task.train {
+        if ex.output.height > ex.input.height || ex.output.width > ex.input.width {
+            return None;
+        }
+        let matches = find_matching_subgrids(&ex.input, &ex.output);
+        if matches.len() != 1 { return None; }
+    }
+    Some(())
+}
+
 /// Extract the bounding box of the MINORITY color (non-background, non-dominant).
 fn solve_subgrid_minority_bbox(task: &ArcTask) -> Option<u8> {
     if task.train.is_empty() { return None; }
@@ -1603,6 +1617,437 @@ fn tile_grid(grid: &Grid, tile_r: usize, tile_c: usize) -> Grid {
         .map(|r| (0..ow).map(|c| grid.cells[r % ih][c % iw]).collect())
         .collect();
     Grid { cells, height: oh, width: ow }
+}
+
+// ─── Strategy S: Canvas embedding (diff-dim, output contains input) ────────
+//
+// Input is placed at a consistent offset inside a larger output, with the
+// remaining cells filled by a fixed background color.
+
+fn solve_canvas(task: &ArcTask) -> Option<(isize, isize, u8)> {
+    if task.train.is_empty() { return None; }
+
+    let mut consistent: Option<(isize, isize, u8)> = None;
+
+    for ex in &task.train {
+        let ih = ex.input.height;
+        let iw = ex.input.width;
+        let oh = ex.output.height;
+        let ow = ex.output.width;
+        if oh < ih || ow < iw { return None; }
+
+        let mut found = None;
+        'search: for r0 in 0..=(oh - ih) {
+            for c0 in 0..=(ow - iw) {
+                let mut ok = true;
+                for r in 0..ih {
+                    for c in 0..iw {
+                        if ex.output.cells[r0 + r][c0 + c] != ex.input.cells[r][c] {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if !ok { break; }
+                }
+                if ok {
+                    found = Some((r0 as isize, c0 as isize));
+                    break 'search;
+                }
+            }
+        }
+        let (r0, c0) = found?;
+
+        let mut bg_color = None;
+        for r in 0..oh {
+            for c in 0..ow {
+                let in_region = r >= r0 as usize && r < r0 as usize + ih
+                    && c >= c0 as usize && c < c0 as usize + iw;
+                if !in_region {
+                    let v = ex.output.cells[r][c];
+                    match bg_color {
+                        None => bg_color = Some(v),
+                        Some(prev) if prev != v => return None,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let bg = bg_color.unwrap_or(0);
+
+        match consistent {
+            None => consistent = Some((r0, c0, bg)),
+            Some((pr, pc, pb)) if pr != r0 || pc != c0 || pb != bg => return None,
+            _ => {}
+        }
+    }
+    consistent
+}
+
+fn apply_canvas(grid: &Grid, r0: isize, c0: isize, oh: usize, ow: usize, bg: u8) -> Grid {
+    let mut cells = vec![vec![bg; ow]; oh];
+    for r in 0..grid.height {
+        for c in 0..grid.width {
+            let tr = r as isize + r0;
+            let tc = c as isize + c0;
+            if tr >= 0 && tr < oh as isize && tc >= 0 && tc < ow as isize {
+                cells[tr as usize][tc as usize] = grid.cells[r][c];
+            }
+        }
+    }
+    Grid { cells, height: oh, width: ow }
+}
+
+// ─── Strategy T: Downscale (diff-dim, input shrinks by integer factor) ─────
+//
+// Each NxN block of the input maps to one output cell. Try different
+// aggregation methods: majority vote, non-background winner.
+
+fn solve_downscale(task: &ArcTask) -> Option<(usize, usize, u8)> {
+    if task.train.is_empty() { return None; }
+
+    for method in 0u8..3 {
+        let mut consistent_factor: Option<(usize, usize)> = None;
+        let mut all_ok = true;
+
+        for ex in &task.train {
+            let ih = ex.input.height;
+            let iw = ex.input.width;
+            let oh = ex.output.height;
+            let ow = ex.output.width;
+
+            if oh > ih || ow > iw { all_ok = false; break; }
+            if ih % oh != 0 || iw % ow != 0 { all_ok = false; break; }
+
+            let sr = ih / oh;
+            let sc = iw / ow;
+            if sr < 2 || sc < 2 { all_ok = false; break; }
+
+            match consistent_factor {
+                None => consistent_factor = Some((sr, sc)),
+                Some((pr, pc)) if pr != sr || pc != sc => { all_ok = false; break; }
+                _ => {}
+            }
+
+            let pred = downscale_grid(&ex.input, sr, sc, method);
+            if !grid_exact_match(&pred, &ex.output) { all_ok = false; break; }
+        }
+
+        if all_ok {
+            let (sr, sc) = consistent_factor?;
+            return Some((sr, sc, method));
+        }
+    }
+    None
+}
+
+fn downscale_grid(grid: &Grid, sr: usize, sc: usize, method: u8) -> Grid {
+    let oh = grid.height / sr;
+    let ow = grid.width / sc;
+    let bg = most_common_color(grid);
+    let mut cells = vec![vec![0u8; ow]; oh];
+
+    for r in 0..oh {
+        for c in 0..ow {
+            let mut counts = [0u32; NUM_COLORS];
+            for dr in 0..sr {
+                for dc in 0..sc {
+                    counts[grid.cells[r * sr + dr][c * sc + dc] as usize] += 1;
+                }
+            }
+            cells[r][c] = match method {
+                0 => {
+                    // Majority vote
+                    counts.iter().enumerate()
+                        .max_by_key(|&(_, &cnt)| cnt)
+                        .map(|(i, _)| i as u8).unwrap_or(0)
+                }
+                1 => {
+                    // Non-background winner (most common non-bg, or bg if all bg)
+                    let non_bg: Vec<(usize, u32)> = counts.iter().enumerate()
+                        .filter(|&(i, &cnt)| cnt > 0 && i != bg as usize)
+                        .map(|(i, &cnt)| (i, cnt))
+                        .collect();
+                    if non_bg.is_empty() { bg }
+                    else { non_bg.iter().max_by_key(|&&(_, cnt)| cnt).unwrap().0 as u8 }
+                }
+                _ => {
+                    // Minority non-bg (least common non-bg, or bg if all bg)
+                    let non_bg: Vec<(usize, u32)> = counts.iter().enumerate()
+                        .filter(|&(i, &cnt)| cnt > 0 && i != bg as usize)
+                        .map(|(i, &cnt)| (i, cnt))
+                        .collect();
+                    if non_bg.is_empty() { bg }
+                    else { non_bg.iter().min_by_key(|&&(_, cnt)| cnt).unwrap().0 as u8 }
+                }
+            };
+        }
+    }
+    Grid { cells, height: oh, width: ow }
+}
+
+// ─── Strategy U: Mirror tiling (diff-dim) ──────────────────────────────────
+//
+// Output is the input reflected along one or both axes:
+//   mode 0: 2x2 quadrant mirror (TL=inp, TR=hflip, BL=vflip, BR=rot180)
+//   mode 1: horizontal concat (L=inp, R=hflip)
+//   mode 2: vertical concat (T=inp, B=vflip)
+
+fn solve_mirror_tile(task: &ArcTask) -> Option<u8> {
+    if task.train.is_empty() { return None; }
+
+    for mode in 0u8..3 {
+        let all_ok = task.train.iter().all(|ex| {
+            let pred = apply_mirror_tile(&ex.input, mode);
+            match pred {
+                Some(ref p) => grid_exact_match(p, &ex.output),
+                None => false,
+            }
+        });
+        if all_ok { return Some(mode); }
+    }
+    None
+}
+
+fn apply_mirror_tile(grid: &Grid, mode: u8) -> Option<Grid> {
+    let ih = grid.height;
+    let iw = grid.width;
+
+    match mode {
+        0 => {
+            let oh = ih * 2;
+            let ow = iw * 2;
+            let cells: Vec<Vec<u8>> = (0..oh).map(|r| {
+                (0..ow).map(|c| {
+                    let sr = if r < ih { r } else { oh - 1 - r };
+                    let sc = if c < iw { c } else { ow - 1 - c };
+                    grid.cells[sr][sc]
+                }).collect()
+            }).collect();
+            Some(Grid { cells, height: oh, width: ow })
+        }
+        1 => {
+            let ow = iw * 2;
+            let cells: Vec<Vec<u8>> = (0..ih).map(|r| {
+                (0..ow).map(|c| {
+                    if c < iw { grid.cells[r][c] }
+                    else { grid.cells[r][ow - 1 - c] }
+                }).collect()
+            }).collect();
+            Some(Grid { cells, height: ih, width: ow })
+        }
+        2 => {
+            let oh = ih * 2;
+            let cells: Vec<Vec<u8>> = (0..oh).map(|r| {
+                (0..iw).map(|c| {
+                    if r < ih { grid.cells[r][c] }
+                    else { grid.cells[oh - 1 - r][c] }
+                }).collect()
+            }).collect();
+            Some(Grid { cells, height: oh, width: iw })
+        }
+        _ => None,
+    }
+}
+
+// ─── Strategy P: Grid scaling (diff-dim, output = input × factor) ──────────
+//
+// Each input cell becomes a factor_r × factor_c block of the same color.
+// Tiling repeats the whole grid; scaling magnifies each cell.
+
+fn solve_scale(task: &ArcTask) -> Option<(usize, usize)> {
+    if task.train.is_empty() { return None; }
+
+    let mut scale: Option<(usize, usize)> = None;
+
+    for ex in &task.train {
+        let ih = ex.input.height;
+        let iw = ex.input.width;
+        let oh = ex.output.height;
+        let ow = ex.output.width;
+
+        if oh < ih || ow < iw { return None; }
+        if oh % ih != 0 || ow % iw != 0 { return None; }
+
+        let sr = oh / ih;
+        let sc = ow / iw;
+        if sr < 2 && sc < 2 { return None; }
+
+        let pred = scale_grid(&ex.input, sr, sc);
+        if !grid_exact_match(&pred, &ex.output) { return None; }
+
+        match scale {
+            None => scale = Some((sr, sc)),
+            Some((pr, pc)) if pr != sr || pc != sc => return None,
+            _ => {}
+        }
+    }
+    scale
+}
+
+fn scale_grid(grid: &Grid, sr: usize, sc: usize) -> Grid {
+    let oh = grid.height * sr;
+    let ow = grid.width * sc;
+    let cells: Vec<Vec<u8>> = (0..oh)
+        .map(|r| (0..ow).map(|c| grid.cells[r / sr][c / sc]).collect())
+        .collect();
+    Grid { cells, height: oh, width: ow }
+}
+
+// ─── Strategy Q: Gravity — objects fall toward a wall ──────────────────────
+//
+// All non-background cells slide in a fixed direction (down, up, left, right)
+// until blocked by the grid edge or another non-background cell.
+
+fn solve_gravity(task: &ArcTask) -> Option<u8> {
+    if task.train.is_empty() { return None; }
+    if !task.train.iter().all(|ex|
+        ex.input.height == ex.output.height && ex.input.width == ex.output.width) {
+        return None;
+    }
+
+    for dir in 0u8..4 {
+        let all_match = task.train.iter().all(|ex| {
+            let pred = apply_gravity(&ex.input, dir);
+            grid_exact_match(&pred, &ex.output)
+        });
+        if all_match { return Some(dir); }
+    }
+    None
+}
+
+fn apply_gravity(grid: &Grid, dir: u8) -> Grid {
+    let h = grid.height;
+    let w = grid.width;
+    let bg = most_common_color(grid);
+    let mut cells = vec![vec![bg; w]; h];
+
+    match dir {
+        0 => { // down
+            for c in 0..w {
+                let mut write = h;
+                for r in (0..h).rev() {
+                    if grid.cells[r][c] != bg {
+                        write -= 1;
+                        cells[write][c] = grid.cells[r][c];
+                    }
+                }
+            }
+        }
+        1 => { // up
+            for c in 0..w {
+                let mut write = 0;
+                for r in 0..h {
+                    if grid.cells[r][c] != bg {
+                        cells[write][c] = grid.cells[r][c];
+                        write += 1;
+                    }
+                }
+            }
+        }
+        2 => { // right
+            for r in 0..h {
+                let mut write = w;
+                for c in (0..w).rev() {
+                    if grid.cells[r][c] != bg {
+                        write -= 1;
+                        cells[r][write] = grid.cells[r][c];
+                    }
+                }
+            }
+        }
+        3 => { // left
+            for r in 0..h {
+                let mut write = 0;
+                for c in 0..w {
+                    if grid.cells[r][c] != bg {
+                        cells[r][write] = grid.cells[r][c];
+                        write += 1;
+                    }
+                }
+            }
+        }
+        _ => return grid.clone(),
+    }
+
+    Grid { cells, height: h, width: w }
+}
+
+// ─── Strategy R: Symmetry completion ───────────────────────────────────────
+//
+// Detect axis of symmetry in the output, check if the output is the input
+// completed to be symmetric along that axis.
+
+fn solve_symmetry(task: &ArcTask) -> Option<u8> {
+    if task.train.is_empty() { return None; }
+    if !task.train.iter().all(|ex|
+        ex.input.height == ex.output.height && ex.input.width == ex.output.width) {
+        return None;
+    }
+
+    for axis in 0u8..4 {
+        let all_match = task.train.iter().all(|ex| {
+            let pred = apply_symmetry(&ex.input, axis);
+            grid_exact_match(&pred, &ex.output)
+        });
+        if all_match { return Some(axis); }
+    }
+    None
+}
+
+fn apply_symmetry(grid: &Grid, axis: u8) -> Grid {
+    let h = grid.height;
+    let w = grid.width;
+    let bg = most_common_color(grid);
+    let mut cells = grid.cells.clone();
+
+    match axis {
+        0 => { // horizontal: mirror top→bottom
+            for r in 0..h {
+                for c in 0..w {
+                    let mr = h - 1 - r;
+                    if cells[r][c] == bg && cells[mr][c] != bg {
+                        cells[r][c] = cells[mr][c];
+                    }
+                }
+            }
+        }
+        1 => { // vertical: mirror left→right
+            for r in 0..h {
+                for c in 0..w {
+                    let mc = w - 1 - c;
+                    if cells[r][c] == bg && cells[r][mc] != bg {
+                        cells[r][c] = cells[r][mc];
+                    }
+                }
+            }
+        }
+        2 => { // both horizontal + vertical
+            for r in 0..h {
+                for c in 0..w {
+                    let mr = h - 1 - r;
+                    let mc = w - 1 - c;
+                    if cells[r][c] == bg {
+                        if cells[mr][c] != bg { cells[r][c] = cells[mr][c]; }
+                        else if cells[r][mc] != bg { cells[r][c] = cells[r][mc]; }
+                        else if cells[mr][mc] != bg { cells[r][c] = cells[mr][mc]; }
+                    }
+                }
+            }
+        }
+        3 => { // diagonal (transpose): mirror across main diagonal
+            if h != w { return grid.clone(); }
+            for r in 0..h {
+                for c in 0..w {
+                    if cells[r][c] == bg && cells[c][r] != bg {
+                        cells[r][c] = cells[c][r];
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    Grid { cells, height: h, width: w }
 }
 
 // ─── Strategy L: Palette-constrained neighborhood ──────────────────────────
@@ -1904,6 +2349,24 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                 total_cells += total;
                 if correct != total { all_exact = false; }
             }
+        } else if let Some(dir) = solve_gravity(task) {
+            best_strategy = "gravity";
+            for test_ex in &task.test {
+                let pred = apply_gravity(&test_ex.input, dir);
+                let (correct, total) = grid_matches(&pred, &test_ex.output);
+                total_correct += correct;
+                total_cells += total;
+                if correct != total { all_exact = false; }
+            }
+        } else if let Some(axis) = solve_symmetry(task) {
+            best_strategy = "symmetry";
+            for test_ex in &task.test {
+                let pred = apply_symmetry(&test_ex.input, axis);
+                let (correct, total) = grid_matches(&pred, &test_ex.output);
+                total_correct += correct;
+                total_cells += total;
+                if correct != total { all_exact = false; }
+            }
         } else if solve_object_positional(task) == Some(1.0) {
             best_strategy = "obj_positional";
             let bg = most_common_color(&task.train[0].input);
@@ -2123,6 +2586,65 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                 total_cells += test_ex.output.height * test_ex.output.width;
                 all_exact = false;
             }
+        }
+    } else if solve_subgrid_unique(task).is_some() {
+        best_strategy = "subgrid_unique";
+        for test_ex in &task.test {
+            let matches = find_matching_subgrids(&test_ex.input, &test_ex.output);
+            if matches.len() == 1 {
+                let (r0, c0) = matches[0];
+                let pred = extract_subgrid(
+                    &test_ex.input, r0, c0,
+                    test_ex.output.height, test_ex.output.width,
+                );
+                let (correct, total) = grid_matches(&pred, &test_ex.output);
+                total_correct += correct;
+                total_cells += total;
+                if correct != total { all_exact = false; }
+            } else {
+                total_cells += test_ex.output.height * test_ex.output.width;
+                all_exact = false;
+            }
+        }
+    } else if let Some(mode) = solve_mirror_tile(task) {
+        best_strategy = "mirror_tile";
+        for test_ex in &task.test {
+            let pred = apply_mirror_tile(&test_ex.input, mode)
+                .unwrap_or_else(|| test_ex.input.clone());
+            let (correct, total) = grid_matches(&pred, &test_ex.output);
+            total_correct += correct;
+            total_cells += total;
+            if correct != total { all_exact = false; }
+        }
+    } else if let Some((r0, c0, bg)) = solve_canvas(task) {
+        best_strategy = "canvas";
+        for test_ex in &task.test {
+            let pred = apply_canvas(
+                &test_ex.input, r0, c0,
+                test_ex.output.height, test_ex.output.width, bg,
+            );
+            let (correct, total) = grid_matches(&pred, &test_ex.output);
+            total_correct += correct;
+            total_cells += total;
+            if correct != total { all_exact = false; }
+        }
+    } else if let Some((sr, sc, method)) = solve_downscale(task) {
+        best_strategy = "downscale";
+        for test_ex in &task.test {
+            let pred = downscale_grid(&test_ex.input, sr, sc, method);
+            let (correct, total) = grid_matches(&pred, &test_ex.output);
+            total_correct += correct;
+            total_cells += total;
+            if correct != total { all_exact = false; }
+        }
+    } else if let Some((sr, sc)) = solve_scale(task) {
+        best_strategy = "scale";
+        for test_ex in &task.test {
+            let pred = scale_grid(&test_ex.input, sr, sc);
+            let (correct, total) = grid_matches(&pred, &test_ex.output);
+            total_correct += correct;
+            total_cells += total;
+            if correct != total { all_exact = false; }
         }
     } else if let Some((tr, tc)) = solve_tiling(task) {
         best_strategy = "tiling";
