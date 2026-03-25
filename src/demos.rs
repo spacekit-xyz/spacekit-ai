@@ -1537,7 +1537,7 @@ fn demo_clifford_mnist_gen(train_limit: Option<usize>, max_epochs_override: Opti
 
     println!("═══════════════════════════════════════════════════════════");
     println!("  Growformer Vision: Growformer Autoencoder");
-    println!("  Encode → Cl(1,7) multivector → Decode → Image");
+    println!("  Encode → Growformer Brain → Decode → Image");
     println!("═══════════════════════════════════════════════════════════\n");
 
     println!("Loading MNIST from {:?}...", data_path);

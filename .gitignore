@@ -4,6 +4,8 @@ src/.DS_Store
 ./src/.DS_Store
 
 docs
+data/audio
+data/pathology
 data/routekit-agent
 data/test-agent
 micro-brains
