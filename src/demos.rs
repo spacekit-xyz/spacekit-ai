@@ -66,6 +66,8 @@ struct Args {
     mnist_v2_gen: bool,
     #[arg(long)]
     mnist_retention: bool,
+    #[arg(long)]
+    pathmnist: bool,
     #[arg(long, default_value_t = true)]
     progress: bool,
     #[arg(long, value_name = "N")]
@@ -257,6 +259,8 @@ fn main() {
         demo_clifford_mnist_gen(args.mnist_train_limit, args.mnist_max_epochs);
     } else if args.mnist_retention {
         demo_mnist_retention();
+    } else if args.pathmnist {
+        demo_pathmnist(args.mnist_train_limit, args.mnist_max_epochs);
     } else if args.acceptance_report {
         if let Err(e) = demo_acceptance_report(args.acceptance_report_path.as_deref()) {
             eprintln!("Failed acceptance report: {}", e);
@@ -1598,6 +1602,491 @@ fn demo_clifford_mnist_gen(train_limit: Option<usize>, max_epochs_override: Opti
         }
         println!();
     }
+}
+
+// =============================================================================
+// Demo: PathMNIST — Colorectal cancer histology through Cl(1,7)
+// 9-class tissue classification on MedMNIST benchmark, CPU only.
+// =============================================================================
+
+fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>) {
+    use growformer::pathmnist::{
+        PathMNISTDataset, CLASS_NAMES, PATH_NUM_CLASSES, is_cancer_class,
+        compute_cancer_metrics,
+    };
+    use growformer::clifford_mnist::{
+        CliffordRGBEncoder, CliffordDiracEncoder, PathClassifier, LinearClassifier,
+        discriminability_weights,
+    };
+    use growformer::clifford::{Multivector, CL8_DIM, minkowski_interval, classify_interval, IntervalType};
+
+    let data_dir = std::path::PathBuf::from(
+        std::env::var("PATHMNIST_ROOT")
+            .unwrap_or_else(|_| "data/pathology/pathmnist".to_string())
+    );
+    if !data_dir.exists() {
+        eprintln!("PathMNIST data not found at {:?}", data_dir);
+        eprintln!("Set PATHMNIST_ROOT or place data in data/pathology/pathmnist/");
+        std::process::exit(1);
+    }
+
+    println!("═══════════════════════════════════════════════════════════════");
+    println!("  Growformer Medical: Colorectal Cancer Histology");
+    println!("  PathMNIST — 9 classes, RGB+Dirac Cl(1,7), single-pass solve");
+    println!("═══════════════════════════════════════════════════════════════\n");
+
+    println!("Loading PathMNIST (RGB)...");
+    let train = PathMNISTDataset::load(&data_dir, "train");
+    let val = PathMNISTDataset::load(&data_dir, "val");
+    let test = PathMNISTDataset::load(&data_dir, "test");
+    println!("  Train: {}, Val: {}, Test: {} (different clinical center)",
+        train.n, val.n, test.n);
+
+    let dist = train.class_distribution();
+    println!("\n  Class distribution (train):");
+    for c in 0..PATH_NUM_CLASSES {
+        let marker = if is_cancer_class(c as u8) { " ← CANCER" } else { "" };
+        println!("    {}: {:>14} {:>6}{}", c, CLASS_NAMES[c], dist[c], marker);
+    }
+
+    let total_start = Instant::now();
+
+    // Two complementary encoders:
+    //   RGB encoder  (2352→256): color/intensity patterns from raw pixels
+    //   Dirac encoder (784→256): differential structure (gradients, Laplacian, texture)
+    let mut rgb_enc = CliffordRGBEncoder::new(42);
+    let mut dirac_enc = CliffordDiracEncoder::new(77);
+
+    let rgb_cal: Vec<_> = train.images_rgb.iter().take(1000)
+        .map(|img| (img.clone(), 0u8)).collect();
+    rgb_enc.calibrate_scales(&rgb_cal);
+    let gray_cal: Vec<_> = train.images_gray.iter().take(1000)
+        .map(|img| (img.clone(), 0u8)).collect();
+    dirac_enc.calibrate_scales(&gray_cal);
+
+    let train_n = train_limit.unwrap_or(train.n).min(train.n);
+    let joint_dim = CL8_DIM * 2; // 512D
+
+    // ── Single-pass: encode all training images with both encoders ──
+    println!("\n--- Encoding {} training images (RGB+Dirac → 512D Cl(1,7)) ---", train_n);
+    let encode_start = Instant::now();
+
+    let mut train_features: Vec<Vec<f32>> = Vec::with_capacity(train_n);
+    let mut train_rgb_mvs: Vec<Multivector> = Vec::with_capacity(train_n);
+    let mut train_dirac_mvs: Vec<Multivector> = Vec::with_capacity(train_n);
+
+    for i in 0..train_n {
+        let rgb_mv = rgb_enc.encode(&train.images_rgb[i]);
+        let dirac_mv = dirac_enc.encode(&train.images_gray[i]);
+
+        let mut joint = Vec::with_capacity(joint_dim);
+        joint.extend_from_slice(&rgb_mv.components);
+        joint.extend_from_slice(&dirac_mv.components);
+        train_features.push(joint);
+        train_rgb_mvs.push(rgb_mv);
+        train_dirac_mvs.push(dirac_mv);
+
+        if (i + 1) % 20000 == 0 { println!("    {}/{}", i + 1, train_n); }
+    }
+    let train_lbls = &train.labels[..train_n];
+    println!("  Encoded in {:.1}s ({}D joint features)\n",
+        encode_start.elapsed().as_secs_f64(), joint_dim);
+
+    // ── Single-pass: solve 9-class on 512D joint features ──
+    println!("--- Solving 9-class classifier (512D normal equations) ---");
+    let head = LinearClassifier::fit_from_features(
+        &train_features, train_lbls,
+        PATH_NUM_CLASSES, 1.0, 1,
+    );
+
+    // ── Also solve binary cancer classifier on 512D joint features ──
+    println!("\n--- Solving binary cancer classifier (512D) ---");
+    let cancer_labels: Vec<u8> = train_lbls.iter()
+        .map(|&l| if is_cancer_class(l) { 1 } else { 0 })
+        .collect();
+    let cancer_head = LinearClassifier::fit_from_features(
+        &train_features, &cancer_labels,
+        2, 1.0, 1,
+    );
+
+    // ── Geometry-driven hierarchical routing ──
+    // Build binary tree from centroid distances — let the algebra define the splits
+    println!("\n--- Building geometric routing tree from 512D centroids ---");
+
+    // Compute 512D feature centroids for each class
+    let mut class_sums = vec![vec![0.0f64; joint_dim]; PATH_NUM_CLASSES];
+    let mut class_counts = vec![0usize; PATH_NUM_CLASSES];
+    for (feat, &lbl) in train_features.iter().zip(train_lbls.iter()) {
+        let c = lbl as usize;
+        class_counts[c] += 1;
+        for j in 0..joint_dim { class_sums[c][j] += feat[j] as f64; }
+    }
+    let centroids_512: Vec<Vec<f32>> = (0..PATH_NUM_CLASSES).map(|c| {
+        let n = class_counts[c].max(1) as f64;
+        class_sums[c].iter().map(|&s| (s / n) as f32).collect()
+    }).collect();
+
+    // Pairwise Euclidean distance matrix between centroids
+    let mut dist_matrix = vec![vec![0.0f32; PATH_NUM_CLASSES]; PATH_NUM_CLASSES];
+    for i in 0..PATH_NUM_CLASSES {
+        for j in (i+1)..PATH_NUM_CLASSES {
+            let d: f32 = centroids_512[i].iter().zip(centroids_512[j].iter())
+                .map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt();
+            dist_matrix[i][j] = d;
+            dist_matrix[j][i] = d;
+        }
+    }
+
+    println!("\n  Centroid distance matrix (512D Euclidean):");
+    print!("         ");
+    for c in 0..PATH_NUM_CLASSES { print!("{:>6}", c); }
+    println!();
+    for i in 0..PATH_NUM_CLASSES {
+        print!("    {}:{:>8} ", i, &CLASS_NAMES[i][..CLASS_NAMES[i].len().min(8)]);
+        for j in 0..PATH_NUM_CLASSES {
+            if i == j { print!("     -"); }
+            else { print!(" {:5.2}", dist_matrix[i][j]); }
+        }
+        println!();
+    }
+
+    // Recursive tree node
+    #[allow(dead_code)]
+    enum GeoNode {
+        Leaf(u8),
+        Split {
+            classifier: LinearClassifier,
+            left_classes: Vec<u8>,
+            right_classes: Vec<u8>,
+            left: Box<GeoNode>,
+            right: Box<GeoNode>,
+        },
+    }
+
+    impl GeoNode {
+        fn classify(&self, feat: &[f32]) -> u8 {
+            match self {
+                GeoNode::Leaf(c) => *c,
+                GeoNode::Split { classifier, left, right, .. } => {
+                    let (pred, _) = classifier.classify_features(feat);
+                    if pred == 0 { left.classify(feat) } else { right.classify(feat) }
+                }
+            }
+        }
+    }
+
+    // Build tree recursively using furthest-pair centroid splitting
+    fn build_geo_tree(
+        classes: &[u8],
+        centroids: &[Vec<f32>],
+        dist_matrix: &[Vec<f32>],
+        features: &[Vec<f32>],
+        labels: &[u8],
+        class_names: &[&str],
+        depth: usize,
+    ) -> GeoNode {
+        if classes.len() == 1 {
+            return GeoNode::Leaf(classes[0]);
+        }
+        if classes.len() == 2 {
+            let c0 = classes[0];
+            let c1 = classes[1];
+            let indent = "    ".repeat(depth + 1);
+            // Filter to these two classes, relabel as 0/1
+            let (sub_feats, sub_lbls): (Vec<_>, Vec<_>) = features.iter()
+                .zip(labels.iter())
+                .filter(|(_, &l)| l == c0 || l == c1)
+                .map(|(f, &l)| (f.clone(), if l == c0 { 0u8 } else { 1 }))
+                .unzip();
+            println!("{}Split: {} vs {} ({} samples)",
+                indent, class_names[c0 as usize], class_names[c1 as usize], sub_feats.len());
+            let clf = LinearClassifier::fit_from_features(&sub_feats, &sub_lbls, 2, 1.0, 0);
+            return GeoNode::Split {
+                classifier: clf,
+                left_classes: vec![c0],
+                right_classes: vec![c1],
+                left: Box::new(GeoNode::Leaf(c0)),
+                right: Box::new(GeoNode::Leaf(c1)),
+            };
+        }
+
+        // Find the two most distant centroids among `classes`
+        let mut max_dist = 0.0f32;
+        let mut seed_a = classes[0];
+        let mut seed_b = classes[1];
+        for i in 0..classes.len() {
+            for j in (i+1)..classes.len() {
+                let d = dist_matrix[classes[i] as usize][classes[j] as usize];
+                if d > max_dist { max_dist = d; seed_a = classes[i]; seed_b = classes[j]; }
+            }
+        }
+
+        // Assign each class to the nearest seed
+        let mut left_classes = Vec::new();
+        let mut right_classes = Vec::new();
+        for &c in classes {
+            let da = dist_matrix[c as usize][seed_a as usize];
+            let db = dist_matrix[c as usize][seed_b as usize];
+            if da <= db { left_classes.push(c); } else { right_classes.push(c); }
+        }
+
+        // Safety: if one side is empty, force at least one class into it
+        if left_classes.is_empty() {
+            left_classes.push(right_classes.pop().unwrap());
+        }
+        if right_classes.is_empty() {
+            right_classes.push(left_classes.pop().unwrap());
+        }
+
+        let indent = "    ".repeat(depth + 1);
+        let left_names: Vec<_> = left_classes.iter().map(|&c| class_names[c as usize]).collect();
+        let right_names: Vec<_> = right_classes.iter().map(|&c| class_names[c as usize]).collect();
+        println!("{}Split (d={:.2}): {{{}}} vs {{{}}}",
+            indent, max_dist, left_names.join(", "), right_names.join(", "));
+
+        // Train binary classifier: left=0, right=1
+        let left_set: std::collections::HashSet<u8> = left_classes.iter().copied().collect();
+        let all_set: std::collections::HashSet<u8> = classes.iter().copied().collect();
+        let (sub_feats, sub_lbls): (Vec<_>, Vec<_>) = features.iter()
+            .zip(labels.iter())
+            .filter(|(_, &l)| all_set.contains(&l))
+            .map(|(f, &l)| (f.clone(), if left_set.contains(&l) { 0u8 } else { 1 }))
+            .unzip();
+        let clf = LinearClassifier::fit_from_features(&sub_feats, &sub_lbls, 2, 1.0, 0);
+
+        let left_child = build_geo_tree(
+            &left_classes, centroids, dist_matrix, features, labels, class_names, depth + 1,
+        );
+        let right_child = build_geo_tree(
+            &right_classes, centroids, dist_matrix, features, labels, class_names, depth + 1,
+        );
+
+        GeoNode::Split {
+            classifier: clf,
+            left_classes,
+            right_classes,
+            left: Box::new(left_child),
+            right: Box::new(right_child),
+        }
+    }
+
+    // ── CliffordMicroBrain: spacetime algebra routing ──
+    // Uses grade-weighted Minkowski distance + interval augmentation
+    // instead of cosine similarity. Preserves magnitude and metric signature.
+    println!("\n--- Building CliffordMicroBrain (spacetime algebra routing) ---");
+    use growformer::clifford_mnist::CliffordMicroBrain;
+
+    let cliff_brain = CliffordMicroBrain::build(
+        &train_rgb_mvs, &train_dirac_mvs, train_lbls, PATH_NUM_CLASSES,
+    );
+
+    let solve_elapsed = total_start.elapsed();
+
+    // ── Encode validation + test with both encoders ──
+    println!("\n--- Validation ---");
+    let encode_joint = |rgb_imgs: &[Vec<f32>], gray_imgs: &[Vec<f32>]|
+        -> (Vec<Vec<f32>>, Vec<Multivector>, Vec<Multivector>)
+    {
+        let mut feats = Vec::with_capacity(rgb_imgs.len());
+        let mut rgb_mvs = Vec::with_capacity(rgb_imgs.len());
+        let mut dirac_mvs_out = Vec::with_capacity(rgb_imgs.len());
+        for i in 0..rgb_imgs.len() {
+            let rgb_mv = rgb_enc.encode(&rgb_imgs[i]);
+            let dirac_mv = dirac_enc.encode(&gray_imgs[i]);
+            let mut joint = Vec::with_capacity(joint_dim);
+            joint.extend_from_slice(&rgb_mv.components);
+            joint.extend_from_slice(&dirac_mv.components);
+            feats.push(joint);
+            rgb_mvs.push(rgb_mv);
+            dirac_mvs_out.push(dirac_mv);
+        }
+        (feats, rgb_mvs, dirac_mvs_out)
+    };
+
+    let (val_features, val_rgb_mvs, val_dirac_mvs) = encode_joint(&val.images_rgb, &val.images_gray);
+
+    let val_9_preds: Vec<u8> = val_features.iter().map(|f| head.classify_features(f).0).collect();
+    let val_9_acc = val_9_preds.iter().zip(val.labels.iter())
+        .filter(|(p, l)| p == l).count() as f32 / val.n as f32;
+
+    let val_cancer_preds: Vec<u8> = val_features.iter().map(|f| cancer_head.classify_features(f).0).collect();
+    let val_cancer_labels: Vec<u8> = val.labels.iter()
+        .map(|&l| if is_cancer_class(l) { 1 } else { 0 }).collect();
+    let val_cancer_acc = val_cancer_preds.iter().zip(val_cancer_labels.iter())
+        .filter(|(p, l)| p == l).count() as f32 / val.n as f32;
+
+    println!("  9-class val accuracy:      {:.1}%", val_9_acc * 100.0);
+    println!("  Cancer binary val accuracy: {:.1}%", val_cancer_acc * 100.0);
+
+    // ── Clifford spacetime analysis (diagnostic, not primary routing) ──
+    // The grade discriminability is nearly flat (~0.02 per grade), meaning
+    // the multivector space lacks differentiated grade structure for histology.
+    // Centroid-based Clifford routing cannot outperform the linear solve in
+    // this regime. Report Clifford metrics as geometric diagnostics.
+
+    // ── Evaluate on test set (different clinical center) ──
+    println!("\n--- Test Set Evaluation (CRC-VAL-HE-7K — different hospital) ---");
+    let (test_features, test_rgb_mvs, test_dirac_mvs) = encode_joint(&test.images_rgb, &test.images_gray);
+
+    let test_preds: Vec<u8> = test_features.iter().map(|f| head.classify_features(f).0).collect();
+    let test_acc = test_preds.iter().zip(test.labels.iter())
+        .filter(|(p, l)| p == l).count() as f32 / test.n as f32;
+    let cancer = compute_cancer_metrics(&test_preds, &test.labels);
+
+    // Binary cancer detection via dedicated classifier
+    let test_cancer_preds: Vec<u8> = test_features.iter()
+        .map(|f| cancer_head.classify_features(f).0).collect();
+    let test_cancer_labels: Vec<u8> = test.labels.iter()
+        .map(|&l| if is_cancer_class(l) { 1 } else { 0 }).collect();
+    let mut c_tp = 0u32; let mut c_fn = 0u32;
+    let mut c_fp = 0u32; let mut c_tn = 0u32;
+    for (&pred, &label) in test_cancer_preds.iter().zip(test_cancer_labels.iter()) {
+        match (pred, label) {
+            (1, 1) => c_tp += 1,
+            (0, 1) => c_fn += 1,
+            (1, 0) => c_fp += 1,
+            (0, 0) => c_tn += 1,
+            _ => {}
+        }
+    }
+    let cancer_sens = c_tp as f32 / (c_tp + c_fn).max(1) as f32;
+    let cancer_spec = c_tn as f32 / (c_tn + c_fp).max(1) as f32;
+    let cancer_f1 = 2.0 * c_tp as f32 / (2 * c_tp + c_fp + c_fn).max(1) as f32;
+    let cancer_binary_acc = (c_tp + c_tn) as f32 / (c_tp + c_fn + c_fp + c_tn).max(1) as f32;
+
+    println!("\n  BINARY CANCER DETECTION (primary clinical result):");
+    println!("    Accuracy:     {:.1}%", cancer_binary_acc * 100.0);
+    println!("    Sensitivity:  {:.1}%", cancer_sens * 100.0);
+    println!("    Specificity:  {:.1}%", cancer_spec * 100.0);
+    println!("    F1:           {:.3}", cancer_f1);
+
+    println!("\n  9-CLASS RESULTS:");
+    println!("    Overall accuracy:      {:.1}%", test_acc * 100.0);
+    println!("    Adenocarcinoma recall: {:.1}%  (class 8)", cancer.adeno_recall * 100.0);
+    println!("    Stroma recall:         {:.1}%  (class 7)", cancer.stroma_recall * 100.0);
+
+    // Per-class accuracy
+    println!("\n  Per-class accuracy:");
+    let mut per_class_correct = [0u32; PATH_NUM_CLASSES];
+    let mut per_class_total = [0u32; PATH_NUM_CLASSES];
+    for (&pred, &label) in test_preds.iter().zip(test.labels.iter()) {
+        let l = label as usize;
+        if l < PATH_NUM_CLASSES {
+            per_class_total[l] += 1;
+            if pred == label { per_class_correct[l] += 1; }
+        }
+    }
+    for c in 0..PATH_NUM_CLASSES {
+        let acc = if per_class_total[c] > 0 {
+            per_class_correct[c] as f32 / per_class_total[c] as f32
+        } else { 0.0 };
+        let marker = if is_cancer_class(c as u8) { " ←" } else { "" };
+        println!("    {}: {:>14} {:.1}% ({}/{}){}", c, CLASS_NAMES[c],
+            acc * 100.0, per_class_correct[c], per_class_total[c], marker);
+    }
+
+    // ── Clifford spacetime routing (diagnostic comparison) ──
+    println!("\n  CLIFFORD SPACETIME ROUTING (diagnostic):");
+    let cliff_preds: Vec<u8> = test_rgb_mvs.iter().zip(test_dirac_mvs.iter())
+        .map(|(rgb, dirac)| cliff_brain.classify(rgb, dirac).0)
+        .collect();
+    let cliff_acc = cliff_preds.iter().zip(test.labels.iter())
+        .filter(|(p, l)| p == l).count() as f32 / test.n as f32;
+    let cliff_cancer = compute_cancer_metrics(&cliff_preds, &test.labels);
+
+    println!("    Accuracy:              {:.1}%  (flat: {:.1}%)", cliff_acc * 100.0, test_acc * 100.0);
+    println!("    Adenocarcinoma recall: {:.1}%  (flat: {:.1}%)",
+        cliff_cancer.adeno_recall * 100.0, cancer.adeno_recall * 100.0);
+    println!("    Stroma recall:         {:.1}%  (flat: {:.1}%)",
+        cliff_cancer.stroma_recall * 100.0, cancer.stroma_recall * 100.0);
+
+    let mut cliff_correct = [0u32; PATH_NUM_CLASSES];
+    let mut cliff_total = [0u32; PATH_NUM_CLASSES];
+    for (&pred, &label) in cliff_preds.iter().zip(test.labels.iter()) {
+        let l = label as usize;
+        if l < PATH_NUM_CLASSES {
+            cliff_total[l] += 1;
+            if pred == label { cliff_correct[l] += 1; }
+        }
+    }
+    println!("\n    Per-class (clifford vs flat):");
+    for c in 0..PATH_NUM_CLASSES {
+        let c_acc = if cliff_total[c] > 0 {
+            cliff_correct[c] as f32 / cliff_total[c] as f32
+        } else { 0.0 };
+        let f_acc = if per_class_total[c] > 0 {
+            per_class_correct[c] as f32 / per_class_total[c] as f32
+        } else { 0.0 };
+        let delta = (c_acc - f_acc) * 100.0;
+        let arrow = if delta > 0.5 { "▲" } else if delta < -0.5 { "▼" } else { "=" };
+        let marker = if is_cancer_class(c as u8) { " ←" } else { "" };
+        println!("      {}: {:>14} {:.1}%  (flat {:.1}%)  {}{:+.1}{}", c, CLASS_NAMES[c],
+            c_acc * 100.0, f_acc * 100.0, arrow, delta, marker);
+    }
+
+    // Grade discriminability
+    let mut centroids = PathClassifier::new(PATH_NUM_CLASSES);
+    for (mv, &lbl) in train_rgb_mvs.iter().zip(train_lbls.iter()) {
+        centroids.accumulate(mv, lbl);
+    }
+    let grade_disc = centroids.grade_discriminability();
+    let gw = discriminability_weights(&grade_disc);
+    let grade_labels = [
+        "scalar (intensity)", "vector (gradients)", "bivector (texture)",
+        "trivector (junctions)", "quadvector (topology)", "grade-5", "grade-6",
+        "grade-7", "pseudoscalar (complement)",
+    ];
+    println!("\n--- Grade Discriminability (9-class) ---");
+    for g in 0..=8 {
+        println!("    grade {}: {:>6.2}  w={:.3}  — {}", g, grade_disc[g], gw[g], grade_labels[g]);
+    }
+
+    // Minkowski interval statistics
+    let mut correct_intervals = Vec::new();
+    let mut incorrect_intervals = Vec::new();
+    for (i, (&pred, &label)) in test_preds.iter().zip(test.labels.iter()).enumerate() {
+        let mink = minkowski_interval(&test_rgb_mvs[i], &centroids.centroids[pred as usize]);
+        if pred == label {
+            correct_intervals.push(mink);
+        } else {
+            incorrect_intervals.push(mink);
+        }
+    }
+    let correct_mean = if correct_intervals.is_empty() { 0.0 }
+        else { correct_intervals.iter().sum::<f32>() / correct_intervals.len() as f32 };
+    let incorrect_mean = if incorrect_intervals.is_empty() { 0.0 }
+        else { incorrect_intervals.iter().sum::<f32>() / incorrect_intervals.len() as f32 };
+    let timelike_correct = correct_intervals.iter()
+        .filter(|&&v| classify_interval(v) == IntervalType::Timelike)
+        .count() as f32 / correct_intervals.len().max(1) as f32;
+
+    println!("\n--- Minkowski Interval Statistics ---");
+    println!("  Correct:   mean={:.4}  timelike={:.1}%", correct_mean, timelike_correct * 100.0);
+    println!("  Incorrect: mean={:.4}", incorrect_mean);
+    if correct_mean.abs() > 1e-8 {
+        println!("  Ratio:     {:.1}x", incorrect_mean / correct_mean);
+    }
+
+    // Summary
+    println!("\n═══════════════════════════════════════════════════════════════");
+    println!("  PathMNIST RESULTS  (RGB+Dirac Cl(1,7), single-pass solve)");
+    println!("═══════════════════════════════════════════════════════════════");
+    println!("  9-class accuracy:       {:.1}%", test_acc * 100.0);
+    println!("  Clifford spacetime:     {:.1}%  (centroid + interval routing)", cliff_acc * 100.0);
+    println!("  Binary cancer detect:   {:.1}%", cancer_binary_acc * 100.0);
+    println!("  Cancer sensitivity:     {:.1}%", cancer_sens * 100.0);
+    println!("  Cancer specificity:     {:.1}%", cancer_spec * 100.0);
+    println!("  Cancer F1:              {:.3}", cancer_f1);
+    println!("  Feature dim:            512D (256 RGB + 256 Dirac)");
+    println!("  Solve time:             {:.1}s (CPU, no epochs)", solve_elapsed.as_secs_f64());
+    println!("  GPU required:           None");
+    println!("═══════════════════════════════════════════════════════════════");
+    println!("\n  Same Cl(1,7) algebra used for:");
+    println!("    MNIST digits:       97.7%");
+    println!("    Language:           97%");
+    println!("    Histopathology:     {:.1}%  (cancer: {:.1}%)",
+        test_acc * 100.0, cancer_binary_acc * 100.0);
+    println!();
 }
 
 // =============================================================================

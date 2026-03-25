@@ -65,9 +65,9 @@ pub fn spacetime_distance(a: &Multivector, b: &Multivector) -> f32 {
 /// grades so the algebra's structure carries geometric meaning.
 pub struct CliffordImageEncoder {
     /// 784 → 256 projection matrix, initialized to extract geometric features
-    projection: Vec<[f32; CL8_DIM]>,
+    pub projection: Vec<[f32; CL8_DIM]>,
     /// Per-grade learned scale factors for balanced contribution
-    grade_scales: [f32; 9],
+    pub grade_scales: [f32; 9],
 }
 
 impl CliffordImageEncoder {
@@ -134,6 +134,117 @@ impl CliffordImageEncoder {
             // Grades 4-8: random structured initialization, grade-scaled.
             for g in 4..=8 {
                 let gs = grade_init_scale[g];
+                for k in 0..GRADE_DIMS[g] {
+                    row[GRADE_OFFSETS[g] + k] = rng.gen_range(-0.1..0.1) * gs;
+                }
+            }
+
+            projection.push(row);
+        }
+
+        CliffordImageEncoder {
+            projection,
+            grade_scales: [1.0; 9],
+        }
+    }
+
+    /// Texture-oriented encoder for histology/natural images.
+    /// Uses Fourier + Gabor basis instead of position features.
+    /// Translation-invariant: captures "what texture" not "where is ink".
+    pub fn new_texture(seed: u64) -> Self {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut projection = Vec::with_capacity(IMAGE_DIM);
+
+        let grade_init_scale: [f32; 9] = std::array::from_fn(|g| {
+            1.0 / (GRADE_DIMS[g] as f32).sqrt().max(1.0)
+        });
+        let norm = 1.0 / (IMAGE_DIM as f32).sqrt();
+        let two_pi = 2.0 * std::f32::consts::PI;
+        let pi = std::f32::consts::PI;
+
+        // Pre-compute frequency pairs for grades 3 and 4
+        let mut g3_freqs: Vec<(f32, f32)> = Vec::new();
+        for u in 0..8i32 {
+            for v in -4..5i32 {
+                let r2 = u * u + v * v;
+                if r2 >= 2 && r2 <= 20 && g3_freqs.len() < GRADE_DIMS[3] / 2 {
+                    g3_freqs.push((u as f32, v as f32));
+                }
+            }
+        }
+        let mut g4_freqs: Vec<(f32, f32)> = Vec::new();
+        for u in 0..10i32 {
+            for v in -5..6i32 {
+                let r2 = u * u + v * v;
+                if r2 > 20 && r2 <= 50 && g4_freqs.len() < GRADE_DIMS[4] / 2 {
+                    g4_freqs.push((u as f32, v as f32));
+                }
+            }
+        }
+
+        for pixel_idx in 0..IMAGE_DIM {
+            let mut row = [0.0f32; CL8_DIM];
+            let px = (pixel_idx % 28) as f32;
+            let py = (pixel_idx / 28) as f32;
+
+            // Grade 0 (scalar): mean intensity — tissue density
+            row[GRADE_OFFSETS[0]] = norm;
+
+            // Grade 1 (8 components): Low-frequency Fourier — coarse texture
+            let g1s = grade_init_scale[1] * norm;
+            let g1_uv: [(f32, f32); 4] = [
+                (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, -1.0),
+            ];
+            for (k, &(u, v)) in g1_uv.iter().enumerate() {
+                let phase = two_pi * (u * px + v * py) / 28.0;
+                row[GRADE_OFFSETS[1] + 2 * k]     = phase.cos() * g1s;
+                row[GRADE_OFFSETS[1] + 2 * k + 1] = phase.sin() * g1s;
+            }
+
+            // Grade 2 (28 components): Gabor-like oriented texture
+            // 7 orientations × 2 spatial frequencies × cos/sin
+            let g2s = grade_init_scale[2] * norm;
+            let n_orient = 7usize;
+            let g2_spatial_freqs = [2.0f32, 4.0];
+            for ori in 0..n_orient {
+                let theta = ori as f32 * pi / n_orient as f32;
+                let dx = theta.cos();
+                let dy = theta.sin();
+                for (fi, &freq) in g2_spatial_freqs.iter().enumerate() {
+                    let phase = two_pi * freq * (px * dx + py * dy) / 28.0;
+                    let base = ori * 4 + fi * 2;
+                    if base + 1 < GRADE_DIMS[2] {
+                        row[GRADE_OFFSETS[2] + base]     = phase.cos() * g2s;
+                        row[GRADE_OFFSETS[2] + base + 1] = phase.sin() * g2s;
+                    }
+                }
+            }
+
+            // Grade 3 (56 components): Medium-frequency 2D Fourier
+            let g3s = grade_init_scale[3] * norm;
+            for (k, &(u, v)) in g3_freqs.iter().enumerate() {
+                let phase = two_pi * (u * px + v * py) / 28.0;
+                let base = 2 * k;
+                if base + 1 < GRADE_DIMS[3] {
+                    row[GRADE_OFFSETS[3] + base]     = phase.cos() * g3s;
+                    row[GRADE_OFFSETS[3] + base + 1] = phase.sin() * g3s;
+                }
+            }
+
+            // Grade 4 (70 components): Higher-frequency 2D Fourier
+            let g4s = grade_init_scale[4] * norm;
+            for (k, &(u, v)) in g4_freqs.iter().enumerate() {
+                let phase = two_pi * (u * px + v * py) / 28.0;
+                let base = 2 * k;
+                if base + 1 < GRADE_DIMS[4] {
+                    row[GRADE_OFFSETS[4] + base]     = phase.cos() * g4s;
+                    row[GRADE_OFFSETS[4] + base + 1] = phase.sin() * g4s;
+                }
+            }
+
+            // Grades 5-8: random structured (learned via contrastive training)
+            for g in 5..=8 {
+                let gs = grade_init_scale[g] * norm;
                 for k in 0..GRADE_DIMS[g] {
                     row[GRADE_OFFSETS[g] + k] = rng.gen_range(-0.1..0.1) * gs;
                 }
@@ -270,6 +381,572 @@ impl CliffordImageEncoder {
                 }
             }
         }
+    }
+}
+
+// ─── Dirac encoder ────────────────────────────────────────────────────────
+//
+// Treats an image as a field and computes its Dirac spinor representation.
+// Instead of linear projection (which can't beat a linear classifier on raw pixels),
+// this uses the geometric product to produce nonlinear texture features:
+//
+//   1. Compute 4 differential feature channels from the image:
+//      - Intensity (identity operator)
+//      - Horizontal gradient ∂_x (Sobel-like)
+//      - Vertical gradient ∂_y
+//      - Laplacian ∂²_xx + ∂²_yy
+//
+//   2. Each channel is projected into a grade-1 vector via 784→8 projection.
+//      This gives 4 vectors in Cl(1,7): v_I, v_∂x, v_∂y, v_Δ.
+//
+//   3. Take geometric products: v_∂x * v_∂y produces grade-0 + grade-2 terms.
+//      This is the NONLINEAR step — texture co-occurrence features that a linear
+//      encoder cannot produce. The bivector (grade-2) captures oriented texture
+//      relationships: parallel fibers (stroma) vs disorganized (cancer stroma).
+//
+//   4. Combine: grade-0 from products, grade-1 from vectors, grade-2 from
+//      products, higher grades from multi-scale products.
+//
+// The resulting multivector is a Dirac spinor where even grades carry the
+// nonlinear interaction features that separate tissue textures.
+
+const DIRAC_W: usize = 28;
+const DIRAC_H: usize = 28;
+const N_CHANNELS: usize = 4; // intensity, ∂x, ∂y, laplacian
+
+pub struct CliffordDiracEncoder {
+    /// Per-channel projection: 784 → 8 (grade-1 vector) for each of 4 channels
+    channel_proj: [[f32; 8]; N_CHANNELS],
+    /// Additional texture projection: 784 → CL8_DIM for local variance channel
+    texture_proj: Vec<[f32; CL8_DIM]>,
+    grade_scales: [f32; 9],
+}
+
+fn img_at(image: &[f32], x: usize, y: usize) -> f32 {
+    if x < DIRAC_W && y < DIRAC_H { image[y * DIRAC_W + x] } else { 0.0 }
+}
+
+fn compute_gradient_x(image: &[f32]) -> [f32; IMAGE_DIM] {
+    let mut out = [0.0f32; IMAGE_DIM];
+    for y in 0..DIRAC_H {
+        for x in 0..DIRAC_W {
+            let left = if x > 0 { img_at(image, x - 1, y) } else { img_at(image, x, y) };
+            let right = if x < DIRAC_W - 1 { img_at(image, x + 1, y) } else { img_at(image, x, y) };
+            out[y * DIRAC_W + x] = (right - left) * 0.5;
+        }
+    }
+    out
+}
+
+fn compute_gradient_y(image: &[f32]) -> [f32; IMAGE_DIM] {
+    let mut out = [0.0f32; IMAGE_DIM];
+    for y in 0..DIRAC_H {
+        for x in 0..DIRAC_W {
+            let up = if y > 0 { img_at(image, x, y - 1) } else { img_at(image, x, y) };
+            let down = if y < DIRAC_H - 1 { img_at(image, x, y + 1) } else { img_at(image, x, y) };
+            out[y * DIRAC_W + x] = (down - up) * 0.5;
+        }
+    }
+    out
+}
+
+fn compute_laplacian(image: &[f32]) -> [f32; IMAGE_DIM] {
+    let mut out = [0.0f32; IMAGE_DIM];
+    for y in 0..DIRAC_H {
+        for x in 0..DIRAC_W {
+            let c = img_at(image, x, y);
+            let l = if x > 0 { img_at(image, x - 1, y) } else { c };
+            let r = if x < DIRAC_W - 1 { img_at(image, x + 1, y) } else { c };
+            let u = if y > 0 { img_at(image, x, y - 1) } else { c };
+            let d = if y < DIRAC_H - 1 { img_at(image, x, y + 1) } else { c };
+            out[y * DIRAC_W + x] = l + r + u + d - 4.0 * c;
+        }
+    }
+    out
+}
+
+fn compute_local_variance(image: &[f32]) -> [f32; IMAGE_DIM] {
+    let mut out = [0.0f32; IMAGE_DIM];
+    for y in 0..DIRAC_H {
+        for x in 0..DIRAC_W {
+            let mut sum = 0.0f32;
+            let mut sum2 = 0.0f32;
+            let mut count = 0.0f32;
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    let nx = x as i32 + dx;
+                    let ny = y as i32 + dy;
+                    if nx >= 0 && nx < DIRAC_W as i32 && ny >= 0 && ny < DIRAC_H as i32 {
+                        let v = image[ny as usize * DIRAC_W + nx as usize];
+                        sum += v;
+                        sum2 += v * v;
+                        count += 1.0;
+                    }
+                }
+            }
+            let mean = sum / count;
+            out[y * DIRAC_W + x] = (sum2 / count - mean * mean).max(0.0).sqrt();
+        }
+    }
+    out
+}
+
+fn channel_to_vector(
+    channel: &[f32],
+    proj: &[f32; 8],
+) -> Multivector {
+    let mut sums = [0.0f32; 8];
+    for &v in channel.iter() {
+        if v.abs() < 1e-7 { continue; }
+        for k in 0..8 { sums[k] += v * proj[k]; }
+    }
+    Multivector::vector(&sums)
+}
+
+impl CliffordDiracEncoder {
+    pub fn new(seed: u64) -> Self {
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        // Per-channel projections to grade-1 vectors
+        // Initialized with different frequency responses per channel
+        let mut channel_proj = [[0.0f32; 8]; N_CHANNELS];
+
+        // Channel 0 (intensity): uniform → measures total energy per basis direction
+        for k in 0..8 {
+            let freq = (k as f32 + 1.0) * std::f32::consts::PI / 8.0;
+            channel_proj[0][k] = freq.cos() * 0.1;
+        }
+        // Channel 1 (∂x): horizontal texture orientation
+        for k in 0..8 {
+            channel_proj[1][k] = rng.gen_range(-0.15..0.15);
+        }
+        channel_proj[1][1] = 0.2; // e_1: primary horizontal
+        // Channel 2 (∂y): vertical texture orientation
+        for k in 0..8 {
+            channel_proj[2][k] = rng.gen_range(-0.15..0.15);
+        }
+        channel_proj[2][2] = 0.2; // e_2: primary vertical
+        // Channel 3 (laplacian): curvature/blob detector
+        for k in 0..8 {
+            channel_proj[3][k] = rng.gen_range(-0.15..0.15);
+        }
+        channel_proj[3][0] = 0.2; // e_0 (timelike): curvature as causal signal
+
+        // Texture projection for local variance → full multivector
+        let norm = 1.0 / (IMAGE_DIM as f32).sqrt();
+        let grade_init_scale: [f32; 9] = std::array::from_fn(|g| {
+            1.0 / (GRADE_DIMS[g] as f32).sqrt().max(1.0)
+        });
+        let two_pi = 2.0 * std::f32::consts::PI;
+
+        let mut texture_proj = Vec::with_capacity(IMAGE_DIM);
+        for pixel_idx in 0..IMAGE_DIM {
+            let mut row = [0.0f32; CL8_DIM];
+            let px = (pixel_idx % 28) as f32;
+            let py = (pixel_idx / 28) as f32;
+
+            // Fourier features for residual texture detail (same as new_texture grades 2-4)
+            let g2s = grade_init_scale[2] * norm;
+            for ori in 0..7usize {
+                let theta = ori as f32 * std::f32::consts::PI / 7.0;
+                let dx = theta.cos();
+                let dy = theta.sin();
+                for (fi, &freq) in [2.0f32, 4.0].iter().enumerate() {
+                    let phase = two_pi * freq * (px * dx + py * dy) / 28.0;
+                    let base = ori * 4 + fi * 2;
+                    if base + 1 < GRADE_DIMS[2] {
+                        row[GRADE_OFFSETS[2] + base]     = phase.cos() * g2s;
+                        row[GRADE_OFFSETS[2] + base + 1] = phase.sin() * g2s;
+                    }
+                }
+            }
+
+            for g in 3..=8 {
+                let gs = grade_init_scale[g] * norm;
+                for k in 0..GRADE_DIMS[g] {
+                    row[GRADE_OFFSETS[g] + k] = rng.gen_range(-0.1..0.1) * gs;
+                }
+            }
+
+            texture_proj.push(row);
+        }
+
+        CliffordDiracEncoder {
+            channel_proj,
+            texture_proj,
+            grade_scales: [1.0; 9],
+        }
+    }
+
+    /// Encode an image as a Dirac particle in Cl(1,7).
+    /// Applies differential operators, projects to vectors, then takes
+    /// geometric products to produce nonlinear spinor features.
+    pub fn encode(&self, image: &[f32]) -> Multivector {
+        let dx = compute_gradient_x(image);
+        let dy = compute_gradient_y(image);
+        let lap = compute_laplacian(image);
+        let lvar = compute_local_variance(image);
+
+        // Project each channel to grade-1 vectors
+        let v_i   = channel_to_vector(image, &self.channel_proj[0]);
+        let v_dx  = channel_to_vector(&dx,   &self.channel_proj[1]);
+        let v_dy  = channel_to_vector(&dy,   &self.channel_proj[2]);
+        let v_lap = channel_to_vector(&lap,  &self.channel_proj[3]);
+
+        // Geometric products → nonlinear even-grade features
+        // v_dx * v_dy produces grade-0 (dot product: gradient energy)
+        //                  and grade-2 (wedge: oriented texture "spin")
+        let spin = v_dx.geo(&v_dy);
+        // v_i * v_lap: intensity-curvature interaction
+        let mass_curvature = v_i.geo(&v_lap);
+
+        // Linear texture features from local variance
+        let mut texture_mv = Multivector::zero();
+        for (i, &v) in lvar.iter().enumerate() {
+            if v.abs() < 1e-6 { continue; }
+            let row = &self.texture_proj[i];
+            for j in 0..CL8_DIM {
+                texture_mv.components[j] += v * row[j];
+            }
+        }
+
+        // Combine: linear vectors + nonlinear products + texture
+        let mut result = Multivector::zero();
+        for i in 0..CL8_DIM {
+            result.components[i] =
+                0.5 * v_i.components[i]
+                + 0.3 * v_dx.components[i]
+                + 0.3 * v_dy.components[i]
+                + 0.2 * v_lap.components[i]
+                + 1.0 * spin.components[i]
+                + 0.5 * mass_curvature.components[i]
+                + 0.3 * texture_mv.components[i];
+        }
+
+        // Apply grade scales
+        for g in 0..=8 {
+            let scale = self.grade_scales[g];
+            let start = GRADE_OFFSETS[g];
+            for k in 0..GRADE_DIMS[g] {
+                result.components[start + k] *= scale;
+            }
+        }
+
+        // Safety clamp
+        const MAX_GRADE_NORM: f32 = 50.0;
+        for g in 0..=8 {
+            let start = GRADE_OFFSETS[g];
+            let dim = GRADE_DIMS[g];
+            let norm: f32 = result.components[start..start + dim]
+                .iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > MAX_GRADE_NORM {
+                let s = MAX_GRADE_NORM / norm;
+                for k in 0..dim { result.components[start + k] *= s; }
+            }
+        }
+        result
+    }
+
+    pub fn calibrate_scales(&mut self, samples: &[(Vec<f32>, u8)]) {
+        let n = samples.len().min(500) as f32;
+        if n < 2.0 { return; }
+        self.grade_scales = [1.0; 9];
+        let mut grade_norms = [0.0f32; 9];
+        for (img, _) in samples.iter().take(500) {
+            let mv = self.encode(img);
+            for g in 0..=8 {
+                let gnorm: f32 = mv.grade(g).iter().map(|x| x * x).sum::<f32>().sqrt();
+                if gnorm.is_finite() { grade_norms[g] += gnorm / n; }
+            }
+        }
+        for g in 0..=8 {
+            if grade_norms[g] > 1e-6 && grade_norms[g].is_finite() {
+                self.grade_scales[g] = 1.0 / grade_norms[g];
+            }
+        }
+    }
+}
+
+// ─── RGB encoder (single 2352→256 projection) ───────────────────────────
+//
+// Direct projection from 28×28×3 RGB pixels into Cl(1,7).
+// Each of the 2352 input dimensions (R,G,B at each spatial position)
+// has its own learned projection row. The three color channels at each
+// pixel contribute DIFFERENTLY to the multivector — the encoder learns
+// that blue (hematoxylin/nuclei) and red (eosin/stroma) carry distinct
+// grade signals without needing explicit geometric product fusion.
+//
+// Same speed as the grayscale encoder, just 3x more projection rows.
+
+const RGB_DIM: usize = 28 * 28 * 3; // 2352
+
+pub struct CliffordRGBEncoder {
+    projection: Vec<[f32; CL8_DIM]>, // 2352 → 256
+    grade_scales: [f32; 9],
+}
+
+impl CliffordRGBEncoder {
+    pub fn new(seed: u64) -> Self {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut projection = Vec::with_capacity(RGB_DIM);
+
+        let grade_init_scale: [f32; 9] = std::array::from_fn(|g| {
+            1.0 / (GRADE_DIMS[g] as f32).sqrt().max(1.0)
+        });
+        let norm = 1.0 / (RGB_DIM as f32).sqrt();
+        let two_pi = 2.0 * std::f32::consts::PI;
+        let pi = std::f32::consts::PI;
+
+        for input_idx in 0..RGB_DIM {
+            let mut row = [0.0f32; CL8_DIM];
+            let pixel_idx = input_idx / 3;
+            let channel = input_idx % 3; // 0=R, 1=G, 2=B
+            let px = (pixel_idx % 28) as f32;
+            let py = (pixel_idx / 28) as f32;
+
+            // Channel-specific grade biases:
+            // R (eosin/stroma): emphasize grade-2 (bivector/texture orientation)
+            // G (mixed): balanced contribution
+            // B (hematoxylin/nuclei): emphasize grade-0 (scalar/density)
+            let channel_weight = match channel {
+                0 => [0.8, 0.8, 1.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], // R: boost bivector
+                1 => [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], // G: balanced
+                2 => [1.5, 1.2, 0.8, 1.0, 1.2, 1.0, 1.0, 1.0, 1.0], // B: boost scalar+topology
+                _ => unreachable!(),
+            };
+
+            // Grade 0: intensity contribution (channel-weighted)
+            row[GRADE_OFFSETS[0]] = norm * channel_weight[0];
+
+            // Grade 1: Fourier features (texture at different scales)
+            let g1s = grade_init_scale[1] * norm * channel_weight[1];
+            let g1_uv: [(f32, f32); 4] = [
+                (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, -1.0),
+            ];
+            for (k, &(u, v)) in g1_uv.iter().enumerate() {
+                let phase = two_pi * (u * px + v * py) / 28.0;
+                row[GRADE_OFFSETS[1] + 2 * k]     = phase.cos() * g1s;
+                row[GRADE_OFFSETS[1] + 2 * k + 1] = phase.sin() * g1s;
+            }
+
+            // Grade 2: Gabor-like oriented texture (7 orientations × 2 frequencies)
+            let g2s = grade_init_scale[2] * norm * channel_weight[2];
+            for ori in 0..7usize {
+                let theta = ori as f32 * pi / 7.0;
+                let dx = theta.cos();
+                let dy = theta.sin();
+                for (fi, &freq) in [2.0f32, 4.0].iter().enumerate() {
+                    let phase = two_pi * freq * (px * dx + py * dy) / 28.0;
+                    let base = ori * 4 + fi * 2;
+                    if base + 1 < GRADE_DIMS[2] {
+                        row[GRADE_OFFSETS[2] + base]     = phase.cos() * g2s;
+                        row[GRADE_OFFSETS[2] + base + 1] = phase.sin() * g2s;
+                    }
+                }
+            }
+
+            // Grade 3-4: medium/high frequency Fourier
+            for g in 3..=4 {
+                let gs = grade_init_scale[g] * norm * channel_weight[g];
+                let freq_offset = if g == 3 { 2.0 } else { 5.0 };
+                for k in 0..GRADE_DIMS[g] {
+                    let freq = freq_offset + k as f32 * 0.5;
+                    let angle = k as f32 * pi / GRADE_DIMS[g] as f32;
+                    let phase = two_pi * freq * (px * angle.cos() + py * angle.sin()) / 28.0;
+                    row[GRADE_OFFSETS[g] + k] = phase.cos() * gs
+                        + rng.gen_range(-0.02..0.02) * gs;
+                }
+            }
+
+            // Grades 5-8: random structured (learned via contrastive training)
+            for g in 5..=8 {
+                let gs = grade_init_scale[g] * norm * channel_weight[g];
+                for k in 0..GRADE_DIMS[g] {
+                    row[GRADE_OFFSETS[g] + k] = rng.gen_range(-0.1..0.1) * gs;
+                }
+            }
+
+            projection.push(row);
+        }
+
+        CliffordRGBEncoder {
+            projection,
+            grade_scales: [1.0; 9],
+        }
+    }
+
+    pub fn encode(&self, rgb: &[f32]) -> Multivector {
+        let mut mv = Multivector::zero();
+        let n = rgb.len().min(RGB_DIM);
+        for (i, &val) in rgb.iter().enumerate().take(n) {
+            if val.abs() < 1e-6 { continue; }
+            let row = &self.projection[i];
+            for j in 0..CL8_DIM {
+                mv.components[j] += val * row[j];
+            }
+        }
+
+        for g in 0..=8 {
+            let scale = self.grade_scales[g];
+            let start = GRADE_OFFSETS[g];
+            for k in 0..GRADE_DIMS[g] {
+                mv.components[start + k] *= scale;
+            }
+        }
+
+        const MAX_GRADE_NORM: f32 = 50.0;
+        for g in 0..=8 {
+            let start = GRADE_OFFSETS[g];
+            let dim = GRADE_DIMS[g];
+            let norm: f32 = mv.components[start..start + dim]
+                .iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > MAX_GRADE_NORM {
+                let s = MAX_GRADE_NORM / norm;
+                for k in 0..dim { mv.components[start + k] *= s; }
+            }
+        }
+        mv
+    }
+
+    pub fn calibrate_scales(&mut self, samples: &[(Vec<f32>, u8)]) {
+        let n = samples.len().min(500) as f32;
+        if n < 2.0 { return; }
+        self.grade_scales = [1.0; 9];
+        let mut grade_norms = [0.0f32; 9];
+        for (img, _) in samples.iter().take(500) {
+            let mv = self.encode(img);
+            for g in 0..=8 {
+                let gnorm: f32 = mv.grade(g).iter().map(|x| x * x).sum::<f32>().sqrt();
+                if gnorm.is_finite() { grade_norms[g] += gnorm / n; }
+            }
+        }
+        for g in 0..=8 {
+            if grade_norms[g] > 1e-6 && grade_norms[g].is_finite() {
+                self.grade_scales[g] = 1.0 / grade_norms[g];
+            }
+        }
+    }
+
+    /// Contrastive training step. Takes a centroid slice (any length).
+    pub fn train_step(
+        &mut self,
+        rgb: &[f32],
+        label: u8,
+        centroids: &[Multivector],
+        lr: f32,
+    ) {
+        let mv = self.encode(rgb);
+        let n_classes = centroids.len();
+        let correct_centroid = &centroids[label as usize];
+        let correct_dist = spacetime_distance(&mv, correct_centroid);
+
+        let mut hardest_neg_dist = f32::MAX;
+        let mut hardest_neg_idx = 0;
+        for d in 0..n_classes {
+            if d == label as usize { continue; }
+            if centroids[d].components.iter().all(|x| x.abs() < 1e-12) { continue; }
+            let dist = spacetime_distance(&mv, &centroids[d]);
+            if dist < hardest_neg_dist {
+                hardest_neg_dist = dist;
+                hardest_neg_idx = d;
+            }
+        }
+        if hardest_neg_dist == f32::MAX { return; }
+
+        let margin = 0.1;
+        let violation = correct_dist - hardest_neg_dist + margin;
+        if violation <= 0.0 { return; }
+
+        let neg_centroid = &centroids[hardest_neg_idx];
+        let loss_scale = violation.min(2.0);
+
+        let n = rgb.len().min(RGB_DIM);
+        for (i, &pixel) in rgb.iter().enumerate().take(n) {
+            if pixel.abs() < 0.01 { continue; }
+            let row = &mut self.projection[i];
+            for g in 0..=8 {
+                let glr = lr / (GRADE_DIMS[g] as f32).sqrt().max(1.0);
+                for k in 0..GRADE_DIMS[g] {
+                    let idx = GRADE_OFFSETS[g] + k;
+                    let toward = correct_centroid.components[idx] - mv.components[idx];
+                    let away = mv.components[idx] - neg_centroid.components[idx];
+                    let update = glr * pixel * loss_scale * (toward + away);
+                    if update.is_finite() {
+                        row[idx] += update;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// N-class centroid classifier for PathMNIST (not hardcoded to 10).
+pub struct PathClassifier {
+    pub centroids: Vec<Multivector>,
+    pub counts: Vec<u32>,
+    pub n_classes: usize,
+}
+
+impl PathClassifier {
+    pub fn new(n_classes: usize) -> Self {
+        PathClassifier {
+            centroids: (0..n_classes).map(|_| Multivector::zero()).collect(),
+            counts: vec![0; n_classes],
+            n_classes,
+        }
+    }
+
+    pub fn accumulate(&mut self, mv: &Multivector, label: u8) {
+        let d = label as usize;
+        if d >= self.n_classes { return; }
+        self.counts[d] += 1;
+        let n = self.counts[d] as f32;
+        let alpha = 1.0 / n;
+        for i in 0..CL8_DIM {
+            self.centroids[d].components[i] =
+                self.centroids[d].components[i] * (1.0 - alpha) + mv.components[i] * alpha;
+        }
+    }
+
+    pub fn classify(&self, mv: &Multivector) -> (u8, f32) {
+        let mut best = 0u8;
+        let mut best_dist = f32::MAX;
+        for d in 0..self.n_classes {
+            if self.counts[d] == 0 { continue; }
+            let dist = spacetime_distance(mv, &self.centroids[d]);
+            if dist < best_dist { best_dist = dist; best = d as u8; }
+        }
+        (best, best_dist)
+    }
+
+    pub fn classify_binary(&self, mv: &Multivector, a: u8, b: u8) -> (u8, f32) {
+        let da = spacetime_distance(mv, &self.centroids[a as usize]);
+        let db = spacetime_distance(mv, &self.centroids[b as usize]);
+        if da <= db { (a, da) } else { (b, db) }
+    }
+
+    pub fn grade_discriminability(&self) -> [f32; 9] {
+        let active: Vec<usize> = (0..self.n_classes).filter(|&d| self.counts[d] > 0).collect();
+        if active.len() < 2 { return [0.0; 9]; }
+        let mut disc = [0.0f32; 9];
+        let mut npairs = 0u32;
+        for i in 0..active.len() {
+            for j in (i + 1)..active.len() {
+                let ca = &self.centroids[active[i]];
+                let cb = &self.centroids[active[j]];
+                for g in 0..=8 {
+                    let ga = ca.grade(g);
+                    let gb = cb.grade(g);
+                    let d2: f32 = ga.iter().zip(gb.iter()).map(|(a, b)| (a - b) * (a - b)).sum();
+                    disc[g] += d2;
+                }
+                npairs += 1;
+            }
+        }
+        if npairs > 0 {
+            for g in 0..=8 { disc[g] /= npairs as f32; }
+        }
+        disc
     }
 }
 
@@ -476,6 +1153,121 @@ fn interval_augmented_score(
     };
 
     base_dist + interval_adjustment
+}
+
+// ─── CliffordMicroBrain ─────────────────────────────────────────────────
+// Paramecium-inspired router that uses spacetime algebra instead of cosine
+// similarity. Stores per-class Multivector centroids and classifies via
+// grade-weighted Minkowski distance + interval augmentation.
+
+pub struct CliffordMicroBrain {
+    pub centroids_rgb: Vec<Multivector>,
+    pub centroids_dirac: Vec<Multivector>,
+    counts: Vec<u64>,
+    grade_weights_rgb: [f32; 9],
+    grade_weights_dirac: [f32; 9],
+    pub n_classes: usize,
+}
+
+impl CliffordMicroBrain {
+    /// Build from paired RGB + Dirac multivectors in one pass.
+    pub fn build(
+        rgb_mvs: &[Multivector],
+        dirac_mvs: &[Multivector],
+        labels: &[u8],
+        n_classes: usize,
+    ) -> Self {
+        let n = rgb_mvs.len();
+        let mut centroids_rgb = vec![Multivector::zero(); n_classes];
+        let mut centroids_dirac = vec![Multivector::zero(); n_classes];
+        let mut counts = vec![0u64; n_classes];
+
+        for i in 0..n {
+            let c = labels[i] as usize;
+            if c >= n_classes { continue; }
+            counts[c] += 1;
+            for j in 0..CL8_DIM {
+                centroids_rgb[c].components[j] += rgb_mvs[i].components[j];
+                centroids_dirac[c].components[j] += dirac_mvs[i].components[j];
+            }
+        }
+        for c in 0..n_classes {
+            if counts[c] > 0 {
+                let n_f = counts[c] as f32;
+                for j in 0..CL8_DIM {
+                    centroids_rgb[c].components[j] /= n_f;
+                    centroids_dirac[c].components[j] /= n_f;
+                }
+            }
+        }
+
+        // Compute grade discriminability from RGB centroids
+        let mut path_clf_rgb = PathClassifier::new(n_classes);
+        for (mv, &l) in rgb_mvs.iter().zip(labels.iter()) {
+            path_clf_rgb.accumulate(mv, l);
+        }
+        let disc_rgb = path_clf_rgb.grade_discriminability();
+        let gw_rgb = discriminability_weights(&disc_rgb);
+
+        let mut path_clf_dirac = PathClassifier::new(n_classes);
+        for (mv, &l) in dirac_mvs.iter().zip(labels.iter()) {
+            path_clf_dirac.accumulate(mv, l);
+        }
+        let disc_dirac = path_clf_dirac.grade_discriminability();
+        let gw_dirac = discriminability_weights(&disc_dirac);
+
+        println!("  CliffordMicroBrain: {} classes, {} samples", n_classes, n);
+        println!("    RGB grade weights:   [{:.2}, {:.2}, {:.2}, {:.2}, {:.2}, {:.2}, {:.2}, {:.2}, {:.2}]",
+            gw_rgb[0], gw_rgb[1], gw_rgb[2], gw_rgb[3], gw_rgb[4],
+            gw_rgb[5], gw_rgb[6], gw_rgb[7], gw_rgb[8]);
+        println!("    Dirac grade weights: [{:.2}, {:.2}, {:.2}, {:.2}, {:.2}, {:.2}, {:.2}, {:.2}, {:.2}]",
+            gw_dirac[0], gw_dirac[1], gw_dirac[2], gw_dirac[3], gw_dirac[4],
+            gw_dirac[5], gw_dirac[6], gw_dirac[7], gw_dirac[8]);
+
+        CliffordMicroBrain {
+            centroids_rgb,
+            centroids_dirac,
+            counts,
+            grade_weights_rgb: gw_rgb,
+            grade_weights_dirac: gw_dirac,
+            n_classes,
+        }
+    }
+
+    /// Classify using both RGB and Dirac multivectors with spacetime distance.
+    pub fn classify(&self, rgb_mv: &Multivector, dirac_mv: &Multivector) -> (u8, f32) {
+        self.classify_among(rgb_mv, dirac_mv, &(0..self.n_classes).collect::<Vec<_>>())
+    }
+
+    /// Classify only among a subset of candidate classes.
+    pub fn classify_among(
+        &self,
+        rgb_mv: &Multivector,
+        dirac_mv: &Multivector,
+        candidates: &[usize],
+    ) -> (u8, f32) {
+        let mut best_class = candidates[0] as u8;
+        let mut best_score = f32::MAX;
+
+        for &c in candidates {
+            if c >= self.n_classes || self.counts[c] == 0 { continue; }
+
+            let rgb_score = interval_augmented_score(
+                rgb_mv, &self.centroids_rgb[c], &self.grade_weights_rgb,
+            );
+            let dirac_score = interval_augmented_score(
+                dirac_mv, &self.centroids_dirac[c], &self.grade_weights_dirac,
+            );
+
+            let score = rgb_score + dirac_score;
+
+            if score < best_score {
+                best_score = score;
+                best_class = c as u8;
+            }
+        }
+        (best_class, best_score)
+    }
 }
 
 /// Full training pipeline result.
@@ -1071,6 +1863,272 @@ fn invert_symmetric(m: Vec<Vec<f64>>) -> Vec<Vec<f64>> {
     }
 
     a.into_iter().map(|row| row[n..].to_vec()).collect()
+}
+
+/// Single-pass linear classifier solved via normal equations.
+/// Maps 256D Cl(1,7) multivector → n_classes logits.
+/// W = (Z^T Z + λI)^{-1} Z^T Y where Y is one-hot labels.
+pub struct LinearClassifier {
+    weights: Vec<Vec<f32>>,  // DECODER_INPUT_DIM × n_classes
+    pub n_classes: usize,
+}
+
+impl LinearClassifier {
+    pub fn fit(
+        encoder: &CliffordImageEncoder,
+        images: &[Vec<f32>],
+        labels: &[u8],
+        n_classes: usize,
+        lambda: f32,
+        verbosity: u8,
+    ) -> Self {
+        let d = DECODER_INPUT_DIM;
+        let n = images.len();
+        if verbosity >= 1 { println!("  Fitting {}-class classifier on {} samples...", n_classes, n); }
+
+        let mut ztz = vec![vec![0.0f64; d]; d];
+        let mut zty = vec![vec![0.0f64; n_classes]; d];
+
+        for idx in 0..n {
+            let mv = encoder.encode(&images[idx]);
+            let mut z = vec![0.0f64; d];
+            for i in 0..CL8_DIM { z[i] = mv.components[i] as f64; }
+            z[CL8_DIM] = 1.0;
+
+            let c = labels[idx] as usize;
+
+            for i in 0..d {
+                if z[i].abs() < 1e-12 { continue; }
+                for j in i..d {
+                    ztz[i][j] += z[i] * z[j];
+                }
+                // One-hot target: Y[idx][c] = 1.0, rest 0.0
+                zty[i][c] += z[i];
+            }
+
+            if verbosity >= 1 && (idx + 1) % 20000 == 0 {
+                println!("    {}/{}", idx + 1, n);
+            }
+        }
+
+        for i in 0..d { for j in 0..i { ztz[i][j] = ztz[j][i]; } }
+        for i in 0..d { ztz[i][i] += lambda as f64; }
+
+        if verbosity >= 1 { println!("  Solving {}×{} normal equations...", d, d); }
+        let inv = invert_symmetric(ztz);
+
+        let mut weights = vec![vec![0.0f32; n_classes]; d];
+        for i in 0..d {
+            for c in 0..n_classes {
+                let mut s = 0.0f64;
+                for k in 0..d { s += inv[i][k] * zty[k][c]; }
+                weights[i][c] = s as f32;
+            }
+        }
+        if verbosity >= 1 { println!("  Classifier solved."); }
+
+        LinearClassifier { weights, n_classes }
+    }
+
+    /// Fit from pre-computed multivector embeddings (encoder-agnostic).
+    pub fn fit_from_embeddings(
+        embeddings: &[Multivector],
+        labels: &[u8],
+        n_classes: usize,
+        lambda: f32,
+        verbosity: u8,
+    ) -> Self {
+        let d = DECODER_INPUT_DIM;
+        let n = embeddings.len();
+        if verbosity >= 1 { println!("  Fitting {}-class classifier on {} embeddings...", n_classes, n); }
+
+        // Inverse-frequency class weights: w_c = N / (K * count_c)
+        let mut counts = vec![0.0f64; n_classes];
+        for &l in labels { counts[l as usize] += 1.0; }
+        let class_weights: Vec<f64> = counts.iter()
+            .map(|&c| if c > 0.0 { n as f64 / (n_classes as f64 * c) } else { 1.0 })
+            .collect();
+
+        if verbosity >= 1 {
+            print!("  Class weights: ");
+            for (c, &w) in class_weights.iter().enumerate() {
+                print!("{}={:.2} ", c, w);
+            }
+            println!();
+        }
+
+        // Weighted least squares: (Z^T W Z)^{-1} Z^T W Y
+        // Absorb sqrt(w) into z for each sample
+        let mut ztz = vec![vec![0.0f64; d]; d];
+        let mut zty = vec![vec![0.0f64; n_classes]; d];
+
+        for idx in 0..n {
+            let mv = &embeddings[idx];
+            let c = labels[idx] as usize;
+            let w = class_weights[c];
+            let sw = w.sqrt();
+
+            let mut z = vec![0.0f64; d];
+            for i in 0..CL8_DIM { z[i] = mv.components[i] as f64 * sw; }
+            z[CL8_DIM] = sw;
+
+            for i in 0..d {
+                if z[i].abs() < 1e-12 { continue; }
+                for j in i..d {
+                    ztz[i][j] += z[i] * z[j];
+                }
+                // Target is sw (not 1.0) because y is also scaled by sqrt(w)
+                zty[i][c] += z[i] * sw;
+            }
+
+            if verbosity >= 1 && (idx + 1) % 20000 == 0 {
+                println!("    {}/{}", idx + 1, n);
+            }
+        }
+
+        for i in 0..d { for j in 0..i { ztz[i][j] = ztz[j][i]; } }
+        for i in 0..d { ztz[i][i] += lambda as f64; }
+
+        if verbosity >= 1 { println!("  Solving {}×{} normal equations...", d, d); }
+        let inv = invert_symmetric(ztz);
+
+        let mut weights = vec![vec![0.0f32; n_classes]; d];
+        for i in 0..d {
+            for c in 0..n_classes {
+                let mut s = 0.0f64;
+                for k in 0..d { s += inv[i][k] * zty[k][c]; }
+                weights[i][c] = s as f32;
+            }
+        }
+        if verbosity >= 1 { println!("  Classifier solved."); }
+
+        LinearClassifier { weights, n_classes }
+    }
+
+    /// Predict class label and confidence (max logit).
+    pub fn classify(&self, mv: &Multivector) -> (u8, f32) {
+        let logits = self.logits(mv);
+        let mut best = 0;
+        let mut best_val = f32::NEG_INFINITY;
+        for c in 0..self.n_classes {
+            if logits[c] > best_val { best_val = logits[c]; best = c; }
+        }
+        (best as u8, best_val)
+    }
+
+    pub fn logits(&self, mv: &Multivector) -> Vec<f32> {
+        let d = DECODER_INPUT_DIM;
+        let mut out = vec![0.0f32; self.n_classes];
+        for c in 0..self.n_classes {
+            let mut s = self.weights[CL8_DIM][c]; // bias
+            for i in 0..CL8_DIM {
+                s += self.weights[i][c] * mv.components[i];
+            }
+            out[c] = s;
+        }
+        out
+    }
+
+    /// Fit from arbitrary-width feature vectors (e.g. concatenated multivectors).
+    /// Solves class-weighted normal equations on D-dimensional input + bias.
+    pub fn fit_from_features(
+        features: &[Vec<f32>],
+        labels: &[u8],
+        n_classes: usize,
+        lambda: f32,
+        verbosity: u8,
+    ) -> Self {
+        let n = features.len();
+        let raw_dim = features[0].len();
+        let d = raw_dim + 1; // +1 bias
+        if verbosity >= 1 {
+            println!("  Fitting {}-class classifier on {} samples, {}D features (+bias={}D)...",
+                n_classes, n, raw_dim, d);
+        }
+
+        let mut counts = vec![0.0f64; n_classes];
+        for &l in labels { counts[l as usize] += 1.0; }
+        let class_weights: Vec<f64> = counts.iter()
+            .map(|&c| if c > 0.0 { n as f64 / (n_classes as f64 * c) } else { 1.0 })
+            .collect();
+
+        if verbosity >= 1 {
+            print!("  Class weights: ");
+            for (c, &w) in class_weights.iter().enumerate() {
+                print!("{}={:.2} ", c, w);
+            }
+            println!();
+        }
+
+        let mut ztz = vec![vec![0.0f64; d]; d];
+        let mut zty = vec![vec![0.0f64; n_classes]; d];
+
+        for idx in 0..n {
+            let feat = &features[idx];
+            let c = labels[idx] as usize;
+            let w = class_weights[c];
+            let sw = w.sqrt();
+
+            let mut z = vec![0.0f64; d];
+            for i in 0..raw_dim { z[i] = feat[i] as f64 * sw; }
+            z[raw_dim] = sw; // bias
+
+            for i in 0..d {
+                if z[i].abs() < 1e-12 { continue; }
+                for j in i..d {
+                    ztz[i][j] += z[i] * z[j];
+                }
+                zty[i][c] += z[i] * sw;
+            }
+
+            if verbosity >= 1 && (idx + 1) % 20000 == 0 {
+                println!("    {}/{}", idx + 1, n);
+            }
+        }
+
+        for i in 0..d { for j in 0..i { ztz[i][j] = ztz[j][i]; } }
+        for i in 0..d { ztz[i][i] += lambda as f64; }
+
+        if verbosity >= 1 { println!("  Solving {}×{} normal equations...", d, d); }
+        let inv = invert_symmetric(ztz);
+
+        let mut weights = vec![vec![0.0f32; n_classes]; d];
+        for i in 0..d {
+            for c in 0..n_classes {
+                let mut s = 0.0f64;
+                for k in 0..d { s += inv[i][k] * zty[k][c]; }
+                weights[i][c] = s as f32;
+            }
+        }
+        if verbosity >= 1 { println!("  Classifier solved."); }
+
+        LinearClassifier { weights, n_classes }
+    }
+
+    /// Classify from an arbitrary-width feature vector.
+    pub fn classify_features(&self, features: &[f32]) -> (u8, f32) {
+        let raw_dim = self.weights.len() - 1;
+        let mut best = 0;
+        let mut best_val = f32::NEG_INFINITY;
+        for c in 0..self.n_classes {
+            let mut s = self.weights[raw_dim][c];
+            for i in 0..raw_dim {
+                s += self.weights[i][c] * features[i];
+            }
+            if s > best_val { best_val = s; best = c; }
+        }
+        (best as u8, best_val)
+    }
+
+    /// Return per-class logits from an arbitrary-width feature vector.
+    pub fn logits_features(&self, features: &[f32]) -> Vec<f32> {
+        let raw_dim = self.weights.len() - 1;
+        (0..self.n_classes).map(|c| {
+            let mut s = self.weights[raw_dim][c];
+            for i in 0..raw_dim { s += self.weights[i][c] * features[i]; }
+            s
+        }).collect()
+    }
 }
 
 /// SSIM-like structural similarity (simplified single-scale).
