@@ -70,6 +70,8 @@ struct Args {
     pathmnist: bool,
     #[arg(long)]
     pathmnist_64: bool,
+    #[arg(long)]
+    arc_agi: bool,
     #[arg(long, default_value_t = true)]
     progress: bool,
     #[arg(long, value_name = "N")]
@@ -265,6 +267,8 @@ fn main() {
         demo_pathmnist(args.mnist_train_limit, args.mnist_max_epochs);
     } else if args.pathmnist_64 {
         demo_pathmnist_64(args.mnist_train_limit);
+    } else if args.arc_agi {
+        demo_arc_agi();
     } else if args.acceptance_report {
         if let Err(e) = demo_acceptance_report(args.acceptance_report_path.as_deref()) {
             eprintln!("Failed acceptance report: {}", e);
@@ -2504,6 +2508,222 @@ fn demo_pathmnist_64(train_limit: Option<usize>) {
     println!("  Architecture: Cl(1,7) RGB(12288→256) + Dirac(4096→256) = 512D");
     println!("  Classifier: single-pass linear solve with class weights");
     println!("  Training: zero epochs (algebraic)");
+    println!("═══════════════════════════════════════════════════════════════");
+}
+
+// =============================================================================
+// Demo: ARC-AGI — Abstract Reasoning through Cl(1,7) spacetime algebra.
+// Rules are rotors. |B| predicts task difficulty before solving.
+// =============================================================================
+
+fn demo_arc_agi() {
+    use growformer::arc_agi::{
+        load_arc_tasks, solve_task, encode_grid, extract_rule,
+        rotor_consistency, solve_normal_equations, print_grid,
+    };
+
+    let data_dir = std::path::PathBuf::from(
+        std::env::var("ARC_AGI_ROOT")
+            .unwrap_or_else(|_| "data/arc-agi/data/training".to_string())
+    );
+    if !data_dir.exists() {
+        eprintln!("ARC-AGI data not found at {:?}", data_dir);
+        eprintln!("Clone https://github.com/fchollet/ARC-AGI into data/arc-agi/");
+        std::process::exit(1);
+    }
+
+    println!("═══════════════════════════════════════════════════════════════");
+    println!("  ARC-AGI-1 — Abstract Reasoning Corpus");
+    println!("  Cl(1,7) spacetime algebra: rules are rotors");
+    println!("═══════════════════════════════════════════════════════════════\n");
+
+    let total_start = Instant::now();
+
+    println!("Loading ARC-AGI training tasks...");
+    let tasks = load_arc_tasks(&data_dir);
+    println!("  {} tasks loaded ({:.1}s)\n", tasks.len(), total_start.elapsed().as_secs_f64());
+
+    // ── Phase 1: |B| diagnostic on all tasks ──
+    println!("═══════════════════════════════════════════════════════════════");
+    println!("  Phase 1: |B| Diagnostic — rotor consistency across examples");
+    println!("═══════════════════════════════════════════════════════════════\n");
+
+    let diag_start = Instant::now();
+
+    let mut diagnostics: Vec<(String, usize, f32, bool)> = Vec::new();
+    let mut bv_histogram = [0usize; 5]; // [0, 0.1), [0.1, 0.3), [0.3, 0.5), [0.5, 1.0), [1.0+)
+
+    for task in &tasks {
+        let inputs: Vec<_> = task.train.iter().map(|ex| encode_grid(&ex.input)).collect();
+        let outputs: Vec<_> = task.train.iter().map(|ex| encode_grid(&ex.output)).collect();
+        let rules: Vec<_> = inputs.iter().zip(outputs.iter())
+            .map(|(i, o)| extract_rule(i, o))
+            .collect();
+        let (mean_bv, _) = rotor_consistency(&rules);
+
+        let same_dims = task.train.iter().all(|ex|
+            ex.input.height == ex.output.height && ex.input.width == ex.output.width);
+
+        diagnostics.push((task.id.clone(), task.train.len(), mean_bv, same_dims));
+
+        let bin = if mean_bv < 0.1 { 0 }
+            else if mean_bv < 0.3 { 1 }
+            else if mean_bv < 0.5 { 2 }
+            else if mean_bv < 1.0 { 3 }
+            else { 4 };
+        bv_histogram[bin] += 1;
+    }
+
+    println!("  |B| distribution across {} tasks:", tasks.len());
+    println!("    |B| < 0.1  (rotor-consistent):  {:>3} tasks", bv_histogram[0]);
+    println!("    |B| 0.1-0.3 (weakly rotational): {:>3} tasks", bv_histogram[1]);
+    println!("    |B| 0.3-0.5 (mixed):             {:>3} tasks", bv_histogram[2]);
+    println!("    |B| 0.5-1.0 (context-dependent):  {:>3} tasks", bv_histogram[3]);
+    println!("    |B| > 1.0  (highly inconsistent): {:>3} tasks", bv_histogram[4]);
+
+    let same_dim_count = diagnostics.iter().filter(|d| d.3).count();
+    println!("\n  Same-dimension tasks: {}/{}", same_dim_count, tasks.len());
+    println!("  Diagnostic: {:.1}s\n", diag_start.elapsed().as_secs_f64());
+
+    // Show top-10 most rotor-consistent tasks
+    let mut sorted_diags = diagnostics.clone();
+    sorted_diags.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+    println!("  Top-10 most rotor-consistent tasks (lowest |B|):");
+    for (id, n_train, bv, same) in sorted_diags.iter().take(10) {
+        let dim_tag = if *same { "same-dim" } else { "diff-dim" };
+        println!("    {} |B|={:.4}  ({} examples, {})", id, bv, n_train, dim_tag);
+    }
+
+    println!("\n  Top-10 least consistent tasks (highest |B|):");
+    for (id, n_train, bv, same) in sorted_diags.iter().rev().take(10) {
+        let dim_tag = if *same { "same-dim" } else { "diff-dim" };
+        println!("    {} |B|={:.4}  ({} examples, {})", id, bv, n_train, dim_tag);
+    }
+
+    // ── Phase 2: Solve all tasks ──
+    println!("\n═══════════════════════════════════════════════════════════════");
+    println!("  Phase 2: Solve — extract rotor, apply, decode");
+    println!("═══════════════════════════════════════════════════════════════\n");
+
+    let solve_start = Instant::now();
+    let mut n_solved = 0usize;
+    let n_total = tasks.len();
+    let mut total_correct_cells = 0usize;
+    let mut total_cells = 0usize;
+    let mut solved_tasks: Vec<String> = Vec::new();
+    let mut results: Vec<(String, f32, f32, bool, &str)> = Vec::new();
+    let mut strategy_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+
+    for (i, task) in tasks.iter().enumerate() {
+        let diag = solve_task(task);
+
+        let cell_acc = if diag.n_total_cells > 0 {
+            diag.n_correct_cells as f32 / diag.n_total_cells as f32
+        } else { 0.0 };
+
+        if diag.solved {
+            n_solved += 1;
+            solved_tasks.push(task.id.clone());
+        }
+        total_correct_cells += diag.n_correct_cells;
+        total_cells += diag.n_total_cells;
+
+        *strategy_counts.entry(diag.strategy).or_insert(0) += 1;
+        results.push((task.id.clone(), diag.mean_bv_norm, cell_acc, diag.solved, diag.strategy));
+
+        if (i + 1) % 50 == 0 || (i + 1) == n_total {
+            println!("    {}/{} tasks evaluated ({} solved so far, {:.1}s)",
+                i + 1, n_total, n_solved, solve_start.elapsed().as_secs_f64());
+        }
+    }
+
+    println!("  Solve: {:.1}s", solve_start.elapsed().as_secs_f64());
+    println!("  Strategy selection:");
+    for (name, count) in &strategy_counts {
+        println!("    {:>13}: {} tasks", name, count);
+    }
+    println!();
+
+    // ── Results ──
+    let overall_cell_acc = if total_cells > 0 {
+        total_correct_cells as f32 / total_cells as f32
+    } else { 0.0 };
+
+    println!("═══════════════════════════════════════════════════════════════");
+    println!("  ARC-AGI-1 RESULTS (training set, {} tasks)", n_total);
+    println!("═══════════════════════════════════════════════════════════════");
+    println!("  Tasks exactly solved:  {}/{}  ({:.1}%)",
+        n_solved, n_total, n_solved as f64 / n_total as f64 * 100.0);
+    println!("  Cell-level accuracy:   {:.1}%  ({}/{})",
+        overall_cell_acc * 100.0, total_correct_cells, total_cells);
+
+    if !solved_tasks.is_empty() {
+        println!("\n  Solved tasks:");
+        for id in &solved_tasks {
+            let res = results.iter().find(|r| &r.0 == id).unwrap();
+            println!("    {} |B|={:.4}  strategy={}", id, res.1, res.4);
+        }
+    }
+
+    // ── Accuracy by |B| bucket ──
+    println!("\n  Accuracy by rotor consistency:");
+    let buckets: [(f32, f32, &str); 5] = [
+        (0.0, 0.1, "|B| < 0.1"),
+        (0.1, 0.3, "|B| 0.1-0.3"),
+        (0.3, 0.5, "|B| 0.3-0.5"),
+        (0.5, 1.0, "|B| 0.5-1.0"),
+        (1.0, f32::MAX, "|B| > 1.0"),
+    ];
+
+    for &(lo, hi, label) in &buckets {
+        let bucket_results: Vec<_> = results.iter()
+            .filter(|r| r.1 >= lo && r.1 < hi)
+            .collect();
+        if bucket_results.is_empty() { continue; }
+        let n = bucket_results.len();
+        let n_solved_bucket = bucket_results.iter().filter(|r| r.3).count();
+        let mean_cell_acc: f32 = bucket_results.iter().map(|r| r.2).sum::<f32>() / n as f32;
+        println!("    {:>13}: {:>3} tasks, {:>2} solved ({:.1}%), cell acc {:.1}%",
+            label, n, n_solved_bucket,
+            n_solved_bucket as f64 / n as f64 * 100.0,
+            mean_cell_acc * 100.0);
+    }
+
+    // Show a few example tasks
+    println!("\n  Example task visualizations:");
+    let examples_to_show: Vec<_> = if !solved_tasks.is_empty() {
+        tasks.iter().filter(|t| solved_tasks.contains(&t.id)).take(3).collect()
+    } else {
+        let mut by_acc: Vec<_> = results.iter().collect();
+        by_acc.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        by_acc.iter().take(3)
+            .filter_map(|r| tasks.iter().find(|t| t.id == r.0))
+            .collect()
+    };
+
+    for task in examples_to_show {
+        println!("\n  Task: {}", task.id);
+        let res = results.iter().find(|r| r.0 == task.id).unwrap();
+        println!("  |B|={:.4}  cell_acc={:.1}%  solved={}  strategy={}", res.1, res.2 * 100.0, res.3, res.4);
+        if let Some(ex) = task.train.first() {
+            println!("    Train input ({}×{}):", ex.input.height, ex.input.width);
+            print_grid(&ex.input, "      ");
+            println!("    Train output ({}×{}):", ex.output.height, ex.output.width);
+            print_grid(&ex.output, "      ");
+        }
+    }
+
+    let total_time = total_start.elapsed().as_secs_f64();
+    println!("\n═══════════════════════════════════════════════════════════════");
+    println!("  ARC-AGI-1 BENCHMARK SUMMARY");
+    println!("═══════════════════════════════════════════════════════════════");
+    println!("  Tasks solved:     {}/{}  ({:.1}%)", n_solved, n_total,
+        n_solved as f64 / n_total as f64 * 100.0);
+    println!("  Cell accuracy:    {:.1}%", overall_cell_acc * 100.0);
+    println!("  Total time:       {:.1}s", total_time);
+    println!("  Architecture:     Growformer");
+    println!("  Parameters:       0 (no training)");
+    println!("  GPU required:     None");
     println!("═══════════════════════════════════════════════════════════════");
 }
 

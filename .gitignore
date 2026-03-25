@@ -8,5 +8,6 @@ data/audio
 data/pathology
 data/routekit-agent
 data/test-agent
+data/arc-agi
 micro-brains
 visualizer
