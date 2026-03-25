@@ -1667,20 +1667,17 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
     let train_n = train_limit.unwrap_or(train.n).min(train.n);
     let joint_dim = CL8_DIM * 2; // 512D
 
-    use growformer::clifford_mnist::{
-        clifford_single_pass, measure_class_distance,
-        diagnose_pair_learnability, TrainableDiracChannel,
-    };
+    use growformer::clifford_mnist::diagnose_pair_learnability;
 
     let train_lbls_full = &train.labels[..train_n];
 
     // ══════════════════════════════════════════════════════════════════════
-    //  Step 0: Geometric Learnability Diagnostic
-    //  Compute |B| = |<Z_a * Z_b†>_2| for all class pairs.
-    //  |B| predicts whether Clifford GD can separate the pair.
+    //  Geometric Learnability Diagnostic
+    //  |B| = |<Z_a * Z_b†>_2| for all class pairs — O(C²), milliseconds.
+    //  Predicts which pairs are rotationally separable vs degenerate.
     // ══════════════════════════════════════════════════════════════════════
     println!("\n═══════════════════════════════════════════════════════════════");
-    println!("  Step 0: Geometric Learnability Diagnostic");
+    println!("  Geometric Learnability Diagnostic");
     println!("  |B| = |<Z_a * Z_b†>_2| — computable before any training");
     println!("═══════════════════════════════════════════════════════════════");
 
@@ -1705,12 +1702,8 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
         println!();
     }
 
-    println!("\n  Rotational (|B| >= 0.3, Clifford GD single-pass):");
-    for &(a, b) in &rotational_pairs {
-        println!("    {} ↔ {}  ({} ↔ {})  |B|={:.3}",
-            a, b, CLASS_NAMES[a as usize], CLASS_NAMES[b as usize], bv_matrix[a as usize][b as usize]);
-    }
-    println!("  Degenerate (|B| < 0.1, need trainable Dirac channel):");
+    println!("\n  Rotational (|B| >= 0.3): {} pairs", rotational_pairs.len());
+    println!("  Degenerate (|B| < 0.1):  {} pairs", degenerate_pairs.len());
     for &(a, b) in &degenerate_pairs {
         println!("    {} ↔ {}  ({} ↔ {})  |B|={:.3}",
             a, b, CLASS_NAMES[a as usize], CLASS_NAMES[b as usize], bv_matrix[a as usize][b as usize]);
@@ -1718,81 +1711,10 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
     println!("  Diagnostic: {:.1}s", diag_start.elapsed().as_secs_f64());
 
     // ══════════════════════════════════════════════════════════════════════
-    //  Step 1: Trainable Dirac channels for degenerate pairs (|B| < 0.1)
-    //  Learn new ∂ operators FIRST — create the dimensions of discrimination
-    //  that the fixed encoder channels don't have. Then Clifford GD can
-    //  separate them in one pass.
+    //  Encode all training images: RGB + Dirac → 512D
     // ══════════════════════════════════════════════════════════════════════
-    println!("\n═══════════════════════════════════════════════════════════════");
-    println!("  Step 1: Trainable Dirac — dimension creation for |B| < 0.1");
-    println!("  Learn new ∂ operators → manufacture rotational structure");
-    println!("═══════════════════════════════════════════════════════════════");
-
-    let mut trainable_channels: Vec<(u8, u8, TrainableDiracChannel)> = Vec::new();
-
-    let key_degenerate: Vec<(u8, u8)> = vec![
-        (2, 7),   // debris ↔ stroma         |B|=0.098
-        (3, 6),   // lymphocytes ↔ mucosa     |B|=0.057
-        (7, 8),   // stroma ↔ adeno           |B|=0.056
-        (5, 7),   // smooth_muscle ↔ stroma   |B|=0.045
-        (5, 8),   // smooth_muscle ↔ adeno    |B|=0.080
-    ];
-
-    let dirac_start = Instant::now();
-    for &(ca, cb) in &key_degenerate {
-        println!("\n    Training Dirac channel for {} ↔ {} ({} ↔ {})",
-            ca, cb, CLASS_NAMES[ca as usize], CLASS_NAMES[cb as usize]);
-        let mut channel = TrainableDiracChannel::new(ca as u64 * 100 + cb as u64);
-        channel.calibrate_scales(&train.images_gray[..1000].to_vec());
-        let final_bv = channel.train_on_pair(
-            &train.images_gray, train_lbls_full,
-            ca, cb,
-            100,     // max epochs
-            0.05,    // learning rate
-            0.3,     // target |B|
-        );
-        println!("    Final |B|={:.4} for {} ↔ {}", final_bv, ca, cb);
-        trainable_channels.push((ca, cb, channel));
-    }
-    println!("\n  Trainable Dirac channels: {:.1}s", dirac_start.elapsed().as_secs_f64());
-
-    // ══════════════════════════════════════════════════════════════════════
-    //  Step 2: Clifford GD — clamped single-pass rotors for rotational pairs
-    //  Bivector norm clamped to 0.5 to prevent destructive large rotations.
-    // ══════════════════════════════════════════════════════════════════════
-    println!("\n═══════════════════════════════════════════════════════════════");
-    println!("  Step 2: Clifford GD — single forward pass (|B| clamped ≤ 0.5)");
-    println!("  Z_a * Z_b† → B → clamp → R = exp(-B/2) → done");
-    println!("═══════════════════════════════════════════════════════════════");
-
-    let cgd_start = Instant::now();
-    let cgd_pairs: Vec<(u8, u8)> = rotational_pairs.clone();
-    if cgd_pairs.is_empty() {
-        println!("  No rotational pairs found — skipping Clifford GD");
-    } else {
-        let _results = clifford_single_pass(
-            &mut rgb_enc, &mut dirac_enc,
-            &train.images_rgb, train_lbls_full,
-            &cgd_pairs, 2000,
-        );
-    }
-    println!("  Clifford GD: {:.1}s", cgd_start.elapsed().as_secs_f64());
-
-    // Re-calibrate after rotor updates
-    let rgb_cal: Vec<_> = train.images_rgb.iter().take(1000)
-        .map(|img| (img.clone(), 0u8)).collect();
-    rgb_enc.calibrate_scales(&rgb_cal);
-    let gray_cal: Vec<_> = train.images_gray.iter().take(1000)
-        .map(|img| (img.clone(), 0u8)).collect();
-    dirac_enc.calibrate_scales(&gray_cal);
-
-    // ══════════════════════════════════════════════════════════════════════
-    //  Encode all training images: RGB + Dirac + trainable channels
-    // ══════════════════════════════════════════════════════════════════════
-    let n_extra = trainable_channels.len() * CL8_DIM;
-    let full_dim = joint_dim + n_extra;
-    println!("\n--- Encoding {} training images (RGB+Dirac+Trainable → {}D) ---",
-        train_n, full_dim);
+    let full_dim = joint_dim;
+    println!("\n--- Encoding {} training images (RGB+Dirac → {}D Cl(1,7)) ---", train_n, full_dim);
     let encode_start = Instant::now();
 
     let mut train_features: Vec<Vec<f32>> = Vec::with_capacity(train_n);
@@ -1806,10 +1728,6 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
         let mut joint = Vec::with_capacity(full_dim);
         joint.extend_from_slice(&rgb_mv.components);
         joint.extend_from_slice(&dirac_mv.components);
-        for (_, _, ch) in &trainable_channels {
-            let ch_mv = ch.encode(&train.images_gray[i]);
-            joint.extend_from_slice(&ch_mv.components);
-        }
         train_features.push(joint);
         train_rgb_mvs.push(rgb_mv);
         train_dirac_mvs.push(dirac_mv);
@@ -2024,10 +1942,6 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
             let mut joint = Vec::with_capacity(full_dim);
             joint.extend_from_slice(&rgb_mv.components);
             joint.extend_from_slice(&dirac_mv.components);
-            for (_, _, ch) in &trainable_channels {
-                let ch_mv = ch.encode(&gray_imgs[i]);
-                joint.extend_from_slice(&ch_mv.components);
-            }
             feats.push(joint);
             rgb_mvs.push(rgb_mv);
             dirac_mvs_out.push(dirac_mv);
@@ -2115,6 +2029,76 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
         let marker = if is_cancer_class(c as u8) { " ←" } else { "" };
         println!("    {}: {:>14} {:.1}% ({}/{}){}", c, CLASS_NAMES[c],
             acc * 100.0, per_class_correct[c], per_class_total[c], marker);
+    }
+
+    // ── k-NN classifier: diagnose whether ceiling is embeddings or linear solve ──
+    println!("\n  k-NN CLASSIFIER (embedding quality diagnostic):");
+    let knn_start = Instant::now();
+    let k_values = [3, 5, 7];
+    for &k in &k_values {
+        let mut knn_correct = 0u32;
+        let mut knn_cancer_tp = 0u32;
+        let mut knn_cancer_fn = 0u32;
+        let mut knn_cancer_fp = 0u32;
+        let mut knn_cancer_tn = 0u32;
+        let mut knn_per_class_correct = [0u32; PATH_NUM_CLASSES];
+
+        for (ti, test_feat) in test_features.iter().enumerate() {
+            let mut dists: Vec<(f32, u8)> = Vec::with_capacity(train_n);
+            for (tr_feat, &tr_lbl) in train_features.iter().zip(train_lbls.iter()) {
+                let d: f32 = test_feat.iter().zip(tr_feat.iter())
+                    .map(|(a, b)| { let diff = a - b; diff * diff })
+                    .sum();
+                dists.push((d, tr_lbl));
+            }
+            dists.select_nth_unstable_by(k - 1, |a, b| a.0.partial_cmp(&b.0).unwrap());
+            let mut votes = [0u32; PATH_NUM_CLASSES];
+            for &(_, lbl) in dists[..k].iter() {
+                votes[lbl as usize] += 1;
+            }
+            let pred = votes.iter().enumerate()
+                .max_by_key(|(_, &v)| v).map(|(i, _)| i as u8).unwrap();
+            let label = test.labels[ti];
+            if pred == label {
+                knn_correct += 1;
+                knn_per_class_correct[label as usize] += 1;
+            }
+            let pred_cancer = is_cancer_class(pred);
+            let label_cancer = is_cancer_class(label);
+            match (pred_cancer, label_cancer) {
+                (true, true)   => knn_cancer_tp += 1,
+                (false, true)  => knn_cancer_fn += 1,
+                (true, false)  => knn_cancer_fp += 1,
+                (false, false) => knn_cancer_tn += 1,
+            }
+
+            if (ti + 1) % 2000 == 0 {
+                print!("    k={}: {}/{}...\r", k, ti + 1, test.n);
+            }
+        }
+        let knn_acc = knn_correct as f32 / test.n as f32;
+        let knn_sens = knn_cancer_tp as f32 / (knn_cancer_tp + knn_cancer_fn).max(1) as f32;
+        let knn_spec = knn_cancer_tn as f32 / (knn_cancer_tn + knn_cancer_fp).max(1) as f32;
+        println!("    k={}: 9-class={:.1}%  sensitivity={:.1}%  specificity={:.1}%  ({:.0}s)",
+            k, knn_acc * 100.0, knn_sens * 100.0, knn_spec * 100.0,
+            knn_start.elapsed().as_secs_f64());
+
+        if k == 5 {
+            println!("    k=5 per-class:");
+            for c in 0..PATH_NUM_CLASSES {
+                let acc = if per_class_total[c] > 0 {
+                    knn_per_class_correct[c] as f32 / per_class_total[c] as f32
+                } else { 0.0 };
+                let flat_acc = if per_class_total[c] > 0 {
+                    per_class_correct[c] as f32 / per_class_total[c] as f32
+                } else { 0.0 };
+                let delta = (acc - flat_acc) * 100.0;
+                let arrow = if delta > 1.0 { "▲" } else if delta < -1.0 { "▼" } else { "=" };
+                let marker = if is_cancer_class(c as u8) { " ←" } else { "" };
+                println!("      {}: {:>14} {:.1}%  (linear {:.1}%)  {}{:+.1}{}",
+                    c, CLASS_NAMES[c], acc * 100.0, flat_acc * 100.0, arrow, delta, marker);
+            }
+        }
     }
 
     // ── Clifford spacetime routing (diagnostic comparison) ──
@@ -2219,9 +2203,9 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
     println!("    Smooth muscle:        {:.1}%", per_class_correct[5] as f32 / per_class_total[5].max(1) as f32 * 100.0);
     println!();
     println!("  Architecture:");
-    println!("    Encoder:              Cl(1,7) RGB + Dirac + trainable ({}D)", full_dim);
-    println!("    Classifier:           single-pass normal equations");
-    println!("    Training:             Clifford GD + trainable Dirac");
+    println!("    Encoder:              Cl(1,7) RGB + Dirac ({}D)", full_dim);
+    println!("    Classifier:           linear solve + k-NN");
+    println!("    Training:             single-pass (no epochs)");
     println!("    Total time:           {:.0}s on CPU", total_elapsed.as_secs_f64());
     println!("    GPU required:         None");
     println!();
