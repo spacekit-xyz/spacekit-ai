@@ -68,6 +68,8 @@ struct Args {
     mnist_retention: bool,
     #[arg(long)]
     pathmnist: bool,
+    #[arg(long)]
+    pathmnist_64: bool,
     #[arg(long, default_value_t = true)]
     progress: bool,
     #[arg(long, value_name = "N")]
@@ -261,6 +263,8 @@ fn main() {
         demo_mnist_retention();
     } else if args.pathmnist {
         demo_pathmnist(args.mnist_train_limit, args.mnist_max_epochs);
+    } else if args.pathmnist_64 {
+        demo_pathmnist_64(args.mnist_train_limit);
     } else if args.acceptance_report {
         if let Err(e) = demo_acceptance_report(args.acceptance_report_path.as_deref()) {
             eprintln!("Failed acceptance report: {}", e);
@@ -1616,7 +1620,7 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
     };
     use growformer::clifford_mnist::{
         CliffordRGBEncoder, CliffordDiracEncoder, PathClassifier, LinearClassifier,
-        discriminability_weights,
+        discriminability_weights, train_projection_for_bv,
     };
     use growformer::clifford::{Multivector, CL8_DIM, minkowski_interval, classify_interval, IntervalType};
 
@@ -1709,6 +1713,66 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
             a, b, CLASS_NAMES[a as usize], CLASS_NAMES[b as usize], bv_matrix[a as usize][b as usize]);
     }
     println!("  Diagnostic: {:.1}s", diag_start.elapsed().as_secs_f64());
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  Projection Training: maximize |B| for degenerate cancer pairs
+    //  Train only the 784×256 projection matrix. Everything else frozen.
+    //  Target: stroma(7)↔debris(2), stroma(7)↔adeno(8)
+    // ══════════════════════════════════════════════════════════════════════
+    println!("\n═══════════════════════════════════════════════════════════════");
+    println!("  Projection Training — maximize |B| for cancer pairs");
+    println!("  Target pairs: stroma↔debris (7,2), stroma↔adeno (7,8)");
+    println!("  Params: {}×{} = {} (projection only)", train.images_rgb[0].len(), CL8_DIM,
+        train.images_rgb[0].len() * CL8_DIM);
+    println!("═══════════════════════════════════════════════════════════════");
+
+    let proj_train_start = Instant::now();
+    let target_pairs = vec![(7u8, 2u8), (7u8, 8u8)];
+    train_projection_for_bv(
+        &mut rgb_enc,
+        &train.images_rgb[..train_n],
+        train_lbls_full,
+        &target_pairs,
+        500,      // steps
+        0.0001,   // learning rate
+        5000,     // samples per class for mean computation
+    );
+
+    rgb_enc.calibrate_scales(&rgb_cal);
+    println!("  Projection training: {:.1}s", proj_train_start.elapsed().as_secs_f64());
+
+    // Post-training |B| diagnostic
+    println!("\n  Post-training |B| diagnostic:");
+    let (bv_matrix_post, rotational_post, degenerate_post) =
+        diagnose_pair_learnability(&rgb_enc, &train.images_rgb, train_lbls_full, PATH_NUM_CLASSES, 1000);
+
+    print!("         ");
+    for c in 0..PATH_NUM_CLASSES { print!("{:>6}", c); }
+    println!();
+    for i in 0..PATH_NUM_CLASSES {
+        print!("    {}:{:>8} ", i, &CLASS_NAMES[i][..CLASS_NAMES[i].len().min(8)]);
+        for j in 0..PATH_NUM_CLASSES {
+            if i == j { print!("     -"); }
+            else {
+                let bv = bv_matrix_post[i][j];
+                let delta = bv - bv_matrix[i][j];
+                let tag = if delta > 0.05 { "↑" } else if delta < -0.05 { "↓" } else { " " };
+                print!("{}{:5.3}", tag, bv);
+            }
+        }
+        println!();
+    }
+
+    println!("\n  Key pair changes:");
+    for &(a, b) in &target_pairs {
+        let before = bv_matrix[a as usize][b as usize];
+        let after = bv_matrix_post[a as usize][b as usize];
+        let verdict = if after >= 0.3 { "SEPARABLE" } else if after >= 0.1 { "improved" } else { "still degenerate" };
+        println!("    {} ↔ {}:  {:.3} → {:.3}  ({})",
+            CLASS_NAMES[a as usize], CLASS_NAMES[b as usize], before, after, verdict);
+    }
+    println!("  Rotational pairs: {} → {}", rotational_pairs.len(), rotational_post.len());
+    println!("  Degenerate pairs: {} → {}", degenerate_pairs.len(), degenerate_post.len());
 
     // ══════════════════════════════════════════════════════════════════════
     //  Encode all training images: RGB + Dirac → 512D
@@ -2222,6 +2286,225 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
     println!("    Language generation:   97%   (25min train)");
     println!("    Histopathology:       {:.1}%  cancer sensitivity", cancer_sens * 100.0);
     println!();
+}
+
+// =============================================================================
+// Demo: PathMNIST 64×64 — Resolution experiment for |B| diagnostic
+// Same encoder architecture at 4× resolution to test embedding ceiling.
+// =============================================================================
+
+fn demo_pathmnist_64(train_limit: Option<usize>) {
+    use growformer::pathmnist::{
+        PathMNISTDataset, CLASS_NAMES, PATH_NUM_CLASSES, is_cancer_class,
+        compute_cancer_metrics,
+    };
+    use growformer::clifford_mnist::{
+        CliffordRGBEncoder, CliffordDiracEncoder, LinearClassifier,
+        diagnose_pair_learnability,
+    };
+    use growformer::clifford::CL8_DIM;
+
+    let data_dir = std::path::PathBuf::from(
+        std::env::var("PATHMNIST64_ROOT")
+            .unwrap_or_else(|_| "data/pathology/pathmnist_64".to_string())
+    );
+    if !data_dir.exists() {
+        eprintln!("PathMNIST 64×64 data not found at {:?}", data_dir);
+        eprintln!("Run: python3 data/pathology/extract_npz.py");
+        std::process::exit(1);
+    }
+
+    println!("═══════════════════════════════════════════════════════════════");
+    println!("  Growformer Medical: Colorectal Cancer Histology (64×64)");
+    println!("  PathMNIST — 9 classes, RGB+Dirac Cl(1,7), single-pass solve");
+    println!("  Resolution: 64×64×3 = 12,288 input dims (vs 2,352 at 28×28)");
+    println!("═══════════════════════════════════════════════════════════════\n");
+
+    println!("Loading PathMNIST 64×64 (RGB)...");
+    let train = PathMNISTDataset::load_with_resolution(&data_dir, "train", 64, 64);
+    let val = PathMNISTDataset::load_with_resolution(&data_dir, "val", 64, 64);
+    let test = PathMNISTDataset::load_with_resolution(&data_dir, "test", 64, 64);
+    println!("  Train: {}, Val: {}, Test: {}", train.n, val.n, test.n);
+
+    let dist = train.class_distribution();
+    println!("\n  Class distribution (train):");
+    for c in 0..PATH_NUM_CLASSES {
+        let marker = if is_cancer_class(c as u8) { " ← CANCER" } else { "" };
+        println!("    {}: {:>14} {:>6}{}", c, CLASS_NAMES[c], dist[c], marker);
+    }
+
+    let total_start = Instant::now();
+
+    let mut rgb_enc = CliffordRGBEncoder::new_with_resolution(42, 64, 64);
+    let mut dirac_enc = CliffordDiracEncoder::new_with_resolution(77, 64, 64);
+
+    let rgb_cal: Vec<_> = train.images_rgb.iter().take(500)
+        .map(|img| (img.clone(), 0u8)).collect();
+    rgb_enc.calibrate_scales(&rgb_cal);
+    let gray_cal: Vec<_> = train.images_gray.iter().take(500)
+        .map(|img| (img.clone(), 0u8)).collect();
+    dirac_enc.calibrate_scales(&gray_cal);
+
+    let train_n = train_limit.unwrap_or(train.n).min(train.n);
+    let joint_dim = CL8_DIM * 2; // 512D
+
+    let train_lbls_full = &train.labels[..train_n];
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  THE KEY TEST: |B| diagnostic at 64×64
+    //  If stroma-debris |B| rises from 0.098 → >0.3, resolution was the bottleneck.
+    // ══════════════════════════════════════════════════════════════════════
+    println!("\n═══════════════════════════════════════════════════════════════");
+    println!("  Geometric Learnability Diagnostic at 64×64");
+    println!("  |B| = |<Z_a * Z_b†>_2| — THE KEY TEST");
+    println!("═══════════════════════════════════════════════════════════════");
+
+    let diag_start = Instant::now();
+    let (bv_matrix, rotational_pairs, degenerate_pairs) =
+        diagnose_pair_learnability(&rgb_enc, &train.images_rgb, train_lbls_full, PATH_NUM_CLASSES, 500);
+
+    println!("\n  Confusion bivector |B| matrix (64×64):");
+    print!("         ");
+    for c in 0..PATH_NUM_CLASSES { print!("{:>6}", c); }
+    println!();
+    for i in 0..PATH_NUM_CLASSES {
+        print!("    {}:{:>8} ", i, &CLASS_NAMES[i][..CLASS_NAMES[i].len().min(8)]);
+        for j in 0..PATH_NUM_CLASSES {
+            if i == j { print!("     -"); }
+            else {
+                let bv = bv_matrix[i][j];
+                let tag = if bv >= 0.3 { "+" } else if bv < 0.1 { "!" } else { " " };
+                print!("{}{:5.3}", tag, bv);
+            }
+        }
+        println!();
+    }
+
+    println!("\n  Rotational (|B| >= 0.3): {} pairs", rotational_pairs.len());
+    println!("  Degenerate (|B| < 0.1):  {} pairs", degenerate_pairs.len());
+    for &(a, b) in &degenerate_pairs {
+        println!("    {} ↔ {}  ({} ↔ {})  |B|={:.3}",
+            a, b, CLASS_NAMES[a as usize], CLASS_NAMES[b as usize], bv_matrix[a as usize][b as usize]);
+    }
+
+    // Compare with 28×28 values
+    println!("\n  ── Comparison with 28×28 baseline ──");
+    println!("  Key pairs to watch:");
+    println!("    stroma(7) ↔ debris(2):  28×28 |B|=0.098  → 64×64 |B|={:.3}", bv_matrix[7][2]);
+    println!("    stroma(7) ↔ adeno(8):   28×28 |B|=0.056  → 64×64 |B|={:.3}", bv_matrix[7][8]);
+    println!("    debris(2) ↔ adeno(8):   28×28 |B|=0.082  → 64×64 |B|={:.3}", bv_matrix[2][8]);
+    println!("    smooth(5) ↔ normal(6):  28×28 |B|=0.091  → 64×64 |B|={:.3}", bv_matrix[5][6]);
+
+    let stroma_debris_bv = bv_matrix[7][2];
+    if stroma_debris_bv >= 0.3 {
+        println!("\n  ✓ RESOLUTION WAS THE BOTTLENECK — stroma-debris now rotationally separable");
+    } else if stroma_debris_bv >= 0.1 {
+        println!("\n  ~ PARTIAL IMPROVEMENT — stroma-debris weakly rotational, may benefit from CGD");
+    } else {
+        println!("\n  ✗ RESOLUTION IS NOT THE BOTTLENECK — stroma-debris still degenerate");
+    }
+    println!("  Diagnostic: {:.1}s", diag_start.elapsed().as_secs_f64());
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  Full pipeline: encode + classify
+    // ══════════════════════════════════════════════════════════════════════
+    let full_dim = joint_dim;
+    println!("\n--- Encoding {} training images (RGB+Dirac 64×64 → {}D) ---", train_n, full_dim);
+    let encode_start = Instant::now();
+
+    let mut train_features: Vec<Vec<f32>> = Vec::with_capacity(train_n);
+    for i in 0..train_n {
+        let rgb_mv = rgb_enc.encode(&train.images_rgb[i]);
+        let dirac_mv = dirac_enc.encode(&train.images_gray[i]);
+
+        let mut joint = Vec::with_capacity(full_dim);
+        joint.extend_from_slice(&rgb_mv.components);
+        joint.extend_from_slice(&dirac_mv.components);
+        train_features.push(joint);
+
+        if (i + 1) % 10000 == 0 {
+            println!("    {}/{} ({:.0}s)", i + 1, train_n, encode_start.elapsed().as_secs_f64());
+        }
+    }
+    let train_lbls = &train.labels[..train_n];
+    println!("  Encoded in {:.1}s\n", encode_start.elapsed().as_secs_f64());
+
+    println!("--- Solving 9-class classifier ({}D normal equations) ---", full_dim);
+    let head = LinearClassifier::fit_from_features(
+        &train_features, train_lbls,
+        PATH_NUM_CLASSES, 1.0, 1,
+    );
+
+    println!("\n--- Solving binary cancer classifier ({}D) ---", full_dim);
+    let cancer_labels: Vec<u8> = train_lbls.iter()
+        .map(|&l| if is_cancer_class(l) { 1 } else { 0 })
+        .collect();
+    let cancer_head = LinearClassifier::fit_from_features(
+        &train_features, &cancer_labels,
+        2, 1.0, 1,
+    );
+
+    // ── Evaluate on test set ──
+    println!("\n--- Evaluating on test set ({} samples) ---", test.n);
+    let eval_start = Instant::now();
+
+    let mut correct_9 = 0usize;
+    let mut per_class_correct = vec![0usize; PATH_NUM_CLASSES];
+    let mut per_class_total = vec![0usize; PATH_NUM_CLASSES];
+    let mut cancer_preds = Vec::with_capacity(test.n);
+    let mut cancer_truths = Vec::with_capacity(test.n);
+
+    for i in 0..test.n {
+        let rgb_mv = rgb_enc.encode(&test.images_rgb[i]);
+        let dirac_mv = dirac_enc.encode(&test.images_gray[i]);
+
+        let mut joint = Vec::with_capacity(full_dim);
+        joint.extend_from_slice(&rgb_mv.components);
+        joint.extend_from_slice(&dirac_mv.components);
+
+        let (pred_9, _) = head.classify_features(&joint);
+        let true_label = test.labels[i] as usize;
+        per_class_total[true_label] += 1;
+        if pred_9 as usize == true_label {
+            correct_9 += 1;
+            per_class_correct[true_label] += 1;
+        }
+
+        let (cancer_pred, _) = cancer_head.classify_features(&joint);
+        cancer_preds.push(cancer_pred as u8);
+        cancer_truths.push(if is_cancer_class(test.labels[i]) { 1u8 } else { 0u8 });
+    }
+
+    let acc_9 = correct_9 as f64 / test.n as f64;
+    let cm = compute_cancer_metrics(&cancer_preds, &cancer_truths);
+    let cancer_sens = cm.sensitivity;
+    let cancer_spec = cm.specificity;
+
+    println!("  Evaluation: {:.1}s\n", eval_start.elapsed().as_secs_f64());
+
+    println!("═══════════════════════════════════════════════════════════════");
+    println!("  PathMNIST 64×64 RESULTS");
+    println!("═══════════════════════════════════════════════════════════════");
+    println!("  9-class accuracy: {:.1}%  (test, {})", acc_9 * 100.0, test.n);
+    println!("  Cancer sensitivity: {:.1}%", cancer_sens * 100.0);
+    println!("  Cancer specificity: {:.1}%", cancer_spec * 100.0);
+    println!();
+    println!("  Per-class recall:");
+    for c in 0..PATH_NUM_CLASSES {
+        let recall = if per_class_total[c] > 0 {
+            per_class_correct[c] as f64 / per_class_total[c] as f64
+        } else { 0.0 };
+        let marker = if is_cancer_class(c as u8) { " ← CANCER" } else { "" };
+        println!("    {}: {:>14}  {:.1}% ({}/{}){}", c, CLASS_NAMES[c],
+            recall * 100.0, per_class_correct[c], per_class_total[c], marker);
+    }
+
+    let total_time = total_start.elapsed().as_secs_f64();
+    println!("\n  Total time: {:.1}s", total_time);
+    println!("  Architecture: Cl(1,7) RGB(12288→256) + Dirac(4096→256) = 512D");
+    println!("  Classifier: single-pass linear solve with class weights");
+    println!("  Training: zero epochs (algebraic)");
+    println!("═══════════════════════════════════════════════════════════════");
 }
 
 // =============================================================================

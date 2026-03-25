@@ -37,15 +37,23 @@ pub fn is_cancer_class(label: u8) -> bool {
 }
 
 pub struct PathMNISTDataset {
-    pub images_rgb: Vec<Vec<f32>>,  // [0,1] normalized, 2352 per image (R,G,B interleaved)
-    pub images_gray: Vec<Vec<f32>>, // grayscale [0,1], 784 per image
+    pub images_rgb: Vec<Vec<f32>>,
+    pub images_gray: Vec<Vec<f32>>,
     pub labels: Vec<u8>,
     pub n: usize,
+    pub height: usize,
+    pub width: usize,
 }
 
 impl PathMNISTDataset {
     /// Load a split from raw binary .npy files (headerless uint8).
+    /// Auto-detects resolution from file size.
     pub fn load(data_dir: &Path, split: &str) -> Self {
+        Self::load_with_resolution(data_dir, split, PATH_IMAGE_H, PATH_IMAGE_W)
+    }
+
+    /// Load with explicit resolution (for 64x64, 224x224, etc.)
+    pub fn load_with_resolution(data_dir: &Path, split: &str, h: usize, w: usize) -> Self {
         let img_path = data_dir.join(format!("{}_images.npy", split));
         let lbl_path = data_dir.join(format!("{}_labels.npy", split));
 
@@ -55,10 +63,11 @@ impl PathMNISTDataset {
             .unwrap_or_else(|e| panic!("Cannot read {}: {}", lbl_path.display(), e));
 
         let n = raw_lbl.len();
+        let rgb_dim = h * w * PATH_CHANNELS;
         assert_eq!(
-            raw_img.len(), n * PATH_RGB_DIM,
-            "Image file size mismatch: {} bytes for {} samples (expected {})",
-            raw_img.len(), n, n * PATH_RGB_DIM
+            raw_img.len(), n * rgb_dim,
+            "Image file size mismatch: {} bytes for {} samples at {}x{} (expected {})",
+            raw_img.len(), n, h, w, n * rgb_dim
         );
 
         let labels: Vec<u8> = raw_lbl.to_vec();
@@ -66,7 +75,7 @@ impl PathMNISTDataset {
         let mut images_rgb: Vec<Vec<f32>> = Vec::with_capacity(n);
         let mut images_gray: Vec<Vec<f32>> = Vec::with_capacity(n);
 
-        for rgb in raw_img.chunks_exact(PATH_RGB_DIM) {
+        for rgb in raw_img.chunks_exact(rgb_dim) {
             let rgb_f: Vec<f32> = rgb.iter().map(|&b| b as f32 / 255.0).collect();
             let gray: Vec<f32> = rgb.chunks_exact(3)
                 .map(|px| {
@@ -80,7 +89,7 @@ impl PathMNISTDataset {
         }
 
         assert_eq!(images_rgb.len(), n);
-        PathMNISTDataset { images_rgb, images_gray, labels, n }
+        PathMNISTDataset { images_rgb, images_gray, labels, n, height: h, width: w }
     }
 
     pub fn class_distribution(&self) -> [usize; PATH_NUM_CLASSES] {

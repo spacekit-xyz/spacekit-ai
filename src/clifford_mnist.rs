@@ -416,11 +416,11 @@ const DIRAC_H: usize = 28;
 const N_CHANNELS: usize = 4; // intensity, ∂x, ∂y, laplacian
 
 pub struct CliffordDiracEncoder {
-    /// Per-channel projection: 784 → 8 (grade-1 vector) for each of 4 channels
     channel_proj: [[f32; 8]; N_CHANNELS],
-    /// Additional texture projection: 784 → CL8_DIM for local variance channel
     texture_proj: Vec<[f32; CL8_DIM]>,
     grade_scales: [f32; 9],
+    pub width: usize,
+    pub height: usize,
 }
 
 fn img_at(image: &[f32], x: usize, y: usize) -> f32 {
@@ -504,56 +504,123 @@ fn channel_to_vector(
     Multivector::vector(&sums)
 }
 
+fn img_at_dyn(image: &[f32], x: usize, y: usize, w: usize, h: usize) -> f32 {
+    if x < w && y < h { image[y * w + x] } else { 0.0 }
+}
+
+fn compute_gradient_x_dyn(image: &[f32], w: usize, h: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let left = if x > 0 { img_at_dyn(image, x - 1, y, w, h) } else { img_at_dyn(image, x, y, w, h) };
+            let right = if x < w - 1 { img_at_dyn(image, x + 1, y, w, h) } else { img_at_dyn(image, x, y, w, h) };
+            out[y * w + x] = (right - left) * 0.5;
+        }
+    }
+    out
+}
+
+fn compute_gradient_y_dyn(image: &[f32], w: usize, h: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let up = if y > 0 { img_at_dyn(image, x, y - 1, w, h) } else { img_at_dyn(image, x, y, w, h) };
+            let down = if y < h - 1 { img_at_dyn(image, x, y + 1, w, h) } else { img_at_dyn(image, x, y, w, h) };
+            out[y * w + x] = (down - up) * 0.5;
+        }
+    }
+    out
+}
+
+fn compute_laplacian_dyn(image: &[f32], w: usize, h: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let c = img_at_dyn(image, x, y, w, h);
+            let l = if x > 0 { img_at_dyn(image, x - 1, y, w, h) } else { c };
+            let r = if x < w - 1 { img_at_dyn(image, x + 1, y, w, h) } else { c };
+            let u = if y > 0 { img_at_dyn(image, x, y - 1, w, h) } else { c };
+            let d = if y < h - 1 { img_at_dyn(image, x, y + 1, w, h) } else { c };
+            out[y * w + x] = l + r + u + d - 4.0 * c;
+        }
+    }
+    out
+}
+
+fn compute_local_variance_dyn(image: &[f32], w: usize, h: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let mut sum = 0.0f32;
+            let mut sum2 = 0.0f32;
+            let mut count = 0.0f32;
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    let nx = x as i32 + dx;
+                    let ny = y as i32 + dy;
+                    if nx >= 0 && nx < w as i32 && ny >= 0 && ny < h as i32 {
+                        let v = image[ny as usize * w + nx as usize];
+                        sum += v;
+                        sum2 += v * v;
+                        count += 1.0;
+                    }
+                }
+            }
+            let mean = sum / count;
+            out[y * w + x] = (sum2 / count - mean * mean).max(0.0).sqrt();
+        }
+    }
+    out
+}
+
 impl CliffordDiracEncoder {
     pub fn new(seed: u64) -> Self {
+        Self::new_with_resolution(seed, 28, 28)
+    }
+
+    pub fn new_with_resolution(seed: u64, h: usize, w: usize) -> Self {
+        let image_dim = h * w;
         let mut rng = StdRng::seed_from_u64(seed);
 
-        // Per-channel projections to grade-1 vectors
-        // Initialized with different frequency responses per channel
         let mut channel_proj = [[0.0f32; 8]; N_CHANNELS];
-
-        // Channel 0 (intensity): uniform → measures total energy per basis direction
         for k in 0..8 {
             let freq = (k as f32 + 1.0) * std::f32::consts::PI / 8.0;
             channel_proj[0][k] = freq.cos() * 0.1;
         }
-        // Channel 1 (∂x): horizontal texture orientation
         for k in 0..8 {
             channel_proj[1][k] = rng.gen_range(-0.15..0.15);
         }
-        channel_proj[1][1] = 0.2; // e_1: primary horizontal
-        // Channel 2 (∂y): vertical texture orientation
+        channel_proj[1][1] = 0.2;
         for k in 0..8 {
             channel_proj[2][k] = rng.gen_range(-0.15..0.15);
         }
-        channel_proj[2][2] = 0.2; // e_2: primary vertical
-        // Channel 3 (laplacian): curvature/blob detector
+        channel_proj[2][2] = 0.2;
         for k in 0..8 {
             channel_proj[3][k] = rng.gen_range(-0.15..0.15);
         }
-        channel_proj[3][0] = 0.2; // e_0 (timelike): curvature as causal signal
+        channel_proj[3][0] = 0.2;
 
-        // Texture projection for local variance → full multivector
-        let norm = 1.0 / (IMAGE_DIM as f32).sqrt();
+        let norm = 1.0 / (image_dim as f32).sqrt();
         let grade_init_scale: [f32; 9] = std::array::from_fn(|g| {
             1.0 / (GRADE_DIMS[g] as f32).sqrt().max(1.0)
         });
         let two_pi = 2.0 * std::f32::consts::PI;
+        let fw = w as f32;
+        let fh = h as f32;
 
-        let mut texture_proj = Vec::with_capacity(IMAGE_DIM);
-        for pixel_idx in 0..IMAGE_DIM {
+        let mut texture_proj = Vec::with_capacity(image_dim);
+        for pixel_idx in 0..image_dim {
             let mut row = [0.0f32; CL8_DIM];
-            let px = (pixel_idx % 28) as f32;
-            let py = (pixel_idx / 28) as f32;
+            let px = (pixel_idx % w) as f32;
+            let py = (pixel_idx / w) as f32;
 
-            // Fourier features for residual texture detail (same as new_texture grades 2-4)
             let g2s = grade_init_scale[2] * norm;
             for ori in 0..7usize {
                 let theta = ori as f32 * std::f32::consts::PI / 7.0;
                 let dx = theta.cos();
                 let dy = theta.sin();
                 for (fi, &freq) in [2.0f32, 4.0].iter().enumerate() {
-                    let phase = two_pi * freq * (px * dx + py * dy) / 28.0;
+                    let phase = two_pi * freq * (px * dx / fw + py * dy / fh);
                     let base = ori * 4 + fi * 2;
                     if base + 1 < GRADE_DIMS[2] {
                         row[GRADE_OFFSETS[2] + base]     = phase.cos() * g2s;
@@ -576,19 +643,18 @@ impl CliffordDiracEncoder {
             channel_proj,
             texture_proj,
             grade_scales: [1.0; 9],
+            width: w,
+            height: h,
         }
     }
 
-    /// Encode an image as a Dirac particle in Cl(1,7).
-    /// Applies differential operators, projects to vectors, then takes
-    /// geometric products to produce nonlinear spinor features.
     pub fn encode(&self, image: &[f32]) -> Multivector {
-        let dx = compute_gradient_x(image);
-        let dy = compute_gradient_y(image);
-        let lap = compute_laplacian(image);
-        let lvar = compute_local_variance(image);
+        let (w, h) = (self.width, self.height);
+        let dx = compute_gradient_x_dyn(image, w, h);
+        let dy = compute_gradient_y_dyn(image, w, h);
+        let lap = compute_laplacian_dyn(image, w, h);
+        let lvar = compute_local_variance_dyn(image, w, h);
 
-        // Project each channel to grade-1 vectors
         let v_i   = channel_to_vector(image, &self.channel_proj[0]);
         let v_dx  = channel_to_vector(&dx,   &self.channel_proj[1]);
         let v_dy  = channel_to_vector(&dy,   &self.channel_proj[2]);
@@ -939,28 +1005,37 @@ pub fn diagnose_pair_learnability(
 const RGB_DIM: usize = 28 * 28 * 3; // 2352
 
 pub struct CliffordRGBEncoder {
-    projection: Vec<[f32; CL8_DIM]>, // 2352 → 256
+    pub projection: Vec<[f32; CL8_DIM]>,
     grade_scales: [f32; 9],
+    pub width: usize,
+    pub height: usize,
 }
 
 impl CliffordRGBEncoder {
     pub fn new(seed: u64) -> Self {
+        Self::new_with_resolution(seed, 28, 28)
+    }
+
+    pub fn new_with_resolution(seed: u64, h: usize, w: usize) -> Self {
+        let rgb_dim = h * w * 3;
         let mut rng = StdRng::seed_from_u64(seed);
-        let mut projection = Vec::with_capacity(RGB_DIM);
+        let mut projection = Vec::with_capacity(rgb_dim);
 
         let grade_init_scale: [f32; 9] = std::array::from_fn(|g| {
             1.0 / (GRADE_DIMS[g] as f32).sqrt().max(1.0)
         });
-        let norm = 1.0 / (RGB_DIM as f32).sqrt();
+        let norm = 1.0 / (rgb_dim as f32).sqrt();
         let two_pi = 2.0 * std::f32::consts::PI;
         let pi = std::f32::consts::PI;
+        let fh = h as f32;
+        let fw = w as f32;
 
-        for input_idx in 0..RGB_DIM {
+        for input_idx in 0..rgb_dim {
             let mut row = [0.0f32; CL8_DIM];
             let pixel_idx = input_idx / 3;
-            let channel = input_idx % 3; // 0=R, 1=G, 2=B
-            let px = (pixel_idx % 28) as f32;
-            let py = (pixel_idx / 28) as f32;
+            let channel = input_idx % 3;
+            let px = (pixel_idx % w) as f32;
+            let py = (pixel_idx / w) as f32;
 
             // Channel-specific grade biases:
             // R (eosin/stroma): emphasize grade-2 (bivector/texture orientation)
@@ -982,7 +1057,7 @@ impl CliffordRGBEncoder {
                 (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, -1.0),
             ];
             for (k, &(u, v)) in g1_uv.iter().enumerate() {
-                let phase = two_pi * (u * px + v * py) / 28.0;
+                let phase = two_pi * (u * px / fw + v * py / fh);
                 row[GRADE_OFFSETS[1] + 2 * k]     = phase.cos() * g1s;
                 row[GRADE_OFFSETS[1] + 2 * k + 1] = phase.sin() * g1s;
             }
@@ -994,7 +1069,7 @@ impl CliffordRGBEncoder {
                 let dx = theta.cos();
                 let dy = theta.sin();
                 for (fi, &freq) in [2.0f32, 4.0].iter().enumerate() {
-                    let phase = two_pi * freq * (px * dx + py * dy) / 28.0;
+                    let phase = two_pi * freq * (px * dx / fw + py * dy / fh);
                     let base = ori * 4 + fi * 2;
                     if base + 1 < GRADE_DIMS[2] {
                         row[GRADE_OFFSETS[2] + base]     = phase.cos() * g2s;
@@ -1010,7 +1085,7 @@ impl CliffordRGBEncoder {
                 for k in 0..GRADE_DIMS[g] {
                     let freq = freq_offset + k as f32 * 0.5;
                     let angle = k as f32 * pi / GRADE_DIMS[g] as f32;
-                    let phase = two_pi * freq * (px * angle.cos() + py * angle.sin()) / 28.0;
+                    let phase = two_pi * freq * (px * angle.cos() / fw + py * angle.sin() / fh);
                     row[GRADE_OFFSETS[g] + k] = phase.cos() * gs
                         + rng.gen_range(-0.02..0.02) * gs;
                 }
@@ -1030,12 +1105,14 @@ impl CliffordRGBEncoder {
         CliffordRGBEncoder {
             projection,
             grade_scales: [1.0; 9],
+            width: w,
+            height: h,
         }
     }
 
     pub fn encode(&self, rgb: &[f32]) -> Multivector {
         let mut mv = Multivector::zero();
-        let n = rgb.len().min(RGB_DIM);
+        let n = rgb.len().min(self.projection.len());
         for (i, &val) in rgb.iter().enumerate().take(n) {
             if val.abs() < 1e-6 { continue; }
             let row = &self.projection[i];
@@ -1118,7 +1195,7 @@ impl CliffordRGBEncoder {
         let neg_centroid = &centroids[hardest_neg_idx];
         let loss_scale = violation.min(2.0);
 
-        let n = rgb.len().min(RGB_DIM);
+        let n = rgb.len().min(self.projection.len());
         for (i, &pixel) in rgb.iter().enumerate().take(n) {
             if pixel.abs() < 0.01 { continue; }
             let row = &mut self.projection[i];
@@ -1999,7 +2076,141 @@ pub fn apply_rotor_to_dirac_encoder(encoder: &mut CliffordDiracEncoder, rotor: &
     }
 }
 
-/// Compute the Euclidean distance between two multivector centroids.
+/// Train ONLY the RGB encoder projection to maximize |B| for target class pairs.
+///
+/// Uses margin loss: L = max(0, target_bv - |B|), so training stops when |B| >= target.
+/// Gradient via analytical chain rule on class-mean centroids.
+pub fn train_projection_for_bv(
+    encoder: &mut CliffordRGBEncoder,
+    images: &[Vec<f32>],
+    labels: &[u8],
+    target_pairs: &[(u8, u8)],
+    n_steps: usize,
+    lr: f32,
+    samples_per_class: usize,
+) {
+    let input_dim = encoder.projection.len();
+    let target_bv = 0.5f32;
+
+    let mut all_classes: Vec<u8> = Vec::new();
+    for &(a, b) in target_pairs {
+        if !all_classes.contains(&a) { all_classes.push(a); }
+        if !all_classes.contains(&b) { all_classes.push(b); }
+    }
+
+    let mut class_means: std::collections::HashMap<u8, Vec<f32>> = std::collections::HashMap::new();
+    for &c in &all_classes {
+        let mut mean = vec![0.0f32; input_dim];
+        let mut count = 0usize;
+        for (img, &lbl) in images.iter().zip(labels.iter()) {
+            if lbl != c { continue; }
+            if count >= samples_per_class { break; }
+            for (j, &v) in img.iter().enumerate().take(input_dim) {
+                mean[j] += v;
+            }
+            count += 1;
+        }
+        if count > 0 {
+            let n = count as f32;
+            for v in mean.iter_mut() { *v /= n; }
+        }
+        class_means.insert(c, mean);
+    }
+
+    let eps = 1e-4f32;
+    let max_grad_norm = 1.0f32;
+
+    let grade_of: Vec<usize> = (0..CL8_DIM).map(|k| {
+        for g in (0..=8).rev() {
+            if k >= GRADE_OFFSETS[g] { return g; }
+        }
+        0
+    }).collect();
+
+    for step in 0..n_steps {
+        let mut total_grad = vec![[0.0f32; CL8_DIM]; input_dim];
+        let mut step_bvs: Vec<(u8, u8, f32)> = Vec::new();
+        let mut all_above_target = true;
+
+        for &(ca, cb) in target_pairs {
+            let mean_a = &class_means[&ca];
+            let mean_b = &class_means[&cb];
+
+            let centroid_a = encoder.encode(mean_a);
+            let centroid_b = encoder.encode(mean_b);
+
+            let bv = confusion_bivector(&centroid_a, &centroid_b);
+            let bv_norm: f32 = bv.grade(2).iter().map(|x| x * x).sum::<f32>().sqrt();
+            step_bvs.push((ca, cb, bv_norm));
+
+            if bv_norm >= target_bv { continue; }
+            all_above_target = false;
+
+            let mut grad_ca = [0.0f32; CL8_DIM];
+            let mut grad_cb = [0.0f32; CL8_DIM];
+
+            for k in 0..CL8_DIM {
+                let mut ca_p = centroid_a.clone();
+                ca_p.components[k] += eps;
+                let bv_p = confusion_bivector(&ca_p, &centroid_b);
+                let norm_p: f32 = bv_p.grade(2).iter().map(|x| x * x).sum::<f32>().sqrt();
+                grad_ca[k] = (norm_p - bv_norm) / eps;
+
+                let mut cb_p = centroid_b.clone();
+                cb_p.components[k] += eps;
+                let bv_p2 = confusion_bivector(&centroid_a, &cb_p);
+                let norm_p2: f32 = bv_p2.grade(2).iter().map(|x| x * x).sum::<f32>().sqrt();
+                grad_cb[k] = (norm_p2 - bv_norm) / eps;
+            }
+
+            for j in 0..input_dim {
+                let ma = mean_a[j];
+                let mb = mean_b[j];
+                if ma.abs() < 1e-6 && mb.abs() < 1e-6 { continue; }
+                for k in 0..CL8_DIM {
+                    let gs = encoder.grade_scales[grade_of[k]];
+                    total_grad[j][k] += (ma * grad_ca[k] + mb * grad_cb[k]) * gs;
+                }
+            }
+        }
+
+        if all_above_target {
+            print!("    Step {:>4}: ALL PAIRS ABOVE TARGET ({:.1})", step, target_bv);
+            for &(ca, cb, bv) in &step_bvs {
+                print!("  |B|({},{})={:.4}", ca, cb, bv);
+            }
+            println!();
+            break;
+        }
+
+        // Gradient norm clamping per row
+        for j in 0..input_dim {
+            let row_norm: f32 = total_grad[j].iter().map(|x| x * x).sum::<f32>().sqrt();
+            if row_norm > max_grad_norm {
+                let scale = max_grad_norm / row_norm;
+                for k in 0..CL8_DIM { total_grad[j][k] *= scale; }
+            }
+        }
+
+        for j in 0..input_dim {
+            for k in 0..CL8_DIM {
+                let g = total_grad[j][k];
+                if g.is_finite() {
+                    encoder.projection[j][k] += lr * g;
+                }
+            }
+        }
+
+        if step % 25 == 0 || step == n_steps - 1 {
+            print!("    Step {:>4}:", step);
+            for &(ca, cb, bv) in &step_bvs {
+                print!("  |B|({},{})={:.4}", ca, cb, bv);
+            }
+            println!();
+        }
+    }
+}
+
 fn centroid_distance(a: &Multivector, b: &Multivector) -> f32 {
     let mut d = 0.0f32;
     for j in 0..CL8_DIM {
