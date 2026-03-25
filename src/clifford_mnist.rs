@@ -1270,6 +1270,308 @@ impl CliffordMicroBrain {
     }
 }
 
+// ─── Contrastive Training for PathMNIST ─────────────────────────────────
+// Grade-pressured triplet training that teaches each grade to carry
+// specific histological structure: grade-2 for texture, grade-3 for
+// junctions, grade-4 for topology, etc.
+
+/// Sign factor for component j in the grade-weighted distance.
+/// Minkowski signature: grade-1 k=0 is timelike (-1), everything else +1.
+fn distance_sign(j: usize) -> f32 {
+    if j >= GRADE_OFFSETS[1] && j < GRADE_OFFSETS[1] + 1 { -1.0 } else { 1.0 }
+}
+
+/// Map a flat multivector component index to its grade.
+fn component_grade(j: usize) -> usize {
+    for g in (0..=8).rev() {
+        if j >= GRADE_OFFSETS[g] { return g; }
+    }
+    0
+}
+
+pub struct ContrastivePair {
+    pub anchor_idx: usize,
+    pub positive_idx: usize,
+    pub negative_idx: usize,
+    pub class_a: u8,
+    pub class_b: u8,
+}
+
+/// Per-pair-type grade emphasis weights.
+/// Higher weight = this grade is MORE important for separating this pair.
+pub struct PairGradeWeights {
+    pub weights: [f32; 9],
+}
+
+impl PairGradeWeights {
+    fn for_classes(a: u8, b: u8) -> Self {
+        let w = match (a.min(b), a.max(b)) {
+            // stroma(7) vs debris(2): texture is the discriminator
+            (2, 7) => [1.0, 0.5, 3.0, 1.5, 1.0, 1.0, 1.0, 1.0, 0.5],
+            // lymphocytes(3) vs mucosa(6): topology (packing)
+            (3, 6) => [1.0, 0.5, 1.0, 1.5, 3.0, 1.0, 1.0, 1.0, 0.5],
+            // adeno(8) vs mucus(4): intensity + junctions
+            (4, 8) => [2.0, 0.5, 1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 0.5],
+            // stroma(7) vs adeno(8): texture + junctions
+            (7, 8) => [1.0, 0.5, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 0.5],
+            // debris(2) vs adeno(8): intensity
+            (2, 8) => [2.0, 0.5, 1.5, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5],
+            // cancer vs normal: all grades contribute
+            _ => {
+                let is_cancer_a = a == 7 || a == 8;
+                let is_cancer_b = b == 7 || b == 8;
+                if is_cancer_a != is_cancer_b {
+                    [1.2, 0.5, 1.5, 1.5, 1.0, 1.0, 1.0, 1.0, 0.5]
+                } else {
+                    [1.0; 9]
+                }
+            }
+        };
+        PairGradeWeights { weights: w }
+    }
+
+    fn to_component_weight(&self, j: usize) -> f32 {
+        self.weights[component_grade(j)]
+    }
+}
+
+pub struct ContrastiveConfig {
+    pub margin: f32,
+    pub learning_rate: f32,
+    pub grade_lr_mult: [f32; 9],
+    pub batch_size: usize,
+    pub epochs: usize,
+    pub pairs_per_type: usize,
+}
+
+/// Generate contrastive pairs between two classes.
+pub fn generate_pairs(
+    labels: &[u8],
+    class_a: u8,
+    class_b: u8,
+    n_pairs: usize,
+    rng: &mut StdRng,
+) -> Vec<ContrastivePair> {
+    let indices_a: Vec<usize> = labels.iter().enumerate()
+        .filter(|(_, &l)| l == class_a).map(|(i, _)| i).collect();
+    let indices_b: Vec<usize> = labels.iter().enumerate()
+        .filter(|(_, &l)| l == class_b).map(|(i, _)| i).collect();
+
+    if indices_a.len() < 2 || indices_b.is_empty() { return Vec::new(); }
+
+    (0..n_pairs).map(|_| {
+        let ai = rng.gen_range(0..indices_a.len());
+        let mut pi = rng.gen_range(0..indices_a.len());
+        while pi == ai && indices_a.len() > 1 { pi = rng.gen_range(0..indices_a.len()); }
+        let ni = rng.gen_range(0..indices_b.len());
+        ContrastivePair {
+            anchor_idx: indices_a[ai],
+            positive_idx: indices_a[pi],
+            negative_idx: indices_b[ni],
+            class_a,
+            class_b,
+        }
+    }).collect()
+}
+
+/// Compute triplet loss and update RGB encoder projection via analytical gradients.
+/// Returns the average loss over the batch.
+pub fn contrastive_train_rgb_batch(
+    enc: &mut CliffordRGBEncoder,
+    pairs: &[ContrastivePair],
+    rgb_images: &[Vec<f32>],
+    config: &ContrastiveConfig,
+) -> f32 {
+    let mut total_loss = 0.0f32;
+    let mut active_count = 0u32;
+
+    let input_dim = RGB_DIM;
+
+    // Accumulate gradients over the batch
+    // Gradient is sparse — only update rows where pixel != 0
+    // For efficiency, process one pair at a time and apply immediately
+    // (online SGD rather than batch accumulate for memory)
+
+    for pair in pairs {
+        let x_a = &rgb_images[pair.anchor_idx];
+        let x_p = &rgb_images[pair.positive_idx];
+        let x_n = &rgb_images[pair.negative_idx];
+
+        // Forward: encode all three (without grade clamp for gradient flow)
+        let z_a = enc.encode(x_a);
+        let z_p = enc.encode(x_p);
+        let z_n = enc.encode(x_n);
+
+        let gw = PairGradeWeights::for_classes(pair.class_a, pair.class_b);
+
+        // Grade-weighted distance
+        let mut d_pos = 0.0f32;
+        let mut d_neg = 0.0f32;
+        for j in 0..CL8_DIM {
+            let s = distance_sign(j);
+            let w = gw.to_component_weight(j);
+            let dp = z_a.components[j] - z_p.components[j];
+            let dn = z_a.components[j] - z_n.components[j];
+            d_pos += s * w * dp * dp;
+            d_neg += s * w * dn * dn;
+        }
+
+        let loss = (d_pos - d_neg + config.margin).max(0.0);
+        total_loss += loss;
+        if loss <= 0.0 { continue; }
+        active_count += 1;
+
+        // Analytical gradient of triplet loss w.r.t. projection[i][j]
+        // dL/dW[i][j] = dL/dz_a[j]*x_a[i] + dL/dz_p[j]*x_p[i] + dL/dz_n[j]*x_n[i]
+        //
+        // dL/dz_a[j] = 2*s*w*[(z_a[j]-z_p[j]) - (z_a[j]-z_n[j])]
+        //            = 2*s*w*[z_n[j] - z_p[j]]
+        // dL/dz_p[j] = -2*s*w*(z_a[j]-z_p[j])
+        // dL/dz_n[j] = 2*s*w*(z_a[j]-z_n[j])
+
+        let lr = config.learning_rate / pairs.len().max(1) as f32;
+
+        for i in 0..input_dim.min(enc.projection.len()) {
+            let va = if i < x_a.len() { x_a[i] } else { 0.0 };
+            let vp = if i < x_p.len() { x_p[i] } else { 0.0 };
+            let vn = if i < x_n.len() { x_n[i] } else { 0.0 };
+
+            if va.abs() < 1e-4 && vp.abs() < 1e-4 && vn.abs() < 1e-4 { continue; }
+
+            let row = &mut enc.projection[i];
+            for j in 0..CL8_DIM {
+                let s = distance_sign(j);
+                let w = gw.to_component_weight(j);
+                let g = component_grade(j);
+                let glr = lr * config.grade_lr_mult[g];
+
+                let dl_dza = 2.0 * s * w * (z_n.components[j] - z_p.components[j]);
+                let dl_dzp = -2.0 * s * w * (z_a.components[j] - z_p.components[j]);
+                let dl_dzn = 2.0 * s * w * (z_a.components[j] - z_n.components[j]);
+
+                let grad = dl_dza * va + dl_dzp * vp + dl_dzn * vn;
+                if grad.is_finite() {
+                    row[j] -= glr * grad;
+                }
+            }
+        }
+    }
+
+    total_loss / pairs.len().max(1) as f32
+}
+
+/// Contrastive update for Dirac encoder's texture_proj.
+/// Only updates the texture projection (784→256), not channel_proj or geo products.
+pub fn contrastive_train_dirac_batch(
+    enc: &mut CliffordDiracEncoder,
+    pairs: &[ContrastivePair],
+    gray_images: &[Vec<f32>],
+    config: &ContrastiveConfig,
+) -> f32 {
+    let mut total_loss = 0.0f32;
+
+    for pair in pairs {
+        let x_a = &gray_images[pair.anchor_idx];
+        let x_p = &gray_images[pair.positive_idx];
+        let x_n = &gray_images[pair.negative_idx];
+
+        let z_a = enc.encode(x_a);
+        let z_p = enc.encode(x_p);
+        let z_n = enc.encode(x_n);
+
+        let gw = PairGradeWeights::for_classes(pair.class_a, pair.class_b);
+
+        let mut d_pos = 0.0f32;
+        let mut d_neg = 0.0f32;
+        for j in 0..CL8_DIM {
+            let s = distance_sign(j);
+            let w = gw.to_component_weight(j);
+            let dp = z_a.components[j] - z_p.components[j];
+            let dn = z_a.components[j] - z_n.components[j];
+            d_pos += s * w * dp * dp;
+            d_neg += s * w * dn * dn;
+        }
+
+        let loss = (d_pos - d_neg + config.margin).max(0.0);
+        total_loss += loss;
+        if loss <= 0.0 { continue; }
+
+        // For Dirac, the texture_proj contribution is:
+        //   texture_mv[j] = sum_i texture_proj[i][j] * local_var[i]
+        // and result includes 0.3 * texture_mv[j], so the gradient
+        // through texture_proj is attenuated by 0.3.
+        let lvar_a = compute_local_variance(x_a);
+        let lvar_p = compute_local_variance(x_p);
+        let lvar_n = compute_local_variance(x_n);
+
+        let lr = config.learning_rate * 0.3 / pairs.len().max(1) as f32;
+
+        for i in 0..IMAGE_DIM {
+            let va = lvar_a[i];
+            let vp = lvar_p[i];
+            let vn = lvar_n[i];
+
+            if va.abs() < 1e-4 && vp.abs() < 1e-4 && vn.abs() < 1e-4 { continue; }
+
+            let row = &mut enc.texture_proj[i];
+            for j in 0..CL8_DIM {
+                let s = distance_sign(j);
+                let w = gw.to_component_weight(j);
+                let g = component_grade(j);
+                let glr = lr * config.grade_lr_mult[g];
+
+                let dl_dza = 2.0 * s * w * (z_n.components[j] - z_p.components[j]);
+                let dl_dzp = -2.0 * s * w * (z_a.components[j] - z_p.components[j]);
+                let dl_dzn = 2.0 * s * w * (z_a.components[j] - z_n.components[j]);
+
+                let grad = dl_dza * va + dl_dzp * vp + dl_dzn * vn;
+                if grad.is_finite() {
+                    row[j] -= glr * grad;
+                }
+            }
+        }
+    }
+
+    total_loss / pairs.len().max(1) as f32
+}
+
+/// Measure centroid distance between two classes using current encoder.
+pub fn measure_class_distance(
+    rgb_enc: &CliffordRGBEncoder,
+    rgb_images: &[Vec<f32>],
+    labels: &[u8],
+    class_a: u8,
+    class_b: u8,
+    max_samples: usize,
+) -> f32 {
+    let mut sum_a = Multivector::zero();
+    let mut sum_b = Multivector::zero();
+    let mut n_a = 0u32;
+    let mut n_b = 0u32;
+    for (img, &l) in rgb_images.iter().zip(labels.iter()) {
+        if l == class_a && (n_a as usize) < max_samples {
+            let mv = rgb_enc.encode(img);
+            for j in 0..CL8_DIM { sum_a.components[j] += mv.components[j]; }
+            n_a += 1;
+        } else if l == class_b && (n_b as usize) < max_samples {
+            let mv = rgb_enc.encode(img);
+            for j in 0..CL8_DIM { sum_b.components[j] += mv.components[j]; }
+            n_b += 1;
+        }
+    }
+    if n_a == 0 || n_b == 0 { return 0.0; }
+    for j in 0..CL8_DIM {
+        sum_a.components[j] /= n_a as f32;
+        sum_b.components[j] /= n_b as f32;
+    }
+    let mut d = 0.0f32;
+    for j in 0..CL8_DIM {
+        let diff = sum_a.components[j] - sum_b.components[j];
+        d += diff * diff;
+    }
+    d.sqrt()
+}
+
 /// Full training pipeline result.
 pub struct CliffordMnistResult {
     pub task_accuracies: Vec<f32>,
