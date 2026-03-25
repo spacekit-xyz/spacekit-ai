@@ -668,6 +668,263 @@ impl CliffordDiracEncoder {
     }
 }
 
+// ─── Trainable Dirac Channel ─────────────────────────────────────────────
+//
+// For translationally confused pairs (|B| < 0.1), the existing encoder
+// maps both classes to the same point — no rotational structure to exploit.
+// This channel learns a NEW differential operator (3×3 kernel) that
+// creates a dimension of discrimination the fixed channels don't have.
+//
+// The training target is |B|: maximize the confusion bivector norm
+// so that Clifford GD can then separate the pair in one pass.
+
+pub struct TrainableDiracChannel {
+    kernel: [[f32; 3]; 3],
+    projection: Vec<[f32; CL8_DIM]>,
+    grade_scales: [f32; 9],
+}
+
+impl TrainableDiracChannel {
+    pub fn new(seed: u64) -> Self {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let norm = 1.0 / (IMAGE_DIM as f32).sqrt();
+
+        let mut kernel = [[0.0f32; 3]; 3];
+        for row in kernel.iter_mut() {
+            for v in row.iter_mut() {
+                *v = rng.gen_range(-0.3..0.3);
+            }
+        }
+
+        let mut projection = Vec::with_capacity(IMAGE_DIM);
+        for _ in 0..IMAGE_DIM {
+            let mut row = [0.0f32; CL8_DIM];
+            for j in 0..CL8_DIM {
+                row[j] = rng.gen_range(-1.0..1.0) * norm;
+            }
+            projection.push(row);
+        }
+
+        TrainableDiracChannel {
+            kernel,
+            projection,
+            grade_scales: [1.0; 9],
+        }
+    }
+
+    fn apply_kernel(&self, image: &[f32]) -> [f32; IMAGE_DIM] {
+        let mut out = [0.0f32; IMAGE_DIM];
+        for y in 0..DIRAC_H {
+            for x in 0..DIRAC_W {
+                let mut val = 0.0f32;
+                for ky in 0..3usize {
+                    for kx in 0..3usize {
+                        let iy = (y as i32 + ky as i32 - 1).clamp(0, DIRAC_H as i32 - 1) as usize;
+                        let ix = (x as i32 + kx as i32 - 1).clamp(0, DIRAC_W as i32 - 1) as usize;
+                        val += image[iy * DIRAC_W + ix] * self.kernel[ky][kx];
+                    }
+                }
+                out[y * DIRAC_W + x] = val;
+            }
+        }
+        out
+    }
+
+    pub fn encode(&self, image: &[f32]) -> Multivector {
+        let response = self.apply_kernel(image);
+        let mut mv = Multivector::zero();
+        for (i, &v) in response.iter().enumerate() {
+            if v.abs() < 1e-6 { continue; }
+            let row = &self.projection[i];
+            for j in 0..CL8_DIM {
+                mv.components[j] += v * row[j];
+            }
+        }
+        for g in 0..=8 {
+            let scale = self.grade_scales[g];
+            let start = GRADE_OFFSETS[g];
+            for k in 0..GRADE_DIMS[g] {
+                mv.components[start + k] *= scale;
+            }
+        }
+        mv
+    }
+
+    pub fn calibrate_scales(&mut self, images: &[Vec<f32>]) {
+        let n = images.len().min(500) as f32;
+        if n < 2.0 { return; }
+        self.grade_scales = [1.0; 9];
+        let mut grade_norms = [0.0f32; 9];
+        for img in images.iter().take(500) {
+            let mv = self.encode(img);
+            for g in 0..=8 {
+                let gnorm: f32 = mv.grade(g).iter().map(|x| x * x).sum::<f32>().sqrt();
+                if gnorm.is_finite() { grade_norms[g] += gnorm / n; }
+            }
+        }
+        for g in 0..=8 {
+            if grade_norms[g] > 1e-6 && grade_norms[g].is_finite() {
+                self.grade_scales[g] = 1.0 / grade_norms[g];
+            }
+        }
+    }
+
+    /// Train on a specific class pair to maximize |B| (confusion bivector norm).
+    /// Uses finite-difference gradient on the 3×3 kernel.
+    /// Goal: manufacture rotational structure so Clifford GD can separate them.
+    pub fn train_on_pair(
+        &mut self,
+        images: &[Vec<f32>],
+        labels: &[u8],
+        class_a: u8,
+        class_b: u8,
+        max_epochs: usize,
+        lr: f32,
+        target_bv_norm: f32,
+    ) -> f32 {
+        let max_per_class = 1000;
+
+        for epoch in 0..max_epochs {
+            let (ca, cb, bv_norm) = self.compute_pair_bivector(
+                images, labels, class_a, class_b, max_per_class,
+            );
+            let _ = (ca, cb);
+
+            if epoch % 10 == 0 || bv_norm >= target_bv_norm {
+                println!("      epoch {:>3}: |B|={:.4}", epoch, bv_norm);
+            }
+            if bv_norm >= target_bv_norm {
+                println!("      target reached at epoch {} (|B|={:.4} >= {:.3})",
+                    epoch, bv_norm, target_bv_norm);
+                return bv_norm;
+            }
+
+            let eps = 0.01f32;
+            for ky in 0..3 {
+                for kx in 0..3 {
+                    self.kernel[ky][kx] += eps;
+                    let (_, _, bv_plus) = self.compute_pair_bivector(
+                        images, labels, class_a, class_b, max_per_class,
+                    );
+                    self.kernel[ky][kx] -= 2.0 * eps;
+                    let (_, _, bv_minus) = self.compute_pair_bivector(
+                        images, labels, class_a, class_b, max_per_class,
+                    );
+                    self.kernel[ky][kx] += eps;
+
+                    let grad = (bv_plus - bv_minus) / (2.0 * eps);
+                    self.kernel[ky][kx] += lr * grad;
+                }
+            }
+
+            // Also update projection weights via finite difference on random subset
+            if epoch % 5 == 0 {
+                let mut proj_rng = StdRng::seed_from_u64(epoch as u64);
+                let n_update = 50;
+                for _ in 0..n_update {
+                    let pi: usize = proj_rng.gen_range(0..IMAGE_DIM);
+                    let pj: usize = proj_rng.gen_range(0..CL8_DIM);
+
+                    self.projection[pi][pj] += eps;
+                    let (_, _, bv_plus) = self.compute_pair_bivector(
+                        images, labels, class_a, class_b, max_per_class,
+                    );
+                    self.projection[pi][pj] -= 2.0 * eps;
+                    let (_, _, bv_minus) = self.compute_pair_bivector(
+                        images, labels, class_a, class_b, max_per_class,
+                    );
+                    self.projection[pi][pj] += eps;
+
+                    let grad = (bv_plus - bv_minus) / (2.0 * eps);
+                    self.projection[pi][pj] += lr * 0.1 * grad;
+                }
+            }
+        }
+
+        let (_, _, final_bv) = self.compute_pair_bivector(
+            images, labels, class_a, class_b, 1000,
+        );
+        final_bv
+    }
+
+    fn compute_pair_bivector(
+        &self,
+        images: &[Vec<f32>],
+        labels: &[u8],
+        class_a: u8,
+        class_b: u8,
+        max_per_class: usize,
+    ) -> (Multivector, Multivector, f32) {
+        let mut sum_a = Multivector::zero();
+        let mut sum_b = Multivector::zero();
+        let mut n_a = 0usize;
+        let mut n_b = 0usize;
+        for (img, &l) in images.iter().zip(labels.iter()) {
+            if l == class_a && n_a < max_per_class {
+                let mv = self.encode(img);
+                for j in 0..CL8_DIM { sum_a.components[j] += mv.components[j]; }
+                n_a += 1;
+            } else if l == class_b && n_b < max_per_class {
+                let mv = self.encode(img);
+                for j in 0..CL8_DIM { sum_b.components[j] += mv.components[j]; }
+                n_b += 1;
+            }
+            if n_a >= max_per_class && n_b >= max_per_class { break; }
+        }
+        if n_a > 0 { for j in 0..CL8_DIM { sum_a.components[j] /= n_a as f32; } }
+        if n_b > 0 { for j in 0..CL8_DIM { sum_b.components[j] /= n_b as f32; } }
+
+        let bv = confusion_bivector(&sum_a, &sum_b);
+        let bv_norm: f32 = bv.grade(2).iter().map(|x| x * x).sum::<f32>().sqrt();
+        (sum_a, sum_b, bv_norm)
+    }
+}
+
+/// Compute |B| for all class pairs — the geometric learnability diagnostic.
+/// Returns a matrix of bivector norms and the list of degenerate pairs (|B| < threshold).
+pub fn diagnose_pair_learnability(
+    rgb_enc: &CliffordRGBEncoder,
+    rgb_images: &[Vec<f32>],
+    labels: &[u8],
+    n_classes: usize,
+    max_samples: usize,
+) -> (Vec<Vec<f32>>, Vec<(u8, u8)>, Vec<(u8, u8)>) {
+    let mut centroids = Vec::with_capacity(n_classes);
+    for c in 0..n_classes {
+        let mut sum = Multivector::zero();
+        let mut n = 0usize;
+        for (img, &l) in rgb_images.iter().zip(labels.iter()) {
+            if l as usize == c && n < max_samples {
+                let mv = rgb_enc.encode(img);
+                for j in 0..CL8_DIM { sum.components[j] += mv.components[j]; }
+                n += 1;
+            }
+        }
+        if n > 0 { for j in 0..CL8_DIM { sum.components[j] /= n as f32; } }
+        centroids.push(sum);
+    }
+
+    let mut bv_matrix = vec![vec![0.0f32; n_classes]; n_classes];
+    let mut rotational = Vec::new();
+    let mut degenerate = Vec::new();
+
+    for i in 0..n_classes {
+        for j in (i+1)..n_classes {
+            let bv = confusion_bivector(&centroids[i], &centroids[j]);
+            let bv_norm: f32 = bv.grade(2).iter().map(|x| x * x).sum::<f32>().sqrt();
+            bv_matrix[i][j] = bv_norm;
+            bv_matrix[j][i] = bv_norm;
+
+            if bv_norm >= 0.3 {
+                rotational.push((i as u8, j as u8));
+            } else if bv_norm < 0.1 {
+                degenerate.push((i as u8, j as u8));
+            }
+        }
+    }
+    (bv_matrix, rotational, degenerate)
+}
+
 // ─── RGB encoder (single 2352→256 projection) ───────────────────────────
 //
 // Direct projection from 28×28×3 RGB pixels into Cl(1,7).
@@ -1654,16 +1911,17 @@ pub fn measure_class_distance(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Clifford Gradient Descent — rotor-based learning native to Cl(1,7)
+// Clifford Gradient Descent — single forward pass learning in Cl(1,7)
 //
-// Instead of backpropagating scalar gradients through geometric products,
-// the update rule IS a rotation (rotor) in multivector space.
+// Standard backprop: forward → scalar loss → backward → parameter updates
+// Clifford gradient: forward → geometric product → rotor → done
 //
-// The geometric product Z_a * Z_b† encodes the full relationship between
-// two class centroids. Its grade-2 (bivector) component identifies the
-// PLANE in which the two classes are confused. A rotor constructed from
-// that bivector rotates one class away from the other — coordinate-free,
-// geometry-preserving, and exact.
+// The geometric product Z_a * Z_b† of two class centroids encodes their
+// full relationship. The grade-2 (bivector) component IS the confusion
+// plane. The rotor R = exp(-B/2) IS the update. One operation.
+//
+// No backward pass. No chain rule. No scalar loss.
+// The algebra computes the exact separation direction.
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Compute the confusion bivector between two class centroids.
@@ -1679,19 +1937,39 @@ pub fn confusion_bivector(centroid_a: &Multivector, centroid_b: &Multivector) ->
     product.grade_project(2)
 }
 
-/// Construct a separation rotor from a confusion bivector with step size α.
+/// Construct a separation rotor from a confusion bivector.
 ///
-/// R = exp(-α * B / 2)
+/// R = exp(-B_clamped / 2)
 ///
-/// The Rotor::from_bivector implementation computes:
-///   R = cos(|B|/2) - sin(|B|/2)/|B| * B
-///
-/// We pre-scale the bivector by α to control the step size.
-pub fn separation_rotor(confusion_bv: &Multivector, alpha: f32) -> Rotor {
+/// The bivector is clamped to |B| <= 0.5 to prevent destructive
+/// large rotations that disrupt other class separations.
+pub fn separation_rotor_full(confusion_bv: &Multivector) -> Rotor {
     let bv_slice = confusion_bv.grade(2);
+    let norm: f32 = bv_slice.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let mut bv = [0.0f32; 28];
+    if norm > 0.5 {
+        let scale = 0.5 / norm;
+        for i in 0..28 { bv[i] = bv_slice[i] * scale; }
+    } else {
+        bv.copy_from_slice(bv_slice);
+    }
+    Rotor::from_bivector(&bv)
+}
+
+/// Construct a scaled separation rotor.
+///
+/// The bivector is normalized and α controls the rotation angle in radians,
+/// independent of the bivector magnitude. Useful when the full rotation
+/// would disrupt other class separations.
+pub fn separation_rotor_scaled(confusion_bv: &Multivector, alpha: f32) -> Rotor {
+    let bv_slice = confusion_bv.grade(2);
+    let bv_norm: f32 = bv_slice.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if bv_norm < 1e-10 {
+        return Rotor::identity();
+    }
     let mut scaled = [0.0f32; 28];
     for i in 0..28 {
-        scaled[i] = bv_slice[i] * alpha;
+        scaled[i] = (bv_slice[i] / bv_norm) * alpha;
     }
     Rotor::from_bivector(&scaled)
 }
@@ -1721,14 +1999,6 @@ pub fn apply_rotor_to_dirac_encoder(encoder: &mut CliffordDiracEncoder, rotor: &
     }
 }
 
-/// Result of a single Clifford gradient step.
-pub struct CliffordGradientStep {
-    pub rotor: Rotor,
-    pub bivector_norm: f32,
-    pub distance_before: f32,
-    pub distance_after: f32,
-}
-
 /// Compute the Euclidean distance between two multivector centroids.
 fn centroid_distance(a: &Multivector, b: &Multivector) -> f32 {
     let mut d = 0.0f32;
@@ -1739,141 +2009,113 @@ fn centroid_distance(a: &Multivector, b: &Multivector) -> f32 {
     d.sqrt()
 }
 
-/// Compute class centroids from encoded multivectors.
-fn compute_centroids(
-    mvs: &[Multivector],
-    labels: &[u8],
-    n_classes: usize,
-) -> Vec<Multivector> {
-    let mut sums: Vec<Multivector> = (0..n_classes).map(|_| Multivector::zero()).collect();
-    let mut counts = vec![0u32; n_classes];
-    for (mv, &l) in mvs.iter().zip(labels.iter()) {
-        let c = l as usize;
-        if c < n_classes {
-            for j in 0..CL8_DIM {
-                sums[c].components[j] += mv.components[j];
-            }
-            counts[c] += 1;
-        }
-    }
-    for c in 0..n_classes {
-        if counts[c] > 0 {
-            let n = counts[c] as f32;
-            for j in 0..CL8_DIM {
-                sums[c].components[j] /= n;
-            }
-        }
-    }
-    sums
+/// Result of single-pass Clifford gradient descent for one class pair.
+pub struct CliffordSeparationResult {
+    pub class_a: u8,
+    pub class_b: u8,
+    pub distance_before: f32,
+    pub distance_after: f32,
+    pub bivector_norm: f32,
 }
 
-/// Clifford gradient descent: separate two classes using rotor updates.
+/// Single-pass Clifford gradient descent for all collision pairs.
 ///
-/// Computes the confusion bivector between class centroids, constructs
-/// a separation rotor, and applies it to the encoder projection weights.
-/// This is a closed-form, coordinate-free update that respects the
-/// geometric structure of Cl(1,7).
+/// One forward pass per pair:
+///   1. Encode class samples → compute centroids  (forward pass)
+///   2. Geometric product Z_a * Z_b†             (the gradient)
+///   3. Extract grade-2 → confusion bivector B    (the direction)
+///   4. R = exp(-B/2) → separation rotor          (the update)
+///   5. Apply R to encoder weights                (done)
 ///
-/// Returns the sequence of gradient steps for monitoring.
-pub fn clifford_gradient_descent(
+/// No backward pass. No loss function. No chain rule.
+/// The geometric product IS the gradient. The rotor IS the update.
+pub fn clifford_single_pass(
     rgb_enc: &mut CliffordRGBEncoder,
     dirac_enc: &mut CliffordDiracEncoder,
     rgb_images: &[Vec<f32>],
-    gray_images: &[Vec<f32>],
     labels: &[u8],
-    class_a: u8,
-    class_b: u8,
-    alpha: f32,
-    max_steps: usize,
-    target_distance: f32,
-) -> Vec<CliffordGradientStep> {
-    let mut steps = Vec::new();
+    pairs: &[(u8, u8)],
+    max_samples_per_class: usize,
+) -> Vec<CliffordSeparationResult> {
+    let mut results = Vec::new();
 
-    for step in 0..max_steps {
-        let rgb_mvs: Vec<Multivector> = rgb_images.iter()
-            .zip(labels.iter())
-            .filter(|(_, &l)| l == class_a || l == class_b)
-            .map(|(img, _)| rgb_enc.encode(img))
-            .collect();
-        let filtered_labels: Vec<u8> = labels.iter()
-            .filter(|&&l| l == class_a || l == class_b)
-            .copied().collect();
+    for &(ca, cb) in pairs {
+        let mut sum_a = Multivector::zero();
+        let mut sum_b = Multivector::zero();
+        let mut n_a = 0usize;
+        let mut n_b = 0usize;
 
-        let centroids = compute_centroids(&rgb_mvs, &filtered_labels, 256);
-        let ca = &centroids[class_a as usize];
-        let cb = &centroids[class_b as usize];
+        for (img, &l) in rgb_images.iter().zip(labels.iter()) {
+            if l == ca && n_a < max_samples_per_class {
+                let mv = rgb_enc.encode(img);
+                for j in 0..CL8_DIM { sum_a.components[j] += mv.components[j]; }
+                n_a += 1;
+            } else if l == cb && n_b < max_samples_per_class {
+                let mv = rgb_enc.encode(img);
+                for j in 0..CL8_DIM { sum_b.components[j] += mv.components[j]; }
+                n_b += 1;
+            }
+            if n_a >= max_samples_per_class && n_b >= max_samples_per_class { break; }
+        }
 
-        let dist_before = centroid_distance(ca, cb);
+        if n_a == 0 || n_b == 0 { continue; }
+        for j in 0..CL8_DIM {
+            sum_a.components[j] /= n_a as f32;
+            sum_b.components[j] /= n_b as f32;
+        }
 
-        let bv = confusion_bivector(ca, cb);
+        let dist_before = centroid_distance(&sum_a, &sum_b);
+
+        let bv = confusion_bivector(&sum_a, &sum_b);
         let bv_norm: f32 = bv.grade(2).iter().map(|x| x * x).sum::<f32>().sqrt();
 
         if bv_norm < 1e-10 {
-            println!("      step {}: bivector norm ~0, classes already orthogonal", step);
-            break;
+            println!("    {} ↔ {}: already orthogonal (|B|≈0)", ca, cb);
+            results.push(CliffordSeparationResult {
+                class_a: ca, class_b: cb,
+                distance_before: dist_before, distance_after: dist_before,
+                bivector_norm: bv_norm,
+            });
+            continue;
         }
 
-        let rotor = separation_rotor(&bv, alpha);
+        let rotor = separation_rotor_full(&bv);
 
         apply_rotor_to_rgb_encoder(rgb_enc, &rotor);
         apply_rotor_to_dirac_encoder(dirac_enc, &rotor);
 
-        let rgb_mvs_after: Vec<Multivector> = rgb_images.iter()
-            .zip(labels.iter())
-            .filter(|(_, &l)| l == class_a || l == class_b)
-            .map(|(img, _)| rgb_enc.encode(img))
-            .collect();
-        let centroids_after = compute_centroids(&rgb_mvs_after, &filtered_labels, 256);
-        let dist_after = centroid_distance(
-            &centroids_after[class_a as usize],
-            &centroids_after[class_b as usize],
-        );
+        let mut sum_a2 = Multivector::zero();
+        let mut sum_b2 = Multivector::zero();
+        let mut n_a2 = 0usize;
+        let mut n_b2 = 0usize;
+        for (img, &l) in rgb_images.iter().zip(labels.iter()) {
+            if l == ca && n_a2 < max_samples_per_class {
+                let mv = rgb_enc.encode(img);
+                for j in 0..CL8_DIM { sum_a2.components[j] += mv.components[j]; }
+                n_a2 += 1;
+            } else if l == cb && n_b2 < max_samples_per_class {
+                let mv = rgb_enc.encode(img);
+                for j in 0..CL8_DIM { sum_b2.components[j] += mv.components[j]; }
+                n_b2 += 1;
+            }
+            if n_a2 >= max_samples_per_class && n_b2 >= max_samples_per_class { break; }
+        }
+        for j in 0..CL8_DIM {
+            if n_a2 > 0 { sum_a2.components[j] /= n_a2 as f32; }
+            if n_b2 > 0 { sum_b2.components[j] /= n_b2 as f32; }
+        }
+        let dist_after = centroid_distance(&sum_a2, &sum_b2);
 
-        steps.push(CliffordGradientStep {
-            rotor,
+        println!("    {} ↔ {}: |B|={:.4}  d={:.3} → {:.3}  (one pass)",
+            ca, cb, bv_norm, dist_before, dist_after);
+
+        results.push(CliffordSeparationResult {
+            class_a: ca, class_b: cb,
+            distance_before: dist_before, distance_after: dist_after,
             bivector_norm: bv_norm,
-            distance_before: dist_before,
-            distance_after: dist_after,
         });
-
-        if step % 5 == 0 || step == max_steps - 1 || dist_after >= target_distance {
-            println!("      step {:>3}: |B|={:.4}  d={:.3} → {:.3}",
-                step, bv_norm, dist_before, dist_after);
-        }
-
-        if dist_after >= target_distance {
-            println!("      converged at step {} (d={:.3} >= {:.3})",
-                step, dist_after, target_distance);
-            break;
-        }
     }
-    steps
-}
-
-/// Run Clifford gradient descent on multiple class pairs.
-///
-/// Operates on class centroids — not individual samples — so each step
-/// is milliseconds not minutes. Convergence typically in <50 iterations.
-pub fn clifford_gradient_descent_pairs(
-    rgb_enc: &mut CliffordRGBEncoder,
-    dirac_enc: &mut CliffordDiracEncoder,
-    rgb_images: &[Vec<f32>],
-    gray_images: &[Vec<f32>],
-    labels: &[u8],
-    pairs: &[(u8, u8, f32)],  // (class_a, class_b, target_distance)
-    alpha: f32,
-    max_steps: usize,
-) {
-    for &(ca, cb, target) in pairs {
-        println!("    Clifford gradient descent: class {} ↔ {} (target d={:.2})", ca, cb, target);
-        let steps = clifford_gradient_descent(
-            rgb_enc, dirac_enc, rgb_images, gray_images, labels,
-            ca, cb, alpha, max_steps, target,
-        );
-        if let Some(last) = steps.last() {
-            println!("      {} steps, final d={:.3}", steps.len(), last.distance_after);
-        }
-    }
+    results
 }
 
 /// Full training pipeline result.

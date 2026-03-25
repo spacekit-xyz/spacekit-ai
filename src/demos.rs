@@ -1667,67 +1667,118 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
     let train_n = train_limit.unwrap_or(train.n).min(train.n);
     let joint_dim = CL8_DIM * 2; // 512D
 
-    // ── Clifford Gradient Descent: rotor-based separation native to Cl(1,7) ──
-    //
-    // Instead of backpropagating scalar gradients through an arbitrary loss,
-    // compute the confusion bivector B = <Z_a * Z_b†>_2 between class centroids.
-    // This bivector identifies the PLANE in which two classes are confused.
-    // A rotor R = exp(-α*B/2) rotates one class out of this plane —
-    // coordinate-free, geometry-preserving, and exact.
-    //
-    // The rotor is applied directly to encoder projection weights:
-    //   projection_new[i] = R * projection_old[i] * R†
-    // This is a closed-form update, not iterative backprop.
     use growformer::clifford_mnist::{
-        clifford_gradient_descent_pairs, measure_class_distance,
+        clifford_single_pass, measure_class_distance,
+        diagnose_pair_learnability, TrainableDiracChannel,
     };
 
     let train_lbls_full = &train.labels[..train_n];
 
+    // ══════════════════════════════════════════════════════════════════════
+    //  Step 0: Geometric Learnability Diagnostic
+    //  Compute |B| = |<Z_a * Z_b†>_2| for all class pairs.
+    //  |B| predicts whether Clifford GD can separate the pair.
+    // ══════════════════════════════════════════════════════════════════════
     println!("\n═══════════════════════════════════════════════════════════════");
-    println!("  Clifford Gradient Descent: rotor-based class separation");
-    println!("  ∂Z = γᵘ∂ᵤZ — the Dirac operator IS the gradient");
+    println!("  Step 0: Geometric Learnability Diagnostic");
+    println!("  |B| = |<Z_a * Z_b†>_2| — computable before any training");
+    println!("═══════════════════════════════════════════════════════════════");
+
+    let diag_start = Instant::now();
+    let (bv_matrix, rotational_pairs, degenerate_pairs) =
+        diagnose_pair_learnability(&rgb_enc, &train.images_rgb, train_lbls_full, PATH_NUM_CLASSES, 1000);
+
+    println!("\n  Confusion bivector |B| matrix:");
+    print!("         ");
+    for c in 0..PATH_NUM_CLASSES { print!("{:>6}", c); }
+    println!();
+    for i in 0..PATH_NUM_CLASSES {
+        print!("    {}:{:>8} ", i, &CLASS_NAMES[i][..CLASS_NAMES[i].len().min(8)]);
+        for j in 0..PATH_NUM_CLASSES {
+            if i == j { print!("     -"); }
+            else {
+                let bv = bv_matrix[i][j];
+                let tag = if bv >= 0.3 { "+" } else if bv < 0.1 { "!" } else { " " };
+                print!("{}{:5.3}", tag, bv);
+            }
+        }
+        println!();
+    }
+
+    println!("\n  Rotational (|B| >= 0.3, Clifford GD single-pass):");
+    for &(a, b) in &rotational_pairs {
+        println!("    {} ↔ {}  ({} ↔ {})  |B|={:.3}",
+            a, b, CLASS_NAMES[a as usize], CLASS_NAMES[b as usize], bv_matrix[a as usize][b as usize]);
+    }
+    println!("  Degenerate (|B| < 0.1, need trainable Dirac channel):");
+    for &(a, b) in &degenerate_pairs {
+        println!("    {} ↔ {}  ({} ↔ {})  |B|={:.3}",
+            a, b, CLASS_NAMES[a as usize], CLASS_NAMES[b as usize], bv_matrix[a as usize][b as usize]);
+    }
+    println!("  Diagnostic: {:.1}s", diag_start.elapsed().as_secs_f64());
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  Step 1: Trainable Dirac channels for degenerate pairs (|B| < 0.1)
+    //  Learn new ∂ operators FIRST — create the dimensions of discrimination
+    //  that the fixed encoder channels don't have. Then Clifford GD can
+    //  separate them in one pass.
+    // ══════════════════════════════════════════════════════════════════════
+    println!("\n═══════════════════════════════════════════════════════════════");
+    println!("  Step 1: Trainable Dirac — dimension creation for |B| < 0.1");
+    println!("  Learn new ∂ operators → manufacture rotational structure");
+    println!("═══════════════════════════════════════════════════════════════");
+
+    let mut trainable_channels: Vec<(u8, u8, TrainableDiracChannel)> = Vec::new();
+
+    let key_degenerate: Vec<(u8, u8)> = vec![
+        (2, 7),   // debris ↔ stroma         |B|=0.098
+        (3, 6),   // lymphocytes ↔ mucosa     |B|=0.057
+        (7, 8),   // stroma ↔ adeno           |B|=0.056
+        (5, 7),   // smooth_muscle ↔ stroma   |B|=0.045
+        (5, 8),   // smooth_muscle ↔ adeno    |B|=0.080
+    ];
+
+    let dirac_start = Instant::now();
+    for &(ca, cb) in &key_degenerate {
+        println!("\n    Training Dirac channel for {} ↔ {} ({} ↔ {})",
+            ca, cb, CLASS_NAMES[ca as usize], CLASS_NAMES[cb as usize]);
+        let mut channel = TrainableDiracChannel::new(ca as u64 * 100 + cb as u64);
+        channel.calibrate_scales(&train.images_gray[..1000].to_vec());
+        let final_bv = channel.train_on_pair(
+            &train.images_gray, train_lbls_full,
+            ca, cb,
+            100,     // max epochs
+            0.05,    // learning rate
+            0.3,     // target |B|
+        );
+        println!("    Final |B|={:.4} for {} ↔ {}", final_bv, ca, cb);
+        trainable_channels.push((ca, cb, channel));
+    }
+    println!("\n  Trainable Dirac channels: {:.1}s", dirac_start.elapsed().as_secs_f64());
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  Step 2: Clifford GD — clamped single-pass rotors for rotational pairs
+    //  Bivector norm clamped to 0.5 to prevent destructive large rotations.
+    // ══════════════════════════════════════════════════════════════════════
+    println!("\n═══════════════════════════════════════════════════════════════");
+    println!("  Step 2: Clifford GD — single forward pass (|B| clamped ≤ 0.5)");
+    println!("  Z_a * Z_b† → B → clamp → R = exp(-B/2) → done");
     println!("═══════════════════════════════════════════════════════════════");
 
     let cgd_start = Instant::now();
+    let cgd_pairs: Vec<(u8, u8)> = rotational_pairs.clone();
+    if cgd_pairs.is_empty() {
+        println!("  No rotational pairs found — skipping Clifford GD");
+    } else {
+        let _results = clifford_single_pass(
+            &mut rgb_enc, &mut dirac_enc,
+            &train.images_rgb, train_lbls_full,
+            &cgd_pairs, 2000,
+        );
+    }
+    println!("  Clifford GD: {:.1}s", cgd_start.elapsed().as_secs_f64());
 
-    let sd_before = measure_class_distance(
-        &rgb_enc, &train.images_rgb, train_lbls_full, 7, 2, 500,
-    );
-    let lm_before = measure_class_distance(
-        &rgb_enc, &train.images_rgb, train_lbls_full, 3, 6, 500,
-    );
-    println!("\n  Before: stroma-debris={:.3}  lymph-mucosa={:.3}", sd_before, lm_before);
-
-    let collision_pairs: Vec<(u8, u8, f32)> = vec![
-        (7, 2, 0.5),   // stroma ↔ debris: d=0.12, target 0.5
-        (3, 6, 0.7),   // lymphocytes ↔ normal mucosa: d=0.36, target 0.7
-        (4, 5, 0.6),   // normal mucosa colon ↔ smooth muscle: check/push
-    ];
-
-    clifford_gradient_descent_pairs(
-        &mut rgb_enc, &mut dirac_enc,
-        &train.images_rgb, &train.images_gray, train_lbls_full,
-        &collision_pairs,
-        0.3,    // α: rotor step size
-        50,     // max iterations per pair
-    );
-
-    let cgd_elapsed = cgd_start.elapsed();
-
-    let sd_final = measure_class_distance(
-        &rgb_enc, &train.images_rgb, train_lbls_full, 7, 2, 500,
-    );
-    let lm_final = measure_class_distance(
-        &rgb_enc, &train.images_rgb, train_lbls_full, 3, 6, 500,
-    );
-    println!("\n  After:  stroma-debris={:.3}  lymph-mucosa={:.3}", sd_final, lm_final);
-    println!("  Clifford gradient descent: {:.1}s ({} rotor applications)",
-        cgd_elapsed.as_secs_f64(),
-        collision_pairs.len() * 50);
-
-    // Re-calibrate grade scales after training
-    println!("  Re-calibrating grade scales...");
+    // Re-calibrate after rotor updates
     let rgb_cal: Vec<_> = train.images_rgb.iter().take(1000)
         .map(|img| (img.clone(), 0u8)).collect();
     rgb_enc.calibrate_scales(&rgb_cal);
@@ -1735,8 +1786,13 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
         .map(|img| (img.clone(), 0u8)).collect();
     dirac_enc.calibrate_scales(&gray_cal);
 
-    // ── Encode all training images with TRAINED encoders ──
-    println!("\n--- Encoding {} training images (RGB+Dirac → 512D Cl(1,7)) ---", train_n);
+    // ══════════════════════════════════════════════════════════════════════
+    //  Encode all training images: RGB + Dirac + trainable channels
+    // ══════════════════════════════════════════════════════════════════════
+    let n_extra = trainable_channels.len() * CL8_DIM;
+    let full_dim = joint_dim + n_extra;
+    println!("\n--- Encoding {} training images (RGB+Dirac+Trainable → {}D) ---",
+        train_n, full_dim);
     let encode_start = Instant::now();
 
     let mut train_features: Vec<Vec<f32>> = Vec::with_capacity(train_n);
@@ -1747,9 +1803,13 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
         let rgb_mv = rgb_enc.encode(&train.images_rgb[i]);
         let dirac_mv = dirac_enc.encode(&train.images_gray[i]);
 
-        let mut joint = Vec::with_capacity(joint_dim);
+        let mut joint = Vec::with_capacity(full_dim);
         joint.extend_from_slice(&rgb_mv.components);
         joint.extend_from_slice(&dirac_mv.components);
+        for (_, _, ch) in &trainable_channels {
+            let ch_mv = ch.encode(&train.images_gray[i]);
+            joint.extend_from_slice(&ch_mv.components);
+        }
         train_features.push(joint);
         train_rgb_mvs.push(rgb_mv);
         train_dirac_mvs.push(dirac_mv);
@@ -1757,8 +1817,8 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
         if (i + 1) % 20000 == 0 { println!("    {}/{}", i + 1, train_n); }
     }
     let train_lbls = &train.labels[..train_n];
-    println!("  Encoded in {:.1}s ({}D joint features)\n",
-        encode_start.elapsed().as_secs_f64(), joint_dim);
+    println!("  Encoded in {:.1}s ({}D features)\n",
+        encode_start.elapsed().as_secs_f64(), full_dim);
 
     // ── Single-pass: solve 9-class on 512D joint features ──
     println!("--- Solving 9-class classifier (512D normal equations) ---");
@@ -1950,7 +2010,7 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
 
     let _solve_elapsed = total_start.elapsed();
 
-    // ── Encode validation + test with both encoders ──
+    // ── Encode validation + test with all encoders ──
     println!("\n--- Validation ---");
     let encode_joint = |rgb_imgs: &[Vec<f32>], gray_imgs: &[Vec<f32>]|
         -> (Vec<Vec<f32>>, Vec<Multivector>, Vec<Multivector>)
@@ -1961,9 +2021,13 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
         for i in 0..rgb_imgs.len() {
             let rgb_mv = rgb_enc.encode(&rgb_imgs[i]);
             let dirac_mv = dirac_enc.encode(&gray_imgs[i]);
-            let mut joint = Vec::with_capacity(joint_dim);
+            let mut joint = Vec::with_capacity(full_dim);
             joint.extend_from_slice(&rgb_mv.components);
             joint.extend_from_slice(&dirac_mv.components);
+            for (_, _, ch) in &trainable_channels {
+                let ch_mv = ch.encode(&gray_imgs[i]);
+                joint.extend_from_slice(&ch_mv.components);
+            }
             feats.push(joint);
             rgb_mvs.push(rgb_mv);
             dirac_mvs_out.push(dirac_mv);
@@ -2155,9 +2219,9 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
     println!("    Smooth muscle:        {:.1}%", per_class_correct[5] as f32 / per_class_total[5].max(1) as f32 * 100.0);
     println!();
     println!("  Architecture:");
-    println!("    Encoder:              Cl(1,7) RGB + Dirac (512D)");
+    println!("    Encoder:              Cl(1,7) RGB + Dirac + trainable ({}D)", full_dim);
     println!("    Classifier:           single-pass normal equations");
-    println!("    Training:             Clifford gradient descent (rotor)");
+    println!("    Training:             Clifford GD + trainable Dirac");
     println!("    Total time:           {:.0}s on CPU", total_elapsed.as_secs_f64());
     println!("    GPU required:         None");
     println!();
