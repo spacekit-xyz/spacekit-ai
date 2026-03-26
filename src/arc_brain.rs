@@ -427,6 +427,17 @@ pub fn benchmark(brain: &mut ArcBrain, tasks: &[ArcTask], lang_rt: Option<&Langu
     let mut router_correct = 0;
     let mut router_total = 0;
 
+    // Flow diagnostic accumulators
+    let mut flow_converging_solved = 0u32;
+    let mut flow_converging_total = 0u32;
+    let mut flow_diverging_solved = 0u32;
+    let mut flow_diverging_total = 0u32;
+    let mut flow_degenerate_count = 0u32;
+    let mut spatial_bias_sum_solved = 0.0f32;
+    let mut spatial_bias_sum_unsolved = 0.0f32;
+    let mut n_solved_flow = 0u32;
+    let mut n_unsolved_flow = 0u32;
+
     let same_dim_count = tasks.iter().filter(|t|
         t.train.iter().all(|ex|
             ex.input.height == ex.output.height && ex.input.width == ex.output.width
@@ -444,6 +455,24 @@ pub fn benchmark(brain: &mut ArcBrain, tasks: &[ArcTask], lang_rt: Option<&Langu
         let diag = solve_task(task);
         let hc_solved = diag.solved;
         if hc_solved { solved_handcoded += 1; }
+
+        if let Some(ref f) = diag.flow {
+            if f.converging {
+                flow_converging_total += 1;
+                if hc_solved { flow_converging_solved += 1; }
+            } else {
+                flow_diverging_total += 1;
+                if hc_solved { flow_diverging_solved += 1; }
+            }
+            if f.is_degenerate() { flow_degenerate_count += 1; }
+            if hc_solved {
+                spatial_bias_sum_solved += f.spatial_bias();
+                n_solved_flow += 1;
+            } else {
+                spatial_bias_sum_unsolved += f.spatial_bias();
+                n_unsolved_flow += 1;
+            }
+        }
 
         let (_cls, conf, predicted_strategy) = brain.route(task, lang_rt);
 
@@ -490,6 +519,24 @@ pub fn benchmark(brain: &mut ArcBrain, tasks: &[ArcTask], lang_rt: Option<&Langu
         solved_combined, total, solved_combined as f32 / total.max(1) as f32 * 100.0);
     println!("Strategy router:     {}/{} correct on solved tasks ({:.1}%)",
         router_correct, router_total, router_acc);
+
+    // Probability flow analysis
+    println!("\n--- Flow Diagnostic (Schrödinger continuity) ---");
+    println!("Converging flow:  {}/{} solved ({:.1}%)",
+        flow_converging_solved, flow_converging_total,
+        flow_converging_solved as f32 / flow_converging_total.max(1) as f32 * 100.0);
+    println!("Diverging flow:   {}/{} solved ({:.1}%)",
+        flow_diverging_solved, flow_diverging_total,
+        flow_diverging_solved as f32 / flow_diverging_total.max(1) as f32 * 100.0);
+    println!("Degenerate (|B|≈0): {}/{} tasks", flow_degenerate_count, total);
+    if n_solved_flow > 0 {
+        println!("Mean spatial bias (solved):   {:.3}",
+            spatial_bias_sum_solved / n_solved_flow as f32);
+    }
+    if n_unsolved_flow > 0 {
+        println!("Mean spatial bias (unsolved): {:.3}",
+            spatial_bias_sum_unsolved / n_unsolved_flow as f32);
+    }
 }
 
 // ─── CLI entry point ───────────────────────────────────────────────────────

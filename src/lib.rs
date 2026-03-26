@@ -53,6 +53,8 @@ pub mod pathmnist;
 pub mod arc_agi;
 #[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 pub mod arc_brain;
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+pub mod arc_dsl;
 pub mod neuron;
 pub mod systems;
 pub mod types;

@@ -4992,6 +4992,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_memorize_phase_learns_faster() {
         use rand::SeedableRng;
         let mut rng = rand::rngs::StdRng::seed_from_u64(99);

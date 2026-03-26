@@ -74,6 +74,7 @@ pub struct TaskDiagnostic {
     pub n_correct_cells: usize,
     pub n_total_cells: usize,
     pub strategy: &'static str,
+    pub flow: Option<FlowDiagnostic>,
 }
 
 // ─── JSON loading ──────────────────────────────────────────────────────────
@@ -192,7 +193,7 @@ fn decode_color(mv: &Multivector) -> u8 {
     best
 }
 
-fn cell_get(grid: &Grid, r: isize, c: isize) -> u8 {
+pub fn cell_get(grid: &Grid, r: isize, c: isize) -> u8 {
     if r >= 0 && r < grid.height as isize && c >= 0 && c < grid.width as isize {
         grid.cells[r as usize][c as usize]
     } else { 0 }
@@ -402,7 +403,7 @@ fn adj_edge_feature(in_a: u8, out_a: u8, in_b: u8, out_b: u8) -> Multivector {
     mv
 }
 
-fn task_color_palette(task: &ArcTask) -> Vec<u8> {
+pub fn task_color_palette(task: &ArcTask) -> Vec<u8> {
     let mut seen = [false; NUM_COLORS];
     for ex in &task.train {
         for row in &ex.input.cells {
@@ -1041,8 +1042,8 @@ impl GridObject {
         (r, c)
     }
     fn size(&self) -> usize { self.pixels.len() }
-    fn bbox_h(&self) -> usize { self.max_r - self.min_r + 1 }
-    fn bbox_w(&self) -> usize { self.max_c - self.min_c + 1 }
+    pub fn bbox_h(&self) -> usize { self.max_r - self.min_r + 1 }
+    pub fn bbox_w(&self) -> usize { self.max_c - self.min_c + 1 }
 }
 
 pub fn find_objects(grid: &Grid, background: u8) -> Vec<GridObject> {
@@ -1085,7 +1086,7 @@ pub fn find_objects(grid: &Grid, background: u8) -> Vec<GridObject> {
     objects
 }
 
-fn most_common_color(grid: &Grid) -> u8 {
+pub fn most_common_color(grid: &Grid) -> u8 {
     let mut counts = [0u32; NUM_COLORS];
     for row in &grid.cells {
         for &c in row { counts[c as usize] += 1; }
@@ -1394,7 +1395,7 @@ fn apply_l_diagonal(grid: &Grid) -> Option<Grid> {
 // input that match the output dimensions. If a consistent extraction rule
 // exists across training examples, apply it to the test input.
 
-fn extract_subgrid(grid: &Grid, r0: usize, c0: usize, h: usize, w: usize) -> Grid {
+pub fn extract_subgrid(grid: &Grid, r0: usize, c0: usize, h: usize, w: usize) -> Grid {
     let cells: Vec<Vec<u8>> = (0..h)
         .map(|r| (0..w).map(|c| grid.cells[r0 + r][c0 + c]).collect())
         .collect();
@@ -1493,7 +1494,7 @@ fn solve_subgrid_content_bbox(task: &ArcTask) -> Option<()> {
     Some(())
 }
 
-fn content_bbox(grid: &Grid, bg: u8) -> Option<(usize, usize, usize, usize)> {
+pub fn content_bbox(grid: &Grid, bg: u8) -> Option<(usize, usize, usize, usize)> {
     let mut min_r = grid.height;
     let mut max_r = 0usize;
     let mut min_c = grid.width;
@@ -1608,7 +1609,7 @@ fn solve_tiling(task: &ArcTask) -> Option<(usize, usize)> {
     tile_dims
 }
 
-fn tile_grid(grid: &Grid, tile_r: usize, tile_c: usize) -> Grid {
+pub fn tile_grid(grid: &Grid, tile_r: usize, tile_c: usize) -> Grid {
     let ih = grid.height;
     let iw = grid.width;
     let oh = ih * tile_r;
@@ -1740,7 +1741,7 @@ fn solve_downscale(task: &ArcTask) -> Option<(usize, usize, u8)> {
     None
 }
 
-fn downscale_grid(grid: &Grid, sr: usize, sc: usize, method: u8) -> Grid {
+pub fn downscale_grid(grid: &Grid, sr: usize, sc: usize, method: u8) -> Grid {
     let oh = grid.height / sr;
     let ow = grid.width / sc;
     let bg = most_common_color(grid);
@@ -1808,7 +1809,7 @@ fn solve_mirror_tile(task: &ArcTask) -> Option<u8> {
     None
 }
 
-fn apply_mirror_tile(grid: &Grid, mode: u8) -> Option<Grid> {
+pub fn apply_mirror_tile(grid: &Grid, mode: u8) -> Option<Grid> {
     let ih = grid.height;
     let iw = grid.width;
 
@@ -1913,7 +1914,7 @@ fn solve_scale(task: &ArcTask) -> Option<(usize, usize)> {
     if all_same { fixed_scale } else { Some((0, 0)) }
 }
 
-fn scale_grid(grid: &Grid, sr: usize, sc: usize) -> Grid {
+pub fn scale_grid(grid: &Grid, sr: usize, sc: usize) -> Grid {
     let oh = grid.height * sr;
     let ow = grid.width * sc;
     let cells: Vec<Vec<u8>> = (0..oh)
@@ -1957,7 +1958,7 @@ fn solve_fractal_tile(task: &ArcTask) -> bool {
     })
 }
 
-fn apply_fractal_tile(grid: &Grid) -> Grid {
+pub fn apply_fractal_tile(grid: &Grid) -> Grid {
     let ih = grid.height;
     let iw = grid.width;
     let oh = ih * ih;
@@ -2000,7 +2001,7 @@ fn solve_gravity(task: &ArcTask) -> Option<u8> {
     None
 }
 
-fn apply_gravity(grid: &Grid, dir: u8) -> Grid {
+pub fn apply_gravity(grid: &Grid, dir: u8) -> Grid {
     let h = grid.height;
     let w = grid.width;
     let bg = most_common_color(grid);
@@ -2079,7 +2080,7 @@ fn solve_symmetry(task: &ArcTask) -> Option<u8> {
     None
 }
 
-fn apply_symmetry(grid: &Grid, axis: u8) -> Grid {
+pub fn apply_symmetry(grid: &Grid, axis: u8) -> Grid {
     let h = grid.height;
     let w = grid.width;
     let bg = most_common_color(grid);
@@ -2234,7 +2235,7 @@ fn solve_connect_lines(task: &ArcTask) -> bool {
     })
 }
 
-fn apply_connect_lines(grid: &Grid) -> Grid {
+pub fn apply_connect_lines(grid: &Grid) -> Grid {
     let h = grid.height;
     let w = grid.width;
     let bg = most_common_color(grid);
@@ -2282,7 +2283,7 @@ fn apply_connect_lines(grid: &Grid) -> Grid {
 // Finds bg cells not reachable from grid edges (enclosed by non-bg cells).
 // Extracts the bounding box of enclosed interior as the output.
 
-fn find_enclosed_bbox(grid: &Grid, bg: u8) -> Option<(usize, usize, usize, usize)> {
+pub fn find_enclosed_bbox(grid: &Grid, bg: u8) -> Option<(usize, usize, usize, usize)> {
     let h = grid.height;
     let w = grid.width;
     let mut outside = vec![vec![false; w]; h];
@@ -2599,7 +2600,7 @@ fn solve_geometric(task: &ArcTask) -> Option<u8> {
     None
 }
 
-fn apply_geometric(grid: &Grid, tf: u8) -> Grid {
+pub fn apply_geometric(grid: &Grid, tf: u8) -> Grid {
     let h = grid.height;
     let w = grid.width;
     let (oh, ow) = match tf {
@@ -2996,6 +2997,99 @@ pub fn rotor_consistency(rules: &[Multivector]) -> (f32, Vec<f32>) {
     (mean, bv_norms)
 }
 
+// ─── Probability flow diagnostic (Schrödinger continuity in Cl(1,7)) ─────
+//
+// The grade-2 bivector of the rule R = O ⊗ I† is the generator of the
+// rotation from input to output embedding.  In the continuity equation
+// ∂ρ/∂t + ∇·j = 0, the bivector IS the probability current j — it encodes
+// where probability is flowing in strategy space.
+//
+// Boost bivectors (e_0∧e_i):   causal/color transformations
+// Rotation bivectors (e_i∧e_j): spatial/geometric transformations
+
+const BOOST_BV_IDX: [usize; 7] = [0, 1, 3, 6, 10, 15, 21];
+
+#[derive(Debug, Clone)]
+pub struct FlowDiagnostic {
+    pub boost_norm: f32,
+    pub rotation_norm: f32,
+    pub flow_magnitudes: Vec<f32>,
+    pub converging: bool,
+    pub mean_bv_direction: [f32; 28],
+}
+
+impl FlowDiagnostic {
+    /// Ratio in [-1, 1]: positive = rotation-dominated, negative = boost-dominated
+    pub fn spatial_bias(&self) -> f32 {
+        let total = self.boost_norm + self.rotation_norm;
+        if total < 1e-10 { return 0.0; }
+        (self.rotation_norm - self.boost_norm) / total
+    }
+
+    pub fn is_degenerate(&self) -> bool {
+        self.boost_norm + self.rotation_norm < 0.01
+    }
+}
+
+pub fn flow_diagnostic(task: &ArcTask) -> FlowDiagnostic {
+    let rules: Vec<Multivector> = task.train.iter()
+        .map(|ex| extract_rule(&encode_grid(&ex.input), &encode_grid(&ex.output)))
+        .collect();
+
+    // Mean rule — the "average transformation" across training examples
+    let n = rules.len() as f32;
+    let mut mean_rule = Multivector::zero();
+    for r in &rules { mean_rule = mean_rule.add(r); }
+    mean_rule = mean_rule.scale(1.0 / n);
+
+    // Extract grade-2 (bivector) of mean rule
+    let g2 = mean_rule.grade(2);
+    let mut bv_dir = [0.0f32; 28];
+    for i in 0..28 { bv_dir[i] = g2[i]; }
+
+    // Decompose into boost and rotation norms
+    let mut boost_sq = 0.0f32;
+    let mut rot_sq = 0.0f32;
+    let mut is_boost = [false; 28];
+    for &bi in &BOOST_BV_IDX { is_boost[bi] = true; }
+    for i in 0..28 {
+        if is_boost[i] { boost_sq += g2[i] * g2[i]; }
+        else { rot_sq += g2[i] * g2[i]; }
+    }
+
+    // Sequential convergence: track |j_k| as each example arrives
+    let mut flow_magnitudes = Vec::new();
+    if rules.len() >= 2 {
+        let mut cumul = rules[0].clone();
+        for k in 1..rules.len() {
+            let prev = cumul.clone();
+            cumul = cumul.scale(k as f32 / (k + 1) as f32)
+                .add(&rules[k].scale(1.0 / (k + 1) as f32));
+            let delta_g2_prev = prev.grade(2);
+            let delta_g2_curr = cumul.grade(2);
+            let j_mag: f32 = (0..28)
+                .map(|i| { let d = delta_g2_curr[i] - delta_g2_prev[i]; d * d })
+                .sum::<f32>()
+                .sqrt();
+            flow_magnitudes.push(j_mag);
+        }
+    }
+
+    let converging = if flow_magnitudes.len() >= 2 {
+        flow_magnitudes.windows(2).all(|w| w[1] <= w[0] * 1.2)
+    } else {
+        true
+    };
+
+    FlowDiagnostic {
+        boost_norm: boost_sq.sqrt(),
+        rotation_norm: rot_sq.sqrt(),
+        flow_magnitudes,
+        converging,
+        mean_bv_direction: bv_dir,
+    }
+}
+
 // ─── Evaluation ────────────────────────────────────────────────────────────
 
 pub fn grid_matches(predicted: &Grid, expected: &Grid) -> (usize, usize) {
@@ -3040,12 +3134,30 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
         .map(|(i, o)| extract_rule(i, o)).collect();
     let (mean_bv, _) = rotor_consistency(&rules);
 
+    // Probability flow diagnostic — decompose bivector into boost/rotation
+    // components and measure sequential convergence across training examples
+    let flow = flow_diagnostic(task);
+
     let mut total_correct = 0usize;
     let mut total_cells = 0usize;
     let mut all_exact = true;
     let best_strategy: &'static str;
 
-    if same_dims {
+    // Priority 0: DSL program search guided by probability current
+    if let Some((predictions, dsl_strategy)) = crate::arc_dsl::dsl_solve_with_flow(task, Some(&flow)) {
+        best_strategy = dsl_strategy;
+        for (i, test_ex) in task.test.iter().enumerate() {
+            if i < predictions.len() {
+                let (correct, total) = grid_matches(&predictions[i], &test_ex.output);
+                total_correct += correct;
+                total_cells += total;
+                if correct != total { all_exact = false; }
+            } else {
+                total_cells += test_ex.output.height * test_ex.output.width;
+                all_exact = false;
+            }
+        }
+    } else if same_dims {
         let (h, w) = task.train.first().map(|e| (e.input.height, e.input.width)).unwrap_or((0, 0));
 
         // Priority 1: Exact structural rules — each must achieve 100% on training.
@@ -3543,6 +3655,7 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
         n_correct_cells: total_correct,
         n_total_cells: total_cells,
         strategy: best_strategy,
+        flow: Some(flow),
     }
 }
 
@@ -3567,5 +3680,261 @@ pub fn print_grid(grid: &Grid, indent: &str) {
             print!("{} {} \x1b[0m", COLORS[c], cell);
         }
         println!();
+    }
+}
+
+// ─── Unit tests ───────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_grid(cells: Vec<Vec<u8>>) -> Grid {
+        let height = cells.len();
+        let width = if height > 0 { cells[0].len() } else { 0 };
+        Grid { cells, height, width }
+    }
+
+    fn make_task(train: Vec<(Vec<Vec<u8>>, Vec<Vec<u8>>)>, test_input: Vec<Vec<u8>>, test_output: Vec<Vec<u8>>) -> ArcTask {
+        let train = train.into_iter().map(|(inp, out)| ArcExample {
+            input: make_grid(inp),
+            output: make_grid(out),
+        }).collect();
+        ArcTask {
+            id: "test".to_string(),
+            train,
+            test: vec![ArcExample {
+                input: make_grid(test_input),
+                output: make_grid(test_output),
+            }],
+        }
+    }
+
+    // ── BOOST_BV_IDX correctness ──
+
+    #[test]
+    fn boost_indices_are_e0_wedge_ei() {
+        // In Cl(1,7), grade-2 blades sorted by bitmap: the ones containing
+        // bit 0 (timelike e_0) should map to our BOOST_BV_IDX positions.
+        let mut grade2_blades: Vec<u8> = (0u16..256)
+            .filter(|b| b.count_ones() == 2)
+            .map(|b| b as u8)
+            .collect();
+        grade2_blades.sort();
+
+        for (idx, &blade) in grade2_blades.iter().enumerate() {
+            let has_e0 = blade & 1 != 0;
+            if has_e0 {
+                assert!(BOOST_BV_IDX.contains(&idx),
+                    "blade 0b{:08b} at idx {} has e_0 but is not in BOOST_BV_IDX", blade, idx);
+            } else {
+                assert!(!BOOST_BV_IDX.contains(&idx),
+                    "blade 0b{:08b} at idx {} lacks e_0 but IS in BOOST_BV_IDX", blade, idx);
+            }
+        }
+        assert_eq!(BOOST_BV_IDX.len(), 7);
+    }
+
+    // ── FlowDiagnostic::spatial_bias ──
+
+    #[test]
+    fn spatial_bias_bounds() {
+        let f = FlowDiagnostic {
+            boost_norm: 0.0,
+            rotation_norm: 1.0,
+            flow_magnitudes: vec![],
+            converging: true,
+            mean_bv_direction: [0.0; 28],
+        };
+        assert_eq!(f.spatial_bias(), 1.0); // pure rotation → +1
+
+        let f2 = FlowDiagnostic {
+            boost_norm: 1.0,
+            rotation_norm: 0.0,
+            flow_magnitudes: vec![],
+            converging: true,
+            mean_bv_direction: [0.0; 28],
+        };
+        assert_eq!(f2.spatial_bias(), -1.0); // pure boost → -1
+
+        let f3 = FlowDiagnostic {
+            boost_norm: 0.5,
+            rotation_norm: 0.5,
+            flow_magnitudes: vec![],
+            converging: true,
+            mean_bv_direction: [0.0; 28],
+        };
+        assert_eq!(f3.spatial_bias(), 0.0); // balanced → 0
+    }
+
+    #[test]
+    fn spatial_bias_degenerate() {
+        let f = FlowDiagnostic {
+            boost_norm: 0.0,
+            rotation_norm: 0.0,
+            flow_magnitudes: vec![],
+            converging: true,
+            mean_bv_direction: [0.0; 28],
+        };
+        assert_eq!(f.spatial_bias(), 0.0); // zero/zero → 0, not NaN
+        assert!(f.is_degenerate());
+    }
+
+    // ── flow_diagnostic on synthetic tasks ──
+
+    #[test]
+    fn identity_task_has_low_flow() {
+        // Input == Output → rule should be ~identity → small bivector
+        let task = make_task(
+            vec![
+                (vec![vec![1, 2], vec![3, 4]], vec![vec![1, 2], vec![3, 4]]),
+                (vec![vec![5, 6], vec![7, 8]], vec![vec![5, 6], vec![7, 8]]),
+                (vec![vec![1, 3], vec![2, 4]], vec![vec![1, 3], vec![2, 4]]),
+            ],
+            vec![vec![1, 1], vec![1, 1]],
+            vec![vec![1, 1], vec![1, 1]],
+        );
+        let flow = flow_diagnostic(&task);
+        let total_bv = flow.boost_norm + flow.rotation_norm;
+        assert!(total_bv < 0.1,
+            "identity task should have near-zero bivector, got boost={:.4} rot={:.4}",
+            flow.boost_norm, flow.rotation_norm);
+        assert!(flow.converging);
+    }
+
+    #[test]
+    fn consistent_color_swap_converges() {
+        // All examples: swap color 1↔2.  Same rule every time → should converge.
+        let task = make_task(
+            vec![
+                (vec![vec![1, 1], vec![2, 2]], vec![vec![2, 2], vec![1, 1]]),
+                (vec![vec![1, 2], vec![1, 2]], vec![vec![2, 1], vec![2, 1]]),
+                (vec![vec![2, 1], vec![2, 1]], vec![vec![1, 2], vec![1, 2]]),
+            ],
+            vec![vec![1, 2], vec![2, 1]],
+            vec![vec![2, 1], vec![1, 2]],
+        );
+        let flow = flow_diagnostic(&task);
+        assert!(flow.converging,
+            "consistent color swap should converge, flow_mags={:?}", flow.flow_magnitudes);
+        assert!(flow.flow_magnitudes.len() == 2);
+    }
+
+    #[test]
+    fn flow_magnitude_decreases_for_consistent_rules() {
+        // 4 examples all doing the same geometric transform (HFlip).
+        // Each new example should reinforce → |j_k| should decrease.
+        let task = make_task(
+            vec![
+                (vec![vec![1, 2, 3]], vec![vec![3, 2, 1]]),
+                (vec![vec![4, 5, 6]], vec![vec![6, 5, 4]]),
+                (vec![vec![7, 8, 9]], vec![vec![9, 8, 7]]),
+                (vec![vec![1, 3, 5]], vec![vec![5, 3, 1]]),
+            ],
+            vec![vec![2, 4, 6]],
+            vec![vec![6, 4, 2]],
+        );
+        let flow = flow_diagnostic(&task);
+        assert_eq!(flow.flow_magnitudes.len(), 3);
+        assert!(flow.converging,
+            "consistent HFlip should converge, mags={:?}", flow.flow_magnitudes);
+    }
+
+    #[test]
+    fn single_train_example_is_trivially_converging() {
+        let task = make_task(
+            vec![(vec![vec![1, 2], vec![3, 4]], vec![vec![4, 3], vec![2, 1]])],
+            vec![vec![5, 6], vec![7, 8]],
+            vec![vec![8, 7], vec![6, 5]],
+        );
+        let flow = flow_diagnostic(&task);
+        assert!(flow.converging);
+        assert!(flow.flow_magnitudes.is_empty(),
+            "single example should have no flow magnitudes");
+    }
+
+    #[test]
+    fn geometric_transform_has_nonzero_bivector() {
+        // HFlip on larger grids with varied colors
+        let task = make_task(
+            vec![
+                (vec![vec![1, 2, 3, 4, 5]], vec![vec![5, 4, 3, 2, 1]]),
+                (vec![vec![6, 7, 8, 1, 2]], vec![vec![2, 1, 8, 7, 6]]),
+            ],
+            vec![vec![3, 4, 5, 6, 7]],
+            vec![vec![7, 6, 5, 4, 3]],
+        );
+        let flow = flow_diagnostic(&task);
+        let total_bv = flow.boost_norm + flow.rotation_norm;
+        assert!(total_bv > 1e-6,
+            "geometric transform should have nonzero bivector, got {:.6}", total_bv);
+    }
+
+    // ── extract_rule basic properties ──
+
+    #[test]
+    fn extract_rule_identity_has_scalar_dominant() {
+        // Larger grid with varied colors so encode_grid produces a rich multivector
+        let g = make_grid(vec![
+            vec![1, 2, 3, 4, 5],
+            vec![6, 7, 8, 1, 2],
+            vec![3, 4, 5, 6, 7],
+            vec![8, 1, 2, 3, 4],
+            vec![5, 6, 7, 8, 1],
+        ]);
+        let mv = encode_grid(&g);
+        let rule = extract_rule(&mv, &mv);
+        // R = O ⊗ I† for identical grids should have dominant scalar part
+        let s = rule.components[0].abs();
+        let total_norm: f32 = rule.components.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(s > 0.01,
+            "identity rule should have nonzero scalar: scalar={:.6}, total_norm={:.6}", s, total_norm);
+        let g2_norm: f32 = rule.grade(2).iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(s > g2_norm,
+            "identity rule should be scalar-dominated: scalar={:.4} bv_norm={:.4}", s, g2_norm);
+    }
+
+    #[test]
+    fn extract_rule_different_grids_has_bivector() {
+        let g1 = make_grid(vec![
+            vec![1, 2, 3, 4, 5],
+            vec![6, 7, 8, 1, 2],
+            vec![3, 4, 5, 6, 7],
+        ]);
+        let g2 = make_grid(vec![
+            vec![5, 4, 3, 2, 1],
+            vec![2, 1, 8, 7, 6],
+            vec![7, 6, 5, 4, 3],
+        ]);
+        let mv1 = encode_grid(&g1);
+        let mv2 = encode_grid(&g2);
+        let rule = extract_rule(&mv1, &mv2);
+        // Different grids → the rule should have nonzero higher-grade components
+        let total_sq: f32 = rule.components[1..].iter().map(|x| x * x).sum();
+        assert!(total_sq > 1e-8,
+            "different grids should produce nonzero non-scalar rule, got {:.8}", total_sq);
+    }
+
+    // ── rotor_consistency ──
+
+    #[test]
+    fn identical_rules_have_zero_bv_consistency() {
+        let g1 = make_grid(vec![vec![1, 2], vec![3, 4]]);
+        let g2 = make_grid(vec![vec![2, 1], vec![4, 3]]);
+        let mv1 = encode_grid(&g1);
+        let mv2 = encode_grid(&g2);
+        let rule = extract_rule(&mv1, &mv2);
+        let (mean_bv, norms) = rotor_consistency(&[rule.clone(), rule.clone()]);
+        assert!(mean_bv < 1e-4,
+            "identical rules should have near-zero rotor consistency, got {:.4}", mean_bv);
+        assert_eq!(norms.len(), 1);
+    }
+
+    #[test]
+    fn rotor_consistency_single_rule_returns_zero() {
+        let rule = Multivector::scalar(1.0);
+        let (mean, norms) = rotor_consistency(&[rule]);
+        assert_eq!(mean, 0.0);
+        assert!(norms.is_empty());
     }
 }
