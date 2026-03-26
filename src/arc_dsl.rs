@@ -1,3 +1,5 @@
+#![allow(warnings)]
+#![allow(unused_imports)]
 //! ARC-AGI Domain-Specific Language — composable grid primitives with bounded search.
 //!
 //! Defines ~30 grid transformation primitives and searches for programs (depth 1–3)
@@ -11,6 +13,9 @@
 
 use std::collections::VecDeque;
 
+use rand::Rng;
+use rand::seq::SliceRandom;
+
 use crate::arc_agi::{
     encode_grid, extract_rule, multivector_cosine_similarity,
     Grid, ArcTask, NUM_COLORS,
@@ -18,7 +23,7 @@ use crate::arc_agi::{
     most_common_color, content_bbox, find_enclosed_bbox, extract_subgrid,
     apply_gravity, apply_symmetry, apply_connect_lines, apply_geometric,
     scale_grid, tile_grid, downscale_grid, apply_mirror_tile, apply_fractal_tile,
-    FlowDiagnostic,
+    FlowDiagnostic, flow_diagnostic,
 };
 use crate::clifford::Multivector;
 
@@ -614,18 +619,22 @@ pub fn train_rule_consensus_mv(task: &ArcTask) -> Multivector {
     acc.scale(1.0 / n as f32)
 }
 
+fn clifford_op_hint_score_with_consensus(consensus: &Multivector, op: &Op) -> f32 {
+    let sig = match dsl_op_signature(op) {
+        Some(s) => s,
+        None => return 0.0,
+    };
+    let c = multivector_cosine_similarity(consensus, &sig);
+    if c.is_finite() { c } else { 0.0 }
+}
+
 /// Cosine similarity between training rule consensus and the op’s reference signature.
 pub fn clifford_op_hint_score(task: &ArcTask, op: &Op) -> f32 {
     if task.train.is_empty() {
         return 0.0;
     }
     let consensus = train_rule_consensus_mv(task);
-    let sig = match dsl_op_signature(op) {
-        Some(s) => s,
-        None => return 0.0,
-    };
-    let c = multivector_cosine_similarity(&consensus, &sig);
-    if c.is_finite() { c } else { 0.0 }
+    clifford_op_hint_score_with_consensus(&consensus, op)
 }
 
 // ─── Search engine ─────────────────────────────────────────────────────────
@@ -972,6 +981,354 @@ fn reorder_by_flow(candidates: &mut Vec<Op>, flow: &FlowDiagnostic) {
         let sb = op_spatial_affinity(b) * bias;
         sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
     });
+}
+
+// ─── MCTS program search (flow + Clifford hints, stochastic rollouts) ────────
+//
+// Explores the same DSL as A* but uses UCB1 + random rollouts instead of a
+// single best-first heuristic — better when Clifford distance is deceptive.
+
+struct MctsNode {
+    program: Vec<usize>,
+    grids: Vec<Grid>,
+    visits: u32,
+    sum_reward: f32,
+    children: Vec<usize>,
+    expanded: bool,
+}
+
+fn train_grids_all_match(grids: &[Grid], task: &ArcTask) -> bool {
+    if grids.len() != task.train.len() {
+        return false;
+    }
+    grids.iter().zip(task.train.iter()).all(|(g, ex)| grid_exact_match(g, &ex.output))
+}
+
+fn mcts_label(depth: usize) -> &'static str {
+    match depth {
+        1 => "mcts_d1",
+        2 => "mcts_d2",
+        _ => "mcts_d3",
+    }
+}
+
+fn mcts_ucb_value(node: &MctsNode, parent_visits: u32, exploration: f32) -> f32 {
+    if node.visits == 0 {
+        return f32::INFINITY;
+    }
+    let mean = node.sum_reward / node.visits as f32;
+    let ln_n = (parent_visits.max(1) as f32).ln();
+    let bonus = exploration * (ln_n / node.visits as f32).sqrt();
+    mean + bonus
+}
+
+fn mcts_pick_child(arena: &[MctsNode], parent_idx: usize, exploration: f32, rng: &mut impl Rng) -> usize {
+    let children = &arena[parent_idx].children;
+    let pv = arena[parent_idx].visits.max(1);
+    let mut best = children[0];
+    let mut best_u = mcts_ucb_value(&arena[best], pv, exploration);
+    let mut ties = vec![best];
+    for &ci in &children[1..] {
+        let u = mcts_ucb_value(&arena[ci], pv, exploration);
+        if u > best_u + 1e-6 {
+            best_u = u;
+            best = ci;
+            ties.clear();
+            ties.push(ci);
+        } else if (u - best_u).abs() <= 1e-6 {
+            ties.push(ci);
+        }
+    }
+    *ties.choose(rng).unwrap_or(&best)
+}
+
+fn mcts_candidate_order(task: &ArcTask, candidates: &[Op], flow: &FlowDiagnostic) -> Vec<usize> {
+    if candidates.is_empty() {
+        return vec![];
+    }
+    // One `train_rule_consensus_mv` + one signature score per op; sorting only compares floats
+    // (sorting by `clifford_op_hint_score` in the comparator was O(n log n) full encodes per expand).
+    let consensus = if task.train.is_empty() {
+        Multivector::zero()
+    } else {
+        train_rule_consensus_mv(task)
+    };
+    let bias = flow.spatial_bias();
+    let mut scored: Vec<(f32, usize)> = (0..candidates.len())
+        .map(|i| {
+            let hint = if task.train.is_empty() {
+                0.0
+            } else {
+                clifford_op_hint_score_with_consensus(&consensus, &candidates[i])
+            };
+            let s = hint + 0.12 * op_spatial_affinity(&candidates[i]) * bias;
+            (s, i)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let k = if flow.is_degenerate() {
+        scored.len().min(40)
+    } else if flow.converging {
+        scored.len().min(14)
+    } else {
+        scored.len().min(22)
+    };
+    scored.truncate(k);
+    scored.into_iter().map(|(_, i)| i).collect()
+}
+
+fn mcts_expand(
+    arena: &mut Vec<MctsNode>,
+    leaf: usize,
+    task: &ArcTask,
+    candidates: &[Op],
+    flow: &FlowDiagnostic,
+) {
+    let order = mcts_candidate_order(task, candidates, flow);
+    let prog_base = arena[leaf].program.clone();
+    let grids_base = arena[leaf].grids.clone();
+    let mut new_nodes = Vec::new();
+    for &op_i in &order {
+        if let Some(&last) = prog_base.last() {
+            if last == op_i && is_self_inverse(&candidates[last]) {
+                continue;
+            }
+        }
+        let op = &candidates[op_i];
+        let mut next_grids = Vec::with_capacity(grids_base.len());
+        let mut ok = true;
+        for g in &grids_base {
+            match apply_op(g, op) {
+                Some(ng) => next_grids.push(ng),
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        let mut prog = prog_base.clone();
+        prog.push(op_i);
+        new_nodes.push(MctsNode {
+            program: prog,
+            grids: next_grids,
+            visits: 0,
+            sum_reward: 0.0,
+            children: vec![],
+            expanded: false,
+        });
+    }
+    let start = arena.len();
+    arena.extend(new_nodes);
+    let end = arena.len();
+    arena[leaf].children.extend(start..end);
+    arena[leaf].expanded = true;
+}
+
+fn mcts_evaluate_state(grids: &[Grid], targets: &[Grid]) -> f32 {
+    let dist = clifford_distance_to_targets(grids, targets);
+    let cliff = 1.0 / (1.0 + 4.0 * dist);
+    let mut cell_acc = 0.0f32;
+    let mut n = 0u32;
+    for (g, t) in grids.iter().zip(targets.iter()) {
+        if g.height == t.height && g.width == t.width {
+            let tot = (g.height * g.width) as f32;
+            let mut c = 0u32;
+            for r in 0..g.height {
+                for col in 0..g.width {
+                    if g.cells[r][col] == t.cells[r][col] {
+                        c += 1;
+                    }
+                }
+            }
+            cell_acc += c as f32 / tot;
+            n += 1;
+        }
+    }
+    let cell_term = if n > 0 { cell_acc / n as f32 } else { 0.0 };
+    0.6 * cell_term + 0.4 * cliff
+}
+
+fn mcts_rollout(
+    start_grids: &[Grid],
+    task: &ArcTask,
+    candidates: &[Op],
+    targets: &[Grid],
+    max_extra_steps: usize,
+    rng: &mut impl Rng,
+) -> f32 {
+    let mut g = start_grids.to_vec();
+    let steps = max_extra_steps.saturating_add(2).min(6);
+    for _ in 0..steps {
+        if train_grids_all_match(&g, task) {
+            return 1.0;
+        }
+        if candidates.is_empty() {
+            break;
+        }
+        let op_i = rng.gen_range(0..candidates.len());
+        let op = &candidates[op_i];
+        let mut next = Vec::new();
+        let mut ok = true;
+        for grid in &g {
+            match apply_op(grid, op) {
+                Some(ng) => next.push(ng),
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            break;
+        }
+        g = next;
+    }
+    if train_grids_all_match(&g, task) {
+        return 1.0;
+    }
+    mcts_evaluate_state(&g, targets)
+}
+
+fn mcts_try_extract(
+    task: &ArcTask,
+    node: &MctsNode,
+    candidates: &[Op],
+) -> Option<(Vec<Grid>, &'static str)> {
+    if !train_grids_all_match(&node.grids, task) || node.program.is_empty() {
+        return None;
+    }
+    let prog: Vec<&Op> = node.program.iter().map(|&i| &candidates[i]).collect();
+    if !validate_program_on_training(task, &prog) {
+        return None;
+    }
+    let preds = predict_test(task, &prog)?;
+    Some((preds, mcts_label(prog.len())))
+}
+
+fn mcts_select_path(
+    arena: &[MctsNode],
+    max_depth: usize,
+    exploration: f32,
+    rng: &mut impl Rng,
+) -> Vec<usize> {
+    let mut path = vec![0usize];
+    loop {
+        let cur = *path.last().unwrap();
+        let depth = arena[cur].program.len();
+        if depth >= max_depth {
+            break;
+        }
+        if !arena[cur].expanded {
+            break;
+        }
+        if arena[cur].children.is_empty() {
+            break;
+        }
+        let nxt = mcts_pick_child(arena, cur, exploration, rng);
+        path.push(nxt);
+    }
+    path
+}
+
+/// Monte Carlo Tree Search over the same DSL as [`astar_dsl_solve`].
+///
+/// - **Selection:** UCB1 on child mean rollout reward.
+/// - **Expansion:** top-k ops ranked by [`clifford_op_hint_score`] plus a small
+///   flow (`spatial_bias`) prior; k adapts to converging / diverging / degenerate flow.
+/// - **Rollout:** random operator steps on all train grids, then
+///   [`mcts_evaluate_state`] (cell accuracy + Clifford distance) if not solved.
+/// - **Success:** all training grids match targets → [`predict_test`].
+///
+/// Returns `None` if budget expires without a valid program.
+pub fn mcts_dsl_solve(
+    task: &ArcTask,
+    max_depth: usize,
+    simulations: usize,
+    exploration: f32,
+    budget_ms: u64,
+) -> Option<(Vec<Grid>, &'static str)> {
+    if task.train.is_empty() || task.test.is_empty() || max_depth == 0 {
+        return None;
+    }
+
+    let candidates = generate_candidates(task);
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let flow = flow_diagnostic(task);
+    let target_grids: Vec<Grid> = task.train.iter().map(|ex| ex.output.clone()).collect();
+    let init_grids: Vec<Grid> = task.train.iter().map(|ex| ex.input.clone()).collect();
+
+    let mut arena = vec![MctsNode {
+        program: vec![],
+        grids: init_grids,
+        visits: 0,
+        sum_reward: 0.0,
+        children: vec![],
+        expanded: false,
+    }];
+
+    let mut rng = rand::thread_rng();
+    let start = std::time::Instant::now();
+    let budget = std::time::Duration::from_millis(budget_ms);
+
+    for _ in 0..simulations {
+        if start.elapsed() > budget {
+            break;
+        }
+
+        let path = mcts_select_path(&arena, max_depth, exploration, &mut rng);
+        let leaf = *path.last().unwrap();
+
+        if arena[leaf].program.len() < max_depth && !arena[leaf].expanded {
+            mcts_expand(&mut arena, leaf, task, &candidates, &flow);
+        }
+
+        let sim_node = if !arena[leaf].children.is_empty() {
+            *arena[leaf].children.choose(&mut rng).unwrap_or(&leaf)
+        } else {
+            leaf
+        };
+
+        if let Some(win) = mcts_try_extract(task, &arena[sim_node], &candidates) {
+            return Some(win);
+        }
+
+        let reward = if train_grids_all_match(&arena[sim_node].grids, task) {
+            1.0
+        } else {
+            let extra = max_depth.saturating_sub(arena[sim_node].program.len());
+            mcts_rollout(
+                &arena[sim_node].grids,
+                task,
+                &candidates,
+                &target_grids,
+                extra,
+                &mut rng,
+            )
+        };
+
+        let mut bp = path.clone();
+        if sim_node != leaf {
+            bp.push(sim_node);
+        }
+        for &idx in &bp {
+            arena[idx].visits = arena[idx].visits.saturating_add(1);
+            arena[idx].sum_reward += reward;
+        }
+    }
+
+    for node in &arena {
+        if let Some(win) = mcts_try_extract(task, node, &candidates) {
+            return Some(win);
+        }
+    }
+
+    None
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────
@@ -1377,5 +1734,22 @@ mod tests {
             c1,
             c2
         );
+    }
+
+    #[test]
+    fn mcts_finds_depth1_hflip() {
+        // Train [1,2,3]→[3,2,1]: HFlip. Inferred MapColors swaps 1↔3 but is identity on
+        // colors 4,5,6, so on test [4,5,6] it leaves the grid fixed while HFlip → [6,5,4].
+        let task = make_task(
+            vec![(vec![vec![1, 2, 3]], vec![vec![3, 2, 1]])],
+            vec![vec![4, 5, 6]],
+            vec![vec![6, 5, 4]],
+        );
+        // Few sims + tiny wall budget: ordering surfaces HFlip on first expand before budget bites.
+        let r = mcts_dsl_solve(&task, 3, 5, 1.4, 5);
+        assert!(r.is_some(), "MCTS should find HFlip for 1×3 row reversal");
+        let (preds, label) = r.unwrap();
+        assert_eq!(label, "mcts_d1");
+        assert_eq!(preds[0].cells, task.test[0].output.cells);
     }
 }

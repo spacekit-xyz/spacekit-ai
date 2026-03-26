@@ -6,12 +6,15 @@
 //!   cargo run --release --bin growformer-arc-agi-2x2
 //!   cargo run --release --bin growformer-arc-agi-2x2 -- --all
 //!   cargo run --release --bin growformer-arc-agi-2x2 -- --count 50
+//!   cargo run --release --bin growformer-arc-agi-2x2 -- --3x3
+//!   cargo run --release --bin growformer-arc-agi-2x2 -- --3x3 --count 30
 //!   cargo run --release --bin growformer-arc-agi-2x2 -- --train-router [save.bin]
 //!   cargo run --release --bin growformer-arc-agi-2x2 -- --router arc-router.bin
 //!   cargo run --release --bin growformer-arc-agi-2x2 -- --lang-brain path/to/brain.bin
 //!
-//! Default task set: 17 training tasks that touch a 2×2 grid. `--train-router`
-//! fits the router on the **same** subset you benchmark (memorization-style);
+//! Default task set: training tasks that touch a **2×2** grid (small curated slice).
+//! Pass **`--3x3`** to benchmark tasks that touch a **3×3** grid instead.
+//! `--train-router` fits the router on the **same** subset you benchmark (memorization-style);
 //! use `--all` for the full training corpus (slow: labels run every solver per task).
 
 use growformer::arc_agi::{
@@ -30,6 +33,16 @@ fn touches_2x2(task: &ArcTask) -> bool {
     }) || task.test.iter().any(|ex| {
         (ex.input.height == 2 && ex.input.width == 2)
             || (ex.output.height == 2 && ex.output.width == 2)
+    })
+}
+
+fn touches_3x3(task: &ArcTask) -> bool {
+    task.train.iter().any(|ex| {
+        (ex.input.height == 3 && ex.input.width == 3)
+            || (ex.output.height == 3 && ex.output.width == 3)
+    }) || task.test.iter().any(|ex| {
+        (ex.input.height == 3 && ex.input.width == 3)
+            || (ex.output.height == 3 && ex.output.width == 3)
     })
 }
 
@@ -89,6 +102,7 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse::<usize>().ok());
     let run_all = args.iter().any(|a| a == "--all");
+    let subset_3x3 = args.iter().any(|a| a == "--3x3");
 
     let lang_brain_path = arg_value(&args, "--lang-brain").unwrap_or_else(|| "brain.bin".into());
 
@@ -107,14 +121,30 @@ fn main() {
     let subset: Vec<ArcTask> = if run_all {
         all_tasks
     } else if let Some(n) = count_flag {
-        all_tasks.into_iter().take(n).collect()
+        if subset_3x3 {
+            all_tasks.into_iter().filter(|t| touches_3x3(t)).take(n).collect()
+        } else {
+            all_tasks.into_iter().take(n).collect()
+        }
+    } else if subset_3x3 {
+        all_tasks.into_iter().filter(|t| touches_3x3(t)).collect()
     } else {
         all_tasks.into_iter().filter(|t| touches_2x2(t)).collect()
     };
 
-    let label = if run_all { "all".into() }
-        else if count_flag.is_some() { format!("first {}", subset.len()) }
-        else { "2×2 subset".into() };
+    let label = if run_all {
+        "all".into()
+    } else if count_flag.is_some() {
+        if subset_3x3 {
+            format!("first {} (3×3-touching)", subset.len())
+        } else {
+            format!("first {}", subset.len())
+        }
+    } else if subset_3x3 {
+        "3×3 subset".into()
+    } else {
+        "2×2 subset".into()
+    };
 
     if train_router {
         eprintln!("Training ArcBrain on {} tasks (learned solver labels; lang: {})…",
