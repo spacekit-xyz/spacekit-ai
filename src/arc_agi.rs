@@ -1795,7 +1795,7 @@ fn downscale_grid(grid: &Grid, sr: usize, sc: usize, method: u8) -> Grid {
 fn solve_mirror_tile(task: &ArcTask) -> Option<u8> {
     if task.train.is_empty() { return None; }
 
-    for mode in 0u8..3 {
+    for mode in 0u8..4 {
         let all_ok = task.train.iter().all(|ex| {
             let pred = apply_mirror_tile(&ex.input, mode);
             match pred {
@@ -1845,6 +1845,28 @@ fn apply_mirror_tile(grid: &Grid, mode: u8) -> Option<Grid> {
             }).collect();
             Some(Grid { cells, height: oh, width: iw })
         }
+        3 => {
+            // Rot90 quadrant: TL=inp, TR=rot90_cw, BL=rot90_ccw, BR=rot180
+            if ih != iw { return None; }
+            let n = ih;
+            let oh = n * 2;
+            let ow = n * 2;
+            let cells: Vec<Vec<u8>> = (0..oh).map(|r| {
+                (0..ow).map(|c| {
+                    let qr = r / n;
+                    let qc = c / n;
+                    let lr = r % n;
+                    let lc = c % n;
+                    match (qr, qc) {
+                        (0, 0) => grid.cells[lr][lc],
+                        (0, 1) => grid.cells[n - 1 - lc][lr],   // rot90_cw
+                        (1, 0) => grid.cells[lc][n - 1 - lr],   // rot90_ccw
+                        _      => grid.cells[n - 1 - lr][n - 1 - lc], // rot180
+                    }
+                }).collect()
+            }).collect();
+            Some(Grid { cells, height: oh, width: ow })
+        }
         _ => None,
     }
 }
@@ -1854,10 +1876,15 @@ fn apply_mirror_tile(grid: &Grid, mode: u8) -> Option<Grid> {
 // Each input cell becomes a factor_r × factor_c block of the same color.
 // Tiling repeats the whole grid; scaling magnifies each cell.
 
+/// Detects pixel scaling: each input cell becomes an sr×sc block.
+/// Scale factor can vary per example (derived from output/input ratio).
+/// Returns true if all training examples are valid pixel-scale transforms.
+/// Also returns whether the factor is fixed (same across examples) for apply logic.
 fn solve_scale(task: &ArcTask) -> Option<(usize, usize)> {
     if task.train.is_empty() { return None; }
 
-    let mut scale: Option<(usize, usize)> = None;
+    let mut fixed_scale: Option<(usize, usize)> = None;
+    let mut all_same = true;
 
     for ex in &task.train {
         let ih = ex.input.height;
@@ -1875,13 +1902,15 @@ fn solve_scale(task: &ArcTask) -> Option<(usize, usize)> {
         let pred = scale_grid(&ex.input, sr, sc);
         if !grid_exact_match(&pred, &ex.output) { return None; }
 
-        match scale {
-            None => scale = Some((sr, sc)),
-            Some((pr, pc)) if pr != sr || pc != sc => return None,
+        match fixed_scale {
+            None => fixed_scale = Some((sr, sc)),
+            Some((pr, pc)) if pr != sr || pc != sc => all_same = false,
             _ => {}
         }
     }
-    scale
+
+    // Return (0, 0) as sentinel for "variable scale — derive from output dims"
+    if all_same { fixed_scale } else { Some((0, 0)) }
 }
 
 fn scale_grid(grid: &Grid, sr: usize, sc: usize) -> Grid {
@@ -1890,6 +1919,62 @@ fn scale_grid(grid: &Grid, sr: usize, sc: usize) -> Grid {
     let cells: Vec<Vec<u8>> = (0..oh)
         .map(|r| (0..ow).map(|c| grid.cells[r / sr][c / sc]).collect())
         .collect();
+    Grid { cells, height: oh, width: ow }
+}
+
+// ─── Strategy Q2: Fractal tile (self-referencing) ───────────────────────────
+//
+// The input is used as both content and mask: for each cell (r,c),
+// if input[r][c] != bg, place a copy of input at tile position (r,c);
+// otherwise fill that tile with bg. Requires oh = ih*ih, ow = iw*iw.
+
+fn solve_fractal_tile(task: &ArcTask) -> bool {
+    if task.train.is_empty() { return false; }
+    task.train.iter().all(|ex| {
+        let ih = ex.input.height;
+        let iw = ex.input.width;
+        let oh = ex.output.height;
+        let ow = ex.output.width;
+        if oh != ih * ih || ow != iw * iw { return false; }
+        let bg = 0u8;
+        for tr in 0..ih {
+            for tc in 0..iw {
+                for r in 0..ih {
+                    for c in 0..iw {
+                        let expected = if ex.input.cells[tr][tc] != bg {
+                            ex.input.cells[r][c]
+                        } else {
+                            bg
+                        };
+                        if ex.output.cells[tr * ih + r][tc * iw + c] != expected {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    })
+}
+
+fn apply_fractal_tile(grid: &Grid) -> Grid {
+    let ih = grid.height;
+    let iw = grid.width;
+    let oh = ih * ih;
+    let ow = iw * iw;
+    let bg = 0u8;
+    let mut cells = vec![vec![bg; ow]; oh];
+    for tr in 0..ih {
+        for tc in 0..iw {
+            if grid.cells[tr][tc] != bg {
+                for r in 0..ih {
+                    for c in 0..iw {
+                        cells[tr * ih + r][tc * iw + c] = grid.cells[r][c];
+                    }
+                }
+            }
+        }
+    }
     Grid { cells, height: oh, width: ow }
 }
 
@@ -2050,6 +2135,495 @@ fn apply_symmetry(grid: &Grid, axis: u8) -> Grid {
     Grid { cells, height: h, width: w }
 }
 
+// ─── Strategy W: 3×3 neighborhood lookup table ─────────────────────────────
+//
+// For each cell, extract the 3×3 neighborhood (9 values, bg-padded at edges).
+// Build a lookup table mapping each observed neighborhood → output color.
+// If consistent across all training examples AND all test neighborhoods are
+// covered, apply the table to produce predictions. Zero parameters learned —
+// the table IS the rule.
+
+fn solve_nbr_lookup(task: &ArcTask) -> Option<std::collections::HashMap<[u8; 9], u8>> {
+    if task.train.is_empty() { return None; }
+    if !task.train.iter().all(|ex|
+        ex.input.height == ex.output.height && ex.input.width == ex.output.width) {
+        return None;
+    }
+
+    let bg = most_common_color(&task.train[0].input);
+    let mut lut: std::collections::HashMap<[u8; 9], u8> = std::collections::HashMap::new();
+
+    for ex in &task.train {
+        let h = ex.input.height;
+        let w = ex.input.width;
+        for r in 0..h {
+            for c in 0..w {
+                let nbr = nbr_key(&ex.input, r, c, bg);
+                let out_color = ex.output.cells[r][c];
+                match lut.get(&nbr) {
+                    Some(&existing) if existing != out_color => return None,
+                    _ => { lut.insert(nbr, out_color); }
+                }
+            }
+        }
+    }
+
+    // Verify all test neighborhoods are covered
+    for test_ex in &task.test {
+        let h = test_ex.input.height;
+        let w = test_ex.input.width;
+        for r in 0..h {
+            for c in 0..w {
+                let nbr = nbr_key(&test_ex.input, r, c, bg);
+                if !lut.contains_key(&nbr) { return None; }
+            }
+        }
+    }
+
+    Some(lut)
+}
+
+fn nbr_key(grid: &Grid, r: usize, c: usize, pad: u8) -> [u8; 9] {
+    let h = grid.height as isize;
+    let w = grid.width as isize;
+    let mut key = [pad; 9];
+    let mut i = 0;
+    for dr in -1i32..=1 {
+        for dc in -1i32..=1 {
+            let nr = r as isize + dr as isize;
+            let nc = c as isize + dc as isize;
+            if nr >= 0 && nr < h && nc >= 0 && nc < w {
+                key[i] = grid.cells[nr as usize][nc as usize];
+            }
+            i += 1;
+        }
+    }
+    key
+}
+
+fn apply_nbr_lookup(grid: &Grid, lut: &std::collections::HashMap<[u8; 9], u8>) -> Grid {
+    let bg = most_common_color(grid);
+    let h = grid.height;
+    let w = grid.width;
+    let mut cells = grid.cells.clone();
+    for r in 0..h {
+        for c in 0..w {
+            let nbr = nbr_key(grid, r, c, bg);
+            if let Some(&color) = lut.get(&nbr) {
+                cells[r][c] = color;
+            }
+        }
+    }
+    Grid { cells, height: h, width: w }
+}
+
+// ─── Strategy O: Connect lines ─────────────────────────────────────────────
+//
+// Fill bg cells between same-colored cells in the same row or column.
+// Only connects the nearest pair; stops at different-colored obstacles.
+
+fn solve_connect_lines(task: &ArcTask) -> bool {
+    if task.train.is_empty() { return false; }
+    if !task.train.iter().all(|ex|
+        ex.input.height == ex.output.height && ex.input.width == ex.output.width) {
+        return false;
+    }
+    task.train.iter().all(|ex| {
+        let pred = apply_connect_lines(&ex.input);
+        grid_exact_match(&pred, &ex.output)
+    })
+}
+
+fn apply_connect_lines(grid: &Grid) -> Grid {
+    let h = grid.height;
+    let w = grid.width;
+    let bg = most_common_color(grid);
+    let mut cells = grid.cells.clone();
+
+    // Horizontal connections
+    for r in 0..h {
+        let mut c = 0;
+        while c < w {
+            if grid.cells[r][c] == bg { c += 1; continue; }
+            let color = grid.cells[r][c];
+            let mut c2 = c + 1;
+            while c2 < w && grid.cells[r][c2] == bg { c2 += 1; }
+            if c2 < w && grid.cells[r][c2] == color {
+                for fill_c in (c + 1)..c2 {
+                    if cells[r][fill_c] == bg { cells[r][fill_c] = color; }
+                }
+            }
+            c = c2;
+        }
+    }
+
+    // Vertical connections
+    for c in 0..w {
+        let mut r = 0;
+        while r < h {
+            if grid.cells[r][c] == bg { r += 1; continue; }
+            let color = grid.cells[r][c];
+            let mut r2 = r + 1;
+            while r2 < h && grid.cells[r2][c] == bg { r2 += 1; }
+            if r2 < h && grid.cells[r2][c] == color {
+                for fill_r in (r + 1)..r2 {
+                    if cells[fill_r][c] == bg { cells[fill_r][c] = color; }
+                }
+            }
+            r = r2;
+        }
+    }
+
+    Grid { cells, height: h, width: w }
+}
+
+// ─── Strategy P2: Enclosed region extraction ────────────────────────────────
+//
+// Finds bg cells not reachable from grid edges (enclosed by non-bg cells).
+// Extracts the bounding box of enclosed interior as the output.
+
+fn find_enclosed_bbox(grid: &Grid, bg: u8) -> Option<(usize, usize, usize, usize)> {
+    let h = grid.height;
+    let w = grid.width;
+    let mut outside = vec![vec![false; w]; h];
+    let mut queue = std::collections::VecDeque::new();
+
+    // Seed BFS from all edge cells that are bg
+    for r in 0..h {
+        for c in 0..w {
+            if (r == 0 || r == h - 1 || c == 0 || c == w - 1) && grid.cells[r][c] == bg {
+                if !outside[r][c] {
+                    outside[r][c] = true;
+                    queue.push_back((r, c));
+                }
+            }
+        }
+    }
+    while let Some((r, c)) = queue.pop_front() {
+        for (dr, dc) in [(-1i32, 0), (1, 0), (0, -1), (0, 1)] {
+            let nr = r as i32 + dr;
+            let nc = c as i32 + dc;
+            if nr >= 0 && nr < h as i32 && nc >= 0 && nc < w as i32 {
+                let (nr, nc) = (nr as usize, nc as usize);
+                if !outside[nr][nc] && grid.cells[nr][nc] == bg {
+                    outside[nr][nc] = true;
+                    queue.push_back((nr, nc));
+                }
+            }
+        }
+    }
+
+    // Find bbox of enclosed bg cells (not outside, not on border path)
+    let mut min_r = h;
+    let mut max_r = 0;
+    let mut min_c = w;
+    let mut max_c = 0;
+    for r in 0..h {
+        for c in 0..w {
+            if grid.cells[r][c] == bg && !outside[r][c] {
+                min_r = min_r.min(r);
+                max_r = max_r.max(r);
+                min_c = min_c.min(c);
+                max_c = max_c.max(c);
+            }
+        }
+    }
+    if min_r > max_r { return None; }
+    Some((min_r, min_c, max_r - min_r + 1, max_c - min_c + 1))
+}
+
+fn solve_enclosed_region(task: &ArcTask) -> bool {
+    if task.train.is_empty() { return false; }
+    // Output must be smaller than input (extraction)
+    if task.train.iter().all(|ex|
+        ex.input.height == ex.output.height && ex.input.width == ex.output.width) {
+        return false;
+    }
+
+    task.train.iter().all(|ex| {
+        let bg = most_common_color(&ex.input);
+        if let Some((r0, c0, bh, bw)) = find_enclosed_bbox(&ex.input, bg) {
+            if bh == ex.output.height && bw == ex.output.width {
+                let sub = extract_subgrid(&ex.input, r0, c0, bh, bw);
+                return grid_exact_match(&sub, &ex.output);
+            }
+        }
+        false
+    })
+}
+
+fn apply_enclosed_region(grid: &Grid) -> Option<Grid> {
+    let bg = most_common_color(grid);
+    if let Some((r0, c0, bh, bw)) = find_enclosed_bbox(grid, bg) {
+        Some(extract_subgrid(grid, r0, c0, bh, bw))
+    } else {
+        None
+    }
+}
+
+// ─── Strategy Z: Operator composition search ───────────────────────────────
+//
+// Instead of hand-coding each task's strategy, define a set of primitive
+// operators and search for short compositions (depth ≤ 2) that transform
+// input → output for all training examples. The operator set:
+//   Size-changing: Tile, Scale, FractalTile, DiagTile, MirrorTile(4 modes)
+//   Geometric:     HFlip, VFlip, Rot90CW, Rot180, Transpose
+//   Color:         ColorSub(a, b)
+//
+// Search budget: ~60 ops × 60 ops = 3,600 depth-2 candidates.
+// Validation: exact match on all training examples.
+
+#[derive(Clone, Debug)]
+enum ComposeOp {
+    Tile(usize, usize),
+    Scale(usize, usize),
+    ColorSub(u8, u8),
+    HFlip,
+    VFlip,
+    Rot90CW,
+    Rot180,
+    Transpose,
+    FractalTile,
+    DiagTile,
+    MirrorTile(u8),
+}
+
+fn apply_compose_op(grid: &Grid, op: &ComposeOp) -> Option<Grid> {
+    match op {
+        ComposeOp::Tile(nh, nw) => Some(tile_grid(grid, *nh, *nw)),
+        ComposeOp::Scale(sr, sc) => Some(scale_grid(grid, *sr, *sc)),
+        ComposeOp::ColorSub(a, b) => {
+            let mut g = grid.clone();
+            for row in g.cells.iter_mut() {
+                for cell in row.iter_mut() {
+                    if *cell == *a { *cell = *b; }
+                }
+            }
+            Some(g)
+        }
+        ComposeOp::HFlip => Some(apply_geometric(grid, 3)),
+        ComposeOp::VFlip => Some(apply_geometric(grid, 4)),
+        ComposeOp::Rot90CW => Some(apply_geometric(grid, 0)),
+        ComposeOp::Rot180 => Some(apply_geometric(grid, 2)),
+        ComposeOp::Transpose => Some(apply_geometric(grid, 5)),
+        ComposeOp::FractalTile => {
+            let ih = grid.height;
+            let iw = grid.width;
+            if ih * ih > 60 || iw * iw > 60 { return None; }
+            Some(apply_fractal_tile(grid))
+        }
+        ComposeOp::DiagTile => {
+            let n = grid.height;
+            if n != grid.width || n * n > 60 { return None; }
+            let on = n * n;
+            let mut cells = vec![vec![0u8; on]; on];
+            for t in 0..n {
+                for r in 0..n {
+                    for c in 0..n {
+                        cells[t * n + r][t * n + c] = grid.cells[r][c];
+                    }
+                }
+            }
+            Some(Grid { cells, height: on, width: on })
+        }
+        ComposeOp::MirrorTile(mode) => apply_mirror_tile(grid, *mode),
+    }
+}
+
+fn compose_output_dims(ih: usize, iw: usize, op: &ComposeOp) -> Option<(usize, usize)> {
+    match op {
+        ComposeOp::Tile(nh, nw) => Some((ih * nh, iw * nw)),
+        ComposeOp::Scale(sr, sc) => Some((ih * sr, iw * sc)),
+        ComposeOp::ColorSub(_, _) | ComposeOp::Rot180 => Some((ih, iw)),
+        ComposeOp::HFlip | ComposeOp::VFlip => Some((ih, iw)),
+        ComposeOp::Rot90CW | ComposeOp::Transpose => Some((iw, ih)),
+        ComposeOp::FractalTile => Some((ih * ih, iw * iw)),
+        ComposeOp::DiagTile => {
+            if ih != iw { return None; }
+            Some((ih * ih, iw * iw))
+        }
+        ComposeOp::MirrorTile(mode) => match mode {
+            0 | 3 => Some((ih * 2, iw * 2)),
+            1 => Some((ih, iw * 2)),
+            2 => Some((ih * 2, iw)),
+            _ => None,
+        },
+    }
+}
+
+fn solve_compose_ops(task: &ArcTask) -> Option<Vec<ComposeOp>> {
+    if task.train.is_empty() || task.test.is_empty() { return None; }
+
+    let oh = task.train[0].output.height;
+    let ow = task.train[0].output.width;
+    let ih = task.train[0].input.height;
+    let iw = task.train[0].input.width;
+
+    let mut ops: Vec<ComposeOp> = Vec::new();
+
+    // Geometric
+    ops.push(ComposeOp::HFlip);
+    ops.push(ComposeOp::VFlip);
+    ops.push(ComposeOp::Rot90CW);
+    ops.push(ComposeOp::Rot180);
+    ops.push(ComposeOp::Transpose);
+
+    // Color substitutions from palette
+    let mut all_colors = [false; 10];
+    let mut out_colors = [false; 10];
+    for ex in &task.train {
+        for row in &ex.input.cells { for &v in row { all_colors[v as usize] = true; } }
+        for row in &ex.output.cells { for &v in row { out_colors[v as usize] = true; all_colors[v as usize] = true; } }
+    }
+    for a in 0u8..10 {
+        for b in 0u8..10 {
+            if a != b && all_colors[a as usize] && out_colors[b as usize] {
+                ops.push(ComposeOp::ColorSub(a, b));
+            }
+        }
+    }
+
+    // Size-changing ops from dimension ratios
+    let mut added_tile = std::collections::HashSet::new();
+    for ex in &task.train {
+        let eih = ex.input.height;
+        let eiw = ex.input.width;
+        let eoh = ex.output.height;
+        let eow = ex.output.width;
+        if eoh >= eih && eow >= eiw && eih > 0 && eiw > 0 && eoh % eih == 0 && eow % eiw == 0 {
+            let nh = eoh / eih;
+            let nw = eow / eiw;
+            if (nh > 1 || nw > 1) && !added_tile.contains(&(nh, nw)) {
+                added_tile.insert((nh, nw));
+                ops.push(ComposeOp::Tile(nh, nw));
+                ops.push(ComposeOp::Scale(nh, nw));
+            }
+        }
+    }
+    for f in 2usize..=5 {
+        if !added_tile.contains(&(f, f)) {
+            ops.push(ComposeOp::Tile(f, f));
+            ops.push(ComposeOp::Scale(f, f));
+        }
+        if !added_tile.contains(&(f, 1)) { ops.push(ComposeOp::Tile(f, 1)); }
+        if !added_tile.contains(&(1, f)) { ops.push(ComposeOp::Tile(1, f)); }
+    }
+
+    ops.push(ComposeOp::FractalTile);
+    ops.push(ComposeOp::DiagTile);
+    for m in 0u8..4 { ops.push(ComposeOp::MirrorTile(m)); }
+
+    // Dedup
+    ops.sort_by(|a, b| format!("{:?}", a).cmp(&format!("{:?}", b)));
+    ops.dedup_by(|a, b| format!("{:?}", a) == format!("{:?}", b));
+
+    // Helper: validate sequence on ALL training examples
+    let validate = |seq: &[&ComposeOp]| -> bool {
+        task.train.iter().all(|ex| {
+            let mut g = ex.input.clone();
+            for op in seq {
+                match apply_compose_op(&g, op) {
+                    Some(next) => g = next,
+                    None => return false,
+                }
+            }
+            g.height == ex.output.height && g.width == ex.output.width
+                && grid_exact_match(&g, &ex.output)
+        })
+    };
+
+    // Depth-1
+    for op in &ops {
+        if let Some((odh, odw)) = compose_output_dims(ih, iw, op) {
+            if odh != oh || odw != ow { continue; }
+        }
+        if validate(&[op]) {
+            return Some(vec![op.clone()]);
+        }
+    }
+
+    // Depth-2: dim-filter to prune impossible pairs
+    for op1 in &ops {
+        let mid = compose_output_dims(ih, iw, op1);
+        if mid.is_none() { continue; }
+        let (mh, mw) = mid.unwrap();
+        if mh > 60 || mw > 60 { continue; }
+
+        for op2 in &ops {
+            if let Some((fh, fw)) = compose_output_dims(mh, mw, op2) {
+                if fh != oh || fw != ow { continue; }
+            } else { continue; }
+
+            if validate(&[op1, op2]) {
+                return Some(vec![op1.clone(), op2.clone()]);
+            }
+        }
+    }
+
+    None
+}
+
+// ─── Strategy N: Geometric transforms (rot90, rot180, hflip, vflip, transpose)
+//
+// Detects if the output is a simple geometric transform of the input.
+// Tries 6 transforms and returns the one consistent across all training examples.
+
+fn solve_geometric(task: &ArcTask) -> Option<u8> {
+    if task.train.is_empty() { return None; }
+    if !task.train.iter().all(|ex|
+        ex.input.height == ex.output.height && ex.input.width == ex.output.width) {
+        return None;
+    }
+
+    // 0=rot90_cw, 1=rot90_ccw, 2=rot180, 3=hflip, 4=vflip, 5=transpose
+    for tf in 0u8..6 {
+        let all_match = task.train.iter().all(|ex| {
+            let h = ex.input.height;
+            let w = ex.input.width;
+            if (tf == 0 || tf == 1 || tf == 5) && h != w { return false; }
+            (0..h).all(|r| (0..w).all(|c| {
+                let (tr, tc) = match tf {
+                    0 => (c, h - 1 - r),       // rot90 cw
+                    1 => (w - 1 - c, r),        // rot90 ccw
+                    2 => (h - 1 - r, w - 1 - c), // rot180
+                    3 => (r, w - 1 - c),        // hflip
+                    4 => (h - 1 - r, c),        // vflip
+                    5 => (c, r),                // transpose
+                    _ => (r, c),
+                };
+                ex.output.cells[tr][tc] == ex.input.cells[r][c]
+            }))
+        });
+        if all_match { return Some(tf); }
+    }
+    None
+}
+
+fn apply_geometric(grid: &Grid, tf: u8) -> Grid {
+    let h = grid.height;
+    let w = grid.width;
+    let (oh, ow) = match tf {
+        0 | 1 | 5 => (w, h), // rot90 variants and transpose swap dims
+        _ => (h, w),
+    };
+    let mut cells = vec![vec![0u8; ow]; oh];
+    for r in 0..h {
+        for c in 0..w {
+            let (tr, tc) = match tf {
+                0 => (c, h - 1 - r),
+                1 => (w - 1 - c, r),
+                2 => (h - 1 - r, w - 1 - c),
+                3 => (r, w - 1 - c),
+                4 => (h - 1 - r, c),
+                5 => (c, r),
+                _ => (r, c),
+            };
+            cells[tr][tc] = grid.cells[r][c];
+        }
+    }
+    Grid { cells, height: oh, width: ow }
+}
+
 // ─── Strategy L: Palette-constrained neighborhood ──────────────────────────
 //
 // Same as neighborhood centroid, but classification is restricted to colors
@@ -2121,6 +2695,195 @@ fn apply_cell_centroid_palette(centroids: &[Multivector], grid: &Grid, palette: 
         }
     }
     Grid { cells, height: grid.height, width: grid.width }
+}
+
+// ─── Strategy M: Grid-separator summarization ──────────────────────────────
+//
+// Many ARC tasks present an input grid divided by separator lines (rows/cols
+// of a single color) into NxN sub-regions. The output is a small grid (e.g.
+// 3x3) summarizing each sub-region. We detect the separator structure,
+// extract sub-regions, and try multiple summarization rules (majority color,
+// minority non-bg color, unique color, presence of target color, etc.).
+
+/// Detect grid-separator structure: a single non-bg color used for full
+/// row/column separator lines dividing the grid into sub-regions.
+/// Returns (sep_color, separator_row_indices, separator_col_indices).
+fn detect_grid_separators(grid: &Grid, bg: u8) -> Option<(u8, Vec<usize>, Vec<usize>)> {
+    // Try each non-bg color as potential separator
+    for sep_c in 0..NUM_COLORS as u8 {
+        if sep_c == bg { continue; }
+        let sep_rows: Vec<usize> = (0..grid.height)
+            .filter(|&r| grid.cells[r].iter().all(|&c| c == sep_c))
+            .collect();
+        let sep_cols: Vec<usize> = (0..grid.width)
+            .filter(|&col| (0..grid.height).all(|r| grid.cells[r][col] == sep_c))
+            .collect();
+        if sep_rows.is_empty() && sep_cols.is_empty() { continue; }
+        // Must have at least one row OR col separator
+        return Some((sep_c, sep_rows, sep_cols));
+    }
+    None
+}
+
+/// Given separator rows and cols, extract the rectangular sub-regions between them.
+/// Returns sub-regions as a 2D vec indexed by (region_row, region_col).
+fn extract_meta_regions(grid: &Grid, sep_rows: &[usize], sep_cols: &[usize])
+    -> Option<Vec<Vec<Vec<Vec<u8>>>>>
+{
+    // Build row bands: ranges between separators
+    let mut row_bands: Vec<(usize, usize)> = Vec::new();
+    let mut prev = 0usize;
+    for &sr in sep_rows {
+        if sr > prev { row_bands.push((prev, sr)); }
+        prev = sr + 1;
+    }
+    if prev < grid.height { row_bands.push((prev, grid.height)); }
+
+    let mut col_bands: Vec<(usize, usize)> = Vec::new();
+    let mut prev = 0usize;
+    for &sc in sep_cols {
+        if sc > prev { col_bands.push((prev, sc)); }
+        prev = sc + 1;
+    }
+    if prev < grid.width { col_bands.push((prev, grid.width)); }
+
+    if row_bands.is_empty() || col_bands.is_empty() { return None; }
+
+    let mut regions = Vec::new();
+    for &(r0, r1) in &row_bands {
+        let mut row_regions = Vec::new();
+        for &(c0, c1) in &col_bands {
+            let sub: Vec<Vec<u8>> = (r0..r1)
+                .map(|r| grid.cells[r][c0..c1].to_vec())
+                .collect();
+            row_regions.push(sub);
+        }
+        regions.push(row_regions);
+    }
+    Some(regions)
+}
+
+/// Compute a feature vector for a sub-region: [count_per_color_0..9, total_non_bg, n_distinct].
+/// bg and sep are both excluded from "interesting" counts.
+fn region_features(region: &[Vec<u8>], bg: u8, sep: u8) -> [u32; 12] {
+    let mut counts = [0u32; NUM_COLORS];
+    for row in region {
+        for &c in row { counts[c as usize] += 1; }
+    }
+    counts[bg as usize] = 0;
+    if sep != bg { counts[sep as usize] = 0; }
+    let total: u32 = counts.iter().sum();
+    let distinct = counts.iter().filter(|&&c| c > 0).count() as u32;
+    let mut feat = [0u32; 12];
+    feat[..10].copy_from_slice(&counts);
+    feat[10] = total;
+    feat[11] = distinct;
+    feat
+}
+
+/// Extract a single scalar feature from the feature vector, used as a lookup key.
+fn region_scalar(feat: &[u32; 12], rule: usize) -> u32 {
+    match rule {
+        0 => feat[10],                    // total non-bg count
+        1 => feat[11],                    // distinct non-bg colors
+        2 => {                            // majority non-bg color index
+            let mut best = 0u8;
+            let mut best_v = 0u32;
+            for i in 0..10 { if feat[i] > best_v { best_v = feat[i]; best = i as u8; } }
+            best as u32
+        }
+        3 => {                            // minority non-bg color index
+            let mut best = 0u8;
+            let mut best_v = u32::MAX;
+            for i in 0..10 { if feat[i] > 0 && feat[i] < best_v { best_v = feat[i]; best = i as u8; } }
+            if best_v == u32::MAX { 0 } else { best as u32 }
+        }
+        4 => if feat[10] > 1 { 1 } else { 0 },  // has_multiple flag
+        5 => {                            // color with count=1 (unique cell)
+            for i in 0..10 { if feat[i] == 1 { return i as u32; } }
+            0
+        }
+        _ => 0,
+    }
+}
+
+const NUM_REGION_RULES: usize = 6;
+
+/// Returns (best_rule, learned_mapping) if separator structure solves training.
+/// learned_mapping[scalar_value] = output_color.
+fn solve_grid_separator(task: &ArcTask) -> Option<(usize, [u8; 32])> {
+    let oh = task.train[0].output.height;
+    let ow = task.train[0].output.width;
+    if !task.train.iter().all(|ex| ex.output.height == oh && ex.output.width == ow) {
+        return None;
+    }
+
+    for rule in 0..NUM_REGION_RULES {
+        // mapping[scalar_value] = output_color (0xFF = unset)
+        let mut mapping = [0xFFu8; 32];
+        let mut ok = true;
+
+        for ex in &task.train {
+            let bg = most_common_color(&ex.input);
+            let (sep_c, sep_rows, sep_cols) = match detect_grid_separators(&ex.input, bg) {
+                Some(v) => v,
+                None => { ok = false; break; }
+            };
+            let regions = match extract_meta_regions(&ex.input, &sep_rows, &sep_cols) {
+                Some(r) => r,
+                None => { ok = false; break; }
+            };
+            let nr = regions.len();
+            let nc = if nr > 0 { regions[0].len() } else { 0 };
+            if nr != oh || nc != ow { ok = false; break; }
+
+            for ri in 0..nr {
+                for ci in 0..nc {
+                    let feat = region_features(&regions[ri][ci], bg, sep_c);
+                    let key = region_scalar(&feat, rule) as usize;
+                    if key >= 32 { ok = false; break; }
+                    let expected = ex.output.cells[ri][ci];
+                    if mapping[key] == 0xFF {
+                        mapping[key] = expected;
+                    } else if mapping[key] != expected {
+                        ok = false; break;
+                    }
+                }
+                if !ok { break; }
+            }
+            if !ok { break; }
+        }
+
+        if ok {
+            return Some((rule, mapping));
+        }
+    }
+    None
+}
+
+fn apply_grid_separator(input: &Grid, rule: usize, mapping: &[u8; 32], oh: usize, ow: usize) -> Grid {
+    let bg = most_common_color(input);
+    let (sep_c, sep_rows, sep_cols) = detect_grid_separators(input, bg)
+        .unwrap_or((bg, vec![], vec![]));
+
+    if let Some(regions) = extract_meta_regions(input, &sep_rows, &sep_cols) {
+        let nr = regions.len();
+        let nc = if nr > 0 { regions[0].len() } else { 0 };
+        if nr == oh && nc == ow {
+            let mut cells = vec![vec![0u8; ow]; oh];
+            for ri in 0..nr {
+                for ci in 0..nc {
+                    let feat = region_features(&regions[ri][ci], bg, sep_c);
+                    let key = region_scalar(&feat, rule) as usize;
+                    cells[ri][ci] = if key < 32 && mapping[key] != 0xFF {
+                        mapping[key]
+                    } else { 0 };
+                }
+            }
+            return Grid { cells, height: oh, width: ow };
+        }
+    }
+    Grid { cells: vec![vec![0u8; ow]; oh], height: oh, width: ow }
 }
 
 // ─── Strategy G: Grid-level rotor (fallback) ───────────────────────────────
@@ -2367,6 +3130,33 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                 total_cells += total;
                 if correct != total { all_exact = false; }
             }
+        } else if let Some(tf) = solve_geometric(task) {
+            best_strategy = "geometric";
+            for test_ex in &task.test {
+                let pred = apply_geometric(&test_ex.input, tf);
+                let (correct, total) = grid_matches(&pred, &test_ex.output);
+                total_correct += correct;
+                total_cells += total;
+                if correct != total { all_exact = false; }
+            }
+        } else if let Some(lut) = solve_nbr_lookup(task) {
+            best_strategy = "nbr_lookup";
+            for test_ex in &task.test {
+                let pred = apply_nbr_lookup(&test_ex.input, &lut);
+                let (correct, total) = grid_matches(&pred, &test_ex.output);
+                total_correct += correct;
+                total_cells += total;
+                if correct != total { all_exact = false; }
+            }
+        } else if solve_connect_lines(task) {
+            best_strategy = "connect_lines";
+            for test_ex in &task.test {
+                let pred = apply_connect_lines(&test_ex.input);
+                let (correct, total) = grid_matches(&pred, &test_ex.output);
+                total_correct += correct;
+                total_cells += total;
+                if correct != total { all_exact = false; }
+            }
         } else if solve_object_positional(task) == Some(1.0) {
             best_strategy = "obj_positional";
             let bg = most_common_color(&task.train[0].input);
@@ -2513,11 +3303,55 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                 }
             }
         }
+    } else if solve_enclosed_region(task) {
+        best_strategy = "enclosed_region";
+        for test_ex in &task.test {
+            if let Some(pred) = apply_enclosed_region(&test_ex.input) {
+                let (correct, total) = grid_matches(&pred, &test_ex.output);
+                total_correct += correct;
+                total_cells += total;
+                if correct != total { all_exact = false; }
+            } else {
+                let total = test_ex.output.height * test_ex.output.width;
+                total_cells += total;
+                all_exact = false;
+            }
+        }
+    } else if let Some((rule, mapping)) = solve_grid_separator(task) {
+        best_strategy = "grid_separator";
+        let oh = task.train[0].output.height;
+        let ow = task.train[0].output.width;
+        for test_ex in &task.test {
+            let pred = apply_grid_separator(&test_ex.input, rule, &mapping, oh, ow);
+            let (correct, total) = grid_matches(&pred, &test_ex.output);
+            total_correct += correct;
+            total_cells += total;
+            if correct != total { all_exact = false; }
+        }
     } else if let Some((r0, c0, oh, ow)) = solve_subgrid_fixed_offset(task) {
         best_strategy = "subgrid_fixed";
         for test_ex in &task.test {
             if r0 + oh <= test_ex.input.height && c0 + ow <= test_ex.input.width {
                 let pred = extract_subgrid(&test_ex.input, r0, c0, oh, ow);
+                let (correct, total) = grid_matches(&pred, &test_ex.output);
+                total_correct += correct;
+                total_cells += total;
+                if correct != total { all_exact = false; }
+            } else {
+                total_cells += test_ex.output.height * test_ex.output.width;
+                all_exact = false;
+            }
+        }
+    } else if solve_subgrid_unique(task).is_some() {
+        best_strategy = "subgrid_unique";
+        for test_ex in &task.test {
+            let matches = find_matching_subgrids(&test_ex.input, &test_ex.output);
+            if matches.len() == 1 {
+                let (r0, c0) = matches[0];
+                let pred = extract_subgrid(
+                    &test_ex.input, r0, c0,
+                    test_ex.output.height, test_ex.output.width,
+                );
                 let (correct, total) = grid_matches(&pred, &test_ex.output);
                 total_correct += correct;
                 total_cells += total;
@@ -2587,25 +3421,6 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                 all_exact = false;
             }
         }
-    } else if solve_subgrid_unique(task).is_some() {
-        best_strategy = "subgrid_unique";
-        for test_ex in &task.test {
-            let matches = find_matching_subgrids(&test_ex.input, &test_ex.output);
-            if matches.len() == 1 {
-                let (r0, c0) = matches[0];
-                let pred = extract_subgrid(
-                    &test_ex.input, r0, c0,
-                    test_ex.output.height, test_ex.output.width,
-                );
-                let (correct, total) = grid_matches(&pred, &test_ex.output);
-                total_correct += correct;
-                total_cells += total;
-                if correct != total { all_exact = false; }
-            } else {
-                total_cells += test_ex.output.height * test_ex.output.width;
-                all_exact = false;
-            }
-        }
     } else if let Some(mode) = solve_mirror_tile(task) {
         best_strategy = "mirror_tile";
         for test_ex in &task.test {
@@ -2640,7 +3455,21 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
     } else if let Some((sr, sc)) = solve_scale(task) {
         best_strategy = "scale";
         for test_ex in &task.test {
-            let pred = scale_grid(&test_ex.input, sr, sc);
+            // (0,0) = variable scale: derive from test output dims
+            let (actual_sr, actual_sc) = if sr == 0 && sc == 0 {
+                let ih = test_ex.input.height;
+                let iw = test_ex.input.width;
+                let oh = test_ex.output.height;
+                let ow = test_ex.output.width;
+                if ih > 0 && iw > 0 && oh % ih == 0 && ow % iw == 0 {
+                    (oh / ih, ow / iw)
+                } else {
+                    (2, 2) // fallback
+                }
+            } else {
+                (sr, sc)
+            };
+            let pred = scale_grid(&test_ex.input, actual_sr, actual_sc);
             let (correct, total) = grid_matches(&pred, &test_ex.output);
             total_correct += correct;
             total_cells += total;
@@ -2655,9 +3484,41 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
             total_cells += total;
             if correct != total { all_exact = false; }
         }
+    } else if solve_fractal_tile(task) {
+        best_strategy = "fractal_tile";
+        for test_ex in &task.test {
+            let pred = apply_fractal_tile(&test_ex.input);
+            let (correct, total) = grid_matches(&pred, &test_ex.output);
+            total_correct += correct;
+            total_cells += total;
+            if correct != total { all_exact = false; }
+        }
+    } else if let Some(compose_ops) = solve_compose_ops(task) {
+        best_strategy = "compose";
+        for test_ex in &task.test {
+            let mut g = test_ex.input.clone();
+            for op in &compose_ops {
+                if let Some(next) = apply_compose_op(&g, op) { g = next; } else { break; }
+            }
+            let (correct, total) = grid_matches(&g, &test_ex.output);
+            total_correct += correct;
+            total_cells += total;
+            if correct != total { all_exact = false; }
+        }
     } else {
-        // Diff-dim: grid-level rotor (fallback)
+        // Diff-dim: grid-level rotor (fallback) — log size relationships
         best_strategy = "grid";
+        let ex0 = &task.train[0];
+        let ih = ex0.input.height;
+        let iw = ex0.input.width;
+        let oh = ex0.output.height;
+        let ow = ex0.output.width;
+        let shrink = oh <= ih && ow <= iw;
+        let rh = if ih > 0 { oh as f32 / ih as f32 } else { 0.0 };
+        let rw = if iw > 0 { ow as f32 / iw as f32 } else { 0.0 };
+        eprintln!("  GRID-FALLBACK {}: {}x{} -> {}x{}  ratio={:.2}h {:.2}w  {}",
+            task.id, ih, iw, oh, ow, rh, rw,
+            if shrink { "SHRINK" } else { "GROW" });
         let grid_rule = solve_normal_equations(&train_inputs, &train_outputs);
 
         for test_ex in &task.test {

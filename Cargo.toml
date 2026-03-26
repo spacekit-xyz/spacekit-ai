@@ -22,6 +22,10 @@ path = "src/demos.rs"
 name = "growformer-node"
 path = "src/server.rs"
 
+[[bin]]
+name = "growformer-arc"
+path = "src/arc_brain_main.rs"
+
 [features]
 default = ["native", "server", "parallel", "cli"]
 native = ["reqwest"]

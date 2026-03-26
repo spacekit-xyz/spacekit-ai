@@ -51,6 +51,8 @@ pub mod clifford_mnist;
 pub mod pathmnist;
 #[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 pub mod arc_agi;
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+pub mod arc_brain;
 pub mod neuron;
 pub mod systems;
 pub mod types;
