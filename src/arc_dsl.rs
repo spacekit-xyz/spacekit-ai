@@ -12,6 +12,7 @@
 use std::collections::VecDeque;
 
 use crate::arc_agi::{
+    encode_grid, extract_rule, multivector_cosine_similarity,
     Grid, ArcTask, NUM_COLORS,
     find_objects, grid_exact_match,
     most_common_color, content_bbox, find_enclosed_bbox, extract_subgrid,
@@ -19,6 +20,7 @@ use crate::arc_agi::{
     scale_grid, tile_grid, downscale_grid, apply_mirror_tile, apply_fractal_tile,
     FlowDiagnostic,
 };
+use crate::clifford::Multivector;
 
 // ─── DSL operations ────────────────────────────────────────────────────────
 
@@ -573,6 +575,59 @@ fn apply_program(grid: &Grid, program: &[&Op]) -> Option<Grid> {
     Some(g)
 }
 
+// ─── Clifford hints for DSL candidate ordering ───────────────────────────────
+
+/// Fixed 3×3 reference (colors 1–9) for per-op rule vectors used in hint scoring.
+pub fn dsl_op_reference_grid() -> Grid {
+    Grid {
+        height: 3,
+        width: 3,
+        cells: vec![
+            vec![1, 2, 3],
+            vec![4, 5, 6],
+            vec![7, 8, 9],
+        ],
+    }
+}
+
+/// `extract_rule(E[in], E[out])` on the reference grid. `None` if `apply_op` fails.
+pub fn dsl_op_signature(op: &Op) -> Option<Multivector> {
+    let g_in = dsl_op_reference_grid();
+    let g_out = apply_op(&g_in, op)?;
+    let z_in = encode_grid(&g_in);
+    let z_out = encode_grid(&g_out);
+    Some(extract_rule(&z_in, &z_out))
+}
+
+/// Mean of per-example `extract_rule(encode(in), encode(out))` over training pairs.
+pub fn train_rule_consensus_mv(task: &ArcTask) -> Multivector {
+    let n = task.train.len();
+    if n == 0 {
+        return Multivector::zero();
+    }
+    let mut acc = Multivector::zero();
+    for ex in &task.train {
+        let z_in = encode_grid(&ex.input);
+        let z_out = encode_grid(&ex.output);
+        acc = acc.add(&extract_rule(&z_in, &z_out));
+    }
+    acc.scale(1.0 / n as f32)
+}
+
+/// Cosine similarity between training rule consensus and the op’s reference signature.
+pub fn clifford_op_hint_score(task: &ArcTask, op: &Op) -> f32 {
+    if task.train.is_empty() {
+        return 0.0;
+    }
+    let consensus = train_rule_consensus_mv(task);
+    let sig = match dsl_op_signature(op) {
+        Some(s) => s,
+        None => return 0.0,
+    };
+    let c = multivector_cosine_similarity(&consensus, &sig);
+    if c.is_finite() { c } else { 0.0 }
+}
+
 // ─── Search engine ─────────────────────────────────────────────────────────
 
 pub fn dsl_solve(task: &ArcTask) -> Option<(Vec<Grid>, &'static str)> {
@@ -611,15 +666,24 @@ pub fn dsl_solve_with_flow(
     let budget_d2 = std::time::Duration::from_millis(budget_d2_ms);
     let budget_d3 = std::time::Duration::from_millis(budget_d3_ms);
 
-    // ── Depth 1 ──
+    // ── Depth 1: collect all valid programs, pick highest Clifford hint (tie → first in order)
+    let mut best: Option<(f32, Vec<Grid>)> = None;
     for op in &candidates {
         if let Some(pred_dims) = op_output_dims(ih, iw, op) {
             if pred_dims.0 != oh || pred_dims.1 != ow { continue; }
         }
         if validate_program_on_training(task, &[op]) {
-            let predictions = predict_test(task, &[op])?;
-            return Some((predictions, "dsl_d1"));
+            if let Some(predictions) = predict_test(task, &[op]) {
+                let score = clifford_op_hint_score(task, op);
+                let replace = best.as_ref().map_or(true, |(s, _)| score > *s);
+                if replace {
+                    best = Some((score, predictions));
+                }
+            }
         }
+    }
+    if let Some((_, predictions)) = best {
+        return Some((predictions, "dsl_d1"));
     }
 
     // ── Depth 2 ──
@@ -700,6 +764,144 @@ fn predict_test(task: &ArcTask, program: &[&Op]) -> Option<Vec<Grid>> {
     Some(predictions)
 }
 
+// ─── A* program search (Clifford-guided) ────────────────────────────────────
+
+use std::collections::BinaryHeap;
+use std::cmp::Ordering;
+
+struct AstarNode {
+    program: Vec<usize>,
+    grids: Vec<Grid>,     // current grid per training example after applying program
+    g: f32,               // cost = program length
+    h: f32,               // heuristic = mean Clifford distance to target
+}
+
+impl AstarNode {
+    fn f(&self) -> f32 { self.g + 2.0 * self.h }
+}
+
+impl PartialEq for AstarNode {
+    fn eq(&self, other: &Self) -> bool { self.f().to_bits() == other.f().to_bits() }
+}
+impl Eq for AstarNode {}
+impl PartialOrd for AstarNode {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+}
+impl Ord for AstarNode {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other.f().partial_cmp(&self.f()).unwrap_or(Ordering::Equal)
+    }
+}
+
+fn clifford_distance_to_targets(grids: &[Grid], targets: &[Grid]) -> f32 {
+    if grids.len() != targets.len() || grids.is_empty() { return f32::MAX; }
+    let mut total = 0.0f32;
+    for (g, t) in grids.iter().zip(targets.iter()) {
+        if g.height != t.height || g.width != t.width {
+            total += 1.0;
+            continue;
+        }
+        let zg = encode_grid(g);
+        let zt = encode_grid(t);
+        let cos = multivector_cosine_similarity(&zg, &zt);
+        total += 1.0 - cos.max(-1.0).min(1.0);
+    }
+    total / grids.len() as f32
+}
+
+/// A* search through DSL program space, using Clifford distance as heuristic.
+/// Returns (predictions_for_test, strategy_label) if a program is found.
+pub fn astar_dsl_solve(task: &ArcTask, max_depth: usize, budget_ms: u64) -> Option<(Vec<Grid>, &'static str)> {
+    if task.train.is_empty() || task.test.is_empty() { return None; }
+
+    let candidates = generate_candidates(task);
+    let targets: Vec<&Grid> = task.train.iter().map(|ex| &ex.output).collect();
+    let target_grids: Vec<Grid> = targets.iter().map(|g| (*g).clone()).collect();
+    let start = std::time::Instant::now();
+    let budget = std::time::Duration::from_millis(budget_ms);
+
+    let init_grids: Vec<Grid> = task.train.iter().map(|ex| ex.input.clone()).collect();
+    let init_h = clifford_distance_to_targets(&init_grids, &target_grids);
+
+    let mut heap = BinaryHeap::new();
+    heap.push(AstarNode {
+        program: vec![],
+        grids: init_grids,
+        g: 0.0,
+        h: init_h,
+    });
+
+    let mut expanded = 0u64;
+    let max_expand = 50_000u64;
+
+    while let Some(node) = heap.pop() {
+        if start.elapsed() > budget || expanded > max_expand { break; }
+        expanded += 1;
+
+        if node.program.len() >= max_depth { continue; }
+
+        for (i, op) in candidates.iter().enumerate() {
+            // Skip no-ops (same op twice if self-inverse)
+            if let Some(&last) = node.program.last() {
+                if last == i && is_self_inverse(&candidates[last]) { continue; }
+            }
+
+            // Apply op to all training grids
+            let mut next_grids = Vec::with_capacity(node.grids.len());
+            let mut all_ok = true;
+            let mut all_match = true;
+
+            for (j, g) in node.grids.iter().enumerate() {
+                match apply_op(g, op) {
+                    Some(ng) => {
+                        if !grid_exact_match(&ng, &target_grids[j]) { all_match = false; }
+                        next_grids.push(ng);
+                    }
+                    None => { all_ok = false; break; }
+                }
+            }
+            if !all_ok { continue; }
+
+            // Goal check: all training examples match
+            if all_match {
+                let mut prog_refs: Vec<&Op> = node.program.iter().map(|&idx| &candidates[idx]).collect();
+                prog_refs.push(op);
+                if let Some(preds) = predict_test(task, &prog_refs) {
+                    let label = match prog_refs.len() {
+                        1 => "astar_d1",
+                        2 => "astar_d2",
+                        _ => "astar_d3",
+                    };
+                    return Some((preds, label));
+                }
+            }
+
+            // Dimension pruning: skip if dims getting further from target
+            let target_h = target_grids[0].height;
+            let target_w = target_grids[0].width;
+            let cur_h = next_grids[0].height;
+            let cur_w = next_grids[0].width;
+            let remaining_depth = max_depth - node.program.len() - 1;
+            if remaining_depth == 0 && (cur_h != target_h || cur_w != target_w) {
+                continue;
+            }
+
+            let h = clifford_distance_to_targets(&next_grids, &target_grids);
+            let mut new_program = node.program.clone();
+            new_program.push(i);
+
+            heap.push(AstarNode {
+                program: new_program,
+                grids: next_grids,
+                g: node.g + 1.0,
+                h,
+            });
+        }
+    }
+
+    None
+}
+
 fn is_self_inverse(op: &Op) -> bool {
     matches!(op,
         Op::HFlip | Op::VFlip | Op::Rot180 |
@@ -777,7 +979,7 @@ fn reorder_by_flow(candidates: &mut Vec<Op>, flow: &FlowDiagnostic) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arc_agi::{Grid, ArcTask, ArcExample, FlowDiagnostic};
+    use crate::arc_agi::{encode_grid, extract_rule, multivector_cosine_similarity, Grid, ArcTask, ArcExample, FlowDiagnostic};
 
     fn make_grid(cells: Vec<Vec<u8>>) -> Grid {
         let height = cells.len();
@@ -1122,5 +1324,58 @@ mod tests {
         assert!(is_self_inverse(&Op::SwapColors(1, 2)));
         assert!(!is_self_inverse(&Op::Rot90CW));
         assert!(!is_self_inverse(&Op::ColorSub(1, 2)));
+    }
+
+    // ── Clifford hints / reference signatures ──
+
+    #[test]
+    fn color_sub_hint_beats_geometric_distractor() {
+        let task = make_task(
+            vec![(vec![vec![3, 1], vec![2, 3]], vec![vec![7, 1], vec![2, 7]])],
+            vec![vec![3, 3]],
+            vec![vec![7, 7]],
+        );
+        let s_color = clifford_op_hint_score(&task, &Op::ColorSub(3, 7));
+        let s_geo = clifford_op_hint_score(&task, &Op::HFlip);
+        assert!(
+            s_color > s_geo,
+            "color rule hint {:.4} should exceed HFlip {:.4} on this task",
+            s_color,
+            s_geo
+        );
+    }
+
+    #[test]
+    fn dsl_color_sub_generalizes_2x2_train_to_tall_test() {
+        let train_in = vec![vec![3, 1], vec![2, 3]];
+        let train_out = vec![vec![7, 1], vec![2, 7]];
+        let test_in: Vec<Vec<u8>> = (0..10).map(|_| vec![3, 1]).collect();
+        let test_out: Vec<Vec<u8>> = (0..10).map(|_| vec![7, 1]).collect();
+        let task = make_task(vec![(train_in, train_out)], test_in, test_out);
+        let (preds, _) = dsl_solve(&task).expect("depth-1 ColorSub");
+        assert_eq!(preds[0].cells, task.test[0].output.cells);
+    }
+
+    #[test]
+    fn composed_op_geo_product_correlates_with_chained_extract_rule() {
+        let g = dsl_op_reference_grid();
+        let g1 = apply_op(&g, &Op::HFlip).unwrap();
+        let g2 = apply_op(&g1, &Op::ColorSub(3, 7)).unwrap();
+        let z0 = encode_grid(&g);
+        let z2 = encode_grid(&g2);
+        let r_chain = extract_rule(&z0, &z2);
+        let s_a = dsl_op_signature(&Op::HFlip).unwrap();
+        let s_b = dsl_op_signature(&Op::ColorSub(3, 7)).unwrap();
+        let c1 = multivector_cosine_similarity(&r_chain, &s_b.geo(&s_a));
+        let c2 = multivector_cosine_similarity(&r_chain, &s_a.geo(&s_b));
+        // Nonlinear encode → chained `extract_rule` need not match either geo-product order;
+        // we only expect a strong linear relation (same or opposite direction in R^256).
+        let align = c1.abs().max(c2.abs());
+        assert!(
+            align > 0.5,
+            "expect |cos| ≫ 0 vs one product order; c1={:.4} c2={:.4}",
+            c1,
+            c2
+        );
     }
 }

@@ -26,6 +26,10 @@ path = "src/server.rs"
 name = "growformer-arc"
 path = "src/arc_brain_main.rs"
 
+[[bin]]
+name = "growformer-arc-agi-2x2"
+path = "src/arc_agi_2x2.rs"
+
 [features]
 default = ["native", "server", "parallel", "cli"]
 native = ["reqwest"]
