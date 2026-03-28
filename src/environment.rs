@@ -911,6 +911,7 @@ impl NeuralEnvironment {
 
     /// Forward + backprop only; no STDP, prune, grow, or geometry.
     /// Used by minibatch SGD: run on B clones in parallel, then average params.
+    #[cfg(feature = "training")]
     pub fn train_tick_gradient_only(
         &mut self,
         input: &[f32],
@@ -921,6 +922,7 @@ impl NeuralEnvironment {
         self.backprop(&output, target)
     }
 
+    #[cfg(feature = "training")]
     pub fn train_tick(
         &mut self, input: &[f32], target: &[f32], rng: &mut impl Rng,
     ) -> TickResult {

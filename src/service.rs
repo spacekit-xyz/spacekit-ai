@@ -1,5 +1,6 @@
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
+use rand::RngCore;
 use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -205,18 +206,12 @@ impl OceanProfile {
         (self.openness - self.conscientiousness).clamp(-0.3, 0.3)
     }
 
-    /// Gentle drift toward a target value on one dimension. `alpha` controls
-    /// step size (0.01–0.05 recommended). Clamps to [0.0, 1.0].
+    #[cfg(feature = "training")]
     fn drift(val: &mut f32, direction: f32, alpha: f32) {
         *val = (*val + direction * alpha).clamp(0.0, 1.0);
     }
 
-    /// Apply emergent personality drift from a single feedback event.
-    /// Patterns:
-    ///   Accept → reward current profile (reduce neuroticism, boost agreeableness)
-    ///   Reject → increase caution and precision
-    ///   Correct with longer text → user wants detail (boost extraversion)
-    ///   Correct with shorter text → user wants conciseness (reduce extraversion)
+    #[cfg(feature = "training")]
     pub fn apply_feedback_drift(
         &mut self,
         accepted: bool,
@@ -574,6 +569,8 @@ pub struct LanguageService {
     /// Agent identity for "who are you" responses.
     pub agent_name: String,
     pub agent_creator: String,
+    /// Stored in [`crate::brain::BrainPackageHeader::description`] on [`Self::export_brain`].
+    pub brain_package_description: String,
     /// OCEAN personality profile — conditions generation and conversation style.
     pub personality: OceanProfile,
     /// Multi-turn conversation context.
@@ -600,6 +597,8 @@ pub struct LanguageService {
     pub metacognition: Option<MetaCognition>,
     /// System 2 configuration for deliberate multi-step reasoning.
     pub system2_config: System2Config,
+    /// Parsed header from the most recently loaded brain package (populated by [`Self::load_brain`]).
+    pub brain_package_header: Option<crate::brain::BrainPackageHeader>,
 }
 
 impl LanguageService {
@@ -650,6 +649,7 @@ impl LanguageService {
             last_turn: None,
             agent_name: "Growformer".to_string(),
             agent_creator: "swtch.ai".to_string(),
+            brain_package_description: "growformer DimensionManager checkpoint".to_string(),
             personality: OceanProfile::assistant(),
             conversation: ConversationContext::default(),
             project_model: ProjectModel::new(),
@@ -663,6 +663,7 @@ impl LanguageService {
             meta_codebook: None,
             metacognition: None,
             system2_config: System2Config::default(),
+            brain_package_header: None,
         })
     }
 
@@ -696,6 +697,11 @@ impl LanguageService {
     pub fn set_identity(&mut self, name: &str, creator: &str) {
         self.agent_name = name.to_string();
         self.agent_creator = creator.to_string();
+    }
+
+    /// Text stored in the exported brain package header (`BrainPackageHeader::description`).
+    pub fn set_brain_package_description(&mut self, description: &str) {
+        self.brain_package_description = description.to_string();
     }
 
     fn is_identity_query(text: &str) -> bool {
@@ -2317,8 +2323,24 @@ impl LanguageService {
     // Brain export / import (full DimensionManager state)
     // -----------------------------------------------------------------------
 
+    /// Serializes the active `DimensionManager` and wraps it in a [`crate::brain::BrainPackage`]
+    /// (binary envelope: header JSON + checkpoint JSON + optional personality JSON).
+    /// [`load_brain`](Self::load_brain) accepts both this format and legacy raw checkpoint JSON.
     pub fn export_brain(&self) -> Result<Vec<u8>, String> {
-        crate::systems::checkpoint::serialize_checkpoint_to_bytes(self.active_dm())
+        let checkpoint = crate::systems::checkpoint::serialize_checkpoint_to_bytes(self.active_dm())?;
+        let personality = self.export_personality()?;
+        let mut header = crate::brain::BrainPackageHeader::default();
+        let mut id_raw = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut id_raw);
+        header.id = id_raw.iter().fold(String::with_capacity(32), |mut s, b| {
+            use std::fmt::Write;
+            let _ = write!(s, "{:02x}", b);
+            s
+        });
+        header.name.clone_from(&self.agent_name);
+        header.author.name.clone_from(&self.agent_creator);
+        header.description.clone_from(&self.brain_package_description);
+        crate::brain::encode_brain_package(&header, &checkpoint, Some(personality.as_slice()))
     }
 
     /// Export current personality as JSON bytes (for persistence alongside brain).
@@ -2355,6 +2377,7 @@ impl LanguageService {
     /// Consume feedback for the last turn. Updates both the neural network
     /// path (router, gen head) and the Paramecium lattice (quality/reliability,
     /// correction injection) per CONTINUUM.md spec.
+    #[cfg(feature = "training")]
     pub fn submit_feedback(&mut self, feedback: &Feedback) -> Result<(), String> {
         let turn = match self.last_turn.take() {
             Some(t) => t,
@@ -2473,6 +2496,7 @@ impl LanguageService {
     }
 
     /// Auto-save brain to disk after every N feedback events.
+    #[cfg(feature = "training")]
     fn maybe_auto_checkpoint(&self) {
         let interval = self.continuum_config.checkpoint_interval;
         if interval == 0 { return; }
@@ -2492,6 +2516,7 @@ impl LanguageService {
     }
 
     /// Check rate limit: returns true if this feedback should be processed.
+    #[cfg(feature = "training")]
     fn check_rate_limit(&mut self) -> bool {
         let limit = self.continuum_config.rate_limit_per_minute;
         if limit == 0 { return true; }
@@ -2505,9 +2530,24 @@ impl LanguageService {
     }
 
     /// Load a brain as the default checkpoint (replaces current default / single-brain behavior).
+    /// Accepts a [`crate::brain::BrainPackage`] file or legacy raw JSON checkpoint bytes.
     pub fn load_brain(&mut self, data: &[u8]) -> Result<(), String> {
+        let peeled = crate::brain::peel_brain_file_bytes(data)?;
+        self.brain_package_header = Some(peeled.header.clone());
+        if !peeled.header.name.is_empty() && peeled.header.name != "growformer" {
+            self.agent_name = peeled.header.name.clone();
+        }
+        if !peeled.header.author.name.is_empty() {
+            self.agent_creator = peeled.header.author.name.clone();
+        }
+        if !peeled.header.description.is_empty() {
+            self.brain_package_description = peeled.header.description.clone();
+        }
+        if let Some(ref p) = peeled.personality {
+            self.import_personality(p)?;
+        }
         let mut dm: DimensionManager =
-            crate::systems::checkpoint::deserialize_checkpoint_from_bytes(data)?;
+            crate::systems::checkpoint::deserialize_checkpoint_from_bytes(&peeled.checkpoint)?;
         if let Some(ref mut clf) = dm.action_classifier {
             clf.ensure_output_dim();
         }
@@ -2557,8 +2597,9 @@ impl LanguageService {
 
     /// Load an additional brain under a name. Use `set_active_brain(name)` to switch to it.
     pub fn load_brain_as(&mut self, name: &str, data: &[u8]) -> Result<(), String> {
+        let peeled = crate::brain::peel_brain_file_bytes(data)?;
         let mut dm: DimensionManager =
-            crate::systems::checkpoint::deserialize_checkpoint_from_bytes(data)?;
+            crate::systems::checkpoint::deserialize_checkpoint_from_bytes(&peeled.checkpoint)?;
         if let Some(ref mut clf) = dm.action_classifier {
             clf.ensure_output_dim();
         }

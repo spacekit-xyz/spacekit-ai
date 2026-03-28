@@ -546,6 +546,12 @@ The forward pass itself is non‑standard: signal strength is gated by a tempora
 # Auto-configure everything from the dataset (recommended)
 cargo run --release -- --train-brain --auto
 
+# Optional metadata embedded in the exported brain package header (name, description, author)
+cargo run --release -- --train-brain --auto \
+  --brain-name "Support assistant v1" \
+  --brain-description "Trained on internal helpdesk + model routing + coding mix" \
+  --brain-author "your-org"
+
 # Manual: specify epochs and replicas
 cargo run --release -- --train-brain --brain-gen-epochs 3000 --brain-gen-replicas 2
 

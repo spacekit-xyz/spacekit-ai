@@ -35,6 +35,7 @@ macro_rules! maybe_par_iter_mut {
 pub mod clifford;
 pub mod cloze;
 pub mod coherence;
+#[cfg(feature = "training")]
 pub mod gradient_memory;
 pub mod predictive_coder;
 pub mod dimension;
@@ -57,12 +58,17 @@ pub mod arc_brain;
 pub mod arc_dsl;
 pub mod neuron;
 pub mod systems;
+pub mod brain;
 pub mod types;
 pub mod metacognition;
 pub mod reasoning;
 pub mod service;
+pub mod runtime;
 pub mod spectral;
 pub mod text_autoencoder;
+#[cfg(feature = "training")]
 pub mod training_objectives;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod tools_builtin;
 #[cfg(feature = "wasm-bindgen")]
 pub mod wasm;

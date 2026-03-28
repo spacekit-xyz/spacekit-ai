@@ -143,6 +143,7 @@ impl MirrorDimension {
     }
 
     /// Train one epoch; returns mean loss and accuracy (0.0..1.0).
+    #[cfg(feature = "training")]
     pub fn train_epoch(
         &mut self,
         data: &[crate::types::Sample],
@@ -174,6 +175,7 @@ impl MirrorDimension {
     /// Train one epoch with minibatch SGD: B clones updated in parallel, then params averaged.
     /// Gradient-only (no STDP/prune/grow/geometry) for deterministic averaging.
     /// `batch_size` 1 is equivalent to sequential; use 16–64 for speed on multi-core.
+    #[cfg(feature = "training")]
     pub fn train_epoch_minibatch(
         &mut self,
         data: &[Sample],

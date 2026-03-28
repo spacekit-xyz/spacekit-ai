@@ -145,6 +145,7 @@ impl LearnedRouter {
     }
 
     /// One training step: develop lattice with this (input, group_id) pair.
+    #[cfg(feature = "training")]
     pub fn train_step(
         &mut self,
         input: &[f32],

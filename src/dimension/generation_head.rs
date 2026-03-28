@@ -137,6 +137,7 @@ impl GenerationHead {
 
     /// Train on one (conditioning, target_text) pair using teacher forcing.
     /// Returns average cross-entropy loss over characters.
+    #[cfg(feature = "training")]
     pub fn train_step(&mut self, cond: &[f32], target: &str, lr: f32) -> f32 {
         let target_bytes: Vec<u8> = target.bytes().take(200).collect();
         if target_bytes.is_empty() {

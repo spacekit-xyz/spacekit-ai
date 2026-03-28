@@ -4,10 +4,14 @@ src/.DS_Store
 ./src/.DS_Store
 
 docs
+agent-data/
 data/audio
+data/badwords
+data/
 data/pathology
 data/routekit-agent
 data/test-agent
 data/arc-agi
+growformer-pkg
 micro-brains
 visualizer

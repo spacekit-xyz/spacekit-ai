@@ -13,29 +13,40 @@ crate-type = ["cdylib", "rlib"]
 [[bin]]
 name = "growformer"
 path = "src/main.rs"
+required-features = ["cli"]
 
 [[bin]]
 name = "growformer-demos"
 path = "src/demos.rs"
+required-features = ["cli"]
 
 [[bin]]
 name = "growformer-node"
 path = "src/server.rs"
+required-features = ["server"]
+
+# Inference-only runtime — builds with --no-default-features (no clap, rayon, etc.)
+[[bin]]
+name = "growformer-runtime"
+path = "src/runtime_main.rs"
 
 [[bin]]
 name = "growformer-arc"
 path = "src/arc_brain_main.rs"
+required-features = ["cli"]
 
 [[bin]]
 name = "growformer-arc-agi-2x2"
 path = "src/arc_agi_2x2.rs"
+required-features = ["cli"]
 
 [features]
 default = ["native", "server", "parallel", "cli"]
 native = ["reqwest"]
 server = ["axum", "tokio", "tower-http", "async-stream", "futures-core", "uuid"]
 parallel = ["rayon"]
-cli = ["clap", "indicatif", "mnist", "kiddo"]
+training = []
+cli = ["clap", "indicatif", "mnist", "kiddo", "training"]
 wasm-bindgen = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:console_error_panic_hook"]
 
 [dependencies]
@@ -56,7 +67,8 @@ tower-http = { version = "0.5", features = ["cors"], optional = true }
 async-stream = { version = "0.3", optional = true }
 futures-core = { version = "0.3", optional = true }
 
-wasm-bindgen = { version = "0.2", optional = true }
+# Pin to match `wasm-bindgen-cli` (schema versions must match exactly).
+wasm-bindgen = { version = "=0.2.115", optional = true }
 serde-wasm-bindgen = { version = "0.6", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 

@@ -1697,6 +1697,7 @@ impl GroupGenEnv {
     /// Encodes entire target as binary token IDs, trains in one substrate tick.
     /// Then runs a second gradient-only pass with an EOS-emphasized target to
     /// strongly push trailing positions toward zero.
+    #[cfg(feature = "training")]
     pub fn train_step(&mut self, cond: &[f32], target: &str, rng: &mut impl Rng) -> f32 {
         if self.frozen {
             return 0.0;
@@ -2608,6 +2609,7 @@ impl IndexedGenEnv {
     /// Build from pre-constructed components plus semantic topic labels.
     /// Each topic gets a compact sub-lattice that acts like a living index
     /// inside the coarse group.
+    #[cfg(feature = "training")]
     pub fn from_tagged_parts(
         dictionary: TokenDictionary,
         codebook: AlgebraicCodebook,
@@ -3973,9 +3975,7 @@ impl IndexedGenEnv {
             }
         }
 
-        // Medium-low confidence: SpaceTime Gradient Memory composition
-        // Retrieves k-nearest programs and optimizes a blended representation
-        // in Cl(1,7) STA space via test-time gradient descent.
+        #[cfg(feature = "training")]
         {
             use crate::gradient_memory::{GradientMemory, GradientMemoryConfig, MemorySource};
             let top_k = self.nearest_responses_k(cond, 4);
@@ -4163,6 +4163,7 @@ impl IndexedGenEnv {
 
     /// Online learning: train on a correction by developing the lattice
     /// with the new (embedding, correction) pair. No backprop.
+    #[cfg(feature = "training")]
     pub fn train_step(&mut self, cond: &[f32], target: &str, _rng: &mut impl Rng) -> f32 {
         if self.frozen { return 0.0; }
         let pairs = vec![(cond.to_vec(), target.to_string())];

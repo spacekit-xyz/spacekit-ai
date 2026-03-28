@@ -436,6 +436,7 @@ impl GroupAdapter {
     /// SGD training step: given the gradient signal from gen head loss.
     /// `cond_grad` is the gradient of loss w.r.t. the adapted vector (bridge_dim).
     /// `h_raw` is the raw encoder vector for this sample.
+    #[cfg(feature = "training")]
     pub fn train_step(&mut self, h_raw: &[f32], cond_grad: &[f32], lr: f32) {
         if self.frozen { return; }
         debug_assert_eq!(h_raw.len(), self.raw_dim);

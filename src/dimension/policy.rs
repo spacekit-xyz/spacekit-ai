@@ -43,6 +43,7 @@ impl Policy {
     }
 
     /// One training step: one-hot target for action index. Returns MSE loss.
+    #[cfg(feature = "training")]
     pub fn train_step(
         &mut self,
         state: &[f32],
@@ -108,6 +109,7 @@ impl ContinuousPolicy {
     }
 
     /// One training step: MSE to target action. Returns MSE loss.
+    #[cfg(feature = "training")]
     pub fn train_step(
         &mut self,
         state: &[f32],

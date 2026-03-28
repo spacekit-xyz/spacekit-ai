@@ -95,6 +95,7 @@ impl MicroBrain {
     }
 
     /// One training step: develop lattice with this (input, class) pair.
+    #[cfg(feature = "training")]
     pub fn train_step(&mut self, input: &[f32], target_idx: usize, _rng: &mut impl Rng) -> f32 {
         if self.frozen || input.len() != self.input_dim || target_idx >= self.output_dim {
             return 0.0;
@@ -108,6 +109,7 @@ impl MicroBrain {
     }
 
     /// Build from labeled data in one pass.
+    #[cfg(feature = "training")]
     pub fn build_from_data(
         role: MicroBrainRole,
         input_dim: usize,
@@ -293,6 +295,7 @@ impl CentroidCoordinator {
     }
 
     /// Develop from (input, output) pairs in one pass.
+    #[cfg(feature = "training")]
     pub fn develop(&mut self, pairs: &[(Vec<f32>, Vec<f32>)]) {
         for (input, output) in pairs {
             let mut found = false;
@@ -331,6 +334,7 @@ impl CentroidCoordinator {
     }
 
     /// Train step returns MSE loss (for API compatibility).
+    #[cfg(feature = "training")]
     pub fn train_step(&mut self, input: &[f32], target: &[f32]) -> f32 {
         self.develop(&[(input.to_vec(), target.to_vec())]);
         let pred = self.predict(input);
@@ -534,6 +538,7 @@ impl MetaBrain {
     }
 
     /// Train the coordinator: develop with this (micro-brain output, target conditioning) pair.
+    #[cfg(feature = "training")]
     pub fn train_coordinator_step(
         &mut self,
         h_raw: &[f32],

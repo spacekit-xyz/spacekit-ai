@@ -57,6 +57,18 @@ struct Args {
     #[arg(long, value_name = "PATH", default_value = "brain.bin")]
     brain_output: String,
 
+    /// Brain package / agent display name (embedded in exported brain header and "who are you" replies).
+    #[arg(long, value_name = "TEXT")]
+    brain_name: Option<String>,
+
+    /// Short description embedded in the exported brain package header.
+    #[arg(long, value_name = "TEXT")]
+    brain_description: Option<String>,
+
+    /// Author or org string embedded as `BrainPackageHeader.author` (default: swtch.ai).
+    #[arg(long, value_name = "TEXT")]
+    brain_author: Option<String>,
+
     /// Run inference on a trained brain.
     #[arg(long)]
     infer: bool,
@@ -72,6 +84,11 @@ struct Args {
     /// Retrain only the gen env for a specific group index (loads existing brain, retrains one group, re-exports).
     #[arg(long, value_name = "GROUP_IDX")]
     retrain_gen: Option<usize>,
+
+    /// Custom data directory containing train_*.jsonl files. When set, ONLY this
+    /// directory is loaded (skips default m5/agent/routekit). Use for focused micro-brains.
+    #[arg(long, value_name = "DIR")]
+    data_dir: Option<String>,
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -119,6 +136,10 @@ fn main() {
             args.brain_gen_replicas,
             args.validate_brain_training,
             args.auto,
+            args.brain_name.as_deref(),
+            args.brain_description.as_deref(),
+            args.brain_author.as_deref(),
+            args.data_dir.as_deref(),
         ) {
             eprintln!("Failed to train brain: {}", e);
             std::process::exit(1);
@@ -134,6 +155,9 @@ fn main() {
             args.brain_gen_epochs,
             args.brain_gen_replicas,
             args.auto,
+            args.brain_name.as_deref(),
+            args.brain_description.as_deref(),
+            args.brain_author.as_deref(),
         ) {
             eprintln!("Retrain failed: {}", e);
             std::process::exit(1);
@@ -159,6 +183,28 @@ fn main() {
 // Retrain a single gen group: loads existing brain, retrains one group, re-exports
 // =============================================================================
 
+fn apply_brain_package_cli(
+    svc: &mut LanguageService,
+    name: Option<&str>,
+    description: Option<&str>,
+    author: Option<&str>,
+) {
+    let mut n = svc.agent_name.clone();
+    let mut c = svc.agent_creator.clone();
+    if let Some(x) = name {
+        n = x.to_string();
+    }
+    if let Some(x) = author {
+        c = x.to_string();
+    }
+    if name.is_some() || author.is_some() {
+        svc.set_identity(&n, &c);
+    }
+    if let Some(d) = description {
+        svc.set_brain_package_description(d);
+    }
+}
+
 fn retrain_single_gen(
     target_group: usize,
     brain_path: &str,
@@ -166,12 +212,16 @@ fn retrain_single_gen(
     gen_epochs_override: u32,
     gen_replicas: u32,
     auto: bool,
+    brain_name: Option<&str>,
+    brain_description: Option<&str>,
+    brain_author: Option<&str>,
 ) -> Result<(), String> {
     let data = std::fs::read(brain_path)
         .map_err(|e| format!("Failed to read {}: {}", brain_path, e))?;
 
     let mut svc = LanguageService::new_default()?;
     svc.load_brain(&data)?;
+    apply_brain_package_cli(&mut svc, brain_name, brain_description, brain_author);
     println!("Loaded brain from {} ({} KB)", brain_path, data.len() / 1024);
 
     let dm = svc.active_dm();
@@ -365,22 +415,18 @@ fn run_inference(brain_path: &str, prompt: Option<&str>) -> Result<(), String> {
     let data = std::fs::read(brain_path)
         .map_err(|e| format!("Failed to read {}: {}", brain_path, e))?;
 
-    let mut svc = LanguageService::new_default()?;
-    svc.load_brain(&data)?;
+    let mut rt = growformer::runtime::Runtime::from_brain_bytes(&data)?;
 
-    let dm = svc.active_dm();
-    let n_groups = dm.main.group_order.len();
-    let n_gen = dm.group_gen_envs.len();
-    let n_code = dm.group_code_envs.len();
-    let has_router = dm.observer.learned_router.is_some();
-    let has_classifier = dm.action_classifier.is_some();
-
+    let info = rt.brain_info();
     println!("Brain loaded: {}", brain_path);
-    println!("  Groups: {}", n_groups);
-    println!("  Router: {}", has_router);
-    println!("  Classifier: {}", has_classifier);
-    println!("  Gen envs: {} groups", n_gen);
-    println!("  Code envs: {} groups", n_code);
+    println!("  Agent: {} (by {})", info.agent_name, info.agent_creator);
+    println!("  Groups: {}", info.num_groups);
+    println!("  Router: {}", info.has_router);
+    println!("  Classifier: {}", info.has_classifier);
+    println!("  Gen envs: {} groups", info.gen_envs);
+    println!("  Code envs: {} groups", info.code_envs);
+
+    let dm = rt.svc.active_dm();
     for (gidx, env) in &dm.group_gen_envs {
         let hopf_info = if env.hopf_table.is_some() { "hopf=yes" } else { "hopf=no" };
         let cb_info = env.codebook.as_ref().map(|cb| format!("proto={} arch={}", cb.has_prototypes(), cb.archetypes.len())).unwrap_or_else(|| "no-codebook".to_string());
@@ -394,28 +440,20 @@ fn run_inference(brain_path: &str, prompt: Option<&str>) -> Result<(), String> {
     }
 
     if let Some(prompt_text) = prompt {
-        run_single_prompt(&mut svc, prompt_text);
+        run_single_prompt(&mut rt, prompt_text);
         return Ok(());
     }
 
-    run_conversation_repl(&mut svc);
+    run_conversation_repl(&mut rt);
 
     Ok(())
 }
 
-fn run_single_prompt(svc: &mut LanguageService, prompt: &str) {
-    let action_result = svc.active_dm_mut().route_text_to_action_stateless(prompt);
-    let is_coding = matches!(
-        &action_result,
-        Ok(ref a) if matches!(a.action_type, growformer::dimension::action::ActionType::CodingAssist)
-    );
-    if let Ok(ref action) = action_result {
-        println!("  route: {:?} (conf={:.2}) group={:?}",
-            action.action_type, action.confidence, action.target_group_id);
-    }
-
-    match svc.generation(prompt) {
-        Ok((_, resp)) => {
+fn run_single_prompt(rt: &mut growformer::runtime::Runtime, prompt: &str) {
+    match rt.prompt(prompt) {
+        Ok(resp) => {
+            println!("  route: {} (conf={:.2}) group={:?}",
+                resp.action_type, resp.action_confidence, resp.target_group);
             if !resp.text.is_empty() {
                 println!("  gen (conf={:.2}): {}", resp.confidence, resp.text);
             }
@@ -423,167 +461,21 @@ fn run_single_prompt(svc: &mut LanguageService, prompt: &str) {
         Err(e) => eprintln!("  gen error: {}", e),
     }
 
-    if is_coding {
-        match svc.codegen(prompt) {
-            Ok((_, Some(code))) => {
-                if !code.code.is_empty() {
-                    println!("  code [{}]: {}", code.kind, code.code);
-                }
-            }
-            Ok((_, None)) => {}
-            Err(e) => eprintln!("  code error: {}", e),
+    match rt.codegen(prompt) {
+        Ok(Some(code)) if !code.code.is_empty() => {
+            println!("  code [{}]: {}", code.kind, code.code);
         }
+        Ok(_) => {}
+        Err(e) => eprintln!("  code error: {}", e),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tool execution — inline executors for the 4 built-in tools
-// ---------------------------------------------------------------------------
 
 fn execute_tool(call: &growformer::dimension::tool::ToolCallInfo) -> growformer::dimension::tool::ToolResult {
-    use growformer::dimension::tool::ToolResult;
-    match call.tool_name.as_str() {
-        "calculator" => {
-            let expr = call.arguments.get("expression").map(|s| s.as_str()).unwrap_or("");
-            let result = eval_arithmetic(expr);
-            ToolResult { tool_name: "calculator".into(), success: result.is_ok(), output: result.unwrap_or_else(|e| e) }
-        }
-        "file_reader" => {
-            let path = call.arguments.get("path").map(|s| s.as_str()).unwrap_or("");
-            match std::fs::read_to_string(path) {
-                Ok(content) => {
-                    let preview: String = content.lines().take(50).collect::<Vec<_>>().join("\n");
-                    let total = content.lines().count();
-                    let output = if total > 50 {
-                        format!("{}\n... ({} more lines)", preview, total - 50)
-                    } else {
-                        preview
-                    };
-                    ToolResult { tool_name: "file_reader".into(), success: true, output }
-                }
-                Err(e) => ToolResult { tool_name: "file_reader".into(), success: false, output: e.to_string() },
-            }
-        }
-        "code_runner" => {
-            let code = call.arguments.get("code").map(|s| s.as_str()).unwrap_or("");
-            let lang = call.arguments.get("language").map(|s| s.as_str()).unwrap_or("python");
-            let (cmd, args) = match lang {
-                "python" => ("python3", vec!["-c", code]),
-                "bash" | "shell" => ("bash", vec!["-c", code]),
-                "ruby" => ("ruby", vec!["-e", code]),
-                "node" | "javascript" => ("node", vec!["-e", code]),
-                _ => ("python3", vec!["-c", code]),
-            };
-            match std::process::Command::new(cmd)
-                .args(&args)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .output()
-            {
-                Ok(output) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let text = if stdout.is_empty() { stderr.to_string() } else { stdout.to_string() };
-                    let truncated = if text.len() > 2000 { format!("{}...(truncated)", &text[..2000]) } else { text };
-                    ToolResult { tool_name: "code_runner".into(), success: output.status.success(), output: truncated }
-                }
-                Err(e) => ToolResult { tool_name: "code_runner".into(), success: false, output: e.to_string() },
-            }
-        }
-        "web_search" => {
-            let query = call.arguments.get("query").map(|s| s.as_str()).unwrap_or("");
-            ToolResult {
-                tool_name: "web_search".into(),
-                success: false,
-                output: format!("Web search not yet available. Query: {}", query),
-            }
-        }
-        _ => ToolResult {
-            tool_name: call.tool_name.clone(),
-            success: false,
-            output: format!("Unknown tool: {}", call.tool_name),
-        },
-    }
+    growformer::tools_builtin::execute_tool(call)
 }
 
-fn eval_arithmetic(expr: &str) -> Result<String, String> {
-    let clean: String = expr.chars().filter(|c| c.is_ascii_digit() || " .+-*/()%".contains(*c)).collect();
-    if clean.is_empty() { return Err("empty expression".into()); }
-    let tokens = tokenize_math(&clean)?;
-    let result = eval_tokens(&tokens)?;
-    Ok(format!("{}", result))
-}
-
-#[derive(Debug, Clone)]
-enum MathToken { Num(f64), Op(char), LParen, RParen }
-
-fn tokenize_math(expr: &str) -> Result<Vec<MathToken>, String> {
-    let mut tokens = Vec::new();
-    let mut chars = expr.chars().peekable();
-    while let Some(&ch) = chars.peek() {
-        if ch.is_whitespace() { chars.next(); continue; }
-        if ch.is_ascii_digit() || ch == '.' {
-            let mut num = String::new();
-            while let Some(&c) = chars.peek() {
-                if c.is_ascii_digit() || c == '.' { num.push(c); chars.next(); } else { break; }
-            }
-            tokens.push(MathToken::Num(num.parse::<f64>().map_err(|e| e.to_string())?));
-        } else if "+-*/%".contains(ch) {
-            tokens.push(MathToken::Op(ch)); chars.next();
-        } else if ch == '(' { tokens.push(MathToken::LParen); chars.next();
-        } else if ch == ')' { tokens.push(MathToken::RParen); chars.next();
-        } else { chars.next(); }
-    }
-    Ok(tokens)
-}
-
-fn eval_tokens(tokens: &[MathToken]) -> Result<f64, String> {
-    let mut pos = 0;
-    let result = parse_expr(tokens, &mut pos)?;
-    Ok(result)
-}
-
-fn parse_expr(tokens: &[MathToken], pos: &mut usize) -> Result<f64, String> {
-    let mut left = parse_term(tokens, pos)?;
-    while *pos < tokens.len() {
-        match tokens[*pos] {
-            MathToken::Op('+') => { *pos += 1; left += parse_term(tokens, pos)?; }
-            MathToken::Op('-') => { *pos += 1; left -= parse_term(tokens, pos)?; }
-            _ => break,
-        }
-    }
-    Ok(left)
-}
-
-fn parse_term(tokens: &[MathToken], pos: &mut usize) -> Result<f64, String> {
-    let mut left = parse_factor(tokens, pos)?;
-    while *pos < tokens.len() {
-        match tokens[*pos] {
-            MathToken::Op('*') => { *pos += 1; left *= parse_factor(tokens, pos)?; }
-            MathToken::Op('/') => { *pos += 1; let r = parse_factor(tokens, pos)?; if r == 0.0 { return Err("division by zero".into()); } left /= r; }
-            MathToken::Op('%') => { *pos += 1; let r = parse_factor(tokens, pos)?; if r == 0.0 { return Err("modulo by zero".into()); } left %= r; }
-            _ => break,
-        }
-    }
-    Ok(left)
-}
-
-fn parse_factor(tokens: &[MathToken], pos: &mut usize) -> Result<f64, String> {
-    if *pos >= tokens.len() { return Err("unexpected end of expression".into()); }
-    match &tokens[*pos] {
-        MathToken::Num(n) => { let v = *n; *pos += 1; Ok(v) }
-        MathToken::Op('-') => { *pos += 1; let v = parse_factor(tokens, pos)?; Ok(-v) }
-        MathToken::LParen => {
-            *pos += 1;
-            let v = parse_expr(tokens, pos)?;
-            if *pos < tokens.len() && matches!(tokens[*pos], MathToken::RParen) { *pos += 1; }
-            Ok(v)
-        }
-        _ => Err(format!("unexpected token: {:?}", tokens[*pos])),
-    }
-}
-
-fn run_conversation_repl(svc: &mut LanguageService) {
+fn run_conversation_repl(rt: &mut growformer::runtime::Runtime) {
+    let svc = &mut rt.svc;
     let ocean = svc.personality.as_vec();
     println!("\n=== Growformer Conversation REPL ===");
     println!("  Agent: {} (by {})", svc.agent_name, svc.agent_creator);
@@ -605,7 +497,7 @@ fn run_conversation_repl(svc: &mut LanguageService) {
 
     let stdin = std::io::stdin();
     loop {
-        eprint!("[turn {}] > ", svc.conversation.turn_count() + 1);
+        eprint!("[turn {}] > ", rt.turn_count() + 1);
         let _ = std::io::Write::flush(&mut std::io::stderr());
         let mut line = String::new();
         match stdin.read_line(&mut line) {
@@ -616,12 +508,11 @@ fn run_conversation_repl(svc: &mut LanguageService) {
                 if trimmed == "quit" || trimmed == "exit" { break; }
 
                 if let Some(cmd) = trimmed.strip_prefix('/') {
-                    handle_repl_command(svc, cmd);
+                    handle_repl_command(rt, cmd);
                     continue;
                 }
 
-                // Check for tool call first — execute inline if matched
-                if let Some(tool_call) = svc.try_tool_call(trimmed) {
+                if let Some(tool_call) = rt.try_tool_call(trimmed) {
                     let result = execute_tool(&tool_call);
                     let status = if result.success { "ok" } else { "error" };
                     println!("  [tool: {} ({})]", tool_call.tool_name, status);
@@ -634,30 +525,29 @@ fn run_conversation_repl(svc: &mut LanguageService) {
                         }
                     }
 
-                    // Feed tool result back for a composed conversational response
-                    match svc.generation_with_tool_result(trimmed, &result) {
-                        Ok((_action, resp)) => {
-                            if !resp.text.is_empty() && !resp.text.starts_with("[tool_call:") {
-                                println!();
-                                println!("  {}", resp.text);
-                            }
+                    match rt.respond_with_tool_result(trimmed, &result) {
+                        Ok(resp) if !resp.text.is_empty() && !resp.text.starts_with("[tool_call:") => {
+                            println!();
+                            println!("  {}", resp.text);
                         }
-                        Err(_) => {}
+                        _ => {}
                     }
                 } else {
-                    match svc.converse(trimmed) {
-                        Ok((action, resp)) => {
-                            if let Some(gid) = action.target_group_id {
-                                eprint!("  [route: {:?} g={} conf={:.2}] ",
-                                    action.action_type, gid, action.confidence);
+                    match rt.converse(trimmed) {
+                        Ok(resp) => {
+                            if resp.target_group.is_some() {
+                                eprint!("  [route: {} g={} conf={:.2}] ",
+                                    resp.action_type,
+                                    resp.target_group.unwrap(),
+                                    resp.action_confidence);
                             }
                             println!();
                             if !resp.text.is_empty() {
                                 println!("  {} (conf={:.2})", resp.text, resp.confidence);
                             }
 
-                            match svc.codegen(trimmed) {
-                                Ok((_, Some(code))) if !code.code.is_empty() => {
+                            match rt.codegen(trimmed) {
+                                Ok(Some(code)) if !code.code.is_empty() => {
                                     println!("  code [{}]: {}", code.kind, code.code);
                                 }
                                 _ => {}
@@ -676,34 +566,38 @@ fn run_conversation_repl(svc: &mut LanguageService) {
     }
 }
 
-fn handle_repl_command(svc: &mut LanguageService, cmd: &str) {
+fn handle_repl_command(rt: &mut growformer::runtime::Runtime, cmd: &str) {
     use growformer::service::OceanProfile;
 
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     match parts.first().copied() {
         Some("personality") | Some("p") => {
-            match parts.get(1).copied() {
+            let profile = match parts.get(1).copied() {
                 Some("assistant") => {
-                    svc.personality = OceanProfile::assistant();
                     println!("  Personality: assistant (balanced, professional)");
+                    Some(OceanProfile::assistant())
                 }
                 Some("creative") => {
-                    svc.personality = OceanProfile::creative();
                     println!("  Personality: creative (open, enthusiastic)");
+                    Some(OceanProfile::creative())
                 }
                 Some("engineer") => {
-                    svc.personality = OceanProfile::engineer();
                     println!("  Personality: engineer (precise, structured)");
+                    Some(OceanProfile::engineer())
                 }
                 Some("analyst") => {
-                    svc.personality = OceanProfile::analyst();
                     println!("  Personality: analyst (cautious, thorough)");
+                    Some(OceanProfile::analyst())
                 }
                 _ => {
                     println!("  Usage: /personality <assistant|creative|engineer|analyst>");
+                    None
                 }
+            };
+            if let Some(p) = profile {
+                rt.set_personality(p);
             }
-            let v = svc.personality.as_vec();
+            let v = rt.personality().as_vec();
             println!("  [O={:.1} C={:.1} E={:.1} A={:.1} N={:.1}]", v[0], v[1], v[2], v[3], v[4]);
         }
         Some("ocean") => {
@@ -712,30 +606,31 @@ fn handle_repl_command(svc: &mut LanguageService, cmd: &str) {
                     .filter_map(|s| s.parse::<f32>().ok())
                     .collect();
                 if vals.len() == 5 {
-                    svc.personality = OceanProfile {
+                    rt.set_personality(OceanProfile {
                         openness: vals[0].clamp(0.0, 1.0),
                         conscientiousness: vals[1].clamp(0.0, 1.0),
                         extraversion: vals[2].clamp(0.0, 1.0),
                         agreeableness: vals[3].clamp(0.0, 1.0),
                         neuroticism: vals[4].clamp(0.0, 1.0),
-                    };
-                    let v = svc.personality.as_vec();
+                    });
+                    let v = rt.personality().as_vec();
                     println!("  Custom OCEAN: [O={:.1} C={:.1} E={:.1} A={:.1} N={:.1}]",
                         v[0], v[1], v[2], v[3], v[4]);
                 } else {
                     println!("  Usage: /ocean 0.5 0.7 0.5 0.6 0.3");
                 }
             } else {
-                let v = svc.personality.as_vec();
+                let v = rt.personality().as_vec();
                 println!("  Current: [O={:.1} C={:.1} E={:.1} A={:.1} N={:.1}]", v[0], v[1], v[2], v[3], v[4]);
                 println!("  Usage: /ocean <O> <C> <E> <A> <N>  (each 0.0-1.0)");
             }
         }
         Some("reset") => {
-            svc.reset_conversation();
+            rt.reset_conversation();
             println!("  Conversation cleared.");
         }
         Some("history") | Some("h") => {
+            let svc = &rt.svc;
             if svc.conversation.is_empty() {
                 println!("  (no conversation history)");
             } else {
@@ -758,10 +653,11 @@ fn handle_repl_command(svc: &mut LanguageService, cmd: &str) {
             if prompt.is_empty() {
                 println!("  Usage: /single <prompt text>");
             } else {
-                run_single_prompt(svc, &prompt);
+                run_single_prompt(rt, &prompt);
             }
         }
         Some("status") => {
+            let svc = &rt.svc;
             let dm = svc.active_dm();
             println!("  Agent: {} (by {})", svc.agent_name, svc.agent_creator);
             let v = svc.personality.as_vec();
@@ -781,11 +677,11 @@ fn handle_repl_command(svc: &mut LanguageService, cmd: &str) {
             if !path_buf.exists() {
                 println!("  Path not found: {}", path_buf.display());
             } else {
+                let svc = &mut rt.svc;
                 let mut count = 0usize;
                 index_directory(svc, path_buf, &mut count);
                 println!("  Indexed {} files (hybrid AST-lite + semantic + relational)", count);
 
-                // Try to load git history for edit correlation
                 let git_dir = find_git_root(path_buf);
                 if let Some(ref git_root) = git_dir {
                     match std::process::Command::new("git")
@@ -808,6 +704,7 @@ fn handle_repl_command(svc: &mut LanguageService, cmd: &str) {
             }
         }
         Some("project") => {
+            let svc = &rt.svc;
             if svc.project_model.entity_count() == 0 {
                 println!("  No project indexed. Use /index <path> first.");
             } else {
@@ -828,6 +725,7 @@ fn handle_repl_command(svc: &mut LanguageService, cmd: &str) {
         Some("paramecium") | Some("pm") => {
             let prompt = parts[1..].join(" ");
             if prompt.is_empty() {
+                let svc = &rt.svc;
                 let status = if svc.paramecium.is_some() {
                     let p = svc.paramecium.as_ref().unwrap();
                     format!("{} programs, {} bytes", p.program_count(), p.memory_bytes())
@@ -837,9 +735,9 @@ fn handle_repl_command(svc: &mut LanguageService, cmd: &str) {
                 println!("  Paramecium: {}", status);
                 println!("  Usage: /paramecium <prompt>  or  /pm <prompt>");
             } else {
-                match svc.paramecium_respond(&prompt) {
-                    Ok((action, resp)) => {
-                        println!("  [paramecium: {} conf={:.2}]", action.reason, action.confidence);
+                match rt.paramecium(&prompt) {
+                    Ok(resp) => {
+                        println!("  [paramecium: conf={:.2}]", resp.action_confidence);
                         println!();
                         if !resp.text.is_empty() {
                             println!("  {}", resp.text);
@@ -1152,6 +1050,10 @@ fn train_brain(
     gen_replicas: u32,
     validate: bool,
     auto: bool,
+    brain_name: Option<&str>,
+    brain_description: Option<&str>,
+    brain_author: Option<&str>,
+    data_dir: Option<&str>,
 ) -> Result<(), String> {
     println!("=== Full Neural Brain Training ===\n");
     if validate {
@@ -1159,7 +1061,18 @@ fn train_brain(
     }
     let mut rng = StdRng::seed_from_u64(42);
 
-    let mut samples = load_all_m5_training_data()?;
+    let mut samples = if let Some(dir) = data_dir {
+        let path = std::path::Path::new(dir);
+        if !path.exists() {
+            return Err(format!("Data directory not found: {}", dir));
+        }
+        println!("--- Custom data directory: {} ---", dir);
+        let mut all = Vec::new();
+        load_train_jsonl_dir(&mut all, path)?;
+        all
+    } else {
+        load_all_m5_training_data()?
+    };
     println!("Loaded {} training samples", samples.len());
     if max_samples > 0 && samples.len() > max_samples {
         samples.shuffle(&mut rng);
@@ -1233,6 +1146,7 @@ fn train_brain(
     println!("Discovered {} groups from data: {:?}", discovered_group_names.len(), discovered_group_names);
     let group_name_refs: Vec<&str> = discovered_group_names.iter().map(|s| s.as_str()).collect();
     let mut svc = LanguageService::new_with_groups(&group_name_refs)?;
+    apply_brain_package_cli(&mut svc, brain_name, brain_description, brain_author);
 
     // Compute both raw and bridged embeddings.
     // Bridged vectors for routing/classification; raw vectors for generation conditioning.
@@ -2097,9 +2011,10 @@ fn train_brain(
     }
 
     // ---------------------------------------------------------------
-    // Export brain
+    // Export BrainPackage: binary envelope (metadata JSON + DimensionManager JSON + personality JSON).
+    // Router, classifier, generation heads, group gen/code envs, etc. live inside the checkpoint.
     // ---------------------------------------------------------------
-    println!("\n--- Exporting Brain ---");
+    println!("\n--- Exporting Brain Package ---");
     let brain_bytes = svc.export_brain()?;
     let size_kb = brain_bytes.len() / 1024;
     std::fs::write(output_path, &brain_bytes).map_err(|e| format!("write failed: {}", e))?;
@@ -2119,64 +2034,68 @@ fn train_brain(
     }
 
     println!("\n--- Post-Training Inference Check ---");
-    let test_prompts = [
-        "help me reset my password",
-        "implement binary search in Python",
-        "explain the observer pattern",
-        "design a microservices architecture in Rust",
-        "my account is locked after too many failed attempts",
-        "write an addition function in Rust",
-        "explain the factory pattern using a restaurant analogy",
-        // Circle+spiral composition tests: novel combinations of trained skills
-        "write a subtraction function in Rust",
-        "write a multiplication function in Rust",
-        "implement a stack using an enum in Rust",
-        "explain how to combine iterators with error handling",
-        "what is the pattern for a struct with methods in Rust",
-    ];
-    for prompt in &test_prompts {
-        println!("\n  prompt: {:?}", prompt);
-        let action_result = svc.dm.route_text_to_action_stateless(prompt);
-        let is_coding = matches!(
-            &action_result,
-            Ok(ref a) if matches!(a.action_type, growformer::dimension::action::ActionType::CodingAssist)
-        );
-        if let Ok(ref action) = action_result {
-            println!("  action: {:?} (conf={:.2}) group={:?}", action.action_type, action.confidence, action.target_group_id);
-        }
-        if let Ok((_, resp)) = svc.generation(prompt) {
-            let r = &resp.text;
-            let r_end = truncate_to_char_boundary(r, 200);
-            println!("  gen [{}] (conf={:.2}): {:?}", resp.template_id, resp.confidence, &r[..r_end]);
-        }
-        if is_coding {
-            if let Ok((_, Some(code))) = svc.codegen(prompt) {
-                let c = &code.code;
-                let c_end = truncate_to_char_boundary(c, 200);
-                println!("  code [{}]: {:?}", code.kind, &c[..c_end]);
-            }
-        }
-    }
+    let skip_prompts = true; // Set to true to skip prompts
+    if !skip_prompts {
 
-    if validate {
-        use growformer::dimension::action::ActionType;
-        let checks: [(&str, ActionType); 3] = [
-            ("help me reset my password", ActionType::SupportTicket),
-            ("implement binary search in Python", ActionType::CodingAssist),
-            ("explain the observer pattern", ActionType::CodingAssist),
+
+        let test_prompts = [
+            "help me reset my password",
+            "implement binary search in Python",
+            "explain the observer pattern",
+            "design a microservices architecture in Rust",
+            "my account is locked after too many failed attempts",
+            "write an addition function in Rust",
+            "explain the factory pattern using a restaurant analogy",
+            // Circle+spiral composition tests: novel combinations of trained skills
+            "write a subtraction function in Rust",
+            "write a multiplication function in Rust",
+            "implement a stack using an enum in Rust",
+            "explain how to combine iterators with error handling",
+            "what is the pattern for a struct with methods in Rust",
         ];
-        for (prompt, expected) in &checks {
-            let action = svc.dm.route_text_to_action_stateless(prompt).map_err(|e| format!("route_text_to_action failed: {}", e))?;
-            if action.action_type != *expected {
-                return Err(format!(
-                    "validate: prompt {:?} expected action {:?}, got {:?}",
-                    prompt, expected, action.action_type
-                ));
+        for prompt in &test_prompts {
+            println!("\n  prompt: {:?}", prompt);
+            let action_result = svc.dm.route_text_to_action_stateless(prompt);
+            let is_coding = matches!(
+                &action_result,
+                Ok(ref a) if matches!(a.action_type, growformer::dimension::action::ActionType::CodingAssist)
+            );
+            if let Ok(ref action) = action_result {
+                println!("  action: {:?} (conf={:.2}) group={:?}", action.action_type, action.confidence, action.target_group_id);
+            }
+            if let Ok((_, resp)) = svc.generation(prompt) {
+                let r = &resp.text;
+                let r_end = truncate_to_char_boundary(r, 200);
+                println!("  gen [{}] (conf={:.2}): {:?}", resp.template_id, resp.confidence, &r[..r_end]);
+            }
+            if is_coding {
+                if let Ok((_, Some(code))) = svc.codegen(prompt) {
+                    let c = &code.code;
+                    let c_end = truncate_to_char_boundary(c, 200);
+                    println!("  code [{}]: {:?}", code.kind, &c[..c_end]);
+                }
             }
         }
-        println!("\n  Validate: action routing checks passed.");
-    }
 
+        if validate {
+            use growformer::dimension::action::ActionType;
+            let checks: [(&str, ActionType); 3] = [
+                ("help me reset my password", ActionType::SupportTicket),
+                ("implement binary search in Python", ActionType::CodingAssist),
+                ("explain the observer pattern", ActionType::CodingAssist),
+            ];
+            for (prompt, expected) in &checks {
+                let action = svc.dm.route_text_to_action_stateless(prompt).map_err(|e| format!("route_text_to_action failed: {}", e))?;
+                if action.action_type != *expected {
+                    return Err(format!(
+                        "validate: prompt {:?} expected action {:?}, got {:?}",
+                        prompt, expected, action.action_type
+                    ));
+                }
+            }
+            println!("\n  Validate: action routing checks passed.");
+        }    
+    }
     println!("\n=== Brain training complete ===");
     Ok(())
 }

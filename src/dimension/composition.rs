@@ -55,6 +55,7 @@ impl VirtualGroup {
 
     /// One gradient step on blend weights. Loss = (blended[0] - target[0])^2 for single output.
     /// Returns loss.
+    #[cfg(feature = "training")]
     pub fn train_step(
         &mut self,
         main: &mut MainDimension,

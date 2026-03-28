@@ -247,6 +247,7 @@ impl DimensionManager {
     /// Train one epoch in a named mirror.
     /// Train one epoch on the mirror. If `batch_size` is `Some(b)` with `b > 1`, uses minibatch SGD
     /// (B clones in parallel, then average params) for faster multi-core runs.
+    #[cfg(feature = "training")]
     pub fn train_mirror_epoch(
         &mut self,
         task_name: &str,
@@ -398,6 +399,7 @@ impl DimensionManager {
     /// Each entry is (samples, group_index): group_index is the index into main.group_order (0 = first group, etc.).
     /// Call after promotion so main.group_order.len() == data_per_group.len(). Uses input_dim from config.mirror_layer_sizes[0], hidden = 16, lr = 0.15.
     /// Samples are shuffled each epoch to avoid biasing toward the last class.
+    #[cfg(feature = "training")]
     pub fn train_and_set_router(
         &mut self,
         data_per_group: &[(&[crate::types::Sample], usize)],
@@ -438,6 +440,7 @@ impl DimensionManager {
     /// Train a LearnedRouter on (embedding, group_index) pairs from language data.
     /// `samples` is (embedding_vec, group_index). Returns (train_loss, accuracy).
     /// When `batch_size` is `Some(b)`, runs minibatch SGD: B clones train in parallel, then params are averaged (uses multiple cores).
+    #[cfg(feature = "training")]
     pub fn train_language_router(
         &mut self,
         samples: &[(Vec<f32>, usize)],
@@ -471,6 +474,7 @@ impl DimensionManager {
 
     /// Train the action classifier from (embedding, ActionType) pairs with balanced class sampling.
     /// Returns (loss, accuracy).
+    #[cfg(feature = "training")]
     pub fn train_action_classifier(
         &mut self,
         samples: &[(Vec<f32>, ActionType)],
@@ -497,6 +501,7 @@ impl DimensionManager {
     }
 
     /// Returns (trained VirtualGroup, accuracy on data). Use small data (e.g. 20–50 samples).
+    #[cfg(feature = "training")]
     pub fn train_composition(
         &mut self,
         group_ids: &[GroupId],

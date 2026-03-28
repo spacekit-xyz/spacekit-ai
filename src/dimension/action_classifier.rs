@@ -135,6 +135,7 @@ impl ActionClassifier {
     }
 
     /// Train one step: develop lattice with this (input, action) pair.
+    #[cfg(feature = "training")]
     pub fn train_step(&mut self, x: &[f32], target: &ActionType, _lr: f32) -> f32 {
         let idx = action_type_index(target);
         let pairs = vec![(x.to_vec(), ACTION_LABELS[idx].to_string())];
