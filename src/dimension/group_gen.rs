@@ -2646,6 +2646,27 @@ impl IndexedGenEnv {
         env
     }
 
+    /// Topic label for a root-lattice program using **subindex centroids** only (O(#topics)).
+    ///
+    /// The previous training path compared each root program against every program in every
+    /// topic sub-lattice to find a match — O(root × Σ topic programs), which stalls when the
+    /// root lattice is large (e.g. code lattice disabled, all capacity in gen).
+    pub fn topic_label_for_program_centroid(&self, prog_centroid: &[f32], default: &str) -> String {
+        if self.topic_subindex.is_empty() {
+            return default.to_string();
+        }
+        let mut best_name = default.to_string();
+        let mut best_sim = f32::NEG_INFINITY;
+        for sub in &self.topic_subindex {
+            let sim = gen_cosine_sim(prog_centroid, &sub.centroid);
+            if sim > best_sim {
+                best_sim = sim;
+                best_name = sub.topic_name.clone();
+            }
+        }
+        best_name
+    }
+
     /// Extract reusable schemas from program patterns.
     /// Finds positions that are invariant across similar programs (fixed)
     /// vs positions that vary (slots), enabling template-based generation.

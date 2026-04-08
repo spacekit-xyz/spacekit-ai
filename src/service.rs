@@ -881,11 +881,11 @@ impl LanguageService {
             .as_ref()
             .and_then(|h| h.inference_profile.clone());
         let inference_profile_opt = inference_profile_cached.as_deref();
-        let sentiment_cfg_bundle = self
+        let inference_thresholds_bundle = self
             .brain_plugins_manifest
             .as_ref()
-            .and_then(|m| m.sentiment.clone());
-        let sentiment_cfg_ref = sentiment_cfg_bundle.as_ref();
+            .and_then(|m| m.inference_thresholds.clone());
+        let inference_thresholds_ref = inference_thresholds_bundle.as_ref();
         let inference_harness = self.inference_harness.clone();
 
         let dm = self.active_dm_mut();
@@ -914,17 +914,17 @@ impl LanguageService {
                     println!("  [meta-route] concept={}, lang={}, conf={:.3}, margin={:.3} → group {}",
                         mr.concept.name(), mr.language.name(), mr.confidence, mr.margin, best_g);
                     let apply_meta = mr.margin >= 0.05 || mr.confidence >= 0.90 || group_idx.is_none();
-                    let sentiment_skip_gk = inference_harness.skip_weak_gk_for_meta_conditioning(
+                    let lattice_skip_weak_gk = inference_harness.skip_weak_gk_for_meta_conditioning(
                         dm,
                         inference_profile_opt,
-                        sentiment_cfg_ref,
+                        inference_thresholds_ref,
                         mr.concept,
                         mr.margin,
                         mr.confidence,
                     );
-                    if sentiment_skip_gk {
+                    if lattice_skip_weak_gk {
                         println!(
-                            "  [meta-route] sentiment brain: ignore weak GeneralKnowledge (margin={:.3}) for conditioning",
+                            "  [meta-route] lattice profile: ignore weak GeneralKnowledge (margin={:.3}) for conditioning",
                             mr.margin
                         );
                     } else if apply_meta {
@@ -1193,14 +1193,14 @@ impl LanguageService {
             let gen_preempt = inference_harness.try_preempt_generation(
                 dm,
                 inference_profile_opt,
-                sentiment_cfg_ref,
+                inference_thresholds_ref,
                 intent_text,
                 meta_result.as_ref(),
                 topic_hint.as_deref(),
             );
             let preempt_template_id = gen_preempt.as_ref().map(|o| o.template_id);
             // True when we emit classification grounded in the user's line without lattice retrieval.
-            let sentiment_direct_used = gen_preempt.is_some()
+            let lattice_user_anchored_used = gen_preempt.is_some()
                 && effective_gidx.is_some()
                 && broad_summary.is_none();
 
@@ -1218,7 +1218,7 @@ impl LanguageService {
             } else if let (Some(out), Some(gidx)) = (gen_preempt, effective_gidx) {
                 let mut e8 = [0.0f32; 8];
                 for i in 0..8.min(gen_conditioning.len()) { e8[i] = gen_conditioning[i]; }
-                println!("  [sentiment-direct] user-anchored classification (lattice paraphrase skipped)");
+                println!("  [lattice-direct] user-anchored classification (lattice paraphrase skipped)");
                 Some(E8Contribution {
                     group_idx: gidx,
                     lattice_point: e8,
@@ -1353,7 +1353,7 @@ impl LanguageService {
             } else if best_text.len() > 5 {
                 GeneratedResponse {
                     text: best_text,
-                    template_id: if sentiment_direct_used {
+                    template_id: if lattice_user_anchored_used {
                         preempt_template_id.unwrap().to_string()
                     } else {
                         format!("growformer_gen_{}", best_gidx)
@@ -1374,7 +1374,7 @@ impl LanguageService {
 
         // Sentence-level coherence guard: strip trailing sentences that diverge
         // from the prompt's topic (e.g., identity text appended to an IT query).
-        // Skip for user-anchored sentiment: the second sentence ("Grounded in…") is intentional.
+        // Skip for user-anchored lattice shortcut: the second sentence ("Grounded in…") is intentional.
         let resp = if let Some((_, ref bridged)) = encoded {
             if self
                 .inference_harness
@@ -1471,7 +1471,7 @@ impl LanguageService {
             .skip_metacog
         {
             println!(
-                "  [metacog] SKIP: user-anchored sentiment (retrieval-free; relevance gate N/A)"
+                "  [metacog] SKIP: user-anchored lattice shortcut (retrieval-free; relevance gate N/A)"
             );
             resp
         } else {
@@ -1864,15 +1864,8 @@ impl LanguageService {
                 env.topic_subindex[0].topic_name.clone()
             };
             for prog in &env.lattice.programs {
-                let topic = env.topic_subindex.iter()
-                    .find(|sub| {
-                        sub.lattice.programs.iter().any(|sp| {
-                            Self::fast_cosine(&sp.ema_centroid, &prog.ema_centroid) > 0.90
-                        })
-                    })
-                    .map(|sub| sub.topic_name.as_str())
-                    .unwrap_or(&default_topic);
-                mc.absorb_pair(&prog.ema_centroid, &prog.ema_centroid, topic);
+                let topic = env.topic_label_for_program_centroid(&prog.ema_centroid, &default_topic);
+                mc.absorb_pair(&prog.ema_centroid, &prog.ema_centroid, &topic);
                 pair_count += 1;
             }
         }
@@ -1883,15 +1876,8 @@ impl LanguageService {
                 env.topic_subindex[0].topic_name.clone()
             };
             for prog in &env.lattice.programs {
-                let topic = env.topic_subindex.iter()
-                    .find(|sub| {
-                        sub.lattice.programs.iter().any(|sp| {
-                            Self::fast_cosine(&sp.ema_centroid, &prog.ema_centroid) > 0.90
-                        })
-                    })
-                    .map(|sub| sub.topic_name.as_str())
-                    .unwrap_or(&default_topic);
-                mc.absorb_pair(&prog.ema_centroid, &prog.ema_centroid, topic);
+                let topic = env.topic_label_for_program_centroid(&prog.ema_centroid, &default_topic);
+                mc.absorb_pair(&prog.ema_centroid, &prog.ema_centroid, &topic);
                 pair_count += 1;
             }
         }

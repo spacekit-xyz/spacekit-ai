@@ -6,10 +6,11 @@ use std::sync::{Arc, OnceLock};
 use serde::{Deserialize, Serialize};
 use toml::Table;
 
-/// Typed `[sentiment]` table in [`BrainPluginsManifest`]; shared by the sentiment lattice plugin and serde.
+/// Numeric gates for lattice-style shortcut inference; serialized under **`[sentiment]`** in brain
+/// packages for backward compatibility with existing `.bin` exports.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct SentimentInferenceConfig {
+pub struct InferenceThresholds {
     pub meta_gk_margin: f32,
     pub meta_gk_confidence: f32,
     pub min_meta_confidence_user_anchored: f32,
@@ -19,7 +20,7 @@ pub struct SentimentInferenceConfig {
     pub ambiguous_line_confidence: f32,
 }
 
-impl Default for SentimentInferenceConfig {
+impl Default for InferenceThresholds {
     fn default() -> Self {
         Self {
             meta_gk_margin: 0.05,
@@ -32,52 +33,41 @@ impl Default for SentimentInferenceConfig {
     }
 }
 
-static SENTIMENT_INFERENCE_CONFIG: OnceLock<Arc<SentimentInferenceConfig>> = OnceLock::new();
-
-/// File / env defaults for sentiment plugin when the brain manifest has no `[sentiment]` table.
-pub fn sentiment_inference_config_disk() -> Arc<SentimentInferenceConfig> {
-    SENTIMENT_INFERENCE_CONFIG
-        .get_or_init(|| {
-            let mut c = SentimentInferenceConfig::default();
-            if let Ok(path) = std::env::var("GROWFORMER_SENTIMENT_INFERENCE_TOML") {
-                if let Ok(s) = std::fs::read_to_string(&path) {
-                    if let Ok(parsed) = toml::from_str::<SentimentInferenceConfig>(&s) {
-                        c = parsed;
-                    } else {
-                        eprintln!(
-                            "[sentiment-inference] failed to parse TOML at {}, using defaults",
-                            path
-                        );
-                    }
-                }
-            }
-            Arc::new(c)
-        })
-        .clone()
+/// Defaults from the embedded inference TOML when the brain manifest has no override table.
+pub fn inference_thresholds_disk() -> Arc<InferenceThresholds> {
+    static LOCK: OnceLock<Arc<InferenceThresholds>> = OnceLock::new();
+    LOCK.get_or_init(|| {
+        Arc::new(
+            crate::inference::inference_toml::inference_toml_loaded()
+                .thresholds
+                .clone(),
+        )
+    })
+    .clone()
 }
 
-/// Brain-bundled `[sentiment]` TOML overrides env-based `GROWFORMER_SENTIMENT_INFERENCE_TOML` when present.
-pub(crate) fn sentiment_cfg<'a>(
-    brain_override: Option<&'a SentimentInferenceConfig>,
-) -> Cow<'a, SentimentInferenceConfig> {
+/// Brain-bundled `[sentiment]` TOML overrides disk/env inference TOML when present.
+pub(crate) fn resolved_inference_thresholds<'a>(
+    brain_override: Option<&'a InferenceThresholds>,
+) -> Cow<'a, InferenceThresholds> {
     match brain_override {
         Some(c) => Cow::Borrowed(c),
-        None => Cow::Owned((*sentiment_inference_config_disk()).clone()),
+        None => Cow::Owned((*inference_thresholds_disk()).clone()),
     }
 }
 
 /// Bundled plugin settings shipped inside a brain `.bin` (UTF-8 TOML).
 ///
 /// Known top-level tables:
-/// - `[sentiment]` — typed thresholds (see [`SentimentInferenceConfig`]).
+/// - `[sentiment]` — numeric gates (see [`InferenceThresholds`]); serde key kept for existing brains.
 /// - `[language_detection]` — locale / detector hints (opaque table until a plugin consumes it).
 /// - `[badwords]` — list paths, severity, locales, etc. (opaque table).
 ///
 /// Add more `Option<Table>` fields here as plugins gain first-class support.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BrainPluginsManifest {
-    #[serde(default)]
-    pub sentiment: Option<SentimentInferenceConfig>,
+    #[serde(default, rename = "sentiment")]
+    pub inference_thresholds: Option<InferenceThresholds>,
     #[serde(default)]
     pub language_detection: Option<Table>,
     #[serde(default)]
@@ -87,7 +77,7 @@ pub struct BrainPluginsManifest {
 impl BrainPluginsManifest {
     /// True if anything would be written to the brain package plugins blob.
     pub fn has_embeddable_content(&self) -> bool {
-        self.sentiment.is_some()
+        self.inference_thresholds.is_some()
             || self
                 .language_detection
                 .as_ref()

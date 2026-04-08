@@ -67,6 +67,8 @@ pub mod types;
 pub mod metacognition;
 pub mod reasoning;
 pub mod inference;
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+pub mod project_gf;
 pub mod service;
 pub mod runtime;
 pub mod spectral;

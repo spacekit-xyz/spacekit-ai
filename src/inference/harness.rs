@@ -1,5 +1,5 @@
 //! Built-in inference plugins run through a small harness so [`crate::service::LanguageService`]
-//! stays orchestration-only while domain logic (e.g. sentiment lattice) lives under [`super::plugins`].
+//! stays orchestration-only while domain logic lives under [`super::plugins`].
 
 use std::sync::Arc;
 
@@ -8,7 +8,7 @@ use crate::dimension::DimensionManager;
 use crate::growformer_lang::MetaConcept;
 use crate::micro_brain::MetaResult;
 
-use super::manifest::{BrainPluginsManifest, SentimentInferenceConfig};
+use super::manifest::{BrainPluginsManifest, InferenceThresholds};
 
 /// Short-circuit generation: plugin-produced text replaces lattice `generate_with_e8_for_topic`.
 #[derive(Debug, Clone)]
@@ -31,7 +31,7 @@ pub trait BrainInferencePlugin: Send + Sync {
         &self,
         dm: &DimensionManager,
         inference_profile: Option<&str>,
-        sentiment_from_manifest: Option<&SentimentInferenceConfig>,
+        thresholds_from_manifest: Option<&InferenceThresholds>,
         concept: MetaConcept,
         margin: f32,
         confidence: f32,
@@ -39,7 +39,7 @@ pub trait BrainInferencePlugin: Send + Sync {
         let _ = (
             dm,
             inference_profile,
-            sentiment_from_manifest,
+            thresholds_from_manifest,
             concept,
             margin,
             confidence,
@@ -61,7 +61,7 @@ pub trait BrainInferencePlugin: Send + Sync {
         &self,
         dm: &DimensionManager,
         inference_profile: Option<&str>,
-        sentiment_from_manifest: Option<&SentimentInferenceConfig>,
+        thresholds_from_manifest: Option<&InferenceThresholds>,
         intent_text: &str,
         meta_result: Option<&MetaResult>,
         topic_hint: Option<&str>,
@@ -69,7 +69,7 @@ pub trait BrainInferencePlugin: Send + Sync {
         let _ = (
             dm,
             inference_profile,
-            sentiment_from_manifest,
+            thresholds_from_manifest,
             intent_text,
             meta_result,
             topic_hint,
@@ -114,7 +114,7 @@ impl InferenceHarness {
         &self,
         dm: &DimensionManager,
         inference_profile: Option<&str>,
-        sentiment_from_manifest: Option<&SentimentInferenceConfig>,
+        thresholds_from_manifest: Option<&InferenceThresholds>,
         concept: MetaConcept,
         margin: f32,
         confidence: f32,
@@ -123,7 +123,7 @@ impl InferenceHarness {
             p.skip_weak_gk_for_meta_conditioning(
                 dm,
                 inference_profile,
-                sentiment_from_manifest,
+                thresholds_from_manifest,
                 concept,
                 margin,
                 confidence,
@@ -147,7 +147,7 @@ impl InferenceHarness {
         &self,
         dm: &DimensionManager,
         inference_profile: Option<&str>,
-        sentiment_from_manifest: Option<&SentimentInferenceConfig>,
+        thresholds_from_manifest: Option<&InferenceThresholds>,
         intent_text: &str,
         meta_result: Option<&MetaResult>,
         topic_hint: Option<&str>,
@@ -156,7 +156,7 @@ impl InferenceHarness {
             if let Some(o) = p.try_preempt_generation(
                 dm,
                 inference_profile,
-                sentiment_from_manifest,
+                thresholds_from_manifest,
                 intent_text,
                 meta_result,
                 topic_hint,

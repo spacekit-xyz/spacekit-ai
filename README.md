@@ -230,8 +230,10 @@ growformer/
     ├── cloze.rs             — Cloze learning: contrastive fill-in-the-blank
     ├── inference/
     │   ├── harness.rs       — InferenceHarness, BrainInferencePlugin (orchestration hooks)
-    │   ├── manifest.rs      — BrainPluginsManifest, SentimentInferenceConfig (embedded TOML)
-    │   └── plugins/         — SentimentLatticePlugin + default_inference_harness()
+    │   ├── inference_toml.rs — Merged load: thresholds + `[rules]` (CLI / disk / env; wasm embed)
+    │   ├── manifest.rs      — BrainPluginsManifest, InferenceThresholds (`[sentiment]` serde key)
+    │   ├── project_gf.rs    — *.gf.toml project manifest (paths relative to manifest file)
+    │   └── plugins/         — LatticeShortcutsPlugin + default_inference_harness()
     ├── dimension/
     │   ├── group_gen.rs     — IndexedGenEnv: topic sub-lattices, forced routing
     │   ├── manager.rs       — DimensionManager: conditioning pipeline, Clifford rotors
@@ -252,9 +254,24 @@ growformer/
 
 ### Inference plugins (`src/inference/`)
 
-Optional **inference-time** behavior is implemented as compile-time plugins behind **`InferenceHarness`**, not as dynamic `.so` loads. The brain package may embed a UTF-8 TOML **`BrainPluginsManifest`** (`plugins_blob` on v2 packages); typed tables such as **`[sentiment]`** map to **`SentimentInferenceConfig`** in `manifest.rs`.
+Optional **inference-time** behavior is implemented as compile-time plugins behind **`InferenceHarness`**, not as dynamic `.so` loads. The brain package may embed a UTF-8 TOML **`BrainPluginsManifest`** (`plugins_blob` on v2 packages). Numeric gates are stored under the **`[sentiment]`** table name for existing brain exports; Rust exposes them as **`InferenceThresholds`** (`manifest.rs`).
 
-- **`LanguageService`** holds **`inference_harness`**, initialized with **`default_inference_harness()`** (currently registers **`SentimentLatticePlugin`**). Generation, meta-route guards, subject-keyword merging, coherence/metacog skips, and **`export_brain`** defaults are dispatched through the harness so **`service.rs`** stays orchestration-focused.
+Shortcut **lists** load at **runtime** from disk. Resolution order (native): **`--inference-toml`** / **`--project`** `*.gf.toml` **`[inference]`** table (registered via `inference::set_inference_toml_cli_paths`), then env **`GROWFORMER_INFERENCE_TOML`** (legacy: **`GROWFORMER_SENTIMENT_INFERENCE_TOML`**), then `data/sentiment/inference_sentiment.toml` under cwd / next to the binary / `../data/...` from the exe. Merge baseline: **`--inference-defaults-toml`** / **`[inference].defaults_toml`**, then **`GROWFORMER_INFERENCE_DEFAULTS_TOML`**, then the same default-path search. **wasm32** uses a compile-time include (no `std::fs`).
+
+### Project manifests (`*.gf.toml`)
+
+Versioned TOML (currently **`schema_version = 1`**) so one file can drive train paths, **`[inference]`** rule files, and default **`--brain`** for **`--infer`**. Paths are resolved **relative to the manifest’s directory** unless absolute.
+
+- **Scaffold:** `cargo run --release -- init [PATH] [--name MyBrain]` writes a starter file (default output `Growformer.gf.toml`).
+- **Example:** [`scripts/sentiment-analysis.gf.toml`](scripts/sentiment-analysis.gf.toml) — train with  
+  `cargo run --release -- --train-brain --project scripts/sentiment-analysis.gf.toml`  
+  (run from the `growformer` crate root so `../data/...` resolves).
+- **Code-only brain:** [`scripts/code.gf.toml`](scripts/code.gf.toml) sets **`[train].code_brain = true`**, which enables **GrowformerLang MetaCodebook (training Stage 2b)** and **per-group code lattices** from **`expected_code`** in JSONL. Default training leaves these **off** so support/sentiment brains are not pulled into code-generation plumbing. Same opt-in via **`--train-code-lattice`** without a project file.
+- **CLI flags** still override merged values when you pass them explicitly (e.g. **`--inference-toml`** wins over **`[inference].toml`** in the project file).
+
+Parser: **`src/project_gf.rs`**.
+
+- **`LanguageService`** holds **`inference_harness`**, initialized with **`default_inference_harness()`** (currently registers **`LatticeShortcutsPlugin`**). Generation, meta-route guards, subject-keyword merging, coherence/metacog skips, and **`export_brain`** defaults are dispatched through the harness so **`service.rs`** stays orchestration-focused.
 - **Borrowing:** Inside the main generation path, code clones **`inference_harness`** before **`active_dm_mut()`** (same pattern as hoisted plugin config) so the harness can run while the active **`DimensionManager`** is mutably borrowed.
 - **Extending:** Implement **`BrainInferencePlugin`** in `src/inference/plugins/`, override only the hooks you need (defaults are no-ops), and append **`Box::new(YourPlugin)`** in **`plugins/mod.rs`** **`default_inference_harness()`**, or replace **`svc.inference_harness`** with **`InferenceHarness::new(vec![...])`** for a custom registry.
 

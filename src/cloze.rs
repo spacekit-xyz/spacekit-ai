@@ -121,15 +121,20 @@ pub fn infer_slots(
         return vec![0; codebook.max_slot_count];
     }
 
-    // Find K nearest programs by cosine similarity to input.
-    let mut scored: Vec<(usize, f32)> = programs.iter().enumerate()
-        .map(|(i, prog)| {
-            let sim = cosine_sim(cond, &prog.ema_centroid).max(0.0);
-            (i, sim)
+    let voters: Vec<(usize, f32)> = top_k_programs_by_cosine(programs, cond, k_voters);
+
+    // Causal tiebreaker: one Cl(8) embed + fingerprint for the query, and one per
+    // voter centroid. Doing this inside the slot×vocab loops was O(slots × vocab × voters)
+    // full embeds per task and made cloze appear hung on large lattices / vocabs.
+    let input_mv = embed_bridge_vector(cond);
+    let input_cf = causal_fingerprint(&input_mv);
+    let voter_cf: Vec<[f32; BOOST_BIVECTOR_COUNT]> = voters
+        .iter()
+        .map(|&(pi, _)| {
+            let prog_mv = embed_bridge_vector(&programs[pi].ema_centroid);
+            causal_fingerprint(&prog_mv)
         })
         .collect();
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let voters: Vec<(usize, f32)> = scored.into_iter().take(k_voters).collect();
 
     // For each slot, voters decode their token_sequence at that position
     // and vote for the matching vocab index, weighted by similarity.
@@ -149,26 +154,17 @@ pub fn infer_slots(
             }
         }
 
-        // Also incorporate causal alignment as a tiebreaker:
-        // if two candidates have similar vote totals, prefer the one whose
-        // owning programs have closer causal fingerprints to the input.
-        let input_mv = embed_bridge_vector(cond);
-        let input_cf = causal_fingerprint(&input_mv);
-
+        // Blend vote totals with causal alignment (precomputed fingerprints only).
         for (vocab_idx, vote) in votes.iter_mut().enumerate() {
             if *vote < 1e-8 { continue; }
             let tok = slot.vocab[vocab_idx];
-            // Find the program whose token_sequence at this position matches
-            // this vocab token and has the highest similarity.
-            let best_causal_alignment = voters.iter()
-                .filter(|&&(pi, _)| {
+            let best_causal_alignment = voters
+                .iter()
+                .enumerate()
+                .filter(|(_, &(pi, _))| {
                     programs[pi].token_sequence.get(slot.position).copied() == Some(tok)
                 })
-                .map(|&(pi, _)| {
-                    let prog_mv = embed_bridge_vector(&programs[pi].ema_centroid);
-                    let prog_cf = causal_fingerprint(&prog_mv);
-                    causal_cosine(&input_cf, &prog_cf)
-                })
+                .map(|(j, _)| causal_cosine(&input_cf, &voter_cf[j]))
                 .fold(0.0f32, f32::max);
 
             // Blend: 70% vote weight + 30% causal alignment
@@ -205,12 +201,31 @@ pub fn play_cloze_round(
 ) -> ClozeStats {
     let mut stats = ClozeStats::default();
 
-    let codebook = match env.codebook.as_ref() {
-        Some(cb) if !cb.archetypes.is_empty() => cb.clone(),
-        _ => return stats,
+    let Some(codebook) = env
+        .codebook
+        .as_ref()
+        .filter(|cb| !cb.archetypes.is_empty())
+    else {
+        return stats;
     };
 
-    for task in tasks {
+    let n_tasks = tasks.len();
+    let n_progs = env.lattice.programs.len();
+    let progress_every = if n_tasks <= 50 {
+        10
+    } else if n_tasks <= 200 {
+        25
+    } else {
+        100
+    };
+
+    for (ti, task) in tasks.iter().enumerate() {
+        if ti == 0 || (ti > 0 && ti % progress_every == 0) {
+            eprintln!(
+                "    cloze progress: {}/{} tasks ({} lattice programs)",
+                ti, n_tasks, n_progs
+            );
+        }
         let arch = match codebook.archetypes.get(task.archetype_idx) {
             Some(a) => a,
             None => continue,
@@ -221,7 +236,7 @@ pub fn play_cloze_round(
         let proposed = infer_slots(
             &task.cond,
             task.archetype_idx,
-            &codebook,
+            codebook,
             &env.dictionary,
             &env.lattice.programs,
             k_voters,
@@ -238,13 +253,9 @@ pub fn play_cloze_round(
             if correct { stats.correct_slots += 1; }
         }
 
-        // Apply reward/punishment to the K-nearest programs.
-        let mut scored: Vec<(usize, f32)> = env.lattice.programs.iter().enumerate()
-            .map(|(i, prog)| (i, cosine_sim(&task.cond, &prog.ema_centroid).max(0.0)))
-            .collect();
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let nearest = top_k_programs_by_cosine(&env.lattice.programs, &task.cond, k_voters);
 
-        for &(prog_idx, sim) in scored.iter().take(k_voters) {
+        for &(prog_idx, sim) in &nearest {
             if sim < 0.05 { continue; }
             let prog = &env.lattice.programs[prog_idx];
             let prog_token_at_slots: Vec<Option<u16>> = arch.slots.iter()
@@ -313,6 +324,9 @@ pub fn play_cloze_round(
 
     stats
 }
+
+/// Upper bound on cloze tasks per group (each task scans the whole lattice for top-k voters).
+pub const DEFAULT_MAX_CLOZE_TASKS_PER_GROUP: usize = 2000;
 
 /// Encode inferred slot values into slot bits for decode_with_archetype.
 pub fn encode_inferred_slot_bits(
@@ -491,6 +505,42 @@ fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
     if na < 1e-12 || nb < 1e-12 { 0.0 } else { dot / (na * nb) }
+}
+
+/// Top-`k` programs by cosine similarity to `cond` in **O(programs.len() × k)** time.
+/// Avoids sorting all programs per cloze task (previously O(n log n) per task → training appeared hung).
+fn top_k_programs_by_cosine(
+    programs: &[BehavioralProgram],
+    cond: &[f32],
+    mut k: usize,
+) -> Vec<(usize, f32)> {
+    use std::cmp::Ordering;
+    k = k.min(programs.len());
+    if k == 0 {
+        return Vec::new();
+    }
+    let mut buf: Vec<(usize, f32)> = Vec::with_capacity(k + 1);
+    for (i, prog) in programs.iter().enumerate() {
+        let mut sim = cosine_sim(cond, &prog.ema_centroid);
+        if !sim.is_finite() {
+            continue;
+        }
+        sim = sim.max(0.0);
+        buf.push((i, sim));
+        if buf.len() <= k {
+            continue;
+        }
+        let (min_j, _) = buf
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal)
+            })
+            .unwrap();
+        buf.swap_remove(min_j);
+    }
+    buf.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+    buf
 }
 
 fn causal_cosine(a: &[f32; BOOST_BIVECTOR_COUNT], b: &[f32; BOOST_BIVECTOR_COUNT]) -> f32 {
