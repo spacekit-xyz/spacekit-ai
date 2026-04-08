@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use serde::Deserialize;
 
 use crate::growformer_lang::MetaConcept;
+use crate::text_keywords::keyword_matches_in_lower;
 
 // ---------------------------------------------------------------------------
 // TOML schema — deserialized directly from knowledge_graph.toml
@@ -65,11 +66,11 @@ impl TopicRule {
     /// - At least one `any` keyword is present (OR) — or `any` is empty
     /// - NONE of the `not` keywords are present (NOT)
     pub fn matches(&self, lower: &str) -> bool {
-        if !self.not.is_empty() && self.not.iter().any(|kw| lower.contains(kw.as_str())) {
+        if !self.not.is_empty() && self.not.iter().any(|kw| keyword_matches_in_lower(lower, kw)) {
             return false;
         }
-        let all_ok = self.all.is_empty() || self.all.iter().all(|kw| lower.contains(kw.as_str()));
-        let any_ok = self.any.is_empty() || self.any.iter().any(|kw| lower.contains(kw.as_str()));
+        let all_ok = self.all.is_empty() || self.all.iter().all(|kw| keyword_matches_in_lower(lower, kw));
+        let any_ok = self.any.is_empty() || self.any.iter().any(|kw| keyword_matches_in_lower(lower, kw));
         all_ok && any_ok
     }
 
@@ -108,6 +109,15 @@ pub struct TopicGraph {
 impl TopicGraph {
     /// Load from a TOML config file.
     pub fn from_toml(toml_str: &str) -> Result<Self, String> {
+        Self::from_toml_impl(toml_str, true)
+    }
+
+    /// Parse TOML without the standard startup log line (for overlay merges).
+    pub fn from_toml_quiet(toml_str: &str) -> Result<Self, String> {
+        Self::from_toml_impl(toml_str, false)
+    }
+
+    fn from_toml_impl(toml_str: &str, log: bool) -> Result<Self, String> {
         let config: KnowledgeGraphConfig = toml::from_str(toml_str)
             .map_err(|e| format!("Failed to parse knowledge_graph.toml: {}", e))?;
 
@@ -146,8 +156,10 @@ impl TopicGraph {
             concept_keywords.insert(parse_concept(k), v.clone());
         }
 
-        println!("  [topic-graph] loaded {} nodes, {} action_target mappings, {} concept keyword sets",
-            nodes.len(), action_target_map.len(), concept_keywords.len());
+        if log {
+            println!("  [topic-graph] loaded {} nodes, {} action_target mappings, {} concept keyword sets",
+                nodes.len(), action_target_map.len(), concept_keywords.len());
+        }
 
         Ok(TopicGraph { nodes, action_target_map, concept_keywords })
     }
@@ -157,6 +169,26 @@ impl TopicGraph {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read {}: {}", path, e))?;
         Self::from_toml(&content)
+    }
+
+    /// Append nodes and merge maps from another graph (e.g. sentiment NL hints).
+    pub fn merge_overlay(mut self, mut other: TopicGraph) -> Self {
+        let added = other.nodes.len();
+        self.nodes.append(&mut other.nodes);
+        self.nodes.sort_by(|a, b| b.priority.cmp(&a.priority));
+
+        for (k, v) in other.action_target_map {
+            self.action_target_map.insert(k, v);
+        }
+        for (concept, kws) in other.concept_keywords {
+            self.concept_keywords
+                .entry(concept)
+                .or_default()
+                .extend(kws);
+        }
+        println!("  [topic-graph] merged overlay: +{} nodes (total {} nodes)",
+            added, self.nodes.len());
+        self
     }
 
     pub fn node_count(&self) -> usize { self.nodes.len() }
@@ -244,7 +276,10 @@ impl TopicGraph {
 
         // Check concept_keywords arrays (broad InformationTheory, BinaryArithmetic, etc.)
         for (concept, keywords) in &self.concept_keywords {
-            if keywords.iter().any(|kw| lower.contains(kw.as_str())) {
+            if keywords
+                .iter()
+                .any(|kw| keyword_matches_in_lower(&lower, kw.as_str()))
+            {
                 return concept.clone();
             }
         }

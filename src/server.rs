@@ -93,10 +93,8 @@ async fn main() {
     // Initialize topic knowledge graph (shared static, same as training binary)
     let kg_path = std::env::var("GROWFORMER_KG_PATH")
         .unwrap_or_else(|_| "data/knowledge_graph.toml".to_string());
-    if std::path::Path::new(&kg_path).exists() {
-        if let Err(e) = growformer::growformer_lang::init_topic_graph(&kg_path) {
-            eprintln!("Warning: failed to load topic graph: {}", e);
-        }
+    if let Err(e) = growformer::growformer_lang::try_init_topic_graph_bundle(&kg_path) {
+        eprintln!("Warning: failed to load topic graph: {}", e);
     }
 
     // Auto-load trained brain(s)

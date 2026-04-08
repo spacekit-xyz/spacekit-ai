@@ -17,6 +17,7 @@ use rand::seq::SliceRandom;
 use rand::rngs::StdRng;
 use serde::Deserialize;
 use clap::Parser;
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "growformer", version, about = "Growformer — train and run specialized neural brains")]
@@ -77,9 +78,15 @@ struct Args {
     #[arg(long, value_name = "PATH", default_value = "brain.bin")]
     brain: String,
 
-    /// Prompt text for single-shot inference. Omit for interactive mode.
-    #[arg(long, value_name = "TEXT")]
+    /// Prompt for single-shot inference. Omit for interactive mode. If the text contains `$`
+    /// (e.g. dollar amounts), use **single quotes** in the shell or use `--prompt-file` —
+    /// double quotes cause the shell to expand `$` and drop the amount before it reaches the binary.
+    #[arg(long, value_name = "TEXT", conflicts_with = "prompt_file")]
     prompt: Option<String>,
+
+    /// Read the inference prompt from a UTF-8 file (exact text; avoids shell `$` expansion).
+    #[arg(long, value_name = "PATH", conflicts_with = "prompt")]
+    prompt_file: Option<PathBuf>,
 
     /// Retrain only the gen env for a specific group index (loads existing brain, retrains one group, re-exports).
     #[arg(long, value_name = "GROUP_IDX")]
@@ -89,6 +96,15 @@ struct Args {
     /// directory is loaded (skips default m5/agent/routekit). Use for focused micro-brains.
     #[arg(long, value_name = "DIR")]
     data_dir: Option<String>,
+}
+
+fn resolve_infer_prompt(args: &Args) -> Result<Option<String>, String> {
+    if let Some(path) = &args.prompt_file {
+        let s = std::fs::read_to_string(path)
+            .map_err(|e| format!("--prompt-file {}: {}", path.display(), e))?;
+        return Ok(Some(s.trim().to_string()));
+    }
+    Ok(args.prompt.clone())
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -104,12 +120,10 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 fn main() {
     let args = Args::parse();
 
-    // Initialize topic knowledge graph globally
+    // Initialize topic knowledge graph + optional sentiment NL overlay (same directory).
     let kg_path = "data/knowledge_graph.toml";
-    if std::path::Path::new(kg_path).exists() {
-        if let Err(e) = growformer::growformer_lang::init_topic_graph(kg_path) {
-            eprintln!("Warning: failed to load topic graph: {}", e);
-        }
+    if let Err(e) = growformer::growformer_lang::try_init_topic_graph_bundle(kg_path) {
+        eprintln!("Warning: failed to load topic graph: {}", e);
     }
 
     if args.train_brain || args.validate_brain_training {
@@ -163,7 +177,14 @@ fn main() {
             std::process::exit(1);
         }
     } else if args.infer {
-        if let Err(e) = run_inference(&args.brain, args.prompt.as_deref()) {
+        let infer_prompt = match resolve_infer_prompt(&args) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = run_inference(&args.brain, infer_prompt.as_deref()) {
             eprintln!("Inference failed: {}", e);
             std::process::exit(1);
         }
@@ -172,7 +193,7 @@ fn main() {
         println!("Usage:");
         println!("  Train:     cargo run --release -- --train-brain [--auto]");
         println!("  Retrain:   cargo run --release -- --retrain-gen 1 [--auto]");
-        println!("  Infer:     cargo run --release -- --infer [--prompt \"your question\"]");
+        println!("  Infer:     cargo run --release -- --infer [--prompt 'text'] [--prompt-file path]");
         println!("  Demos:     cargo run --bin growformer-demos -- --help");
         println!("\nRun with --help for all options.");
         std::process::exit(1);
@@ -1098,6 +1119,13 @@ fn train_brain(
         let original_count = samples.len();
         let mut augmented_samples = Vec::new();
         for (i, sample) in samples.iter().enumerate() {
+            // Salient masking injects "[MASK]" into expected_response; for sentiment
+            // that trains the generator to emit mask tokens at inference.
+            let sentiment = sample.action_target.as_deref() == Some("sentiment")
+                || sample.domain.eq_ignore_ascii_case("sentiment");
+            if sentiment {
+                continue;
+            }
             if let Some(ref response) = sample.expected_response {
                 let masked_versions = growformer::training_objectives::mask_salient_spans(
                     response, lexicon, 2, (i as u64).wrapping_mul(0x517cc1b727220a95),
@@ -1124,6 +1152,11 @@ fn train_brain(
         );
         let mut rtd_augmented = Vec::new();
         for (i, sample) in samples.iter().enumerate() {
+            let sentiment = sample.action_target.as_deref() == Some("sentiment")
+                || sample.domain.eq_ignore_ascii_case("sentiment");
+            if sentiment {
+                continue;
+            }
             if let Some(ref response) = sample.expected_response {
                 if let Some((corrupted, _mask)) = growformer::training_objectives::replace_salient_tokens(
                     response, lexicon, &rtd_dict, 0.15,

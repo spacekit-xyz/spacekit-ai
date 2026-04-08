@@ -582,7 +582,8 @@ pub struct LanguageService {
     /// Continuum: count of feedback events since startup (for auto-checkpoint).
     continuum_feedback_count: u64,
     /// Continuum: timestamp of last feedback (for rate limiting).
-    last_feedback_time: std::time::Instant,
+    /// Uses `instant` so `now()` works on wasm32 (std time panics in browser).
+    last_feedback_time: instant::Instant,
     /// Continuum: feedback count in current rate-limit window.
     feedback_window_count: u32,
     /// Continuum: configurable online learning parameters.
@@ -655,7 +656,7 @@ impl LanguageService {
             project_model: ProjectModel::new(),
             tool_registry: ToolRegistry::with_builtins(),
             continuum_feedback_count: 0,
-            last_feedback_time: std::time::Instant::now(),
+            last_feedback_time: instant::Instant::now(),
             feedback_window_count: 0,
             continuum_config: ContinuumConfig::default(),
             paramecium: None,
@@ -727,14 +728,29 @@ impl LanguageService {
         exact.iter().any(|p| trimmed == *p || trimmed.starts_with(&format!("{} ", p)))
     }
 
+    /// Second sentence for [`Self::greeting_response`]: from brain package header when set,
+    /// else a short default (no hardcoded generalist capability list — that misled specialized agents).
+    fn greeting_capability_line(&self) -> String {
+        const DEFAULT_PKG_DESC: &str = "growformer DimensionManager checkpoint";
+        let desc = self.brain_package_description.trim();
+        if !desc.is_empty() && desc != DEFAULT_PKG_DESC {
+            return desc.to_string();
+        }
+        let n = self.agent_name.to_lowercase();
+        if n.contains("sentiment") {
+            return "I focus on sentiment and tone in the text you send—paste a phrase or short paragraph and I'll characterize it.".to_string();
+        }
+        "How can I help?".to_string()
+    }
+
     fn greeting_response(&self) -> GeneratedResponse {
+        let cap = self.greeting_capability_line();
+        let text = format!(
+            "I'm doing well, thank you for asking! I'm {}, ready to help. {}",
+            self.agent_name, cap
+        );
         GeneratedResponse {
-            text: format!(
-                "I'm doing well, thank you for asking! I'm {}, ready to help. \
-                 I can assist with programming, mathematics, system design, \
-                 information theory, and general knowledge. What would you like to explore?",
-                self.agent_name
-            ),
+            text,
             template_id: "greeting".to_string(),
             traceable: false,
             confidence: 1.0,
@@ -770,6 +786,17 @@ impl LanguageService {
         intent_text: &str,
     ) -> Result<(ActionJson, GeneratedResponse), String> {
         let start = portable_instant();
+
+        // Preserve monetary magnitude for routing/retrieval; hashing encoder skips pure-number tokens.
+        // Note: shells expand `$` in double-quoted argv — prefer single quotes or `--prompt-file`.
+        let intent_text_owned = crate::growformer_lang::normalize_inference_money_spans(intent_text);
+        let text_owned = if text == intent_text {
+            intent_text_owned.clone()
+        } else {
+            crate::growformer_lang::normalize_inference_money_spans(text)
+        };
+        let intent_text = intent_text_owned.as_str();
+        let text = text_owned.as_str();
 
         if Self::is_identity_query(intent_text) {
             let action = self.active_dm_mut().route_text_to_action_stateless(text)?;
@@ -1841,8 +1868,9 @@ impl LanguageService {
             self.build_paramecium();
         }
 
+        let normalized = crate::growformer_lang::normalize_inference_money_spans(text);
         let dm = self.active_dm_mut();
-        let encoded = dm.language_runtime.encode_and_bridge(text)?;
+        let encoded = dm.language_runtime.encode_and_bridge(&normalized)?;
         let embedding = &encoded.1.routed_vector;
 
         let lattice = self.paramecium.as_mut()
@@ -2520,7 +2548,7 @@ impl LanguageService {
     fn check_rate_limit(&mut self) -> bool {
         let limit = self.continuum_config.rate_limit_per_minute;
         if limit == 0 { return true; }
-        let now = std::time::Instant::now();
+        let now = instant::Instant::now();
         if now.duration_since(self.last_feedback_time).as_secs() >= 60 {
             self.last_feedback_time = now;
             self.feedback_window_count = 0;

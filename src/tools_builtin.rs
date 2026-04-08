@@ -5,6 +5,9 @@
 
 use crate::dimension::tool::{ToolCallInfo, ToolResult};
 
+// TODO: Add tool execution for the following tools:
+// - web_payment : x402 for USDC on Base/EVM chains
+// - web_search  : implement web search retrieve/parse/summarize
 pub fn execute_tool(call: &ToolCallInfo) -> ToolResult {
     match call.tool_name.as_str() {
         "calculator" => {
@@ -109,6 +112,25 @@ pub fn execute_tool(call: &ToolCallInfo) -> ToolResult {
                 tool_name: "web_search".into(),
                 success: false,
                 output: format!("Web search not yet available. Query: {}", query),
+            }
+        }
+        "web_payment" => {
+            let amount = call
+                .arguments
+                .get("amount")
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            // TODO: Implement web payment x402 logic here.
+            let result = false;
+            let output = if result {
+                format!("Web payment successful. Amount: {}", amount)
+            } else {
+                format!("Web payment failed. Amount: {}", amount)
+            };
+            ToolResult {
+                tool_name: "web_payment".into(),
+                success: result,
+                output: output.to_string(),
             }
         }
         _ => ToolResult {

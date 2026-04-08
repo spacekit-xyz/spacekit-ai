@@ -18,12 +18,48 @@ use crate::topic_graph::TopicGraph;
 
 static TOPIC_GRAPH: OnceLock<TopicGraph> = OnceLock::new();
 
+/// Overlay merged after the base graph when both exist (same directory as `base_path`).
+const SENTIMENT_OVERLAY_FILENAME: &str = "knowledge_graph_sentiment_overlay.toml";
+
 /// Initialize the global TopicGraph from a TOML file.
 /// Called once at startup. If the file is not found, functions fall back
 /// to the legacy hardcoded rules (which should not happen in production).
 pub fn init_topic_graph(toml_path: &str) -> Result<(), String> {
     let graph = TopicGraph::from_file(toml_path)?;
     TOPIC_GRAPH.set(graph).map_err(|_| "TopicGraph already initialized".to_string())
+}
+
+/// Load `base_path` and merge `knowledge_graph_sentiment_overlay.toml` from the same directory
+/// when present. If only the overlay exists, loads the overlay alone. No-op if neither exists.
+pub fn try_init_topic_graph_bundle(base_path: &str) -> Result<(), String> {
+    let base_p = std::path::Path::new(base_path);
+    let overlay_pb = base_p
+        .parent()
+        .map(|dir| dir.join(SENTIMENT_OVERLAY_FILENAME))
+        .unwrap_or_else(|| std::path::PathBuf::from(SENTIMENT_OVERLAY_FILENAME));
+    let overlay_s = overlay_pb
+        .to_str()
+        .ok_or_else(|| "overlay path is not valid UTF-8".to_string())?;
+
+    let base_exists = base_p.exists();
+    let overlay_exists = overlay_pb.exists();
+
+    let graph = match (base_exists, overlay_exists) {
+        (true, true) => {
+            let base_g = TopicGraph::from_file(base_path)?;
+            let overlay_content = std::fs::read_to_string(overlay_s)
+                .map_err(|e| format!("Failed to read {}: {}", overlay_s, e))?;
+            let overlay_g = TopicGraph::from_toml_quiet(&overlay_content)?;
+            base_g.merge_overlay(overlay_g)
+        }
+        (true, false) => TopicGraph::from_file(base_path)?,
+        (false, true) => TopicGraph::from_file(overlay_s)?,
+        (false, false) => return Ok(()),
+    };
+
+    TOPIC_GRAPH
+        .set(graph)
+        .map_err(|_| "TopicGraph already initialized".to_string())
 }
 
 /// Initialize from an inline TOML string (for tests or embedded configs).
@@ -270,9 +306,11 @@ impl TargetLanguage {
 pub fn detect_language(text: &str) -> TargetLanguage {
     let lower = text.to_lowercase();
 
+    // Note: avoid bare `"match "` — it appears in English ("playoff match because…")
+    // and falsely wins the Rust score. Prefer `match {` / `match(` style cues.
     let rust_signals = ["rust", "cargo", "impl ", "struct ", "&mut", "fn ",
         "crate", "enum ", "trait ", "tokio", "async fn", "Vec<", "Option<",
-        "Result<", "match ", "println!", "unwrap", "lifetime", "borrow"];
+        "Result<", "match {", " match {", "println!", "unwrap", "lifetime", "borrow"];
     let python_signals = ["python", "pip", "def ", "import ", "class ",
         "self.", "print(", "__init__", "numpy", "pandas", "django",
         "flask", "pytest", "lambda ", "list comprehension"];
@@ -367,6 +405,116 @@ pub struct QueryIntent {
     pub subject: String,
     /// The full original query text (lowercased).
     pub raw: String,
+}
+
+/// Normalize currency and money-like glued tokens so **magnitude** survives:
+/// - Hashing encoders skip pure-numeric words; replacing with `money_usd_5000` keeps a lexical signal.
+/// - Shells expand `$` inside double quotes — use single quotes or `--prompt-file` for literal `$`.
+///
+/// Idempotent: already-normalized `money_*` tokens are left unchanged.
+pub fn normalize_inference_money_spans(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let mut out: Vec<String> = Vec::new();
+    for raw in text.split_whitespace() {
+        let (core, trailing_punct) = split_trailing_punct(raw);
+        let piece = if let Some(m) = replace_money_token(core) {
+            m
+        } else {
+            core.to_string()
+        };
+        out.push(format!("{}{}", piece, trailing_punct));
+    }
+    out.join(" ")
+}
+
+fn split_trailing_punct(word: &str) -> (&str, &str) {
+    let end = word
+        .char_indices()
+        .rev()
+        .find_map(|(i, c)| {
+            if ".,;:!?)]}\"'".contains(c) {
+                None
+            } else {
+                Some(i + c.len_utf8())
+            }
+        })
+        .unwrap_or(word.len());
+    word.split_at(end)
+}
+
+fn replace_money_token(w: &str) -> Option<String> {
+    if w.starts_with("money_") {
+        return None;
+    }
+    let lower = w.to_ascii_lowercase();
+    // Glued forms: 5000usd, 12kusd, $5000usd
+    if let Some(m) = parse_glued_money(&lower) {
+        return Some(m);
+    }
+    if !lower.starts_with('$') || lower.len() < 2 {
+        return None;
+    }
+    let rest = &lower[1..];
+    let (int_part, after_int) = take_digits_commas(rest);
+    if int_part.is_empty() {
+        return None;
+    }
+    let mut i = after_int;
+    // Optional .fraction
+    if i < rest.len() && rest.as_bytes().get(i) == Some(&b'.') {
+        i += 1;
+        while i < rest.len() && rest.as_bytes()[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+    let tail = &rest[i..];
+    let ccy = if tail.starts_with("usd") {
+        "usd"
+    } else if tail.starts_with("eur") {
+        "eur"
+    } else if tail.starts_with("gbp") {
+        "gbp"
+    } else {
+        "usd"
+    };
+    Some(format!("money_{}_{}", ccy, int_part))
+}
+
+fn take_digits_commas(s: &str) -> (String, usize) {
+    let mut out = String::new();
+    let mut i = 0;
+    for ch in s.chars() {
+        if ch.is_ascii_digit() {
+            out.push(ch);
+            i += ch.len_utf8();
+        } else if ch == ',' {
+            i += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    (out, i)
+}
+
+fn parse_glued_money(lower: &str) -> Option<String> {
+    // e.g. 5000usd, 1200eur (no `$` — handled in replace_money_token)
+    for (suffix, ccy) in [("usd", "usd"), ("eur", "eur"), ("gbp", "gbp")] {
+        if !lower.ends_with(suffix) || lower.len() <= suffix.len() {
+            continue;
+        }
+        let num_part = &lower[..lower.len() - suffix.len()];
+        if num_part.starts_with('$') {
+            continue;
+        }
+        let (digits, _) = take_digits_commas(num_part);
+        if digits.is_empty() || digits.chars().all(|c| c == '0') {
+            continue;
+        }
+        return Some(format!("money_{}_{}", ccy, digits));
+    }
+    None
 }
 
 /// Parse a query into structured intent: action + subject.
@@ -822,7 +970,9 @@ fn infer_operation_topic_legacy(text: &str) -> Option<String> {
     if lower.contains("calculator") || lower.contains("basic calc") {
         return Some("calculator_operation".into());
     }
-    if lower.contains("average") || lower.contains("mean") {
+    if crate::text_keywords::keyword_matches_in_lower(&lower, "average")
+        || crate::text_keywords::keyword_matches_in_lower(&lower, "mean")
+    {
         return Some("average_operation".into());
     }
     if lower.contains("min ") && lower.contains("max ") || lower.contains("min_val") || lower.contains("max_val") {
@@ -1569,6 +1719,37 @@ mod tests {
         assert_eq!(detect_language("implement in Python"), TargetLanguage::Python);
         assert_eq!(detect_language("create a React component"), TargetLanguage::TypeScript);
         assert_eq!(detect_language("explain algorithms"), TargetLanguage::Generic);
+        // English "match" (noun) must not count as Rust `match`:
+        assert_eq!(
+            detect_language("we lost the playoff match because our star was hurt"),
+            TargetLanguage::Generic
+        );
+    }
+
+    #[test]
+    fn legacy_infer_topic_mean_not_inside_meant() {
+        assert_eq!(
+            infer_operation_topic("she meant more than anything anyone has done"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_normalize_inference_money_spans_dollar_glued() {
+        let s = normalize_inference_money_spans("I lost $5000USD on the game last night");
+        assert!(s.contains("money_usd_5000"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_normalize_inference_money_spans_glued_no_dollar() {
+        let s = normalize_inference_money_spans("lost 5000usd on the game");
+        assert!(s.contains("money_usd_5000"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_normalize_inference_money_idempotent() {
+        let s = normalize_inference_money_spans("already money_usd_5000 token");
+        assert!(s.contains("money_usd_5000"));
     }
 
     #[test]

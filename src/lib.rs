@@ -35,11 +35,15 @@ macro_rules! maybe_par_iter_mut {
 pub mod clifford;
 pub mod cloze;
 pub mod coherence;
+/// Categorical DAG, Pythagoras-node training scaffolding, and sentiment functor experiments.
+#[cfg(feature = "categorical")]
+pub mod category;
 #[cfg(feature = "training")]
 pub mod gradient_memory;
 pub mod predictive_coder;
 pub mod dimension;
 pub mod growformer_lang;
+pub mod text_keywords;
 pub mod topic_graph;
 pub mod micro_brain;
 pub mod understanding;
