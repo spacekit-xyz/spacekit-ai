@@ -66,6 +66,7 @@ pub mod brain;
 pub mod types;
 pub mod metacognition;
 pub mod reasoning;
+pub mod inference;
 pub mod service;
 pub mod runtime;
 pub mod spectral;

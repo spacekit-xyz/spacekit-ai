@@ -19,6 +19,7 @@ use crate::dimension::EncoderPreset;
 use crate::spectral::{ProjectModel, EntityKind, HybridEmbedder};
 use crate::dimension::tool::{ToolRegistry, ToolSchema, ToolCallInfo, ToolResult};
 use crate::dimension::paramecium::InfraciliaryLattice;
+use crate::inference::{sentiment, BrainPluginsManifest};
 use crate::metacognition::{MetaCognition, ReflectionOutcome};
 use crate::reasoning::{ReasoningEngine, System2Config};
 use crate::types::{EnvironmentConfig, GroupId, Sample};
@@ -600,6 +601,8 @@ pub struct LanguageService {
     pub system2_config: System2Config,
     /// Parsed header from the most recently loaded brain package (populated by [`Self::load_brain`]).
     pub brain_package_header: Option<crate::brain::BrainPackageHeader>,
+    /// Inference plugins from [`crate::brain::BrainPackage::plugins_blob`] (TOML), if present and valid.
+    pub brain_plugins_manifest: Option<BrainPluginsManifest>,
 }
 
 impl LanguageService {
@@ -665,6 +668,7 @@ impl LanguageService {
             metacognition: None,
             system2_config: System2Config::default(),
             brain_package_header: None,
+            brain_plugins_manifest: None,
         })
     }
 
@@ -703,6 +707,20 @@ impl LanguageService {
     /// Text stored in the exported brain package header (`BrainPackageHeader::description`).
     pub fn set_brain_package_description(&mut self, description: &str) {
         self.brain_package_description = description.to_string();
+    }
+
+    /// Override or set [`crate::brain::BrainPackageHeader::inference_profile`] (e.g. `sentiment_lattice`, `off`)
+    /// without re-serializing the checkpoint. Merges into the last loaded header or a default stub.
+    pub fn set_inference_profile(&mut self, profile: Option<String>) {
+        let h = self
+            .brain_package_header
+            .get_or_insert_with(crate::brain::BrainPackageHeader::default);
+        h.inference_profile = profile;
+    }
+
+    /// Replace the in-memory plugins manifest (embedded on next [`Self::export_brain`] as TOML v2).
+    pub fn set_brain_plugins_manifest(&mut self, manifest: Option<BrainPluginsManifest>) {
+        self.brain_plugins_manifest = manifest;
     }
 
     fn is_identity_query(text: &str) -> bool {
@@ -855,6 +873,17 @@ impl LanguageService {
         // Snapshot conversation context before mutable borrow of DimensionManager
         let conv_ctx_snapshot = self.conversation.context_embedding.clone();
 
+        let inference_profile_cached = self
+            .brain_package_header
+            .as_ref()
+            .and_then(|h| h.inference_profile.clone());
+        let inference_profile_opt = inference_profile_cached.as_deref();
+        let sentiment_cfg_bundle = self
+            .brain_plugins_manifest
+            .as_ref()
+            .and_then(|m| m.sentiment.clone());
+        let sentiment_cfg_ref = sentiment_cfg_bundle.as_ref();
+
         let dm = self.active_dm_mut();
         let action = dm.route_text_to_action_stateless(intent_text)?;
 
@@ -880,15 +909,29 @@ impl LanguageService {
                 if best_g < dm.main.group_order.len() {
                     println!("  [meta-route] concept={}, lang={}, conf={:.3}, margin={:.3} → group {}",
                         mr.concept.name(), mr.language.name(), mr.confidence, mr.margin, best_g);
-                    if mr.margin >= 0.05 || mr.confidence >= 0.90 || group_idx.is_none() {
+                    let apply_meta = mr.margin >= 0.05 || mr.confidence >= 0.90 || group_idx.is_none();
+                    let sentiment_skip_gk = sentiment::skip_weak_gk_for_meta_conditioning(
+                        dm,
+                        inference_profile_opt,
+                        sentiment_cfg_ref,
+                        mr.concept,
+                        mr.margin,
+                        mr.confidence,
+                    );
+                    if sentiment_skip_gk {
+                        println!(
+                            "  [meta-route] sentiment brain: ignore weak GeneralKnowledge (margin={:.3}) for conditioning",
+                            mr.margin
+                        );
+                    } else if apply_meta {
                         group_idx = Some(best_g);
+                        meta_routing = Some(mr);
                     } else {
                         println!("  [meta-route] SKIP: low margin ({:.3}) + low conf ({:.3}), keeping classifier group {:?}",
                             mr.margin, mr.confidence, group_idx);
                     }
                 }
             }
-            meta_routing = Some(mr);
         }
 
         // Structural routing fallback: when surface routing rejects as OOD,
@@ -1046,11 +1089,23 @@ impl LanguageService {
 
             // Apply OCEAN Hopf diversity bonus and subject keywords to all gen envs
             let div_bonus = personality.hopf_diversity_bonus();
-            let subject_kw: Vec<String> = query_intent.subject
+            let mut subject_kw: Vec<String> = query_intent.subject
                 .split_whitespace()
                 .filter(|w| w.len() > 2)
                 .map(|w| w.to_ascii_lowercase())
                 .collect();
+            // Sentiment brains: use the full user line for BM25 / lexical retrieval,
+            // not only the stripped "subject", so "sleeping", "sundays" survive.
+            if sentiment::shortcuts_enabled(dm, inference_profile_opt) {
+                for w in intent_text.split_whitespace() {
+                    let lw = w
+                        .trim_matches(|c: char| !c.is_alphanumeric())
+                        .to_ascii_lowercase();
+                    if lw.len() > 2 && !subject_kw.iter().any(|x| x == &lw) {
+                        subject_kw.push(lw);
+                    }
+                }
+            }
             let intent_act = query_intent.action.name().to_string();
             for env in dm.group_gen_envs.values_mut() {
                 env.diversity_bonus = div_bonus;
@@ -1134,24 +1189,50 @@ impl LanguageService {
             // Primary generation: prefer classifier's group_idx over MetaBrain's.
             // Only use MetaBrain's archetype when the classifier didn't provide a group.
             let effective_gidx = group_idx.or_else(|| meta_result.as_ref().and_then(|mr| mr.group_idx));
-            let primary = effective_gidx.and_then(|gidx| {
-                // If we already have a broad summary for this group, use it directly
-                if let Some((ref summary_text, summary_conf)) = broad_summary {
+
+            let sentiment_direct = sentiment::try_user_anchored_line(
+                dm,
+                inference_profile_opt,
+                sentiment_cfg_ref,
+                intent_text,
+                meta_result.as_ref(),
+                topic_hint.as_deref(),
+            );
+            // True when we emit classification grounded in the user's line without lattice retrieval.
+            let sentiment_direct_used = sentiment_direct.is_some()
+                && effective_gidx.is_some()
+                && broad_summary.is_none();
+
+            let primary = if let Some((ref summary_text, summary_conf)) = &broad_summary {
+                effective_gidx.map(|gidx| {
                     let mut e8 = [0.0f32; 8];
                     for i in 0..8.min(gen_conditioning.len()) { e8[i] = gen_conditioning[i]; }
-                    return Some(E8Contribution {
+                    E8Contribution {
                         group_idx: gidx,
                         lattice_point: e8,
                         text: summary_text.clone(),
-                        confidence: summary_conf,
-                    });
-                }
-                let cond = dm.adapt_for_group_clifford(gidx, &conditioned, h_raw, GEN_COND_DIM);
-                dm.group_gen_envs.get_mut(&gidx).map(|env| {
-                    let (text, conf, e8) = env.generate_with_e8_for_topic(&cond, topic_hint.as_deref(), 300, 0.8);
-                    E8Contribution { group_idx: gidx, lattice_point: e8, text, confidence: conf }
+                        confidence: *summary_conf,
+                    }
                 })
-            });
+            } else if let (Some((stext, sconf)), Some(gidx)) = (sentiment_direct, effective_gidx) {
+                let mut e8 = [0.0f32; 8];
+                for i in 0..8.min(gen_conditioning.len()) { e8[i] = gen_conditioning[i]; }
+                println!("  [sentiment-direct] user-anchored classification (lattice paraphrase skipped)");
+                Some(E8Contribution {
+                    group_idx: gidx,
+                    lattice_point: e8,
+                    text: stext,
+                    confidence: sconf,
+                })
+            } else {
+                effective_gidx.and_then(|gidx| {
+                    let cond = dm.adapt_for_group_clifford(gidx, &conditioned, h_raw, GEN_COND_DIM);
+                    dm.group_gen_envs.get_mut(&gidx).map(|env| {
+                        let (text, conf, e8) = env.generate_with_e8_for_topic(&cond, topic_hint.as_deref(), 300, 0.8);
+                        E8Contribution { group_idx: gidx, lattice_point: e8, text, confidence: conf }
+                    })
+                })
+            };
 
             let (best_text, best_conf, best_gidx) = match primary {
                 Some(ref c) if c.confidence >= 0.70 && c.text.len() > 5 => {
@@ -1271,7 +1352,11 @@ impl LanguageService {
             } else if best_text.len() > 5 {
                 GeneratedResponse {
                     text: best_text,
-                    template_id: format!("growformer_gen_{}", best_gidx),
+                    template_id: if sentiment_direct_used {
+                        sentiment::TEMPLATE_ID_USER_ANCHORED.to_string()
+                    } else {
+                        format!("growformer_gen_{}", best_gidx)
+                    },
                     traceable: false,
                     confidence: best_conf,
                 }
@@ -1288,15 +1373,20 @@ impl LanguageService {
 
         // Sentence-level coherence guard: strip trailing sentences that diverge
         // from the prompt's topic (e.g., identity text appended to an IT query).
+        // Skip for user-anchored sentiment: the second sentence ("Grounded in…") is intentional.
         let resp = if let Some((_, ref bridged)) = encoded {
-            let truncated = Self::coherence_truncate(&bridged.routed_vector, &resp.text);
-            if truncated.len() != resp.text.len() {
-                GeneratedResponse {
-                    text: truncated,
-                    ..resp
-                }
-            } else {
+            if resp.template_id == sentiment::TEMPLATE_ID_USER_ANCHORED {
                 resp
+            } else {
+                let truncated = Self::coherence_truncate(&bridged.routed_vector, &resp.text);
+                if truncated.len() != resp.text.len() {
+                    GeneratedResponse {
+                        text: truncated,
+                        ..resp
+                    }
+                } else {
+                    resp
+                }
             }
         } else {
             resp
@@ -1369,6 +1459,11 @@ impl LanguageService {
             resp
         } else if is_broad && broad_summary.is_some() {
             println!("  [metacog] SKIP: broad query summary (multi-topic composition)");
+            resp
+        } else if resp.template_id == sentiment::TEMPLATE_ID_USER_ANCHORED {
+            println!(
+                "  [metacog] SKIP: user-anchored sentiment (retrieval-free; relevance gate N/A)"
+            );
             resp
         } else {
             let mc_taken = self.metacognition.take();
@@ -2351,9 +2446,10 @@ impl LanguageService {
     // Brain export / import (full DimensionManager state)
     // -----------------------------------------------------------------------
 
-    /// Serializes the active `DimensionManager` and wraps it in a [`crate::brain::BrainPackage`]
-    /// (binary envelope: header JSON + checkpoint JSON + optional personality JSON).
-    /// [`load_brain`](Self::load_brain) accepts both this format and legacy raw checkpoint JSON.
+    /// Serializes the active `DimensionManager` into a [`crate::brain::BrainPackage`] and encodes it.
+    /// Includes optional UTF-8 TOML plugins (see [`BrainPluginsManifest`]); sentiment lattice brains
+    /// get a default `[sentiment]` section so the runtime is self-describing.
+    /// [`load_brain`](Self::load_brain) accepts this envelope, format v1/v2, or legacy raw checkpoint JSON.
     pub fn export_brain(&self) -> Result<Vec<u8>, String> {
         let checkpoint = crate::systems::checkpoint::serialize_checkpoint_to_bytes(self.active_dm())?;
         let personality = self.export_personality()?;
@@ -2368,7 +2464,31 @@ impl LanguageService {
         header.name.clone_from(&self.agent_name);
         header.author.name.clone_from(&self.agent_creator);
         header.description.clone_from(&self.brain_package_description);
-        crate::brain::encode_brain_package(&header, &checkpoint, Some(personality.as_slice()))
+        let dm = self.active_dm();
+        if sentiment::is_lattice_shape(dm) {
+            header.inference_profile = Some("sentiment_lattice".to_string());
+        } else {
+            header.inference_profile = self
+                .brain_package_header
+                .as_ref()
+                .and_then(|h| h.inference_profile.clone());
+        }
+
+        let mut manifest = self.brain_plugins_manifest.clone().unwrap_or_default();
+        if sentiment::is_lattice_shape(dm) && manifest.sentiment.is_none() {
+            manifest.sentiment = Some(sentiment::SentimentInferenceConfig::default());
+        }
+        let plugins_blob = crate::inference::serialize_plugins_manifest(&manifest)
+            .ok()
+            .filter(|v| !v.is_empty());
+
+        let pkg = crate::brain::BrainPackage::new(
+            header,
+            checkpoint,
+            Some(personality),
+            plugins_blob,
+        );
+        pkg.encode_to_bytes()
     }
 
     /// Export current personality as JSON bytes (for persistence alongside brain).
@@ -2562,6 +2682,16 @@ impl LanguageService {
     pub fn load_brain(&mut self, data: &[u8]) -> Result<(), String> {
         let peeled = crate::brain::peel_brain_file_bytes(data)?;
         self.brain_package_header = Some(peeled.header.clone());
+        self.brain_plugins_manifest = match &peeled.plugins_blob {
+            Some(blob) => match crate::inference::parse_plugins_manifest_bytes(blob) {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    eprintln!("  [brain-plugins] manifest TOML parse failed: {}", e);
+                    None
+                }
+            },
+            None => None,
+        };
         if !peeled.header.name.is_empty() && peeled.header.name != "growformer" {
             self.agent_name = peeled.header.name.clone();
         }
@@ -2718,10 +2848,6 @@ impl LanguageService {
         self.active_dm_mut().route_text_with_spawn_check(text)
     }
 
-    // -----------------------------------------------------------------------
-    // M6: SLO tracking
-    // -----------------------------------------------------------------------
-
     /// Sentence-level coherence guard: truncate trailing sentences that diverge
     /// from the prompt's semantic space. Catches cross-domain contamination where
     /// the primary response is correct but Hopf composition or multi-group blending
@@ -2823,6 +2949,10 @@ impl LanguageService {
             self.latency_log.drain(0..5_000);
         }
     }
+
+    // -----------------------------------------------------------------------
+    // M6: SLO tracking
+    // -----------------------------------------------------------------------
 
     pub fn slo_snapshot(&self) -> SloSnapshot {
         let p95 = percentile(&self.latency_log, 0.95);

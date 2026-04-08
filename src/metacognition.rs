@@ -22,6 +22,10 @@
 
 use serde::{Deserialize, Serialize};
 
+fn default_min_relevance_for_accept_field() -> f32 {
+    0.06
+}
+
 /// Reflection scores from the MetaCognition evaluation.
 #[derive(Clone, Debug)]
 pub struct ReflectionScores {
@@ -64,6 +68,10 @@ pub enum ReflectionOutcome {
 pub struct MetaCognitionConfig {
     /// Minimum quality score to accept a response (0.0–1.0).
     pub accept_threshold: f32,
+    /// Minimum [`ReflectionScores::relevance`] to accept; blocks coherence-only
+    /// overrides when the response is unrelated to the prompt in topic space.
+    #[serde(default = "default_min_relevance_for_accept_field")]
+    pub min_relevance_for_accept: f32,
     /// Maximum retry attempts before graceful degradation.
     pub max_retries: usize,
     /// Weight of coherence in the combined quality score.
@@ -82,6 +90,7 @@ impl Default for MetaCognitionConfig {
     fn default() -> Self {
         Self {
             accept_threshold: 0.35,
+            min_relevance_for_accept: 0.06,
             max_retries: 2,
             coherence_weight: 0.45,
             relevance_weight: 0.35,
@@ -220,15 +229,28 @@ impl MetaCognition {
         // score low on relevance but are linguistically sound. The coherence floor
         // (0.95) prevents garbled generation from slipping through the lower gate.
         const COHERENCE_FLOOR: f32 = 0.95;
-        if scores.quality >= self.config.accept_threshold && scores.coherence >= COHERENCE_FLOOR {
+        let rel_ok = scores.relevance >= self.config.min_relevance_for_accept;
+        if scores.quality >= self.config.accept_threshold && scores.coherence >= COHERENCE_FLOOR && rel_ok {
             return ReflectionOutcome::Accept { scores };
+        }
+        if scores.quality >= self.config.accept_threshold && scores.coherence >= COHERENCE_FLOOR && !rel_ok {
+            println!(
+                "  [metacog] REJECT: relevance {:.3} < min {:.3} (topic mismatch)",
+                scores.relevance, self.config.min_relevance_for_accept
+            );
         }
         // High coherence with marginal quality: accept if clearly above a
         // soft floor — catches correct responses dragged down by one sub-metric.
-        if scores.coherence >= COHERENCE_FLOOR && scores.quality >= 0.20 {
+        if scores.coherence >= COHERENCE_FLOOR && scores.quality >= 0.20 && rel_ok {
             println!("  [metacog] ACCEPT (coherence-floor override): quality={:.3}, coherence={:.3}",
                 scores.quality, scores.coherence);
             return ReflectionOutcome::Accept { scores };
+        }
+        if scores.coherence >= COHERENCE_FLOOR && scores.quality >= 0.20 && !rel_ok {
+            println!(
+                "  [metacog] REJECT coherence override: relevance {:.3} < min {:.3}",
+                scores.relevance, self.config.min_relevance_for_accept
+            );
         }
 
         if attempt >= self.config.max_retries {

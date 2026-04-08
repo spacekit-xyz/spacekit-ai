@@ -96,6 +96,11 @@ struct Args {
     /// directory is loaded (skips default m5/agent/routekit). Use for focused micro-brains.
     #[arg(long, value_name = "DIR")]
     data_dir: Option<String>,
+
+    /// UTF-8 TOML embedded in the exported brain as the inference plugins manifest (format v2).
+    /// Top-level tables, e.g. `[sentiment]`, `[language_detection]`, `[badwords]`.
+    #[arg(long, value_name = "PATH")]
+    brain_plugins_toml: Option<PathBuf>,
 }
 
 fn resolve_infer_prompt(args: &Args) -> Result<Option<String>, String> {
@@ -154,6 +159,7 @@ fn main() {
             args.brain_description.as_deref(),
             args.brain_author.as_deref(),
             args.data_dir.as_deref(),
+            args.brain_plugins_toml.as_deref(),
         ) {
             eprintln!("Failed to train brain: {}", e);
             std::process::exit(1);
@@ -172,6 +178,7 @@ fn main() {
             args.brain_name.as_deref(),
             args.brain_description.as_deref(),
             args.brain_author.as_deref(),
+            args.brain_plugins_toml.as_deref(),
         ) {
             eprintln!("Retrain failed: {}", e);
             std::process::exit(1);
@@ -191,7 +198,7 @@ fn main() {
     } else {
         println!("Growformer — train and run specialized neural brains\n");
         println!("Usage:");
-        println!("  Train:     cargo run --release -- --train-brain [--auto]");
+        println!("  Train:     cargo run --release -- --train-brain [--auto] [--brain-plugins-toml path]");
         println!("  Retrain:   cargo run --release -- --retrain-gen 1 [--auto]");
         println!("  Infer:     cargo run --release -- --infer [--prompt 'text'] [--prompt-file path]");
         println!("  Demos:     cargo run --bin growformer-demos -- --help");
@@ -203,6 +210,28 @@ fn main() {
 // =============================================================================
 // Retrain a single gen group: loads existing brain, retrains one group, re-exports
 // =============================================================================
+
+/// Load TOML from `--brain-plugins-toml` and store for the next [`LanguageService::export_brain`].
+fn apply_optional_brain_plugins_toml(
+    svc: &mut LanguageService,
+    path: Option<&std::path::Path>,
+) -> Result<(), String> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let s = std::fs::read_to_string(path)
+        .map_err(|e| format!("--brain-plugins-toml {}: {}", path.display(), e))?;
+    let m = growformer::inference::parse_plugins_manifest_bytes(s.as_bytes())?;
+    if !m.has_embeddable_content() {
+        println!(
+            "  [brain-plugins] note: {} has no non-empty plugin tables (export may still add defaults for sentiment-shaped brains)",
+            path.display()
+        );
+    }
+    svc.set_brain_plugins_manifest(Some(m));
+    println!("  [brain-plugins] will embed manifest from {}", path.display());
+    Ok(())
+}
 
 fn apply_brain_package_cli(
     svc: &mut LanguageService,
@@ -236,6 +265,7 @@ fn retrain_single_gen(
     brain_name: Option<&str>,
     brain_description: Option<&str>,
     brain_author: Option<&str>,
+    brain_plugins_toml: Option<&std::path::Path>,
 ) -> Result<(), String> {
     let data = std::fs::read(brain_path)
         .map_err(|e| format!("Failed to read {}: {}", brain_path, e))?;
@@ -243,6 +273,7 @@ fn retrain_single_gen(
     let mut svc = LanguageService::new_default()?;
     svc.load_brain(&data)?;
     apply_brain_package_cli(&mut svc, brain_name, brain_description, brain_author);
+    apply_optional_brain_plugins_toml(&mut svc, brain_plugins_toml)?;
     println!("Loaded brain from {} ({} KB)", brain_path, data.len() / 1024);
 
     let dm = svc.active_dm();
@@ -446,6 +477,12 @@ fn run_inference(brain_path: &str, prompt: Option<&str>) -> Result<(), String> {
     println!("  Classifier: {}", info.has_classifier);
     println!("  Gen envs: {} groups", info.gen_envs);
     println!("  Code envs: {} groups", info.code_envs);
+    if let Some(ref p) = info.inference_profile {
+        println!("  Inference profile: {}", p);
+    }
+    if info.has_inference_plugins {
+        println!("  Inference plugins: embedded TOML manifest (see BrainPluginsManifest)");
+    }
 
     let dm = rt.svc.active_dm();
     for (gidx, env) in &dm.group_gen_envs {
@@ -1075,6 +1112,7 @@ fn train_brain(
     brain_description: Option<&str>,
     brain_author: Option<&str>,
     data_dir: Option<&str>,
+    brain_plugins_toml: Option<&std::path::Path>,
 ) -> Result<(), String> {
     println!("=== Full Neural Brain Training ===\n");
     if validate {
@@ -1180,6 +1218,7 @@ fn train_brain(
     let group_name_refs: Vec<&str> = discovered_group_names.iter().map(|s| s.as_str()).collect();
     let mut svc = LanguageService::new_with_groups(&group_name_refs)?;
     apply_brain_package_cli(&mut svc, brain_name, brain_description, brain_author);
+    apply_optional_brain_plugins_toml(&mut svc, brain_plugins_toml)?;
 
     // Compute both raw and bridged embeddings.
     // Bridged vectors for routing/classification; raw vectors for generation conditioning.

@@ -3305,6 +3305,39 @@ impl IndexedGenEnv {
                 } else {
                     println!("      [no-graph] topic '{}' has no ProgramGraph", forced_topic);
                 }
+                // Stage 4: lexical alignment — boost programs that match several query
+                // content words; penalize matches that hinge on a single frequent token
+                // (e.g. "love" shared across unrelated positive_strong prototypes).
+                if query_terms.len() >= 2 {
+                    let stop: std::collections::HashSet<&str> = [
+                        "the", "a", "an", "is", "are", "was", "were", "and", "or", "but",
+                        "in", "on", "at", "to", "for", "of", "with", "by", "from", "as",
+                        "it", "this", "that", "i", "you", "we", "they", "my", "your",
+                        "me", "not", "no", "do", "does", "did", "have", "has", "had",
+                        "love", "like", "likes", "hate", "good", "bad", "really", "very",
+                        "just", "so", "too", "get", "got",
+                    ]
+                    .into_iter()
+                    .collect();
+                    let qcontent: Vec<&String> = query_terms
+                        .iter()
+                        .filter(|t| t.len() > 2 && !stop.contains(t.as_str()))
+                        .collect();
+                    if qcontent.len() >= 2 {
+                        for (idx, sc) in scored.iter_mut() {
+                            let text = self.dictionary.decode(&topic.lattice.programs[*idx].token_sequence);
+                            let tl = text.to_ascii_lowercase();
+                            let hits = qcontent.iter().filter(|qt| tl.contains(qt.as_str())).count();
+                            let align = hits as f32 / qcontent.len() as f32;
+                            *sc += 0.22 * align;
+                            if hits == 1 && qcontent.len() >= 3 {
+                                *sc -= 0.14;
+                            }
+                        }
+                        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                        println!("      [lex-align] reranked with {} content terms (stopwords stripped)", qcontent.len());
+                    }
+                }
                 scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 for (rank, &(idx, score)) in scored.iter().enumerate().take(3) {
                     let snippet: String = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence)

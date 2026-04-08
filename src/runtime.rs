@@ -41,6 +41,12 @@ pub struct BrainInfo {
     pub has_classifier: bool,
     pub gen_envs: usize,
     pub code_envs: usize,
+    /// From [`crate::brain::BrainPackageHeader::inference_profile`] when present.
+    #[serde(default)]
+    pub inference_profile: Option<String>,
+    /// True when a [`crate::brain::BrainPackage::plugins_blob`] was present and parsed.
+    #[serde(default)]
+    pub has_inference_plugins: bool,
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -102,6 +108,12 @@ impl Runtime {
             has_classifier: dm.action_classifier.is_some(),
             gen_envs: dm.group_gen_envs.len(),
             code_envs: dm.group_code_envs.len(),
+            inference_profile: self
+                .svc
+                .brain_package_header
+                .as_ref()
+                .and_then(|h| h.inference_profile.clone()),
+            has_inference_plugins: self.svc.brain_plugins_manifest.is_some(),
         }
     }
 

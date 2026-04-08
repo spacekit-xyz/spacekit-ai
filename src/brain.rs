@@ -1,12 +1,18 @@
-//! Brain package format: versioned on-disk envelope around the JSON `DimensionManager`
-//! checkpoint (router, classifier, generation heads, group envs, etc.) plus optional
-//! personality JSON.
+//! Brain package format: versioned on-disk envelope for the Growformer runtime.
+//!
+//! A **brain package** is the full portable unit: JSON [`BrainPackageHeader`],
+//! JSON `DimensionManager` checkpoint, optional personality JSON, and optional
+//! UTF-8 TOML **plugins** blob (see `crate::inference::BrainPluginsManifest`).
+//! Legacy format v1 ends after personality; v2 appends `plugin_len: u32` + plugin bytes.
 
 use serde::{Deserialize, Serialize};
 
 /// Magic + little-endian `format_version` must match for the binary envelope.
 pub const BRAIN_PACKAGE_MAGIC: &[u8; 8] = b"GWFBRPKG";
+/// Header + checkpoint + personality only (no trailing plugin section).
 pub const BRAIN_PACKAGE_FORMAT_VERSION: u32 = 1;
+/// Same as v1, then `u32` plugin length + plugin bytes (UTF-8 TOML manifest).
+pub const BRAIN_PACKAGE_FORMAT_VERSION_PLUGINS: u32 = 2;
 
 /// Semantic version for display and provenance (not the binary format version).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -63,6 +69,10 @@ pub struct BrainPackageHeader {
     pub topics: Vec<TopicRef>,
     pub signature: Signature,
     pub merged_from: Vec<BrainRef>,
+    /// Hint for inference-time plugins: e.g. `sentiment_lattice` (set on export for sentiment brains),
+    /// or `off` / `none` to disable sentiment shortcuts even when the lattice shape matches.
+    #[serde(default)]
+    pub inference_profile: Option<String>,
 }
 
 impl Default for BrainPackageHeader {
@@ -78,16 +88,51 @@ impl Default for BrainPackageHeader {
             topics: vec![],
             signature: Signature::default(),
             merged_from: vec![],
+            inference_profile: None,
         }
     }
 }
 
-/// Full logical package: header + checkpoint (`DimensionManager` JSON) + optional personality JSON.
+/// Full logical unit for create / load / export: metadata, weights checkpoint, drift, and plugins.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BrainPackage {
     pub header: BrainPackageHeader,
     pub checkpoint: Vec<u8>,
     pub personality: Option<Vec<u8>>,
+    /// UTF-8 TOML inference manifest (see `crate::inference::BrainPluginsManifest`); `None` → on-disk format v1.
+    pub plugins_blob: Option<Vec<u8>>,
+}
+
+impl BrainPackage {
+    /// Assemble a package in memory before [`Self::encode_to_bytes`].
+    pub fn new(
+        header: BrainPackageHeader,
+        checkpoint: Vec<u8>,
+        personality: Option<Vec<u8>>,
+        plugins_blob: Option<Vec<u8>>,
+    ) -> Self {
+        Self {
+            header,
+            checkpoint,
+            personality,
+            plugins_blob,
+        }
+    }
+
+    /// Serialize to the binary `.bin` envelope consumed by [`peel_brain_file_bytes`].
+    pub fn encode_to_bytes(&self) -> Result<Vec<u8>, String> {
+        encode_brain_package(
+            &self.header,
+            &self.checkpoint,
+            self.personality.as_deref(),
+            self.plugins_blob.as_deref().filter(|b| !b.is_empty()),
+        )
+    }
+
+    /// Decode from file bytes (v1 or v2).
+    pub fn decode_from_bytes(data: &[u8]) -> Result<Self, String> {
+        decode_brain_package(data)
+    }
 }
 
 fn u32_le(b: &[u8]) -> Result<u32, String> {
@@ -106,11 +151,15 @@ pub fn is_brain_package_bytes(data: &[u8]) -> bool {
     data.len() >= BRAIN_PACKAGE_MAGIC.len() && &data[..BRAIN_PACKAGE_MAGIC.len()] == BRAIN_PACKAGE_MAGIC.as_slice()
 }
 
-/// Wrap checkpoint bytes (JSON `DimensionManager`) and optional personality JSON.
+/// Wrap checkpoint bytes (JSON `DimensionManager`), optional personality JSON, and optional plugins TOML.
+///
+/// Uses on-disk format v1 when `plugins_blob` is `None` or empty (backward compatible).
+/// Non-empty plugins use format v2 (trailing `u32` length + bytes).
 pub fn encode_brain_package(
     header: &BrainPackageHeader,
     checkpoint: &[u8],
     personality: Option<&[u8]>,
+    plugins_blob: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
     let header_json = serde_json::to_vec(header)
         .map_err(|e| format!("brain package header serialize failed: {}", e))?;
@@ -124,16 +173,37 @@ pub fn encode_brain_package(
     if pers.len() > u32::MAX as usize {
         return Err("brain package: personality blob too large".to_string());
     }
+    let plug: &[u8] = match plugins_blob {
+        Some(b) if !b.is_empty() => b,
+        _ => &[],
+    };
+    let use_v2 = !plug.is_empty();
+    if plug.len() > u32::MAX as usize {
+        return Err("brain package: plugins blob too large".to_string());
+    }
+    let format_ver = if use_v2 {
+        BRAIN_PACKAGE_FORMAT_VERSION_PLUGINS
+    } else {
+        BRAIN_PACKAGE_FORMAT_VERSION
+    };
 
-    let mut out = Vec::with_capacity(8 + 4 + 4 + 4 + header_json.len() + checkpoint.len() + 4 + pers.len());
+    let mut cap = 8 + 4 + 4 + 4 + header_json.len() + checkpoint.len() + 4 + pers.len();
+    if use_v2 {
+        cap += 4 + plug.len();
+    }
+    let mut out = Vec::with_capacity(cap);
     out.extend_from_slice(BRAIN_PACKAGE_MAGIC.as_slice());
-    push_u32_le(&mut out, BRAIN_PACKAGE_FORMAT_VERSION);
+    push_u32_le(&mut out, format_ver);
     push_u32_le(&mut out, header_json.len() as u32);
     push_u32_le(&mut out, checkpoint.len() as u32);
     out.extend_from_slice(&header_json);
     out.extend_from_slice(checkpoint);
     push_u32_le(&mut out, pers.len() as u32);
     out.extend_from_slice(pers);
+    if use_v2 {
+        push_u32_le(&mut out, plug.len() as u32);
+        out.extend_from_slice(plug);
+    }
     Ok(out)
 }
 
@@ -146,10 +216,12 @@ pub fn decode_brain_package(data: &[u8]) -> Result<BrainPackage, String> {
         return Err("brain package: bad magic".to_string());
     }
     let format_ver = u32_le(&data[8..12])?;
-    if format_ver != BRAIN_PACKAGE_FORMAT_VERSION {
+    if format_ver != BRAIN_PACKAGE_FORMAT_VERSION && format_ver != BRAIN_PACKAGE_FORMAT_VERSION_PLUGINS {
         return Err(format!(
-            "brain package: unsupported format version {} (expected {})",
-            format_ver, BRAIN_PACKAGE_FORMAT_VERSION
+            "brain package: unsupported format version {} (expected {} or {})",
+            format_ver,
+            BRAIN_PACKAGE_FORMAT_VERSION,
+            BRAIN_PACKAGE_FORMAT_VERSION_PLUGINS
         ));
     }
     let header_len = u32_le(&data[12..16])? as usize;
@@ -171,24 +243,56 @@ pub fn decode_brain_package(data: &[u8]) -> Result<BrainPackage, String> {
     let pers_end = pers_start
         .checked_add(pers_len)
         .ok_or_else(|| "brain package: personality length overflow".to_string())?;
-    if data.len() != pers_end {
-        return Err(format!(
-            "brain package: length mismatch (file {} bytes, expected {})",
-            data.len(),
-            pers_end
-        ));
-    }
-    let personality = if pers_len == 0 {
-        None
+    let (personality, plugins_blob, expected_end) = if format_ver == BRAIN_PACKAGE_FORMAT_VERSION {
+        if data.len() != pers_end {
+            return Err(format!(
+                "brain package: length mismatch (file {} bytes, expected {} for format v1)",
+                data.len(),
+                pers_end
+            ));
+        }
+        let personality = if pers_len == 0 {
+            None
+        } else {
+            Some(data[pers_start..pers_end].to_vec())
+        };
+        (personality, None, pers_end)
     } else {
-        Some(data[pers_start..pers_end].to_vec())
+        if data.len() < pers_end + 4 {
+            return Err("brain package: truncated plugins length (format v2)".to_string());
+        }
+        let personality = if pers_len == 0 {
+            None
+        } else {
+            Some(data[pers_start..pers_end].to_vec())
+        };
+        let plugin_len = u32_le(&data[pers_end..pers_end + 4])? as usize;
+        let plug_start = pers_end + 4;
+        let plug_end = plug_start
+            .checked_add(plugin_len)
+            .ok_or_else(|| "brain package: plugin length overflow".to_string())?;
+        if data.len() != plug_end {
+            return Err(format!(
+                "brain package: length mismatch (file {} bytes, expected {} for format v2)",
+                data.len(),
+                plug_end
+            ));
+        }
+        let plugins_blob = if plugin_len == 0 {
+            None
+        } else {
+            Some(data[plug_start..plug_end].to_vec())
+        };
+        (personality, plugins_blob, plug_end)
     };
+    debug_assert_eq!(data.len(), expected_end);
     let header: BrainPackageHeader = serde_json::from_slice(header_json)
         .map_err(|e| format!("brain package header deserialize failed: {}", e))?;
     Ok(BrainPackage {
         header,
         checkpoint,
         personality,
+        plugins_blob,
     })
 }
 
@@ -202,6 +306,7 @@ pub fn peel_brain_file_bytes(data: &[u8]) -> Result<BrainPackage, String> {
             header: BrainPackageHeader::default(),
             checkpoint: data.to_vec(),
             personality: None,
+            plugins_blob: None,
         })
     }
 }
@@ -217,11 +322,26 @@ mod tests {
         h.name = "unit-test".to_string();
         let ckpt = br#"{"smoke": true}"#;
         let pers = br#"{"O":0.5}"#;
-        let bytes = encode_brain_package(&h, ckpt, Some(pers)).unwrap();
+        let bytes = encode_brain_package(&h, ckpt, Some(pers), None).unwrap();
         let p = decode_brain_package(&bytes).unwrap();
         assert_eq!(p.header.id, "test-id");
         assert_eq!(p.checkpoint, ckpt);
         assert_eq!(p.personality.as_deref(), Some(pers.as_slice()));
+        assert!(p.plugins_blob.is_none());
+    }
+
+    #[test]
+    fn brain_package_v2_plugins_roundtrip() {
+        let mut h = BrainPackageHeader::default();
+        h.id = "p2".to_string();
+        let ckpt = br#"{"v":2}"#;
+        let pers = br#"{}"#;
+        let plugins = b"[sentiment]\nmeta_gk_margin = 0.06\n";
+        let bytes = encode_brain_package(&h, ckpt, Some(pers), Some(plugins)).unwrap();
+        let p = decode_brain_package(&bytes).unwrap();
+        assert_eq!(p.plugins_blob.as_deref(), Some(plugins.as_slice()));
+        let round = p.encode_to_bytes().unwrap();
+        assert_eq!(round, bytes);
     }
 
     #[test]
