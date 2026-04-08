@@ -19,7 +19,7 @@ use crate::dimension::EncoderPreset;
 use crate::spectral::{ProjectModel, EntityKind, HybridEmbedder};
 use crate::dimension::tool::{ToolRegistry, ToolSchema, ToolCallInfo, ToolResult};
 use crate::dimension::paramecium::InfraciliaryLattice;
-use crate::inference::{sentiment, BrainPluginsManifest};
+use crate::inference::{default_inference_harness, BrainPluginsManifest, InferenceHarness};
 use crate::metacognition::{MetaCognition, ReflectionOutcome};
 use crate::reasoning::{ReasoningEngine, System2Config};
 use crate::types::{EnvironmentConfig, GroupId, Sample};
@@ -603,6 +603,8 @@ pub struct LanguageService {
     pub brain_package_header: Option<crate::brain::BrainPackageHeader>,
     /// Inference plugins from [`crate::brain::BrainPackage::plugins_blob`] (TOML), if present and valid.
     pub brain_plugins_manifest: Option<BrainPluginsManifest>,
+    /// Built-in inference plugins (sentiment lattice, etc.); extend via [`InferenceHarness::new`].
+    pub inference_harness: InferenceHarness,
 }
 
 impl LanguageService {
@@ -669,6 +671,7 @@ impl LanguageService {
             system2_config: System2Config::default(),
             brain_package_header: None,
             brain_plugins_manifest: None,
+            inference_harness: default_inference_harness(),
         })
     }
 
@@ -883,6 +886,7 @@ impl LanguageService {
             .as_ref()
             .and_then(|m| m.sentiment.clone());
         let sentiment_cfg_ref = sentiment_cfg_bundle.as_ref();
+        let inference_harness = self.inference_harness.clone();
 
         let dm = self.active_dm_mut();
         let action = dm.route_text_to_action_stateless(intent_text)?;
@@ -910,7 +914,7 @@ impl LanguageService {
                     println!("  [meta-route] concept={}, lang={}, conf={:.3}, margin={:.3} → group {}",
                         mr.concept.name(), mr.language.name(), mr.confidence, mr.margin, best_g);
                     let apply_meta = mr.margin >= 0.05 || mr.confidence >= 0.90 || group_idx.is_none();
-                    let sentiment_skip_gk = sentiment::skip_weak_gk_for_meta_conditioning(
+                    let sentiment_skip_gk = inference_harness.skip_weak_gk_for_meta_conditioning(
                         dm,
                         inference_profile_opt,
                         sentiment_cfg_ref,
@@ -1096,16 +1100,12 @@ impl LanguageService {
                 .collect();
             // Sentiment brains: use the full user line for BM25 / lexical retrieval,
             // not only the stripped "subject", so "sleeping", "sundays" survive.
-            if sentiment::shortcuts_enabled(dm, inference_profile_opt) {
-                for w in intent_text.split_whitespace() {
-                    let lw = w
-                        .trim_matches(|c: char| !c.is_alphanumeric())
-                        .to_ascii_lowercase();
-                    if lw.len() > 2 && !subject_kw.iter().any(|x| x == &lw) {
-                        subject_kw.push(lw);
-                    }
-                }
-            }
+            inference_harness.extend_subject_keywords(
+                dm,
+                inference_profile_opt,
+                intent_text,
+                &mut subject_kw,
+            );
             let intent_act = query_intent.action.name().to_string();
             for env in dm.group_gen_envs.values_mut() {
                 env.diversity_bonus = div_bonus;
@@ -1190,7 +1190,7 @@ impl LanguageService {
             // Only use MetaBrain's archetype when the classifier didn't provide a group.
             let effective_gidx = group_idx.or_else(|| meta_result.as_ref().and_then(|mr| mr.group_idx));
 
-            let sentiment_direct = sentiment::try_user_anchored_line(
+            let gen_preempt = inference_harness.try_preempt_generation(
                 dm,
                 inference_profile_opt,
                 sentiment_cfg_ref,
@@ -1198,8 +1198,9 @@ impl LanguageService {
                 meta_result.as_ref(),
                 topic_hint.as_deref(),
             );
+            let preempt_template_id = gen_preempt.as_ref().map(|o| o.template_id);
             // True when we emit classification grounded in the user's line without lattice retrieval.
-            let sentiment_direct_used = sentiment_direct.is_some()
+            let sentiment_direct_used = gen_preempt.is_some()
                 && effective_gidx.is_some()
                 && broad_summary.is_none();
 
@@ -1214,15 +1215,15 @@ impl LanguageService {
                         confidence: *summary_conf,
                     }
                 })
-            } else if let (Some((stext, sconf)), Some(gidx)) = (sentiment_direct, effective_gidx) {
+            } else if let (Some(out), Some(gidx)) = (gen_preempt, effective_gidx) {
                 let mut e8 = [0.0f32; 8];
                 for i in 0..8.min(gen_conditioning.len()) { e8[i] = gen_conditioning[i]; }
                 println!("  [sentiment-direct] user-anchored classification (lattice paraphrase skipped)");
                 Some(E8Contribution {
                     group_idx: gidx,
                     lattice_point: e8,
-                    text: stext,
-                    confidence: sconf,
+                    text: out.text,
+                    confidence: out.confidence,
                 })
             } else {
                 effective_gidx.and_then(|gidx| {
@@ -1353,7 +1354,7 @@ impl LanguageService {
                 GeneratedResponse {
                     text: best_text,
                     template_id: if sentiment_direct_used {
-                        sentiment::TEMPLATE_ID_USER_ANCHORED.to_string()
+                        preempt_template_id.unwrap().to_string()
                     } else {
                         format!("growformer_gen_{}", best_gidx)
                     },
@@ -1375,7 +1376,11 @@ impl LanguageService {
         // from the prompt's topic (e.g., identity text appended to an IT query).
         // Skip for user-anchored sentiment: the second sentence ("Grounded in…") is intentional.
         let resp = if let Some((_, ref bridged)) = encoded {
-            if resp.template_id == sentiment::TEMPLATE_ID_USER_ANCHORED {
+            if self
+                .inference_harness
+                .template_postprocess_flags(&resp.template_id)
+                .skip_coherence_truncate
+            {
                 resp
             } else {
                 let truncated = Self::coherence_truncate(&bridged.routed_vector, &resp.text);
@@ -1460,7 +1465,11 @@ impl LanguageService {
         } else if is_broad && broad_summary.is_some() {
             println!("  [metacog] SKIP: broad query summary (multi-topic composition)");
             resp
-        } else if resp.template_id == sentiment::TEMPLATE_ID_USER_ANCHORED {
+        } else if self
+            .inference_harness
+            .template_postprocess_flags(&resp.template_id)
+            .skip_metacog
+        {
             println!(
                 "  [metacog] SKIP: user-anchored sentiment (retrieval-free; relevance gate N/A)"
             );
@@ -2465,19 +2474,13 @@ impl LanguageService {
         header.author.name.clone_from(&self.agent_creator);
         header.description.clone_from(&self.brain_package_description);
         let dm = self.active_dm();
-        if sentiment::is_lattice_shape(dm) {
-            header.inference_profile = Some("sentiment_lattice".to_string());
-        } else {
-            header.inference_profile = self
-                .brain_package_header
-                .as_ref()
-                .and_then(|h| h.inference_profile.clone());
-        }
-
+        let prev_profile = self
+            .brain_package_header
+            .as_ref()
+            .and_then(|h| h.inference_profile.as_deref());
         let mut manifest = self.brain_plugins_manifest.clone().unwrap_or_default();
-        if sentiment::is_lattice_shape(dm) && manifest.sentiment.is_none() {
-            manifest.sentiment = Some(sentiment::SentimentInferenceConfig::default());
-        }
+        self.inference_harness
+            .apply_export_brain_plugins(dm, prev_profile, &mut header, &mut manifest);
         let plugins_blob = crate::inference::serialize_plugins_manifest(&manifest)
             .ok()
             .filter(|v| !v.is_empty());

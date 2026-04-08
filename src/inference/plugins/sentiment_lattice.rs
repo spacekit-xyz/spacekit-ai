@@ -1,15 +1,15 @@
-//! Sentiment lattice inference augment: user-anchored copy, weak meta-GK guard, richer keywords.
-//! Configuration: optional TOML via `GROWFORMER_SENTIMENT_INFERENCE_TOML`.
+//! Sentiment lattice inference plugin: user-anchored copy, weak meta-GK guard, richer keywords.
+//! Config: `[sentiment]` in the brain plugins TOML and optional `GROWFORMER_SENTIMENT_INFERENCE_TOML`.
 
-use std::borrow::Cow;
 use std::collections::HashSet;
-use std::sync::{Arc, OnceLock};
 
-use serde::{Deserialize, Serialize};
-
+use crate::brain::BrainPackageHeader;
 use crate::dimension::DimensionManager;
 use crate::growformer_lang::MetaConcept;
 use crate::micro_brain::MetaResult;
+
+use crate::inference::harness::{BrainInferencePlugin, GenerationPreemptOutcome, TemplatePostprocessFlags};
+use crate::inference::manifest::{sentiment_cfg, BrainPluginsManifest, SentimentInferenceConfig};
 
 /// `GeneratedResponse.template_id` when the user-anchored path is used.
 pub const TEMPLATE_ID_USER_ANCHORED: &str = "sentiment_user_anchored";
@@ -24,64 +24,6 @@ pub const TOPIC_KEYS: &[&str] = &[
     "positive_strong",
     "mixed",
 ];
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SentimentInferenceConfig {
-    pub meta_gk_margin: f32,
-    pub meta_gk_confidence: f32,
-    pub min_meta_confidence_user_anchored: f32,
-    pub mixed_override_confidence: f32,
-    pub default_line_confidence: f32,
-    /// Confidence for hedged / ambiguous lines (not a clear pole).
-    pub ambiguous_line_confidence: f32,
-}
-
-impl Default for SentimentInferenceConfig {
-    fn default() -> Self {
-        Self {
-            meta_gk_margin: 0.05,
-            meta_gk_confidence: 0.55,
-            min_meta_confidence_user_anchored: 0.28,
-            mixed_override_confidence: 0.88,
-            default_line_confidence: 0.92,
-            ambiguous_line_confidence: 0.58,
-        }
-    }
-}
-
-static CONFIG: OnceLock<Arc<SentimentInferenceConfig>> = OnceLock::new();
-
-pub fn config() -> Arc<SentimentInferenceConfig> {
-    CONFIG
-        .get_or_init(|| {
-            let mut c = SentimentInferenceConfig::default();
-            if let Ok(path) = std::env::var("GROWFORMER_SENTIMENT_INFERENCE_TOML") {
-                if let Ok(s) = std::fs::read_to_string(&path) {
-                    if let Ok(parsed) = toml::from_str::<SentimentInferenceConfig>(&s) {
-                        c = parsed;
-                    } else {
-                        eprintln!(
-                            "[sentiment-inference] failed to parse TOML at {}, using defaults",
-                            path
-                        );
-                    }
-                }
-            }
-            Arc::new(c)
-        })
-        .clone()
-}
-
-/// Brain-bundled `[sentiment]` TOML overrides env-based `GROWFORMER_SENTIMENT_INFERENCE_TOML` when present.
-pub(crate) fn sentiment_cfg<'a>(
-    brain_override: Option<&'a SentimentInferenceConfig>,
-) -> Cow<'a, SentimentInferenceConfig> {
-    match brain_override {
-        Some(c) => Cow::Borrowed(c),
-        None => Cow::Owned((*config()).clone()),
-    }
-}
 
 /// True when the checkpoint exposes exactly the standard sentiment topic sub-lattice in one group.
 pub fn is_lattice_shape(dm: &DimensionManager) -> bool {
@@ -117,7 +59,7 @@ pub fn shortcuts_enabled(dm: &DimensionManager, inference_profile: Option<&str>)
 }
 
 /// Ignore weak GeneralKnowledge meta projection for conditioning on sentiment brains.
-pub fn skip_weak_gk_for_meta_conditioning(
+pub fn should_skip_weak_gk_for_meta_conditioning(
     dm: &DimensionManager,
     inference_profile: Option<&str>,
     sentiment_from_manifest: Option<&SentimentInferenceConfig>,
@@ -221,9 +163,7 @@ fn has_bipolar_lexicon(lower: &str) -> bool {
     has_pos && has_neg
 }
 
-/// Discourse templates where laudatory wording usually means irony (MetaBrain often misfires as plain negative/positive).
 fn has_sarcasm_template(lower: &str) -> bool {
-    // --- "because X is exactly what I wanted" (stoic irony) ---
     if lower.contains("because") {
         let desired_outcome = lower.contains("exactly what")
             && (lower.contains("i wanted")
@@ -349,7 +289,6 @@ fn has_sarcasm_template(lower: &str) -> bool {
         return true;
     }
 
-    // Praise + beat + "nailed" — common vent / ironic performance review tone
     if lower.contains("fantastic") && lower.contains("nail") {
         if lower.contains('…') || lower.contains("...") {
             return true;
@@ -359,7 +298,6 @@ fn has_sarcasm_template(lower: &str) -> bool {
         }
     }
 
-    // Grievance + bitter "praise" (long hold, silence, delays…)
     let gripe = lower.contains("waiting ")
         || lower.contains("waiting for")
         || lower.contains("waited ")
@@ -388,7 +326,6 @@ fn normalize_match_text(text: &str) -> String {
     s
 }
 
-/// MetaBrain often picks `positive_strong` on weak tokens ("fine", "better") while the line is hedged or disappointed.
 fn ambiguous_valence_retarget(lower: &str, key: &str) -> Option<&'static str> {
     if !matches!(key, "positive_strong" | "positive_mild") {
         return None;
@@ -430,7 +367,6 @@ fn ambiguous_valence_retarget(lower: &str, key: &str) -> Option<&'static str> {
     None
 }
 
-/// Obvious opinion / affect words — if present, do not treat the line as a dry fact.
 fn has_clear_evaluative_stance(lower: &str) -> bool {
     const EVAL: &[&str] = &[
         "hate", "love", "terrible", "awful", "amazing", "horrible", "fantastic", "disappointed",
@@ -441,7 +377,6 @@ fn has_clear_evaluative_stance(lower: &str) -> bool {
     EVAL.iter().any(|w| lower.contains(w))
 }
 
-/// Third-person / technical facts with no stance (file metrics, login status, delivery time).
 fn is_objective_factual_statement(lower: &str) -> bool {
     if has_clear_evaluative_stance(lower) {
         return false;
@@ -500,7 +435,6 @@ fn is_objective_factual_statement(lower: &str) -> bool {
     false
 }
 
-/// `disappointed` + MetaBrain `positive_*` is a common misfire.
 fn disappointment_positive_override(lower: &str, key: &str) -> Option<&'static str> {
     if !matches!(key, "positive_strong" | "positive_mild") {
         return None;
@@ -511,7 +445,6 @@ fn disappointment_positive_override(lower: &str, key: &str) -> Option<&'static s
     None
 }
 
-/// Phrases where surface text fixes polarity regardless of MetaBrain (wrong pole or low confidence).
 fn lexical_polarity_signal(lower: &str) -> Option<&'static str> {
     if lower.contains("blew me away")
         || lower.contains("blow me away")
@@ -563,7 +496,6 @@ pub fn try_user_anchored_line(
     let cfg = sentiment_cfg(sentiment_from_manifest);
     let lower = normalize_match_text(intent_text);
 
-    // Dry facts often get weak / wrong MetaBrain scores; still answer NEUTRAL without lattice retrieval.
     if is_objective_factual_statement(&lower) {
         let header = label_header("neutral");
         let body = "Measurable fact, status, or time — no evaluative opinion; read as NEUTRAL (not praise or complaint)";
@@ -729,4 +661,99 @@ pub fn try_user_anchored_line(
         header, body, excerpt
     );
     Some((text, conf))
+}
+
+/// Zero-sized handle; all behavior is in this module's functions.
+pub struct SentimentLatticePlugin;
+
+impl BrainInferencePlugin for SentimentLatticePlugin {
+    fn skip_weak_gk_for_meta_conditioning(
+        &self,
+        dm: &DimensionManager,
+        inference_profile: Option<&str>,
+        sentiment_from_manifest: Option<&SentimentInferenceConfig>,
+        concept: MetaConcept,
+        margin: f32,
+        confidence: f32,
+    ) -> bool {
+        should_skip_weak_gk_for_meta_conditioning(
+            dm,
+            inference_profile,
+            sentiment_from_manifest,
+            concept,
+            margin,
+            confidence,
+        )
+    }
+
+    fn extend_subject_keywords(
+        &self,
+        dm: &DimensionManager,
+        inference_profile: Option<&str>,
+        intent_text: &str,
+        subject_kw: &mut Vec<String>,
+    ) {
+        if !shortcuts_enabled(dm, inference_profile) {
+            return;
+        }
+        for w in intent_text.split_whitespace() {
+            let lw = w
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_ascii_lowercase();
+            if lw.len() > 2 && !subject_kw.iter().any(|x| x == &lw) {
+                subject_kw.push(lw);
+            }
+        }
+    }
+
+    fn try_preempt_generation(
+        &self,
+        dm: &DimensionManager,
+        inference_profile: Option<&str>,
+        sentiment_from_manifest: Option<&SentimentInferenceConfig>,
+        intent_text: &str,
+        meta_result: Option<&MetaResult>,
+        topic_hint: Option<&str>,
+    ) -> Option<GenerationPreemptOutcome> {
+        try_user_anchored_line(
+            dm,
+            inference_profile,
+            sentiment_from_manifest,
+            intent_text,
+            meta_result,
+            topic_hint,
+        )
+        .map(|(text, confidence)| GenerationPreemptOutcome {
+            text,
+            confidence,
+            template_id: TEMPLATE_ID_USER_ANCHORED,
+        })
+    }
+
+    fn template_postprocess_flags(&self, template_id: &str) -> TemplatePostprocessFlags {
+        if template_id == TEMPLATE_ID_USER_ANCHORED {
+            TemplatePostprocessFlags {
+                skip_coherence_truncate: true,
+                skip_metacog: true,
+            }
+        } else {
+            TemplatePostprocessFlags::default()
+        }
+    }
+
+    fn export_brain_plugins(
+        &self,
+        dm: &DimensionManager,
+        header: &mut BrainPackageHeader,
+        manifest: &mut BrainPluginsManifest,
+    ) -> bool {
+        if !is_lattice_shape(dm) {
+            return false;
+        }
+        header.inference_profile = Some("sentiment_lattice".to_string());
+        if manifest.sentiment.is_none() {
+            manifest.sentiment = Some(SentimentInferenceConfig::default());
+        }
+        true
+    }
 }
