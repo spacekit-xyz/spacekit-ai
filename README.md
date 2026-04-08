@@ -228,6 +228,10 @@ growformer/
     ├── understanding.rs     — UnderstandingLayer: topic/verb classifiers, goal_magnitude
     ├── meta_brain.rs        — MetaBrain: CentroidCoordinator, ArchetypeBrain
     ├── cloze.rs             — Cloze learning: contrastive fill-in-the-blank
+    ├── inference/
+    │   ├── harness.rs       — InferenceHarness, BrainInferencePlugin (orchestration hooks)
+    │   ├── manifest.rs      — BrainPluginsManifest, SentimentInferenceConfig (embedded TOML)
+    │   └── plugins/         — SentimentLatticePlugin + default_inference_harness()
     ├── dimension/
     │   ├── group_gen.rs     — IndexedGenEnv: topic sub-lattices, forced routing
     │   ├── manager.rs       — DimensionManager: conditioning pipeline, Clifford rotors
@@ -245,6 +249,14 @@ growformer/
         ├── mirror.rs        — System 6: Mirror group coupling
         └── checkpoint.rs    — Brain serialization/deserialization
 ```
+
+### Inference plugins (`src/inference/`)
+
+Optional **inference-time** behavior is implemented as compile-time plugins behind **`InferenceHarness`**, not as dynamic `.so` loads. The brain package may embed a UTF-8 TOML **`BrainPluginsManifest`** (`plugins_blob` on v2 packages); typed tables such as **`[sentiment]`** map to **`SentimentInferenceConfig`** in `manifest.rs`.
+
+- **`LanguageService`** holds **`inference_harness`**, initialized with **`default_inference_harness()`** (currently registers **`SentimentLatticePlugin`**). Generation, meta-route guards, subject-keyword merging, coherence/metacog skips, and **`export_brain`** defaults are dispatched through the harness so **`service.rs`** stays orchestration-focused.
+- **Borrowing:** Inside the main generation path, code clones **`inference_harness`** before **`active_dm_mut()`** (same pattern as hoisted plugin config) so the harness can run while the active **`DimensionManager`** is mutably borrowed.
+- **Extending:** Implement **`BrainInferencePlugin`** in `src/inference/plugins/`, override only the hooks you need (defaults are no-ops), and append **`Box::new(YourPlugin)`** in **`plugins/mod.rs`** **`default_inference_harness()`**, or replace **`svc.inference_harness`** with **`InferenceHarness::new(vec![...])`** for a custom registry.
 
 Three binaries, one shared library:
 
