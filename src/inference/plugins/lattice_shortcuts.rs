@@ -4,6 +4,7 @@
 
 use std::collections::HashSet;
 
+use crate::infer_trace;
 use crate::brain::BrainPackageHeader;
 use crate::dimension::DimensionManager;
 use crate::growformer_lang::MetaConcept;
@@ -90,6 +91,121 @@ fn label_header(topic_key: &str) -> &'static str {
     }
 }
 
+/// Display header for a `semantic_intent` / topic key (matches seven-topic shortcuts, plus extended sentiment intents).
+pub fn sentiment_display_header(topic_key: &str) -> String {
+    match topic_key.to_ascii_lowercase().as_str() {
+        "positive_strong" => "POSITIVE (strong)".to_string(),
+        "positive_mild" => "POSITIVE (mild)".to_string(),
+        "negative_strong" => "NEGATIVE (strong)".to_string(),
+        "negative_mild" => "NEGATIVE (mild)".to_string(),
+        "neutral" => "NEUTRAL".to_string(),
+        "sarcastic" => "SARCASTIC".to_string(),
+        "mixed" => "MIXED".to_string(),
+        "neutral_chop" => "NEUTRAL (chop)".to_string(),
+        "cautiously_negative" => "CAUTIOUSLY NEGATIVE".to_string(),
+        "cautiously_positive" => "CAUTIOUSLY POSITIVE".to_string(),
+        "confused" => "CONFUSED".to_string(),
+        "hopium" => "HOPIUM".to_string(),
+        "copium" => "COPIUM".to_string(),
+        "capitulation" => "CAPITULATION".to_string(),
+        "euphoric" => "EUPHORIC".to_string(),
+        k => k
+            .split('_')
+            .map(|w| {
+                let mut c = w.chars();
+                c.next()
+                    .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+/// True when `segment` looks like a display label (`MIXED`, `POSITIVE (mild)`, `NEGATIVE( sarcastic)`, `CAUTIOUSLY NEGATIVE`, …).
+fn sentiment_segment_looks_like_label_header(seg: &str) -> bool {
+    let h = seg.trim();
+    if h.len() < 3 || h.len() > 88 {
+        return false;
+    }
+    if !h.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+        return false;
+    }
+    let mut depth: i32 = 0;
+    for c in h.chars() {
+        match c {
+            '(' => {
+                depth += 1;
+                if depth > 2 {
+                    return false;
+                }
+            }
+            ')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ if depth > 0 => {
+                if !(c.is_ascii_alphanumeric() || c == ' ') {
+                    return false;
+                }
+            }
+            _ => {
+                if !(c.is_ascii_uppercase() || c == ' ' || c == '-' || c == '/') {
+                    return false;
+                }
+            }
+        }
+    }
+    depth == 0
+}
+
+fn split_once_label_separator(s: &str) -> Option<(&str, &str)> {
+    s.split_once(" — ")
+        .or_else(|| s.split_once(" – "))
+        .or_else(|| s.split_once(" - "))
+}
+
+/// Remove one or more leading `LABEL —` / `LABEL -` segments (fixes double headers when training text embedded old shortcut fragments).
+pub fn strip_leading_sentiment_display_headers(s: &str) -> String {
+    let mut cur = s.trim_start();
+    loop {
+        let Some((head, rest)) = split_once_label_separator(cur) else {
+            return cur.to_string();
+        };
+        let r = rest.trim_start();
+        if r.is_empty() {
+            return cur.to_string();
+        }
+        if sentiment_segment_looks_like_label_header(head) {
+            cur = r;
+            continue;
+        }
+        return cur.to_string();
+    }
+}
+
+/// True when `body` begins with a recognizable display label + separator (after stripping, would lose content).
+pub fn sentiment_line_already_has_display_header(body: &str) -> bool {
+    let Some((head, rest)) = split_once_label_separator(body.trim_start()) else {
+        return false;
+    };
+    sentiment_segment_looks_like_label_header(head) && !rest.trim().is_empty()
+}
+
+/// Prefix lattice-retrieved rationale with `LABEL —` for parity with the user-anchored shortcut line format.
+pub fn format_retrieved_sentiment_line(topic_key: &str, body: &str) -> String {
+    let cleaned = strip_leading_sentiment_display_headers(body);
+    let cleaned = if cleaned.trim().is_empty() {
+        body.trim().to_string()
+    } else {
+        cleaned.trim_start().to_string()
+    };
+    let header = sentiment_display_header(topic_key);
+    format!("{} — {}", header, cleaned)
+}
+
 fn normalize_match_text(text: &str) -> String {
     let mut s = text.to_lowercase();
     s = s.replace('\u{2019}', "'");
@@ -129,7 +245,7 @@ pub fn try_user_anchored_line(
         } else {
             trimmed.to_string()
         };
-        println!("  [lattice-direct] objective fact / status → NEUTRAL (bypass meta conf gate)");
+        infer_trace!("  [lattice-direct] objective fact / status → NEUTRAL (bypass meta conf gate)");
         let text = format!(
             "{} — {}. Grounded in the user's own words: \"{}\"",
             header, body, excerpt
@@ -256,22 +372,22 @@ pub fn try_user_anchored_line(
     };
 
     if force_mixed {
-        println!("  [lattice-direct] contrastive bipolar → MIXED (override meta topic)");
+        infer_trace!("  [lattice-direct] contrastive bipolar → MIXED (override meta topic)");
     }
     if sarcasm_template_override {
-        println!("  [lattice-direct] sarcasm template → SARCASTIC (override meta topic)");
+        infer_trace!("  [lattice-direct] sarcasm template → SARCASTIC (override meta topic)");
     }
     if ambiguous_override {
-        println!(
+        infer_trace!(
             "  [lattice-direct] hedged/ambiguous → {} (override meta topic)",
             key
         );
     }
     if disappointment_override {
-        println!("  [lattice-direct] disappointment cue → NEGATIVE (mild) (override meta topic)");
+        infer_trace!("  [lattice-direct] disappointment cue → NEGATIVE (mild) (override meta topic)");
     }
     if lexical_polarity_override {
-        println!(
+        infer_trace!(
             "  [lattice-direct] lexical polarity → {} (override meta topic / bypass low conf)",
             key
         );
@@ -376,5 +492,43 @@ impl BrainInferencePlugin for LatticeShortcutsPlugin {
             manifest.inference_thresholds = Some(InferenceThresholds::default());
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod sentiment_format_tests {
+    use super::{
+        format_retrieved_sentiment_line, sentiment_display_header, sentiment_line_already_has_display_header,
+    };
+
+    #[test]
+    fn display_header_extended_intents() {
+        assert_eq!(sentiment_display_header("neutral_chop"), "NEUTRAL (chop)");
+        assert_eq!(sentiment_display_header("cautiously_negative"), "CAUTIOUSLY NEGATIVE");
+    }
+
+    #[test]
+    fn format_line_prefixes_body() {
+        let out = format_retrieved_sentiment_line("neutral_chop", "Low activity; neutral chop.");
+        assert!(out.starts_with("NEUTRAL (chop) — "));
+        assert!(out.contains("Low activity"));
+    }
+
+    #[test]
+    fn format_line_idempotent_when_prefixed() {
+        let already = "MIXED — Two-sided valence.";
+        assert!(sentiment_line_already_has_display_header(already));
+        assert_eq!(format_retrieved_sentiment_line("mixed", already), already);
+    }
+
+    #[test]
+    fn format_line_strips_chained_legacy_headers() {
+        let body = "POSITIVE (mild) — POSITIVE( mild) — Security improvement acknowledged.";
+        let out = format_retrieved_sentiment_line("positive_mild", body);
+        assert_eq!(
+            out,
+            "POSITIVE (mild) — Security improvement acknowledged."
+        );
+        assert!(!out.contains("POSITIVE( mild)"));
     }
 }

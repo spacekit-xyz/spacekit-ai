@@ -22,6 +22,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::infer_trace;
+
 fn default_min_relevance_for_accept_field() -> f32 {
     0.06
 }
@@ -218,7 +220,7 @@ impl MetaCognition {
     ) -> ReflectionOutcome {
         let scores = self.evaluate(prompt_emb, response_emb, response_text, topic_hint);
 
-        println!(
+        infer_trace!(
             "  [metacog] attempt={}, coherence={:.3}, relevance={:.3}, completeness={:.3}, quality={:.3} (threshold={:.3})",
             attempt, scores.coherence, scores.relevance, scores.completeness,
             scores.quality, self.config.accept_threshold
@@ -234,7 +236,7 @@ impl MetaCognition {
             return ReflectionOutcome::Accept { scores };
         }
         if scores.quality >= self.config.accept_threshold && scores.coherence >= COHERENCE_FLOOR && !rel_ok {
-            println!(
+            infer_trace!(
                 "  [metacog] REJECT: relevance {:.3} < min {:.3} (topic mismatch)",
                 scores.relevance, self.config.min_relevance_for_accept
             );
@@ -242,12 +244,12 @@ impl MetaCognition {
         // High coherence with marginal quality: accept if clearly above a
         // soft floor — catches correct responses dragged down by one sub-metric.
         if scores.coherence >= COHERENCE_FLOOR && scores.quality >= 0.20 && rel_ok {
-            println!("  [metacog] ACCEPT (coherence-floor override): quality={:.3}, coherence={:.3}",
+            infer_trace!("  [metacog] ACCEPT (coherence-floor override): quality={:.3}, coherence={:.3}",
                 scores.quality, scores.coherence);
             return ReflectionOutcome::Accept { scores };
         }
         if scores.coherence >= COHERENCE_FLOOR && scores.quality >= 0.20 && !rel_ok {
-            println!(
+            infer_trace!(
                 "  [metacog] REJECT coherence override: relevance {:.3} < min {:.3}",
                 scores.relevance, self.config.min_relevance_for_accept
             );

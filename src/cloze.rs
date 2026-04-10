@@ -192,13 +192,21 @@ pub fn infer_slots(
 ///
 /// The drift magnitude is proportional to the program's similarity to the input,
 /// so nearby programs learn faster than distant ones.
-pub fn play_cloze_round(
+///
+/// `on_each_task` is invoked once after each task (e.g. progress bar tick). Use `|| {}` if unused.
+/// When `eprint_progress` is true, periodic lines go to stderr (skipped when using a GUI bar).
+pub fn play_cloze_round<F>(
     env: &mut IndexedGenEnv,
     tasks: &[ClozeTask],
     k_voters: usize,
     reward_rate: f32,
     punish_rate: f32,
-) -> ClozeStats {
+    mut on_each_task: F,
+    eprint_progress: bool,
+) -> ClozeStats
+where
+    F: FnMut(),
+{
     let mut stats = ClozeStats::default();
 
     let Some(codebook) = env
@@ -220,7 +228,7 @@ pub fn play_cloze_round(
     };
 
     for (ti, task) in tasks.iter().enumerate() {
-        if ti == 0 || (ti > 0 && ti % progress_every == 0) {
+        if eprint_progress && (ti == 0 || (ti > 0 && ti % progress_every == 0)) {
             eprintln!(
                 "    cloze progress: {}/{} tasks ({} lattice programs)",
                 ti, n_tasks, n_progs
@@ -320,6 +328,7 @@ pub fn play_cloze_round(
         }
 
         stats.games_played += 1;
+        on_each_task();
     }
 
     stats

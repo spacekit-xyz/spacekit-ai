@@ -19,6 +19,15 @@ use serde::Deserialize;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
+mod train_progress;
+
+fn bump_train_phase(ui: &Option<train_progress::TrainUi>, i: &mut u64, label: &str) {
+    if let Some(u) = ui {
+        u.set_major_phase(*i, label.to_string());
+    }
+    *i += 1;
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "growformer",
@@ -106,12 +115,17 @@ struct Args {
     /// Prompt for single-shot inference. Omit for interactive mode. If the text contains `$`
     /// (e.g. dollar amounts), use **single quotes** in the shell or use `--prompt-file` —
     /// double quotes cause the shell to expand `$` and drop the amount before it reaches the binary.
-    #[arg(long, value_name = "TEXT", conflicts_with = "prompt_file")]
+    /// For many prompts, use `--prompts-file` instead.
+    #[arg(long, value_name = "TEXT", conflicts_with = "prompt_file", conflicts_with = "prompts_file")]
     prompt: Option<String>,
 
     /// Read the inference prompt from a UTF-8 file (exact text; avoids shell `$` expansion).
-    #[arg(long, value_name = "PATH", conflicts_with = "prompt")]
+    #[arg(long, value_name = "PATH", conflicts_with = "prompt", conflicts_with = "prompts_file")]
     prompt_file: Option<PathBuf>,
+
+    /// Batch inference: one prompt per non-empty line (plain text; optional matching `"`/`'`/`“…”` wrappers are stripped). Lines starting with `#` are comments. Use with `--infer` (`-v` for traces).
+    #[arg(long, value_name = "PATH", conflicts_with = "prompt", conflicts_with = "prompt_file")]
+    prompts_file: Option<PathBuf>,
 
     /// Retrain only the gen env for a specific group index (loads existing brain, retrains one group, re-exports).
     #[arg(long, value_name = "GROUP_IDX")]
@@ -142,6 +156,14 @@ struct Args {
     /// Enable MetaCodebook (Stage 2b) and code lattice training from `expected_code` in JSONL. Off by default; use for a standalone code brain (see `scripts/code.gf.toml`).
     #[arg(long)]
     train_code_lattice: bool,
+
+    /// Disable stderr progress bars (plain logs only; use for CI and when capturing stderr).
+    #[arg(long)]
+    no_progress: bool,
+
+    /// Verbose inference: routing traces, metacognition, topic graph, lattice shortcuts (`--infer` is quiet by default).
+    #[arg(long, short = 'v')]
+    verbose: bool,
 }
 
 #[derive(Default)]
@@ -255,13 +277,63 @@ fn run_gf_init(output: Option<PathBuf>, name: Option<String>) -> Result<(), Stri
     Ok(())
 }
 
-fn resolve_infer_prompt(args: &Args) -> Result<Option<String>, String> {
+/// How to drive `run_inference`: REPL, one prompt, or many.
+enum InferMode {
+    Interactive,
+    Single(String),
+    Batch(Vec<String>),
+}
+
+/// Remove one layer of matching ASCII or curly quotes so list files can use `“...”` wrappers.
+fn strip_outer_wrapping_quotes(line: &str) -> String {
+    let t = line.trim();
+    let chars: Vec<char> = t.chars().collect();
+    if chars.len() < 2 {
+        return t.to_string();
+    }
+    let first = chars[0];
+    let last = *chars.last().unwrap();
+    let paired = matches!(
+        (first, last),
+        ('"', '"')
+            | ('\u{201c}', '\u{201d}')
+            | ('\u{2018}', '\u{2019}')
+            | ('\'', '\'')
+    );
+    if !paired {
+        return t.to_string();
+    }
+    chars[1..chars.len() - 1].iter().collect::<String>().trim().to_string()
+}
+
+fn resolve_infer_mode(args: &Args) -> Result<InferMode, String> {
+    if let Some(path) = &args.prompts_file {
+        let s = std::fs::read_to_string(path)
+            .map_err(|e| format!("--prompts-file {}: {}", path.display(), e))?;
+        let lines: Vec<String> = s
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(strip_outer_wrapping_quotes)
+            .filter(|l| !l.is_empty())
+            .collect();
+        if lines.is_empty() {
+            return Err(format!(
+                "--prompts-file {}: no prompts (use non-empty lines; lines starting with `#` are comments)",
+                path.display()
+            ));
+        }
+        return Ok(InferMode::Batch(lines));
+    }
     if let Some(path) = &args.prompt_file {
         let s = std::fs::read_to_string(path)
             .map_err(|e| format!("--prompt-file {}: {}", path.display(), e))?;
-        return Ok(Some(s.trim().to_string()));
+        return Ok(InferMode::Single(s.trim().to_string()));
     }
-    Ok(args.prompt.clone())
+    match &args.prompt {
+        Some(p) => Ok(InferMode::Single(p.clone())),
+        None => Ok(InferMode::Interactive),
+    }
 }
 
 fn main() {
@@ -321,6 +393,10 @@ fn main() {
             .and_then(|o| o.train_code_lattice)
             .unwrap_or(false);
 
+    // Quiet inference by default: suppress diagnostic `infer_trace!` lines until `--verbose`.
+    let infer_quiet = args.infer && !args.verbose;
+    growformer::infer_log::set_infer_trace_quiet(infer_quiet);
+
     // Initialize topic knowledge graph + optional sentiment NL overlay (same directory).
     let kg_path = "data/knowledge_graph.toml";
     if let Err(e) = growformer::growformer_lang::try_init_topic_graph_bundle(kg_path) {
@@ -357,6 +433,7 @@ fn main() {
             args.data_dir.as_deref(),
             args.brain_plugins_toml.as_deref(),
             train_code_lattice,
+            args.no_progress,
         ) {
             eprintln!("Failed to train brain: {}", e);
             std::process::exit(1);
@@ -381,14 +458,14 @@ fn main() {
             std::process::exit(1);
         }
     } else if args.infer {
-        let infer_prompt = match resolve_infer_prompt(&args) {
-            Ok(p) => p,
+        let infer_mode = match resolve_infer_mode(&args) {
+            Ok(m) => m,
             Err(e) => {
                 eprintln!("{}", e);
                 std::process::exit(1);
             }
         };
-        if let Err(e) = run_inference(&brain_path, infer_prompt.as_deref()) {
+        if let Err(e) = run_inference(&brain_path, infer_mode) {
             eprintln!("Inference failed: {}", e);
             std::process::exit(1);
         }
@@ -401,7 +478,8 @@ fn main() {
         println!("           or --train-code-lattice (MetaCodebook + expected_code lattices)");
         println!("  Train:     cargo run --release -- --train-brain [--auto] [--inference-toml path]");
         println!("  Retrain:   cargo run --release -- --retrain-gen 1 [--auto]");
-        println!("  Infer:     cargo run --release -- --infer [--project scripts/foo.gf.toml]");
+        println!("  Infer:     cargo run --release -- --infer [--project scripts/foo.gf.toml] [-v]");
+        println!("             --prompts-file path.txt  (one prompt per line; `#` comments)");
         println!("  Demos:     cargo run --bin growformer-demos -- --help");
         println!("\nRun with --help for all options.");
         std::process::exit(1);
@@ -664,57 +742,91 @@ fn retrain_single_gen(
 // Inference: load brain.bin and run prompts
 // =============================================================================
 
-fn run_inference(brain_path: &str, prompt: Option<&str>) -> Result<(), String> {
+fn run_inference(brain_path: &str, mode: InferMode) -> Result<(), String> {
     let data = std::fs::read(brain_path)
         .map_err(|e| format!("Failed to read {}: {}", brain_path, e))?;
 
     let mut rt = growformer::runtime::Runtime::from_brain_bytes(&data)?;
 
     let info = rt.brain_info();
-    println!("Brain loaded: {}", brain_path);
-    println!("  Agent: {} (by {})", info.agent_name, info.agent_creator);
-    println!("  Groups: {}", info.num_groups);
-    println!("  Router: {}", info.has_router);
-    println!("  Classifier: {}", info.has_classifier);
-    println!("  Gen envs: {} groups", info.gen_envs);
-    println!("  Code envs: {} groups", info.code_envs);
-    if let Some(ref p) = info.inference_profile {
-        println!("  Inference profile: {}", p);
-    }
-    if info.has_inference_plugins {
-        println!("  Inference plugins: embedded TOML manifest (see BrainPluginsManifest)");
+    let trace = growformer::infer_log::infer_trace_enabled();
+    if trace {
+        println!("Brain loaded: {}", brain_path);
+        println!("  Agent: {} (by {})", info.agent_name, info.agent_creator);
+        println!("  Groups: {}", info.num_groups);
+        println!("  Router: {}", info.has_router);
+        println!("  Classifier: {}", info.has_classifier);
+        println!("  Gen envs: {} groups", info.gen_envs);
+        println!("  Code envs: {} groups", info.code_envs);
+        if let Some(ref p) = info.inference_profile {
+            println!("  Inference profile: {}", p);
+        }
+        if info.has_inference_plugins {
+            println!("  Inference plugins: embedded TOML manifest (see BrainPluginsManifest)");
+        }
+
+        let dm = rt.svc.active_dm();
+        for (gidx, env) in &dm.group_gen_envs {
+            let hopf_info = if env.hopf_table.is_some() { "hopf=yes" } else { "hopf=no" };
+            let cb_info = env.codebook.as_ref().map(|cb| format!("proto={} arch={}", cb.has_prototypes(), cb.archetypes.len())).unwrap_or_else(|| "no-codebook".to_string());
+            let sub_names: Vec<&str> = env.topic_subindex.iter().map(|t| t.topic_name.as_str()).collect();
+            println!("    gen[{}]: {} tokens, {} progs, {} topics {:?}, {}, {}",
+                gidx, env.dictionary.len(), env.program_count(), env.topic_subindex.len(), sub_names, hopf_info, cb_info);
+        }
+        for (gidx, env) in &dm.group_code_envs {
+            println!("    code[{}]: {} tokens in dict, {} lattice programs",
+                gidx, env.dictionary.len(), env.program_count());
+        }
+    } else {
+        println!(
+            "Brain loaded: {} · {} ({} group{})",
+            brain_path,
+            info.agent_name,
+            info.num_groups,
+            if info.num_groups == 1 { "" } else { "s" }
+        );
     }
 
-    let dm = rt.svc.active_dm();
-    for (gidx, env) in &dm.group_gen_envs {
-        let hopf_info = if env.hopf_table.is_some() { "hopf=yes" } else { "hopf=no" };
-        let cb_info = env.codebook.as_ref().map(|cb| format!("proto={} arch={}", cb.has_prototypes(), cb.archetypes.len())).unwrap_or_else(|| "no-codebook".to_string());
-        let sub_names: Vec<&str> = env.topic_subindex.iter().map(|t| t.topic_name.as_str()).collect();
-        println!("    gen[{}]: {} tokens, {} progs, {} topics {:?}, {}, {}",
-            gidx, env.dictionary.len(), env.program_count(), env.topic_subindex.len(), sub_names, hopf_info, cb_info);
+    match mode {
+        InferMode::Interactive => run_conversation_repl(&mut rt),
+        InferMode::Single(prompt_text) => run_single_prompt(&mut rt, &prompt_text, false),
+        InferMode::Batch(prompts) => {
+            let trace = growformer::infer_log::infer_trace_enabled();
+            for (i, prompt_text) in prompts.iter().enumerate() {
+                if trace {
+                    println!("\n--- prompt {} / {} ---", i + 1, prompts.len());
+                    println!("{}", prompt_text);
+                } else {
+                    println!("\n[{}] {}", i + 1, prompt_text);
+                }
+                run_single_prompt(&mut rt, prompt_text, true);
+            }
+        }
     }
-    for (gidx, env) in &dm.group_code_envs {
-        println!("    code[{}]: {} tokens in dict, {} lattice programs",
-            gidx, env.dictionary.len(), env.program_count());
-    }
-
-    if let Some(prompt_text) = prompt {
-        run_single_prompt(&mut rt, prompt_text);
-        return Ok(());
-    }
-
-    run_conversation_repl(&mut rt);
 
     Ok(())
 }
 
-fn run_single_prompt(rt: &mut growformer::runtime::Runtime, prompt: &str) {
+/// `skip_duplicate_prompt_echo`: when true, the caller already printed the prompt (batch mode).
+fn run_single_prompt(rt: &mut growformer::runtime::Runtime, prompt: &str, skip_duplicate_prompt_echo: bool) {
+    let trace = growformer::infer_log::infer_trace_enabled();
+    if trace && !skip_duplicate_prompt_echo {
+        println!("\n--- prompt ---\n{}", prompt);
+    }
     match rt.prompt(prompt) {
         Ok(resp) => {
-            println!("  route: {} (conf={:.2}) group={:?}",
-                resp.action_type, resp.action_confidence, resp.target_group);
+            if trace {
+                println!(
+                    "  route: {} (conf={:.2}) group={:?}",
+                    resp.action_type, resp.action_confidence, resp.target_group
+                );
+            }
             if !resp.text.is_empty() {
-                println!("  gen (conf={:.2}): {}", resp.confidence, resp.text);
+                if trace {
+                    println!("  gen (conf={:.2}): {}", resp.confidence, resp.text);
+                } else {
+                    println!("{}", resp.text);
+                }
             }
         }
         Err(e) => eprintln!("  gen error: {}", e),
@@ -794,15 +906,23 @@ fn run_conversation_repl(rt: &mut growformer::runtime::Runtime) {
                 } else {
                     match rt.converse(trimmed) {
                         Ok(resp) => {
-                            if resp.target_group.is_some() {
-                                eprint!("  [route: {} g={} conf={:.2}] ",
-                                    resp.action_type,
-                                    resp.target_group.unwrap(),
-                                    resp.action_confidence);
+                            if growformer::infer_log::infer_trace_enabled() {
+                                if resp.target_group.is_some() {
+                                    eprint!(
+                                        "  [route: {} g={} conf={:.2}] ",
+                                        resp.action_type,
+                                        resp.target_group.unwrap(),
+                                        resp.action_confidence
+                                    );
+                                }
+                                println!();
                             }
-                            println!();
                             if !resp.text.is_empty() {
-                                println!("  {} (conf={:.2})", resp.text, resp.confidence);
+                                if growformer::infer_log::infer_trace_enabled() {
+                                    println!("  {} (conf={:.2})", resp.text, resp.confidence);
+                                } else {
+                                    println!("{}", resp.text);
+                                }
                             }
 
                             match rt.codegen(trimmed) {
@@ -912,7 +1032,7 @@ fn handle_repl_command(rt: &mut growformer::runtime::Runtime, cmd: &str) {
             if prompt.is_empty() {
                 println!("  Usage: /single <prompt text>");
             } else {
-                run_single_prompt(rt, &prompt);
+                run_single_prompt(rt, &prompt, false);
             }
         }
         Some("status") => {
@@ -1336,11 +1456,16 @@ fn train_brain(
     data_dir: Option<&str>,
     brain_plugins_toml: Option<&std::path::Path>,
     train_code_lattice: bool,
+    no_progress: bool,
 ) -> Result<(), String> {
     println!("=== Full Neural Brain Training ===\n");
     if validate {
         println!("(validate mode: capped samples and gen epochs, will assert inference)\n");
     }
+    let ui = train_progress::TrainUi::try_new(no_progress);
+    let mut major_phase: u64 = 0;
+    bump_train_phase(&ui, &mut major_phase, "Load data & augmentation");
+
     let mut rng = StdRng::seed_from_u64(42);
 
     let mut samples = if let Some(dir) = data_dir {
@@ -1446,6 +1571,10 @@ fn train_brain(
     // Compute both raw and bridged embeddings.
     // Bridged vectors for routing/classification; raw vectors for generation conditioning.
     // When the `parallel` feature is enabled, embedding computation runs in parallel across cores.
+    bump_train_phase(&ui, &mut major_phase, "Compute embeddings");
+    if let Some(u) = &ui {
+        u.detail_spinner("encoding samples (parallel)…");
+    }
     println!("\n--- Computing embeddings ---");
     let runtime = &svc.dm.language_runtime;
     let results: Vec<_> = growformer::maybe_par_iter!(samples)
@@ -1468,11 +1597,15 @@ fn train_brain(
     let raw_dim = raw_embeddings.first().map_or(384, |e| e.len());
     let bridge_dim = bridged_embeddings.first().map_or(DEFAULT_BRIDGE_DIM, |e| e.len());
     println!("  {} samples: raw={}d, bridged={}d", samples.len(), raw_dim, bridge_dim);
+    if let Some(u) = &ui {
+        u.detail_finish_clear();
+    }
 
     // ---------------------------------------------------------------
     // Paramecium pre-training: build lattice from embeddings to provide
     // curriculum signals and group-discovery diagnostics for training.
     // ---------------------------------------------------------------
+    bump_train_phase(&ui, &mut major_phase, "Paramecium pre-lattice");
     println!("\n--- Paramecium Pre-Training Lattice ---");
     let fallback_dict = svc.dm.gen_dictionary.clone()
         .unwrap_or_else(|| TokenDictionary::build(
@@ -1505,6 +1638,7 @@ fn train_brain(
     let max_novelty = novelty_scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     println!("  novelty scores: avg={:.3} min={:.3} max={:.3}", avg_novelty, min_novelty, max_novelty);
 
+    bump_train_phase(&ui, &mut major_phase, "Data profile, auto-config & router");
     let num_groups = svc.dm.main.group_order.len();
     let group_lookup = build_group_lookup(&discovered_group_names);
     let group_map = |s: &LanguageSample| -> usize {
@@ -1589,6 +1723,7 @@ fn train_brain(
     // ---------------------------------------------------------------
     // Stage 2: Train ActionClassifier
     // ---------------------------------------------------------------
+    bump_train_phase(&ui, &mut major_phase, "Action classifier");
     println!("\n--- Stage 2: ActionClassifier Training ---");
     let action_samples: Vec<(Vec<f32>, growformer::dimension::action::ActionType)> = bridged_embeddings
         .iter()
@@ -1607,6 +1742,7 @@ fn train_brain(
     // ---------------------------------------------------------------
     // Stage 2b: GrowformerLang MetaCodebook (code-brain / --train-code-lattice only)
     // ---------------------------------------------------------------
+    bump_train_phase(&ui, &mut major_phase, "MetaCodebook (2b)");
     if train_code_lattice {
         println!("\n--- Stage 2b: GrowformerLang MetaCodebook ---");
         use growformer::growformer_lang::{infer_concept, detect_language, MetaCodebook};
@@ -1707,6 +1843,7 @@ fn train_brain(
 
     // Stage 2.5: Understanding Layer + MetaBrain — Paramecium one-pass build.
     // All classifiers use Paramecium lattice develop(), zero iterative epochs.
+    bump_train_phase(&ui, &mut major_phase, "Understanding + MetaBrain");
     println!("\n--- Stage 2.5: Understanding Layer + MetaBrain (Paramecium one-pass) ---");
     {
         use growformer::understanding::UnderstandingLayer;
@@ -1820,6 +1957,7 @@ fn train_brain(
 
     // Build per-group dictionaries from each group's own data.
     // Larger groups get larger dictionaries (2048 max), smaller groups get 1024.
+    bump_train_phase(&ui, &mut major_phase, "Dictionaries & codebooks");
     use growformer::dimension::group_gen::{bits_for_dict, MAX_TOKENS};
     let effective_max_tokens = gen_overrides.as_ref().and_then(|o| o.max_tokens).unwrap_or(MAX_TOKENS);
     let mut gen_dicts: HashMap<usize, TokenDictionary> = HashMap::new();
@@ -1970,10 +2108,26 @@ fn train_brain(
     // Knowledge is indexed in one pass (codebook + lattice develop).
     // No NeuralEnvironment, no backprop, no iterative training.
     // ---------------------------------------------------------------
+    bump_train_phase(&ui, &mut major_phase, "Indexed generation lattices");
     println!("\n--- Stages 3+4: Indexed Generation (Paramecium lattice) ---");
 
     use growformer::dimension::group_gen::IndexedGenEnv;
     let spawn_threshold = 0.97;
+    let min_code_for_index = 10usize;
+    let mut index_jobs: u64 = 0;
+    for gidx in 0..num_groups {
+        if gen_by_group.get(&gidx).map_or(false, |p| !p.is_empty()) {
+            index_jobs += 1;
+        }
+        if code_by_group.get(&gidx).map_or(false, |p| p.len() >= min_code_for_index) {
+            index_jobs += 1;
+        }
+    }
+    if let Some(u) = &ui {
+        if index_jobs > 0 {
+            u.detail_bar(index_jobs, "building per-group lattices");
+        }
+    }
     for gidx in 0..num_groups {
         if let Some(p) = gen_by_group.get(&gidx) {
             if !p.is_empty() {
@@ -2029,6 +2183,11 @@ fn train_brain(
                 gidx, env.program_count(), env.topic_subindex.len()
             );
             svc.dm.group_gen_envs.insert(gidx, env);
+            if let Some(u) = &ui {
+                if index_jobs > 0 {
+                    u.detail_inc(1);
+                }
+            }
         }
 
         if let Some(pairs) = code_by_group.get(&gidx) {
@@ -2058,14 +2217,23 @@ fn train_brain(
                 gidx, env.program_count(), env.topic_subindex.len()
             );
             svc.dm.group_code_envs.insert(gidx, env);
+            if let Some(u) = &ui {
+                if index_jobs > 0 {
+                    u.detail_inc(1);
+                }
+            }
         }
     }
     let t_index_elapsed = t_index_start.elapsed();
+    if let Some(u) = &ui {
+        u.detail_finish_clear();
+    }
     println!("  Indexed {} gen + {} code groups in {:?}",
         svc.dm.group_gen_envs.len(), svc.dm.group_code_envs.len(), t_index_elapsed);
 
     // Contrastive refinement: push apart program centroids within each group's
     // topic sub-lattices that are too similar but represent different content.
+    bump_train_phase(&ui, &mut major_phase, "Contrastive lattice refinement");
     println!("\n--- Contrastive Lattice Refinement ---");
     let contrastive_margin = 0.92;
     let contrastive_rate = 0.05;
@@ -2101,6 +2269,7 @@ fn train_brain(
     // Runs 3-phase pipeline on lattice programs to activate the
     // Cl(1,7) grade structure with semantic meaning.
     // ---------------------------------------------------------------
+    bump_train_phase(&ui, &mut major_phase, "STA-CALM orchestration");
     println!("\n--- STA-CALM Orchestrated Training ---");
     {
         let t_sta = std::time::Instant::now();
@@ -2151,6 +2320,7 @@ fn train_brain(
 
     // Register per-group structural fingerprints (grade-2 bivectors in Cl(8))
     // for understanding-based routing on novel/OOD inputs.
+    bump_train_phase(&ui, &mut major_phase, "Structural fingerprints");
     println!("\n--- Computing Structural Fingerprints ---");
     for gidx in 0..num_groups {
         let mut all_raw: Vec<&[f32]> = Vec::new();
@@ -2169,6 +2339,7 @@ fn train_brain(
     // ---------------------------------------------------------------
     // Build cognitive map — hippocampal relational graph across all groups
     // ---------------------------------------------------------------
+    bump_train_phase(&ui, &mut major_phase, "Cognitive map");
     println!("\n--- Building Cognitive Map (Reasoning Engine) ---");
     let cog_map = CognitiveMap::build(&svc.dm.group_gen_envs, &svc.dm.group_rotors);
     println!("  nodes: {}, edges: {} (cross-group structural links)", cog_map.node_count(), cog_map.edge_count());
@@ -2187,6 +2358,7 @@ fn train_brain(
     // ---------------------------------------------------------------
     {
         use growformer::metacognition::MetaCognition;
+        bump_train_phase(&ui, &mut major_phase, "MetaCognition");
         println!("\n--- Building MetaCognition (Reflection Brain) ---");
         let mut mc = MetaCognition::with_defaults();
         let mut pair_count = 0u64;
@@ -2228,12 +2400,31 @@ fn train_brain(
     // ---------------------------------------------------------------
     {
         use growformer::cloze;
-        println!("\n--- Cloze Learning (Fill-in-the-Blank) ---");
+        bump_train_phase(&ui, &mut major_phase, "Cloze learning");
+        println!("\n--- Learning With Games (Fill-in-the-Blank) ---");
         let cloze_rounds = 6;
         let k_voters = 7;
         let reward_rate = 0.10;
         let punish_rate = 0.06;
         let mut total_stats = cloze::ClozeStats::default();
+        let cap_u64 = cloze::DEFAULT_MAX_CLOZE_TASKS_PER_GROUP as u64;
+        let mut cloze_units: u64 = 0;
+        for (_g, env) in &svc.dm.group_gen_envs {
+            if env.codebook.as_ref().filter(|cb| !cb.archetypes.is_empty()).is_some() {
+                cloze_units += (env.lattice.programs.len() as u64).min(cap_u64) * (cloze_rounds as u64);
+            }
+        }
+        for (_g, env) in &svc.dm.group_code_envs {
+            if env.codebook.as_ref().filter(|cb| !cb.archetypes.is_empty()).is_some() {
+                cloze_units += (env.lattice.programs.len() as u64).min(cap_u64) * (cloze_rounds as u64);
+            }
+        }
+        if let Some(u) = &ui {
+            if cloze_units > 0 {
+                u.detail_bar(cloze_units.max(1), "cloze (fill-in-the-blank)");
+            }
+        }
+        let eprint_cloze = ui.is_none();
         // One IndexedGenEnv per routing group; each has its own AlgebraicCodebook (`env.codebook`:
         // archetypes + slots — not related to `group_code_envs`). Cloze needs that structure per group.
         for (gidx, env) in svc.dm.group_gen_envs.iter_mut() {
@@ -2268,7 +2459,21 @@ fn train_brain(
             env.frozen = false;
             let mut round_stats = cloze::ClozeStats::default();
             for _round in 0..cloze_rounds {
-                let stats = cloze::play_cloze_round(env, &tasks, k_voters, reward_rate, punish_rate);
+                let stats = cloze::play_cloze_round(
+                    env,
+                    &tasks,
+                    k_voters,
+                    reward_rate,
+                    punish_rate,
+                    || {
+                        if let Some(u) = &ui {
+                            if cloze_units > 0 {
+                                u.detail_inc(1);
+                            }
+                        }
+                    },
+                    eprint_cloze,
+                );
                 round_stats.games_played += stats.games_played;
                 round_stats.total_slots += stats.total_slots;
                 round_stats.correct_slots += stats.correct_slots;
@@ -2314,7 +2519,21 @@ fn train_brain(
             env.frozen = false;
             let mut round_stats = cloze::ClozeStats::default();
             for _round in 0..cloze_rounds {
-                let stats = cloze::play_cloze_round(env, &tasks, k_voters, reward_rate, punish_rate);
+                let stats = cloze::play_cloze_round(
+                    env,
+                    &tasks,
+                    k_voters,
+                    reward_rate,
+                    punish_rate,
+                    || {
+                        if let Some(u) = &ui {
+                            if cloze_units > 0 {
+                                u.detail_inc(1);
+                            }
+                        }
+                    },
+                    eprint_cloze,
+                );
                 round_stats.games_played += stats.games_played;
                 round_stats.total_slots += stats.total_slots;
                 round_stats.correct_slots += stats.correct_slots;
@@ -2330,6 +2549,9 @@ fn train_brain(
             total_stats.punishment_applied += round_stats.punishment_applied;
         }
         println!("  TOTAL: {}", total_stats);
+        if let Some(u) = &ui {
+            u.detail_finish_clear();
+        }
     }
 
     // ---------------------------------------------------------------
@@ -2337,6 +2559,7 @@ fn train_brain(
     // This captures the learned archetype structure so the lattice is
     // available for curriculum-guided continuum learning at runtime.
     // ---------------------------------------------------------------
+    bump_train_phase(&ui, &mut major_phase, "Paramecium + export brain package");
     println!("\n--- Building Post-Training Paramecium ---");
     svc.build_paramecium();
     if let Some(ref pm) = svc.paramecium {
@@ -2430,6 +2653,9 @@ fn train_brain(
         }    
     }
     println!("\n=== Brain training complete ===");
+    if let Some(u) = &ui {
+        u.finish_ok("Brain training complete");
+    }
     Ok(())
 }
 

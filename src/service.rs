@@ -5,6 +5,7 @@ use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::infer_trace;
 use crate::dimension::{
     action_type_one_hot, generate_code_from_action, group_id_one_hot, render_action_template, ActionJson,
     CalibrationDataset, CalibrationReport, CalibrationRequirements, CheckpointSizeSummary, CodeGeneration,
@@ -794,6 +795,52 @@ impl LanguageService {
         }
     }
 
+    /// Heuristic: generation env for this group looks like a multi-intent sentiment lattice (not coding).
+    fn generation_env_looks_like_sentiment(dm: &DimensionManager, gidx: usize) -> bool {
+        dm.group_gen_envs.get(&gidx).map_or(false, |env| {
+            if env.topic_subindex.len() < 2 {
+                return false;
+            }
+            const MARKERS: &[&str] = &[
+                "positive_",
+                "negative_",
+                "neutral",
+                "mixed",
+                "sarcastic",
+                "confused",
+                "cautious",
+                "hopium",
+                "copium",
+                "euphoric",
+                "capitulation",
+            ];
+            env.topic_subindex.iter().any(|t| {
+                let n = t.topic_name.to_ascii_lowercase();
+                MARKERS.iter().any(|m| n.contains(m))
+            })
+        })
+    }
+
+    /// When lattice retrieval returns bare `expected_response` text, prepend `LABEL —` like the seven-topic shortcut path.
+    fn maybe_prefix_sentiment_retrieval_line(
+        dm: &DimensionManager,
+        gidx: usize,
+        topic_hint: Option<&str>,
+        skip_prefix: bool,
+        body: &str,
+    ) -> String {
+        if skip_prefix {
+            return body.to_string();
+        }
+        let Some(th) = topic_hint else {
+            return body.to_string();
+        };
+        if !Self::generation_env_looks_like_sentiment(dm, gidx) {
+            return body.to_string();
+        }
+        crate::inference::format_retrieved_sentiment_line(th, body)
+    }
+
     pub fn generation(&mut self, text: &str) -> Result<(ActionJson, GeneratedResponse), String> {
         self.generation_with_intent_override(text, text)
     }
@@ -911,7 +958,7 @@ impl LanguageService {
         if let Some(mr) = meta_pre {
             if let Some(best_g) = mr.best_group() {
                 if best_g < dm.main.group_order.len() {
-                    println!("  [meta-route] concept={}, lang={}, conf={:.3}, margin={:.3} → group {}",
+                    infer_trace!("  [meta-route] concept={}, lang={}, conf={:.3}, margin={:.3} → group {}",
                         mr.concept.name(), mr.language.name(), mr.confidence, mr.margin, best_g);
                     let apply_meta = mr.margin >= 0.05 || mr.confidence >= 0.90 || group_idx.is_none();
                     let lattice_skip_weak_gk = inference_harness.skip_weak_gk_for_meta_conditioning(
@@ -923,7 +970,7 @@ impl LanguageService {
                         mr.confidence,
                     );
                     if lattice_skip_weak_gk {
-                        println!(
+                        infer_trace!(
                             "  [meta-route] lattice profile: ignore weak GeneralKnowledge (margin={:.3}) for conditioning",
                             mr.margin
                         );
@@ -931,7 +978,7 @@ impl LanguageService {
                         group_idx = Some(best_g);
                         meta_routing = Some(mr);
                     } else {
-                        println!("  [meta-route] SKIP: low margin ({:.3}) + low conf ({:.3}), keeping classifier group {:?}",
+                        infer_trace!("  [meta-route] SKIP: low margin ({:.3}) + low conf ({:.3}), keeping classifier group {:?}",
                             mr.margin, mr.confidence, group_idx);
                     }
                 }
@@ -955,7 +1002,7 @@ impl LanguageService {
         let query_intent = crate::growformer_lang::parse_query_intent(intent_text);
         let is_broad = query_intent.is_broad_overview();
         let mut broad_summary: Option<(String, f32)> = None;
-        println!("  [intent] action={}, subject=\"{}\", broad={}", query_intent.action.name(), query_intent.subject, is_broad);
+        infer_trace!("  [intent] action={}, subject=\"{}\", broad={}", query_intent.action.name(), query_intent.subject, is_broad);
 
         // Hoisted for metacognition retry loop (survives the encoding block scope)
         let mut retry_conditioning: Option<Vec<f32>> = None;
@@ -997,7 +1044,7 @@ impl LanguageService {
             let meta_result = if let Some(ref mut mb) = dm.meta_brain {
                 if mb.is_ready() {
                     let r = mb.process(h_raw, &conditioned);
-                    println!("  [meta-brain] topic={}, verb={}, action={:?}, conf={:.3}",
+                    infer_trace!("  [meta-brain] topic={}, verb={}, action={:?}, conf={:.3}",
                         r.topic, r.verb, r.action, r.confidence);
                     if group_idx.is_none() && r.group_idx.is_some() { group_idx = r.group_idx; }
                     topic_hint = Some(r.topic.clone());
@@ -1007,7 +1054,7 @@ impl LanguageService {
                 if let Some(ref mut ul) = dm.understanding {
                     if !ul.is_empty() {
                         let (_, _, topic, verb) = ul.classify(h_raw);
-                        println!("  [understanding] topic={}, verb={}", topic, verb);
+                        infer_trace!("  [understanding] topic={}, verb={}", topic, verb);
                         topic_hint = Some(topic);
                     }
                 }
@@ -1052,17 +1099,70 @@ impl LanguageService {
                         let should_redirect = current_count == 0
                             || (redirect_count >= current_count * 3 && current_count < 3);
                         if should_redirect {
-                            println!("  [cross-group] topic '{}': group {} has {} progs vs current group {} with {}, redirecting",
+                            infer_trace!("  [cross-group] topic '{}': group {} has {} progs vs current group {} with {}, redirecting",
                                 op_topic, redirect_g, redirect_count, current_g, current_count);
                             group_idx = Some(redirect_g);
                         }
                     }
                     if current_count == 0 && best_redirect.is_none() {
-                        println!("  [topic-miss] '{}' not found in any group", op_topic);
+                        infer_trace!("  [topic-miss] '{}' not found in any group", op_topic);
                     }
                 }
             } else {
-                println!("  [topic-miss] no topic inferred for: {}", &intent_text[..intent_text.len().min(60)]);
+                infer_trace!("  [topic-miss] no topic inferred for: {}", &intent_text[..intent_text.len().min(60)]);
+            }
+
+            // Single-group brains with many sub-topics skip lattice shortcut shape checks, so MetaBrain
+            // topic alone can mis-track domain vocabulary (“fee” → negative_strong). Re-align with
+            // TOML lexical / anchor cues when there is no coding operation topic override.
+            if crate::growformer_lang::infer_operation_topic(intent_text).is_none()
+                && dm.group_gen_envs.len() == 1
+            {
+                if let Some(env) = dm.group_gen_envs.values().next() {
+                    if !env.topic_subindex.is_empty() {
+                        if let Some(k) = crate::inference::inference_rules_runtime()
+                            .sentiment_lexical_topic_key(intent_text)
+                        {
+                            let has = env
+                                .topic_subindex
+                                .iter()
+                                .any(|t| t.topic_name.eq_ignore_ascii_case(&k));
+                            if has && topic_hint.as_deref() != Some(k.as_str()) {
+                                infer_trace!(
+                                    "  [topic-lex] override {:?} → {} (TOML lexical / anchors)",
+                                    topic_hint.as_deref(),
+                                    k
+                                );
+                                topic_hint = Some(k);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Drop spurious `mixed` from MetaBrain when the line has no contrastive structure and no
+            // bipolar lexicon hit — embeddings often match a long MIXED training example from its prefix.
+            if crate::growformer_lang::infer_operation_topic(intent_text).is_none()
+                && dm.group_gen_envs.len() == 1
+            {
+                if let Some(env) = dm.group_gen_envs.values().next() {
+                    let has_mixed_bucket = env
+                        .topic_subindex
+                        .iter()
+                        .any(|t| t.topic_name.eq_ignore_ascii_case("mixed"));
+                    if has_mixed_bucket
+                        && topic_hint
+                            .as_ref()
+                            .is_some_and(|t| t.eq_ignore_ascii_case("mixed"))
+                        && !crate::inference::inference_rules_runtime()
+                            .sentiment_allow_forced_mixed_topic(intent_text)
+                    {
+                        infer_trace!(
+                            "  [topic-mixed-guard] clearing 'mixed' (no contrast marker + no bipolar lexicon)"
+                        );
+                        topic_hint = None;
+                    }
+                }
             }
 
             // Use MetaBrain conditioning when available, else fall back to Clifford path
@@ -1148,7 +1248,7 @@ impl LanguageService {
                     .or_else(|| meta_result.as_ref().and_then(|mr| mr.group_idx));
 
                 if let Some(bbg) = best_broad_group {
-                    println!("  [broad-query] best group by topic match: group {} (relevance={})", bbg.0, bbg.1);
+                    infer_trace!("  [broad-query] best group by topic match: group {} (relevance={})", bbg.0, bbg.1);
                 }
 
                 effective_gidx.and_then(|gidx| {
@@ -1159,12 +1259,12 @@ impl LanguageService {
                         }
                         let (summary, conf, topics, ens_coh) = env.summarize_across_topics(&adapted, 6, 500);
                         if summary.len() > 30 && !topics.is_empty() {
-                            println!(
+                            infer_trace!(
                                 "  [broad-query] summarized {} topics from group {}: {:?}, conf={:.3}, coherence={:.3}",
                                 topics.len(), gidx, topics, conf, ens_coh
                             );
                             if ens_coh < 0.15 {
-                                println!("  [broad-query] REJECT: ensemble coherence too low ({:.3}), falling back", ens_coh);
+                                infer_trace!("  [broad-query] REJECT: ensemble coherence too low ({:.3}), falling back", ens_coh);
                                 None
                             } else {
                                 // Override group_idx so downstream generation uses this group
@@ -1218,7 +1318,7 @@ impl LanguageService {
             } else if let (Some(out), Some(gidx)) = (gen_preempt, effective_gidx) {
                 let mut e8 = [0.0f32; 8];
                 for i in 0..8.min(gen_conditioning.len()) { e8[i] = gen_conditioning[i]; }
-                println!("  [lattice-direct] user-anchored classification (lattice paraphrase skipped)");
+                infer_trace!("  [lattice-direct] user-anchored classification (lattice paraphrase skipped)");
                 Some(E8Contribution {
                     group_idx: gidx,
                     lattice_point: e8,
@@ -1342,7 +1442,7 @@ impl LanguageService {
                         topic_label
                     )
                 };
-                println!("  [knowledge-boundary] conf={:.3} < floor={:.3}, declining",
+                infer_trace!("  [knowledge-boundary] conf={:.3} < floor={:.3}, declining",
                     best_conf, RETRIEVAL_CONFIDENCE_FLOOR);
                 GeneratedResponse {
                     text: decline_msg,
@@ -1351,8 +1451,16 @@ impl LanguageService {
                     confidence: 0.0,
                 }
             } else if best_text.len() > 5 {
+                let skip_sentiment_header = lattice_user_anchored_used || broad_summary.is_some();
+                let display_text = Self::maybe_prefix_sentiment_retrieval_line(
+                    &*dm,
+                    best_gidx,
+                    topic_hint.as_deref(),
+                    skip_sentiment_header,
+                    &best_text,
+                );
                 GeneratedResponse {
-                    text: best_text,
+                    text: display_text,
                     template_id: if lattice_user_anchored_used {
                         preempt_template_id.unwrap().to_string()
                     } else {
@@ -1424,7 +1532,7 @@ impl LanguageService {
                     &self.system2_config,
                 );
                 if s2_result.confidence > resp.confidence && s2_result.text.len() > 10 {
-                    println!(
+                    infer_trace!(
                         "  [system2] accepted: steps={}, wm={}, coherence={:.3}, groups={:?}",
                         s2_result.steps_taken, s2_result.working_memory_size,
                         s2_result.final_coherence, s2_result.source_groups
@@ -1460,18 +1568,34 @@ impl LanguageService {
         // MetaCognition: reflective quality gate with retry-reconditioning loop.
         // Skip for: broad query summaries, knowledge boundary declines, degradation.
         let resp = if is_decline {
-            println!("  [metacog] SKIP: knowledge boundary decline");
+            infer_trace!("  [metacog] SKIP: knowledge boundary decline");
             resp
         } else if is_broad && broad_summary.is_some() {
-            println!("  [metacog] SKIP: broad query summary (multi-topic composition)");
+            infer_trace!("  [metacog] SKIP: broad query summary (multi-topic composition)");
             resp
         } else if self
             .inference_harness
             .template_postprocess_flags(&resp.template_id)
             .skip_metacog
         {
-            println!(
+            infer_trace!(
                 "  [metacog] SKIP: user-anchored lattice shortcut (retrieval-free; relevance gate N/A)"
+            );
+            resp
+        } else if topic_hint.is_some()
+            && resp.template_id.starts_with("growformer_gen_")
+            && resp.confidence >= 0.25
+            && retry_effective_gidx
+                .and_then(|g| self.active_dm().group_gen_envs.get(&g))
+                .map(|e| !e.topic_subindex.is_empty())
+                .unwrap_or(false)
+        {
+            // `rebuild_metacognition` feeds `absorb_pair(program_centroid, program_centroid, topic)`,
+            // so reference centroids live in conditioning space — not comparable to
+            // `joint(prompt, approximate_response_embedding)` at reflect time. That mismatch
+            // yields near-zero relevance and false degradation despite strong lattice retrieval.
+            infer_trace!(
+                "  [metacog] SKIP: topic sub-lattice gen (trust retrieval; reflection joint space mismatch)"
             );
             resp
         } else {
@@ -1500,7 +1624,7 @@ impl LanguageService {
 
                     match outcome {
                         ReflectionOutcome::Accept { scores } => {
-                            println!("  [metacog] ACCEPT: quality={:.3}", scores.quality);
+                            infer_trace!("  [metacog] ACCEPT: quality={:.3}", scores.quality);
                             // Continuum: positive feedback to the selected program
                             if let Some(gidx) = retry_effective_gidx {
                                 let dm = self.active_dm_mut();
@@ -1513,7 +1637,7 @@ impl LanguageService {
                             break;
                         }
                         ReflectionOutcome::Retry { scores, adjustment: _, attempt: att } => {
-                            println!(
+                            infer_trace!(
                                 "  [metacog] RETRY: quality={:.3}, attempt {}, predictive coding refinement",
                                 scores.quality, att + 1
                             );
@@ -1528,7 +1652,7 @@ impl LanguageService {
                                 let refinement = pc.refine(prompt_emb, base_cond, &response_emb);
                                 let adjusted_cond = if refinement.improved {
                                     if let Some(ref ge) = refinement.last_grade_error {
-                                        println!("    [pc] dominant grade={}, error={:.4}, coherence={:.3}",
+                                        infer_trace!("    [pc] dominant grade={}, error={:.4}, coherence={:.3}",
                                             ge.dominant_grade, ge.total_error, refinement.coherence.combined);
                                     }
                                     refinement.conditioning
@@ -1542,8 +1666,15 @@ impl LanguageService {
                                         &recond, topic_hint.as_deref(), 300, 0.8,
                                     );
                                     if retry_text.len() > 5 && retry_conf > current_resp.confidence {
+                                        let retry_display = Self::maybe_prefix_sentiment_retrieval_line(
+                                            &*dm,
+                                            gidx,
+                                            topic_hint.as_deref(),
+                                            false,
+                                            &retry_text,
+                                        );
                                         current_resp = GeneratedResponse {
-                                            text: retry_text,
+                                            text: retry_display,
                                             template_id: format!("metacog_retry_{}", att + 1),
                                             traceable: current_resp.traceable,
                                             confidence: retry_conf,
@@ -1553,7 +1684,7 @@ impl LanguageService {
                             }
                         }
                         ReflectionOutcome::Degrade { scores, message, attempts_exhausted } => {
-                            println!(
+                            infer_trace!(
                                 "  [metacog] DEGRADE: quality={:.3} after {} attempts → honest decline",
                                 scores.quality, attempts_exhausted
                             );
@@ -1633,7 +1764,7 @@ impl LanguageService {
         // from accumulated context, reset topic thread to avoid stale bias.
         if let Some(ref qe) = query_emb {
             if self.conversation.is_topic_shift(qe, 0.15) {
-                println!("  [conv] topic shift detected, resetting topic thread");
+                infer_trace!("  [conv] topic shift detected, resetting topic thread");
                 self.conversation.current_topic = None;
                 self.conversation.current_group = None;
             }
@@ -1767,7 +1898,7 @@ impl LanguageService {
                         format!(" {}{}", referent, suffix_char)
                     };
                     resolved = format!("{}{}{}", &resolved[..pos], replacement, &resolved[pos + pat.len()..]);
-                    println!("  [anaphora] '{}' → '{}' (referent: {})", text, resolved, referent);
+                    infer_trace!("  [anaphora] '{}' → '{}' (referent: {})", text, resolved, referent);
                     return Some(resolved);
                 }
             }
@@ -1776,14 +1907,14 @@ impl LanguageService {
             if resolved.to_ascii_lowercase().ends_with(&trailing) {
                 let cut = resolved.len() - trailing.len();
                 resolved = format!("{} {}", &resolved[..cut], referent);
-                println!("  [anaphora] '{}' → '{}' (referent: {})", text, resolved, referent);
+                infer_trace!("  [anaphora] '{}' → '{}' (referent: {})", text, resolved, referent);
                 return Some(resolved);
             }
             // Handle leading pronoun
             let leading = format!("{} ", pronoun);
             if resolved.to_ascii_lowercase().starts_with(&leading) {
                 resolved = format!("{} {}", referent, &resolved[leading.len()..]);
-                println!("  [anaphora] '{}' → '{}' (referent: {})", text, resolved, referent);
+                infer_trace!("  [anaphora] '{}' → '{}' (referent: {})", text, resolved, referent);
                 return Some(resolved);
             }
         }
@@ -1882,7 +2013,7 @@ impl LanguageService {
             }
         }
 
-        println!(
+        infer_trace!(
             "  MetaCognition rebuilt: {} pairs, {} topics, ready={}",
             pair_count, mc.topic_count(), mc.is_ready()
         );
@@ -1898,7 +2029,7 @@ impl LanguageService {
             .iter()
             .map(|(&gidx, env)| (gidx, env.dictionary.clone()))
             .collect();
-        println!(
+        infer_trace!(
             "  ReasoningEngine rebuilt: {} nodes, {} edges",
             cog_map.node_count(),
             cog_map.edge_count()
@@ -1931,7 +2062,7 @@ impl LanguageService {
         }
 
         let mcb = MetaCodebook::build(&meta_samples);
-        println!(
+        infer_trace!(
             "  MetaCodebook rebuilt: {} samples, {} concepts",
             meta_samples.len(),
             mcb.entries.len()
@@ -2095,6 +2226,11 @@ impl LanguageService {
             if mr.confidence > 0.3 { Some(mr) } else { None }
         });
 
+        let allow_deterministic_stub = {
+            let dm = self.active_dm();
+            Self::allow_codegen_deterministic_stub(dm, &self.brain_package_header)
+        };
+
         let dm = self.active_dm_mut();
         let action = dm.route_text_to_action_stateless(text)?;
 
@@ -2106,7 +2242,7 @@ impl LanguageService {
         if let Some(ref mr) = meta_pre {
             if let Some(mg) = mr.best_group() {
                 if mg < dm.main.group_order.len() {
-                    println!("  [meta-route codegen] concept={}, lang={}, conf={:.3} → group {}",
+                    infer_trace!("  [meta-route codegen] concept={}, lang={}, conf={:.3} → group {}",
                         mr.concept.name(), mr.language.name(), mr.confidence, mg);
                     group_idx = Some(mg);
                 }
@@ -2229,14 +2365,32 @@ impl LanguageService {
                     kind: format!("growformer_code_{}", best_gidx),
                 })
             } else if let Some(ref head) = dm.codegen_head {
-                Self::legacy_code_from_encoded(head, &encoded, &action, text, &dm.main.group_order)
-            } else {
+                Self::legacy_code_from_encoded(
+                    head,
+                    &encoded,
+                    &action,
+                    text,
+                    &dm.main.group_order,
+                    allow_deterministic_stub,
+                )
+            } else if allow_deterministic_stub {
                 generate_code_from_action(&action, text)
+            } else {
+                None
             }
         } else if let Some(ref head) = dm.codegen_head {
-            Self::legacy_code_from_encoded(head, &encoded, &action, text, &dm.main.group_order)
-        } else {
+            Self::legacy_code_from_encoded(
+                head,
+                &encoded,
+                &action,
+                text,
+                &dm.main.group_order,
+                allow_deterministic_stub,
+            )
+        } else if allow_deterministic_stub {
             generate_code_from_action(&action, text)
+        } else {
+            None
         };
 
         // MetaCognition gate for code generation: reject low-quality code
@@ -2246,7 +2400,7 @@ impl LanguageService {
                 let response_emb = Self::approximate_response_embedding(prompt_emb, &cg.code);
                 let topic_hint_cg = crate::growformer_lang::infer_operation_topic(text);
                 let scores = mc.evaluate(prompt_emb, &response_emb, &cg.code, topic_hint_cg.as_deref());
-                println!(
+                infer_trace!(
                     "  [metacog codegen] quality={:.3}, coherence={:.3}, relevance={:.3}",
                     scores.quality, scores.coherence, scores.relevance
                 );
@@ -2254,7 +2408,7 @@ impl LanguageService {
                     || (scores.coherence >= 0.95 && scores.quality >= 0.15) {
                     Some(cg)
                 } else {
-                    println!("  [metacog codegen] REJECTED: quality below threshold");
+                    infer_trace!("  [metacog codegen] REJECTED: quality below threshold");
                     None
                 }
             }
@@ -2402,12 +2556,31 @@ impl LanguageService {
         render_action_template(action)
     }
 
+    /// `todo!()`-style templates from [`generate_code_from_action`] are for coding-assist checkpoints.
+    /// Sentiment micro-brains often have **no** `group_code_envs` but the action router can still emit
+    /// [`ActionType::CodingAssist`], which produced nonsense stubs after `growformer --infer` (CLI always
+    /// calls [`Runtime::codegen`] after [`Runtime::prompt`]).
+    fn allow_codegen_deterministic_stub(
+        dm: &DimensionManager,
+        header: &Option<crate::brain::BrainPackageHeader>,
+    ) -> bool {
+        if header
+            .as_ref()
+            .and_then(|h| h.inference_profile.as_deref())
+            .is_some_and(|s| s.to_ascii_lowercase().contains("sentiment"))
+        {
+            return false;
+        }
+        !dm.group_code_envs.is_empty() || dm.codegen_head.is_some()
+    }
+
     fn legacy_code_from_encoded(
         head: &GenerationHead,
         encoded: &Option<(Vec<f32>, crate::dimension::language::BridgeOutput)>,
         action: &ActionJson,
         text: &str,
         group_order: &[GroupId],
+        allow_deterministic_stub: bool,
     ) -> Option<CodeGeneration> {
         if let Some((ref raw, _)) = encoded {
             let mut cond = raw.clone();
@@ -2430,7 +2603,11 @@ impl LanguageService {
                 });
             }
         }
-        generate_code_from_action(action, text)
+        if allow_deterministic_stub {
+            generate_code_from_action(action, text)
+        } else {
+            None
+        }
     }
 
     pub fn load_gle_students_from_bytes(&mut self, data: &[&[u8]]) -> Result<usize, String> {
@@ -2726,7 +2903,7 @@ impl LanguageService {
                 let names: Vec<_> = env.topic_subindex.iter()
                     .map(|t| format!("{}({})", t.topic_name, t.lattice.programs.len()))
                     .collect();
-                println!("  [topics] group {} gen: {}", gidx, names.join(", "));
+                infer_trace!("  [topics] group {} gen: {}", gidx, names.join(", "));
             }
         }
         for (&gidx, env) in dm.group_code_envs.iter_mut() {
@@ -2737,7 +2914,7 @@ impl LanguageService {
                 let names: Vec<_> = env.topic_subindex.iter()
                     .map(|t| format!("{}({})", t.topic_name, t.lattice.programs.len()))
                     .collect();
-                println!("  [topics] group {} code: {}", gidx, names.join(", "));
+                infer_trace!("  [topics] group {} code: {}", gidx, names.join(", "));
             }
         }
     }
@@ -2872,14 +3049,14 @@ impl LanguageService {
                 || (sent.contains("I ") && sent.contains("structural pattern"));
 
             if has_self_ref {
-                println!("  [coherence-trunc] stripped self-referential tail: \"{}\"",
+                infer_trace!("  [coherence-trunc] stripped self-referential tail: \"{}\"",
                     &sent[..sent.len().min(60)]);
                 break;
             }
 
             // Low overlap with the leading sentence = likely off-topic tail
             if overlap < 0.15 && kept.len() >= 1 {
-                println!("  [coherence-trunc] stripped divergent tail (overlap={:.3}): \"{}\"",
+                infer_trace!("  [coherence-trunc] stripped divergent tail (overlap={:.3}): \"{}\"",
                     overlap, &sent[..sent.len().min(60)]);
                 break;
             }

@@ -156,7 +156,7 @@ impl TopicGraph {
             concept_keywords.insert(parse_concept(k), v.clone());
         }
 
-        if log {
+        if log && crate::infer_log::infer_trace_enabled() {
             println!("  [topic-graph] loaded {} nodes, {} action_target mappings, {} concept keyword sets",
                 nodes.len(), action_target_map.len(), concept_keywords.len());
         }
@@ -186,8 +186,10 @@ impl TopicGraph {
                 .or_default()
                 .extend(kws);
         }
-        println!("  [topic-graph] merged overlay: +{} nodes (total {} nodes)",
-            added, self.nodes.len());
+        if crate::infer_log::infer_trace_enabled() {
+            println!("  [topic-graph] merged overlay: +{} nodes (total {} nodes)",
+                added, self.nodes.len());
+        }
         self
     }
 

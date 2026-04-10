@@ -67,6 +67,17 @@ pub mod types;
 pub mod metacognition;
 pub mod reasoning;
 pub mod inference;
+pub mod infer_log;
+
+/// Print inference diagnostics only when `infer_log::infer_trace_enabled()` (see CLI `--verbose` / quiet `--infer`).
+#[macro_export]
+macro_rules! infer_trace {
+    ($($t:tt)*) => {
+        if $crate::infer_log::infer_trace_enabled() {
+            println!($($t)*);
+        }
+    };
+}
 #[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 pub mod project_gf;
 pub mod service;

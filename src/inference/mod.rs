@@ -22,5 +22,6 @@ pub use manifest::{
     BrainPluginsManifest, InferenceThresholds,
 };
 pub use plugins::{
-    default_inference_harness, LatticeShortcutsPlugin, TEMPLATE_ID_USER_ANCHORED, TOPIC_KEYS,
+    default_inference_harness, format_retrieved_sentiment_line, LatticeShortcutsPlugin,
+    TEMPLATE_ID_USER_ANCHORED, TOPIC_KEYS,
 };

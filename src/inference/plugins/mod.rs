@@ -2,7 +2,9 @@
 
 mod lattice_shortcuts;
 
-pub use lattice_shortcuts::{LatticeShortcutsPlugin, TEMPLATE_ID_USER_ANCHORED, TOPIC_KEYS};
+pub use lattice_shortcuts::{
+    format_retrieved_sentiment_line, LatticeShortcutsPlugin, TEMPLATE_ID_USER_ANCHORED, TOPIC_KEYS,
+};
 
 use super::harness::InferenceHarness;
 

@@ -2842,8 +2842,10 @@ impl IndexedGenEnv {
             let primary_text = self.dictionary.decode(
                 &topic.lattice.programs[primary_idx].token_sequence);
             if primary_text.len() >= 5 && !Self::has_tokenization_artifacts(&primary_text) {
-                println!("    [codec-fallback] algebraic composition garbled, using primary prog {}",
-                    primary_idx);
+                crate::infer_trace!(
+                    "    [codec-fallback] algebraic composition garbled, using primary prog {}",
+                    primary_idx
+                );
                 let confidence = scored[0].1.min(0.90);
                 self.last_selected_archetype = None;
                 self.last_generation_confidence = confidence;
@@ -3157,8 +3159,10 @@ impl IndexedGenEnv {
                     }
                 }
                 if let Some((t, _)) = best {
-                    println!("    [fuzzy-topic] '{}' → fuzzy matched '{}' ({} progs)",
-                        forced_topic, t.topic_name, t.lattice.programs.len());
+                    crate::infer_trace!(
+                        "    [fuzzy-topic] '{}' → fuzzy matched '{}' ({} progs)",
+                        forced_topic, t.topic_name, t.lattice.programs.len()
+                    );
                 }
                 best.map(|(t, _)| t)
             });
@@ -3272,13 +3276,17 @@ impl IndexedGenEnv {
                 // ── Stage 3: Graph signature re-rank ──
                 // Use discriminative keyword signatures from the ProgramGraph to
                 // further separate confusable programs that cosine+BM25 can't distinguish.
-                println!("    [retrieval-diag] topic='{}', {} progs, query_terms={:?}",
-                    forced_topic, n, query_terms);
+                crate::infer_trace!(
+                    "    [retrieval-diag] topic='{}', {} progs, query_terms={:?}",
+                    forced_topic, n, query_terms
+                );
                 for (rank, &(idx, score)) in scored.iter().enumerate().take(3) {
                     let snippet: String = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence)
                         .chars().take(50).collect();
-                    println!("      pre-graph[{}]: prog={}, score={:.3}, text=\"{}...\"",
-                        rank, idx, score, snippet);
+                    crate::infer_trace!(
+                        "      pre-graph[{}]: prog={}, score={:.3}, text=\"{}...\"",
+                        rank, idx, score, snippet
+                    );
                 }
                 if let Some(ref graph) = topic.graph {
                     if !query_terms.is_empty() {
@@ -3292,8 +3300,10 @@ impl IndexedGenEnv {
                             let sigs_for_prog: Vec<String> = graph.signatures.get(idx)
                                 .map(|s| s.iter().take(5).map(|dk| format!("{}:{:.2}", dk.keyword, dk.specificity)).collect())
                                 .unwrap_or_default();
-                            println!("      graph[{}]: prog={}, combined={:.3}, sig_score={:.3}, top_keys=[{}]",
-                                rank, idx, combined, sig, sigs_for_prog.join(", "));
+                            crate::infer_trace!(
+                                "      graph[{}]: prog={}, combined={:.3}, sig_score={:.3}, top_keys=[{}]",
+                                rank, idx, combined, sig, sigs_for_prog.join(", ")
+                            );
                         }
 
                         // Also show what keyword_lookup returns
@@ -3302,7 +3312,7 @@ impl IndexedGenEnv {
                             let top3: Vec<String> = lookup.iter().take(3)
                                 .map(|(idx, s)| format!("prog{}={:.2}", idx, s))
                                 .collect();
-                            println!("      keyword_lookup: [{}]", top3.join(", "));
+                            crate::infer_trace!("      keyword_lookup: [{}]", top3.join(", "));
                         }
 
                         if sig_max > 0.0 {
@@ -3317,14 +3327,16 @@ impl IndexedGenEnv {
                             if let Some(redirect_idx) = graph.neighbor_redirect(top_idx, &query_terms) {
                                 if let Some(entry) = scored.iter_mut().find(|e| e.0 == redirect_idx) {
                                     entry.1 = top_score + 0.05;
-                                    println!("    [graph-redirect] prog {} → neighbor {} (better keyword match)",
-                                        top_idx, redirect_idx);
+                                    crate::infer_trace!(
+                                        "    [graph-redirect] prog {} → neighbor {} (better keyword match)",
+                                        top_idx, redirect_idx
+                                    );
                                 }
                             }
                         }
                     }
                 } else {
-                    println!("      [no-graph] topic '{}' has no ProgramGraph", forced_topic);
+                    crate::infer_trace!("      [no-graph] topic '{}' has no ProgramGraph", forced_topic);
                 }
                 // Stage 4: lexical alignment — boost programs that match several query
                 // content words; penalize matches that hinge on a single frequent token
@@ -3356,15 +3368,20 @@ impl IndexedGenEnv {
                             }
                         }
                         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                        println!("      [lex-align] reranked with {} content terms (stopwords stripped)", qcontent.len());
+                        crate::infer_trace!(
+                            "      [lex-align] reranked with {} content terms (stopwords stripped)",
+                            qcontent.len()
+                        );
                     }
                 }
                 scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 for (rank, &(idx, score)) in scored.iter().enumerate().take(3) {
                     let snippet: String = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence)
                         .chars().take(50).collect();
-                    println!("      post-graph[{}]: prog={}, score={:.3}, text=\"{}...\"",
-                        rank, idx, score, snippet);
+                    crate::infer_trace!(
+                        "      post-graph[{}]: prog={}, score={:.3}, text=\"{}...\"",
+                        rank, idx, score, snippet
+                    );
                 }
 
                 // When a language hint is provided, try to find a program matching that language
@@ -3388,8 +3405,10 @@ impl IndexedGenEnv {
                         };
                         if matches_lang && !text.is_empty() && score > 0.10 {
                             let snippet: String = text.chars().take(60).collect();
-                            println!("    [forced-topic] '{}' → {} progs, conf={:.3}, text=\"{}...\"",
-                                forced_topic, topic.lattice.programs.len(), score, snippet);
+                            crate::infer_trace!(
+                                "    [forced-topic] '{}' → {} progs, conf={:.3}, text=\"{}...\"",
+                                forced_topic, topic.lattice.programs.len(), score, snippet
+                            );
                             return Some((text, topic.topic_name.clone(), score));
                         }
                     }
@@ -3420,14 +3439,18 @@ impl IndexedGenEnv {
                         let centroid = &topic.lattice.programs[idx].ema_centroid;
                         if Self::should_reject_text(&opening, Some(centroid), Some(cond)) {
                             let snippet: String = text.chars().take(40).collect();
-                            println!("    [skip-artifact] prog={}, score={:.3}, text=\"{}...\"",
-                                idx, score, snippet);
+                            crate::infer_trace!(
+                                "    [skip-artifact] prog={}, score={:.3}, text=\"{}...\"",
+                                idx, score, snippet
+                            );
                             continue;
                         }
                     }
                     let snippet: String = text.chars().take(60).collect();
-                    println!("    [forced-topic] '{}' → {} progs, conf={:.3}, graph_conf={}, text=\"{}...\"",
-                        forced_topic, topic.lattice.programs.len(), score, graph_confident, snippet);
+                    crate::infer_trace!(
+                        "    [forced-topic] '{}' → {} progs, conf={:.3}, graph_conf={}, text=\"{}...\"",
+                        forced_topic, topic.lattice.programs.len(), score, graph_confident, snippet
+                    );
                     return Some((text, topic.topic_name.clone(), score));
                 }
                 None
@@ -3590,7 +3613,7 @@ impl IndexedGenEnv {
             (1.0, crate::coherence::BandCoherence { combined: 1.0, ..Default::default() })
         };
 
-        println!(
+        crate::infer_trace!(
             "  [coherence] ensemble={:.3}, δ={:.3} θ={:.3} α/β_boost={:.3} α/β_spatial={:.3} γ={:.3}",
             ens_coherence,
             band_detail.delta,
@@ -3866,7 +3889,9 @@ impl IndexedGenEnv {
                 let global_lower = global_text_backup.to_ascii_lowercase();
                 let global_has_kw = kw_refs.iter().any(|kw| kw.len() > 3 && global_lower.contains(*kw));
                 if global_has_kw && global_conf > 0.30 && !Self::has_tokenization_artifacts(&global_text_backup) {
-                    println!("    [kw-override] forced-topic text has no keyword match, using global nearest");
+                    crate::infer_trace!(
+                        "    [kw-override] forced-topic text has no keyword match, using global nearest"
+                    );
                     self.last_selected_archetype = Some(prog_idx);
                     self.last_generation_confidence = global_conf;
                     return (global_text_backup, global_conf);
