@@ -10,6 +10,8 @@ pub mod harness;
 pub mod inference_toml;
 pub mod manifest;
 pub mod plugins;
+pub mod retrieval_rescore;
+pub mod retrieval_lexicon;
 
 pub use harness::{
     BrainInferencePlugin, GenerationPreemptOutcome, InferenceHarness, TemplatePostprocessFlags,

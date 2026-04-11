@@ -2234,27 +2234,15 @@ pub struct ProgramGraph {
 }
 
 impl ProgramGraph {
-    const STOP: &'static [&'static str] = &[
-        "the", "is", "are", "was", "were", "be", "been", "being",
-        "have", "has", "had", "do", "does", "did", "will", "would",
-        "could", "should", "may", "might", "can", "shall",
-        "not", "but", "and", "or", "for", "nor", "so", "yet",
-        "a", "an", "of", "in", "to", "on", "at", "by", "with",
-        "from", "that", "this", "it", "its", "as", "if", "than",
-        "then", "too", "very", "just", "about", "into", "through",
-        "during", "before", "after", "above", "below", "between",
-        "under", "over", "such", "each", "every", "all", "any",
-        "both", "few", "more", "most", "other", "some", "also",
-        "which", "who", "whom", "what", "when", "where", "how", "why",
-        "one", "two", "used", "using", "use", "like", "example",
-    ];
-
-    pub fn build(lattice: &InfraciliaryLattice, dictionary: &TokenDictionary) -> Self {
+    pub fn build(
+        lattice: &InfraciliaryLattice,
+        dictionary: &TokenDictionary,
+        lexicon: &crate::inference::retrieval_lexicon::RetrievalLexicon,
+    ) -> Self {
         let n = lattice.programs.len();
         if n == 0 {
             return Self::default();
         }
-        let stop_set: HashSet<&str> = Self::STOP.iter().copied().collect();
 
         // Decode all programs to tokenized word bags
         let docs: Vec<Vec<String>> = lattice.programs.iter()
@@ -2262,7 +2250,7 @@ impl ProgramGraph {
                 let text = dictionary.decode(&p.token_sequence);
                 text.to_ascii_lowercase()
                     .split(|c: char| !c.is_alphanumeric() && c != '\'' && c != '-')
-                    .filter(|w| w.len() > 2 && !stop_set.contains(w))
+                    .filter(|w| w.len() > 2 && !lexicon.is_graph_stop(w))
                     .map(|w| w.to_string())
                     .collect()
             })
@@ -2505,7 +2493,11 @@ impl IndexedGenEnv {
 
             let mut lattice = InfraciliaryLattice::new(dictionary.clone());
             lattice.develop(&pairs, spawn_threshold);
-            let graph = ProgramGraph::build(&lattice, dictionary);
+            let graph = ProgramGraph::build(
+                &lattice,
+                dictionary,
+                crate::inference::retrieval_lexicon::global(),
+            );
             let n_edges: usize = graph.adjacency.iter().map(|a| a.len()).sum();
             let n_sigs: usize = graph.signatures.iter().map(|s| s.len()).sum();
             println!("    [program-graph] '{}': {} nodes, {} edges, {} signature keywords",
@@ -2692,7 +2684,11 @@ impl IndexedGenEnv {
         for topic in &mut self.topic_subindex {
             // Always rebuild from scratch — signatures depend on IDF thresholds
             // that may have been updated since the brain was trained.
-            topic.graph = Some(ProgramGraph::build(&topic.lattice, &self.dictionary));
+            topic.graph = Some(ProgramGraph::build(
+                &topic.lattice,
+                &self.dictionary,
+                crate::inference::retrieval_lexicon::global(),
+            ));
         }
     }
 
@@ -3121,21 +3117,8 @@ impl IndexedGenEnv {
         best
     }
 
-    /// Fintech consumer templates that often tie-break ahead of crypto tape lines on shared tokens (`signals`, `positive`, …).
-    fn sentiment_program_looks_fintech_consumer_noise(tl: &str) -> bool {
-        tl.contains("security friction")
-            || tl.contains("everyday purchase misclassified")
-            || tl.contains("fraud system blocked")
-            || tl.contains("fraud system flagged")
-            || tl.contains("fraud team flagged")
-            || tl.contains("payment got flagged but at least")
-            || tl.contains("notified me instantly")
-            || tl.contains("my bank finally added alerts")
-            || tl.contains("my payment got flagged")
-            || tl.contains("merchant says pending")
-    }
-
-    /// When the user line looks like crypto / tape commentary, down-rank fintech-only `expected_response` rows and nudge crypto-aligned bodies.
+    /// When the user line looks like crypto / tape commentary, adjust scores using declarative rules
+    /// (`data/inference/sentiment_crypto_rescore.toml`) — see [`crate::inference::retrieval_rescore`].
     fn sentiment_apply_crypto_market_retrieval_rescore(
         scored: &mut Vec<(usize, f32)>,
         query_terms: &[String],
@@ -3151,150 +3134,12 @@ impl IndexedGenEnv {
         ) {
             return;
         }
-        const PENALTY: f32 = 0.38;
-        let q_breakdown_funding = qjoin.contains("breakdown") && qjoin.contains("funding");
-        let q_compression_query = qjoin.contains("compression") || qjoin.contains("coil");
-        let q_dominance_bleeds = qjoin.contains("dominance")
-            && (qjoin.contains("bleed") || qjoin.contains("falling"));
-        let q_dominance_rising = qjoin.contains("dominance")
-            && (qjoin.contains("rising") || qjoin.contains("climbing"));
-        let q_vol_spike_absorb = qjoin.contains("volume")
-            && qjoin.contains("spiking")
-            && (qjoin.contains("absorbing") || qjoin.contains("absorb"));
-        let q_zero_news_positioning = qjoin.contains("zero")
-            && qjoin.contains("news")
-            && (qjoin.contains("know") || qjoin.contains("someone"));
-        for (idx, sc) in scored.iter_mut() {
-            let text = dictionary.decode(&topic.lattice.programs[*idx].token_sequence);
-            let tl = text.to_ascii_lowercase();
-            if Self::sentiment_program_looks_fintech_consumer_noise(&tl) {
-                *sc -= PENALTY;
-            }
-            // Mixed-topic collision: "breakdown + funding" vs "BTC coiling / compression" share vague tape language.
-            if q_breakdown_funding {
-                if tl.contains("breakdown") && tl.contains("funding") {
-                    *sc += 0.28;
-                }
-                if !q_compression_query
-                    && (tl.contains("compression implies")
-                        || tl.contains("imminent move but not which way")
-                        || tl.contains("coiling tighter"))
-                {
-                    *sc -= 0.34;
-                }
-                // Rotation boilerplate ("BTC up / alts down") is not "funding vs breakdown" mixed tape.
-                if tl.contains("positive for btc but negative for altcoins")
-                    || (tl.contains("dominance is rising") && tl.contains("alts bleed"))
-                {
-                    *sc -= 0.45;
-                }
-                // RSI / "not buying" mixed line is a different setup than funding vs breakdown narrative.
-                if tl.contains("rsi")
-                    && (tl.contains("disbelief")
-                        || tl.contains("not buying")
-                        || tl.contains("exhaustion"))
-                {
-                    *sc -= 0.48;
-                }
-            }
-            if q_compression_query && !q_breakdown_funding {
-                if tl.contains("compression implies")
-                    || tl.contains("imminent move but not which way")
-                    || (tl.contains("coil") && tl.contains("compression"))
-                {
-                    *sc += 0.2;
-                }
-            }
-            // "Dominance bleeding / altseason fork" vs "dominance rising, alts bleed" (both mixed, easy to swap).
-            if q_dominance_bleeds {
-                if tl.contains("falling btc dominance")
-                    || tl.contains("altseason vs nuke")
-                    || (tl.contains("forked narrative") && tl.contains("dominance"))
-                {
-                    *sc += 0.36;
-                }
-                if tl.contains("dominance is rising")
-                    || tl.contains("positive for btc but negative for altcoins")
-                {
-                    *sc -= 0.55;
-                }
-            }
-            if q_dominance_rising {
-                if tl.contains("dominance is rising") || tl.contains("positive for btc but negative for altcoins")
-                {
-                    *sc += 0.24;
-                }
-                if tl.contains("falling btc dominance") || tl.contains("altseason vs nuke") {
-                    *sc -= 0.36;
-                }
-            }
-            if qjoin.contains("dominance") && tl.contains("dominance") {
-                *sc += 0.14;
-            }
-            if qjoin.contains("euphoric") && tl.contains("euphor") {
-                *sc += 0.12;
-            }
-            if qjoin.contains("tiny")
-                && qjoin.contains("green")
-                && ((tl.contains("tiny") && tl.contains("green")) || tl.contains("negligible upside"))
-            {
-                *sc += 0.12;
-            }
-            if qjoin.contains("pump")
-                && qjoin.contains("sold")
-                && (tl.contains("shifting trend")
-                    || tl.contains("instant supply")
-                    || tl.contains("sellers in control"))
-            {
-                *sc += 0.22;
-            }
-            if qjoin.contains("pump")
-                && qjoin.contains("sold")
-                && tl.contains("rumor")
-                && !qjoin.contains("rumor")
-            {
-                *sc -= 0.35;
-            }
-            if qjoin.contains("pump")
-                && qjoin.contains("sold")
-                && !qjoin.contains("catalyst")
-                && tl.contains("positive catalysts")
-            {
-                *sc -= 0.4;
-            }
-            if qjoin.contains("pump")
-                && qjoin.contains("sold")
-                && (tl.contains("everyday purchase") || tl.contains("misclassified as risk"))
-            {
-                *sc -= 0.58;
-            }
-            if q_vol_spike_absorb {
-                if tl.contains("aggressive absorption") || tl.contains("flat print") {
-                    *sc += 0.34;
-                }
-                if tl.contains("adoption") && !qjoin.contains("adoption") {
-                    *sc -= 0.48;
-                }
-            }
-            if q_zero_news_positioning {
-                if tl.contains("informed positioning")
-                    || tl.contains("asymmetric info")
-                    || tl.contains("ahead of public news")
-                    || tl.contains("mainstream headlines")
-                    || tl.contains("positioning ahead")
-                    || tl.contains("someone knows framing")
-                {
-                    *sc += 0.18;
-                }
-                if tl.contains("hopium")
-                    || tl.contains("copium")
-                    || tl.contains("denial from bulls")
-                    || tl.contains("pure hopium")
-                {
-                    *sc -= 0.22;
-                }
-            }
-        }
+        let lattice = &topic.lattice;
+        crate::inference::retrieval_rescore::apply_embedded_sentiment_crypto_rescore(
+            qjoin.as_str(),
+            scored.as_mut_slice(),
+            |i| dictionary.decode(&lattice.programs[i].token_sequence),
+        );
     }
 
     /// Phase A.2: within `mixed` / `negative_mild`, keep only programs whose indexed user witness
@@ -3420,6 +3265,8 @@ impl IndexedGenEnv {
                     .map(|kw| kw.to_ascii_lowercase())
                     .collect();
 
+                let retrieval_lex = crate::inference::retrieval_lexicon::global_for_locale(None);
+
                 // ── Stage 1: Vector recall ──
                 // Score all programs by cosine similarity to conditioning vector.
                 let n = topic.lattice.programs.len();
@@ -3500,19 +3347,15 @@ impl IndexedGenEnv {
                     let mut combined: Vec<(usize, f32)> = cosine_scores.iter().enumerate()
                         .map(|(di, &(idx, cos))| {
                             let base = cos + lambda * bm25_norm[di];
-                            // Intent prefix: "implement"/"code"/"write" prefers programs
-                            // with code markers; "explain"/"define" prefers prose.
+                            // Intent-driven nudge: implement/code/write vs explain/define/describe (lexicon-driven).
                             let intent_mod = if !self.intent_action.is_empty() {
                                 let (_, words) = &docs[di];
                                 let text = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence);
-                                let has_code = text.contains("fn ") || text.contains("def ")
-                                    || text.contains("class ") || text.contains("impl ")
-                                    || text.contains("return ") || text.contains("pub fn")
-                                    || text.contains("struct ") || text.contains("let ");
+                                let has_code = retrieval_lex.program_has_code_markers_bm25(&text);
                                 let action = self.intent_action.as_str();
-                                if (action == "implement" || action == "code" || action == "write") && has_code {
+                                if retrieval_lex.intent_prefers_code(action) && has_code {
                                     0.08
-                                } else if (action == "explain" || action == "define" || action == "describe") && !has_code && words.len() > 15 {
+                                } else if retrieval_lex.intent_prefers_prose(action) && !has_code && words.len() > 15 {
                                     0.05
                                 } else {
                                     0.0
@@ -3596,19 +3439,9 @@ impl IndexedGenEnv {
                 // content words; penalize matches that hinge on a single frequent token
                 // (e.g. "love" shared across unrelated positive_strong prototypes).
                 if query_terms.len() >= 2 {
-                    let stop: std::collections::HashSet<&str> = [
-                        "the", "a", "an", "is", "are", "was", "were", "and", "or", "but",
-                        "in", "on", "at", "to", "for", "of", "with", "by", "from", "as",
-                        "it", "this", "that", "i", "you", "we", "they", "my", "your",
-                        "me", "not", "no", "do", "does", "did", "have", "has", "had",
-                        "love", "like", "likes", "hate", "good", "bad", "really", "very",
-                        "just", "so", "too", "get", "got",
-                    ]
-                    .into_iter()
-                    .collect();
                     let qcontent: Vec<&String> = query_terms
                         .iter()
-                        .filter(|t| t.len() > 2 && !stop.contains(t.as_str()))
+                        .filter(|t| t.len() > 2 && !retrieval_lex.is_lex_align_stop(t.as_str()))
                         .collect();
                     if qcontent.len() >= 2 {
                         for (idx, sc) in scored.iter_mut() {
@@ -3656,10 +3489,9 @@ impl IndexedGenEnv {
                         let centroid = &topic.lattice.programs[idx].ema_centroid;
                         if Self::should_reject_text(&opening, Some(centroid), Some(cond)) { continue; }
                         let matches_lang = if is_rust {
-                            text.contains("fn ") || text.contains("-> ") || text.contains("let ")
-                                || text.contains("i32") || text.contains("f64") || text.contains("impl ")
+                            retrieval_lex.program_matches_rust_lang_hint(&text)
                         } else if is_python {
-                            text.contains("def ") || text.contains("return ") && !text.contains("->")
+                            retrieval_lex.program_matches_python_lang_hint(&text)
                         } else {
                             true
                         };
@@ -3692,12 +3524,20 @@ impl IndexedGenEnv {
                     let text = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence);
                     if text.is_empty() { continue; }
 
-                    // Two-signal artifact check: surface + semantic alignment.
-                    // Graph-confident programs skip entirely.
+                    let opening: String = text.chars().take(300).collect();
+                    if Self::hard_reject_lattice_decoded_text(&opening) {
+                        let snippet: String = text.chars().take(40).collect();
+                        crate::infer_trace!(
+                            "    [skip-hard-reject] prog={}, score={:.3}, text=\"{}...\"",
+                            idx, score, snippet
+                        );
+                        continue;
+                    }
+
+                    // Soft artifact check: graph-confident retrieval may skip (alignment override).
                     if !graph_confident {
-                        let opening: String = text.chars().take(300).collect();
                         let centroid = &topic.lattice.programs[idx].ema_centroid;
-                        if Self::should_reject_text(&opening, Some(centroid), Some(cond)) {
+                        if Self::should_reject_text_soft(&opening, Some(centroid.as_slice()), Some(cond)) {
                             let snippet: String = text.chars().take(40).collect();
                             crate::infer_trace!(
                                 "    [skip-artifact] prog={}, score={:.3}, text=\"{}...\"",
@@ -3922,12 +3762,74 @@ impl IndexedGenEnv {
         (composed, avg_conf.clamp(0.0, 1.0), topics_used, ens_coherence)
     }
 
-    /// Detect tokenization artifacts in decoded text.
-    /// Two-signal artifact decision: surface artifacts AND semantic alignment.
-    /// Stored program text that has surface artifacts (from legacy char-splits)
-    /// but is semantically aligned with the query → accept.
-    /// Generated text with surface artifacts and low alignment → reject.
-    fn should_reject_text(
+    /// Hard reject: mask tokens, bracket glitches, and known training/meta boilerplate leaks.
+    /// **Never** overridden by graph confidence or centroid-vs-query alignment.
+    fn hard_reject_lattice_decoded_text(text: &str) -> bool {
+        let t = text.to_ascii_lowercase();
+        if t.contains("[mask]") || t.contains("mask]") {
+            return true;
+        }
+        if t.contains("][") || t.contains("[]") {
+            return true;
+        }
+        if t.contains("growformer agent")
+            || t.contains("i am growformer")
+            || t.contains("specialized ai agent")
+            || t.contains("built by swtch")
+            || t.contains("swtch.ai")
+            || (t.contains("growformer") && t.contains("swtch"))
+        {
+            return true;
+        }
+        if t.contains("self-organizing neural") || t.contains("self organizing neural") {
+            return true;
+        }
+        if t.contains("drawn to curiosity") {
+            return true;
+        }
+        if t.contains("knowledge is encoded as physical neural structure") {
+            return true;
+        }
+        if t.contains("people their people") || t.contains("their people their") {
+            return true;
+        }
+        if t.match_indices("little details").count() >= 2 {
+            return true;
+        }
+        if t.contains("3d environment") && t.contains("neuron") {
+            return true;
+        }
+        if t.contains("neurons grow") && t.contains("connect") {
+            return true;
+        }
+        if t.contains("details people details") || t.contains("people details people") {
+            return true;
+        }
+        if t.contains("about. about") {
+            return true;
+        }
+        if t.contains(" mask") && (t.contains("little") || t.contains("their")) {
+            return true;
+        }
+        Self::hard_reject_repeated_bigram(&t)
+    }
+
+    /// Detect immediate bigram repetition (`w1 w2 w1 w2`) common in broken decodes.
+    fn hard_reject_repeated_bigram(t: &str) -> bool {
+        let words: Vec<&str> = t.split_whitespace().collect();
+        if words.len() < 4 {
+            return false;
+        }
+        for w in words.windows(4) {
+            if w[0] == w[2] && w[1] == w[3] && w[0].len() > 2 && w[1].len() > 2 {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Soft reject: tokenization heuristics, optionally overridden by high query–program alignment.
+    fn should_reject_text_soft(
         text: &str,
         program_centroid: Option<&[f32]>,
         query_emb: Option<&[f32]>,
@@ -3935,14 +3837,25 @@ impl IndexedGenEnv {
         if !Self::has_tokenization_artifacts(text) {
             return false;
         }
-        // Surface artifacts detected — check semantic alignment as second signal
         if let (Some(centroid), Some(qemb)) = (program_centroid, query_emb) {
             let alignment = gen_cosine_sim(qemb, centroid);
             if alignment > 0.40 {
-                return false; // high alignment overrides surface artifacts
+                return false;
             }
         }
         true
+    }
+
+    /// Surface artifacts with optional alignment override; **hard** rejects are never accepted.
+    fn should_reject_text(
+        text: &str,
+        program_centroid: Option<&[f32]>,
+        query_emb: Option<&[f32]>,
+    ) -> bool {
+        if Self::hard_reject_lattice_decoded_text(text) {
+            return true;
+        }
+        Self::should_reject_text_soft(text, program_centroid, query_emb)
     }
 
     /// Garbled programs have isolated single characters, excessive spacing,
@@ -4116,7 +4029,21 @@ impl IndexedGenEnv {
         // This prevents addition's high cosine similarity from drowning out subtraction.
         let kw_refs: Vec<&str> = self.subject_keywords.iter().map(|s| s.as_str()).collect();
         let kw_opt: Option<&[&str]> = if kw_refs.is_empty() { None } else { Some(&kw_refs) };
-        let forced = topic_hint.and_then(|h| self.forced_topic_response_lang(cond, h, lang_hint, kw_opt));
+        let forced = topic_hint
+            .and_then(|h| self.forced_topic_response_lang(cond, h, lang_hint, kw_opt))
+            .filter(|(ft, _, ft_conf)| {
+                if *ft_conf <= 0.10 || ft.len() <= 5 {
+                    return false;
+                }
+                let open: String = ft.chars().take(400).collect();
+                if Self::hard_reject_lattice_decoded_text(&open) {
+                    crate::infer_trace!(
+                        "    [forced-discard] hard-reject lattice output; falling back to global/topic path"
+                    );
+                    return false;
+                }
+                true
+            });
         let forced_active = forced.is_some();
         let (text, lattice_conf, topic_selected) = if let Some((ft, fn_name, ft_conf)) = forced {
             if ft.len() > 5 && ft_conf > 0.10 {
@@ -4148,7 +4075,12 @@ impl IndexedGenEnv {
             if !has_kw_match {
                 let global_lower = global_text_backup.to_ascii_lowercase();
                 let global_has_kw = kw_refs.iter().any(|kw| kw.len() > 3 && global_lower.contains(*kw));
-                if global_has_kw && global_conf > 0.30 && !Self::has_tokenization_artifacts(&global_text_backup) {
+                let global_open: String = global_text_backup.chars().take(400).collect();
+                if global_has_kw
+                    && global_conf > 0.30
+                    && !Self::has_tokenization_artifacts(&global_text_backup)
+                    && !Self::hard_reject_lattice_decoded_text(&global_open)
+                {
                     crate::infer_trace!(
                         "    [kw-override] forced-topic text has no keyword match, using global nearest"
                     );
@@ -5660,6 +5592,18 @@ mod tests {
         assert!(speedup > 5.0,
             "algebraic pipeline should be >5x faster than even {} neural epochs, got {:.1}x",
             neural_epochs, speedup);
+    }
+
+    #[test]
+    fn hard_reject_masks_meta_boilerplate_and_bracket_glitch() {
+        assert!(IndexedGenEnv::should_reject_text("see [MASK] here", None, None));
+        assert!(IndexedGenEnv::should_reject_text("I am Growformer, a specialized AI agent built by swtch", None, None));
+        assert!(IndexedGenEnv::should_reject_text("ideas, and[][ MASK] people", None, None));
+        assert!(!IndexedGenEnv::should_reject_text(
+            "Funding is negative but price holds; shorts may be trapped.",
+            None,
+            None
+        ));
     }
 
     #[test]
