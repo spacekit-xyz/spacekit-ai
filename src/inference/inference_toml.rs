@@ -262,6 +262,12 @@ impl InferenceRulesRuntime {
             return Some("confused".to_string());
         }
 
+        // First- and third-person crypto tape / positioning lines — route before headline heuristics and
+        // before token anchors like `like` (e.g. “feels like the calm…”, “absorbing like crazy”).
+        if let Some(k) = Self::sentiment_crypto_market_operator_topic_key(lower) {
+            return Some(k);
+        }
+
         // Third-party crypto / macro market headlines & analysis — not first-person consumer sentiment.
         if let Some(k) = self.sentiment_third_party_crypto_market_copy_topic_key(lower) {
             return Some(k);
@@ -342,6 +348,14 @@ impl InferenceRulesRuntime {
             if STRONG_POS.contains(&w.as_str()) {
                 continue;
             }
+            if w == "like" {
+                if Self::like_token_is_perception_idiom(lower) {
+                    continue;
+                }
+                if lower.contains("like crazy") || lower.contains("like mad") {
+                    continue;
+                }
+            }
             if tokens.contains(w.as_str()) {
                 return Some("positive_mild".to_string());
             }
@@ -365,6 +379,7 @@ impl InferenceRulesRuntime {
             || self.has_operational_inconsistency_mixed_signal(l)
             || self.sentiment_confused_lexical_topic_key(l)
             || self.has_cautiously_positive_lexical_pattern(l)
+            || Self::sentiment_crypto_market_operator_topic_key(l).as_deref() == Some("mixed")
     }
 
     /// Deposit/timing wins + unfamiliarity, or “it worked” + surprise — hedged positivity, not bipolar MIXED.
@@ -423,6 +438,80 @@ impl InferenceRulesRuntime {
             && (lower.contains("complete") || lower.contains("says"))
     }
 
+    /// Volatility / deleveraging setup (two-sided), not a one-sided crash headline.
+    fn sentiment_crypto_bilateral_liquidations_headline(lower: &str) -> bool {
+        lower.contains("liquidation") && lower.contains("both") && lower.contains("side")
+    }
+
+    /// Tape / positioning heuristics for crypto operator chatter (runs before third-party headline path).
+    fn sentiment_crypto_market_operator_topic_key(lower: &str) -> Option<String> {
+        if lower.contains("dominance")
+            && (lower.contains("altseason") || lower.contains("nuke") || lower.contains("bleed"))
+        {
+            return Some("mixed".to_string());
+        }
+        if lower.contains("breakdown")
+            && lower.contains("funding")
+            && (lower.contains("positive") || lower.contains("still positive"))
+        {
+            return Some("mixed".to_string());
+        }
+        if Self::sentiment_crypto_bilateral_liquidations_headline(lower) {
+            return Some("mixed".to_string());
+        }
+        let vol_spike = lower.contains("volume")
+            && (lower.contains("spiking") || lower.contains("spike"));
+        let flat_or_absorb = (lower.contains("price")
+            && (lower.contains("isn't moving")
+                || lower.contains("isnt moving")
+                || lower.contains("not moving")))
+            || lower.contains("absorbing");
+        if vol_spike && flat_or_absorb {
+            return Some("cautiously_positive".to_string());
+        }
+        if (lower.contains("btc") || lower.contains("bitcoin"))
+            && (lower.contains("coil") || lower.contains("compression"))
+            && (lower.contains("tighter")
+                || lower.contains("won't last")
+                || lower.contains("wont last")
+                || lower.contains("won’t last"))
+        {
+            return Some("mixed".to_string());
+        }
+        if lower.contains("exit liquidity") || lower.contains("liquidity season") {
+            return Some("cautiously_negative".to_string());
+        }
+        if lower.contains("top signal")
+            && (lower.contains("euphoric") || lower.contains("tiny green"))
+        {
+            return Some("cautiously_negative".to_string());
+        }
+        if lower.contains("pump")
+            && lower.contains("sold")
+            && lower.contains("instantly")
+        {
+            return Some("negative_mild".to_string());
+        }
+        None
+    }
+
+    /// `like` after perception verbs (“feels like”, “looks like a trap”) — not evaluative praise.
+    fn like_token_is_perception_idiom(lower: &str) -> bool {
+        let tokens: Vec<&str> = lower
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| !t.is_empty())
+            .collect();
+        const PRE: &[&str] = &[
+            "feel", "feels", "look", "looks", "sound", "sounds", "seem", "seems", "smell", "smells",
+        ];
+        for window in tokens.windows(2) {
+            if window[1] == "like" && PRE.contains(&window[0]) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Headline-style crypto / asset-market copy (no I/my/we). Consumer wallet lines skip this path.
     fn sentiment_third_party_crypto_market_copy_topic_key(&self, lower: &str) -> Option<String> {
         if Self::looks_like_first_person_finance_user(lower) {
@@ -439,6 +528,7 @@ impl InferenceRulesRuntime {
             || lower.contains("bottom may be in");
 
         let bearish = !recovery_narrative
+            && !Self::sentiment_crypto_bilateral_liquidations_headline(lower)
             && (lower.contains("losses")
                 || lower.contains("losing")
                 || lower.contains("plunge")
@@ -527,6 +617,25 @@ impl InferenceRulesRuntime {
             || lower.contains("blockchain")
             || lower.contains("token ")
             || lower.contains(" spot etf")
+    }
+
+    /// Superset of [`Self::has_crypto_or_broad_market_lexicon`] for **retrieval gating** (tape / derivatives lexicon).
+    pub fn intent_text_suggests_crypto_market(lower: &str) -> bool {
+        Self::has_crypto_or_broad_market_lexicon(lower)
+            || lower.contains("dominance")
+            || lower.contains("liquidation")
+            || lower.contains("altseason")
+            || lower.contains("funding")
+            || lower.contains("open interest")
+            || lower.contains(" perp")
+            || lower.contains("perps")
+            || lower.contains("perpetual")
+            || lower.contains("rsi")
+            || lower.contains("wick")
+            || lower.contains("candle")
+            || lower.contains("greed")
+            || lower.contains("hash rate")
+            || lower.contains("hashrate")
     }
 
     fn has_mixed_silver_lining_pattern(&self, lower: &str) -> bool {
@@ -968,6 +1077,16 @@ mod negation_tests {
     use super::*;
 
     #[test]
+    fn intent_text_suggests_crypto_market_detects_tape_lexicon() {
+        assert!(InferenceRulesRuntime::intent_text_suggests_crypto_market(
+            "btc dominance is bleeding and funding is still positive"
+        ));
+        assert!(!InferenceRulesRuntime::intent_text_suggests_crypto_market(
+            "my payment got flagged but at least they notified me instantly"
+        ));
+    }
+
+    #[test]
     fn lexical_polarity_prefers_negation_over_positive_idiom() {
         let raw = include_str!("../../data/sentiment/inference_sentiment.toml");
         let doc: InferenceTomlDocument = toml::from_str(raw).expect("fixture TOML");
@@ -1197,6 +1316,75 @@ mod negation_tests {
                 )
                 .as_deref(),
             Some("confused")
+        );
+        // Crypto tape / positioning (v2 fintech prompts): route before third-party headline path and `like` anchors.
+        assert_eq!(
+            rules
+                .sentiment_lexical_topic_key(
+                    "BTC dominance is bleeding fast. Either altseason is real or we're about to nuke."
+                )
+                .as_deref(),
+            Some("mixed")
+        );
+        assert_eq!(
+            rules
+                .sentiment_lexical_topic_key(
+                    "Liquidations are stacking on both sides. Feels like the calm before a big move."
+                )
+                .as_deref(),
+            Some("mixed")
+        );
+        assert_eq!(
+            rules
+                .sentiment_lexical_topic_key(
+                    "Everyone's calling for a breakdown but funding is still positive. Mixed signals everywhere."
+                )
+                .as_deref(),
+            Some("mixed")
+        );
+        assert_eq!(
+            rules
+                .sentiment_lexical_topic_key(
+                    "Volume is spiking but price isn't moving. Someone's absorbing like crazy."
+                )
+                .as_deref(),
+            Some("cautiously_positive")
+        );
+        assert_eq!(
+            rules
+                .sentiment_lexical_topic_key(
+                    "BTC is coiling tighter than ever. This compression won't last long."
+                )
+                .as_deref(),
+            Some("mixed")
+        );
+        assert_eq!(
+            rules
+                .sentiment_lexical_topic_key(
+                    "Alts are printing 20% candles out of nowhere. Feels like exit liquidity season."
+                )
+                .as_deref(),
+            Some("cautiously_negative")
+        );
+        assert_eq!(
+            rules
+                .sentiment_lexical_topic_key(
+                    "Every pump gets sold instantly. Trend is clearly shifting."
+                )
+                .as_deref(),
+            Some("negative_mild")
+        );
+        assert_eq!(
+            rules
+                .sentiment_lexical_topic_key(
+                    "People are euphoric over tiny green candles. That's usually the top signal."
+                )
+                .as_deref(),
+            Some("cautiously_negative")
+        );
+        assert_eq!(
+            rules.sentiment_lexical_topic_key("I really like the new dashboard").as_deref(),
+            Some("positive_mild")
         );
         // Third-party crypto headlines / market copy (no first-person) → neutral or bearish, not consumer templates.
         assert_eq!(

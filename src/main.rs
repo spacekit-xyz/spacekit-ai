@@ -1,6 +1,6 @@
 use growformer::dimension::{
     LanguageSample,
-    GroupGenEnv, action_target_to_type,
+    action_target_to_type,
 };
 use growformer::dimension::language::DEFAULT_BRIDGE_DIM;
 use growformer::clifford::GroupRotor;
@@ -617,14 +617,14 @@ fn retrain_single_gen(
         None
     };
 
-    let gen_epochs: usize = if gen_epochs_override > 0 {
+    let _gen_epochs: usize = if gen_epochs_override > 0 {
         gen_epochs_override as usize
     } else if let Some(ac) = &auto_cfg {
         ac.gen_epochs
     } else {
         1500
     };
-    let k_replicas = if let Some(ac) = &auto_cfg { ac.replicas } else { (gen_replicas as usize).max(1) };
+    let _k_replicas = if let Some(ac) = &auto_cfg { ac.replicas } else { (gen_replicas as usize).max(1) };
     let gen_overrides = auto_cfg.as_ref().map(|ac| {
         growformer::dimension::group_gen::GenEnvOverrides {
             max_tokens: Some(ac.max_tokens),
@@ -637,9 +637,9 @@ fn retrain_single_gen(
         }
     });
 
-    let early_stop_window = auto_cfg.as_ref().map(|ac| ac.early_stop_window).unwrap_or(0);
-    let early_stop_min_imp = auto_cfg.as_ref().map(|ac| ac.early_stop_min_improvement).unwrap_or(0.0);
-    let early_stop_min_ep = auto_cfg.as_ref().map(|ac| ac.early_stop_min_epochs).unwrap_or(0);
+    // let early_stop_window = auto_cfg.as_ref().map(|ac| ac.early_stop_window).unwrap_or(0);
+    // let early_stop_min_imp = auto_cfg.as_ref().map(|ac| ac.early_stop_min_improvement).unwrap_or(0.0);
+    // let early_stop_min_ep = auto_cfg.as_ref().map(|ac| ac.early_stop_min_epochs).unwrap_or(0);
 
     // Build dictionary, codebook, Hopf table for the target group
     use growformer::dimension::group_gen::{bits_for_dict, MAX_TOKENS};
@@ -710,30 +710,6 @@ fn retrain_single_gen(
     let size_kb = brain_bytes.len() / 1024;
     std::fs::write(output_path, &brain_bytes).map_err(|e| format!("write failed: {}", e))?;
     println!("Brain exported: {} ({} KB)", output_path, size_kb);
-
-    // Quick inference check
-    println!("\n--- Post-Retrain Inference Check ---\n");
-    let test_prompts = [
-        "help me reset my password",
-        "implement binary search in Python",
-        "explain the observer pattern",
-        "design a microservices architecture in Rust",
-        "my account is locked after too many failed attempts",
-    ];
-    for prompt in &test_prompts {
-        match svc.generation(prompt) {
-            Ok((action, resp)) => {
-                println!("  prompt: {:?}", prompt);
-                println!("  action: {:?} (conf={:.2}) group={:?}",
-                    action.action_type, action.confidence, action.target_group_id);
-                let t_end = truncate_to_char_boundary(&resp.text, 200);
-                println!("  gen [{}] (conf={:.2}): {:?}\n",
-                    resp.template_id, resp.confidence,
-                    &resp.text[..t_end]);
-            }
-            Err(e) => println!("  {:?} → ERROR: {}\n", prompt, e),
-        }
-    }
 
     Ok(())
 }

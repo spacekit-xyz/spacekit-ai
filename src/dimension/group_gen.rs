@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use crate::clifford::{
     embed_bridge_vector, causal_fingerprint, spatial_fingerprint,
-    BOOST_BIVECTOR_COUNT, ROTATION_BIVECTOR_COUNT,
+    BOOST_BIVECTOR_COUNT,
 };
 use crate::cloze;
 use crate::environment::NeuralEnvironment;
@@ -3121,6 +3121,73 @@ impl IndexedGenEnv {
         best
     }
 
+    /// Fintech consumer templates that often tie-break ahead of crypto tape lines on shared tokens (`signals`, `positive`, …).
+    fn sentiment_program_looks_fintech_consumer_noise(tl: &str) -> bool {
+        tl.contains("security friction")
+            || tl.contains("everyday purchase misclassified")
+            || tl.contains("fraud system blocked")
+            || tl.contains("fraud system flagged")
+            || tl.contains("fraud team flagged")
+            || tl.contains("payment got flagged but at least")
+            || tl.contains("notified me instantly")
+            || tl.contains("my bank finally added alerts")
+            || tl.contains("my payment got flagged")
+            || tl.contains("merchant says pending")
+    }
+
+    /// When the user line looks like crypto / tape commentary, down-rank fintech-only `expected_response` rows and nudge crypto-aligned bodies.
+    fn sentiment_apply_crypto_market_retrieval_rescore(
+        scored: &mut Vec<(usize, f32)>,
+        query_terms: &[String],
+        topic: &TopicSubIndex,
+        dictionary: &TokenDictionary,
+    ) {
+        if query_terms.is_empty() {
+            return;
+        }
+        let qjoin = query_terms.join(" ").to_ascii_lowercase();
+        if !crate::inference::inference_toml::InferenceRulesRuntime::intent_text_suggests_crypto_market(
+            qjoin.as_str(),
+        ) {
+            return;
+        }
+        const PENALTY: f32 = 0.38;
+        for (idx, sc) in scored.iter_mut() {
+            let text = dictionary.decode(&topic.lattice.programs[*idx].token_sequence);
+            let tl = text.to_ascii_lowercase();
+            if Self::sentiment_program_looks_fintech_consumer_noise(&tl) {
+                *sc -= PENALTY;
+            }
+            if qjoin.contains("breakdown")
+                && qjoin.contains("funding")
+                && tl.contains("breakdown")
+                && tl.contains("funding")
+            {
+                *sc += 0.14;
+            }
+            if qjoin.contains("dominance") && tl.contains("dominance") {
+                *sc += 0.14;
+            }
+            if qjoin.contains("euphoric") && tl.contains("euphor") {
+                *sc += 0.12;
+            }
+            if qjoin.contains("tiny")
+                && qjoin.contains("green")
+                && ((tl.contains("tiny") && tl.contains("green")) || tl.contains("negligible upside"))
+            {
+                *sc += 0.12;
+            }
+            if qjoin.contains("pump")
+                && qjoin.contains("sold")
+                && (tl.contains("shifting trend")
+                    || tl.contains("instant supply")
+                    || tl.contains("sellers in control"))
+            {
+                *sc += 0.12;
+            }
+        }
+    }
+
     /// Directly query the sub-lattice whose name matches `forced_topic` (case-insensitive).
     /// Bypasses cross-topic competition — used when `infer_operation_topic` gives a
     /// specific operation name (e.g., "subtraction_operation") so the correct sub-lattice
@@ -3374,6 +3441,12 @@ impl IndexedGenEnv {
                         );
                     }
                 }
+                Self::sentiment_apply_crypto_market_retrieval_rescore(
+                    &mut scored,
+                    &query_terms,
+                    topic,
+                    &self.dictionary,
+                );
                 scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 for (rank, &(idx, score)) in scored.iter().enumerate().take(3) {
                     let snippet: String = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence)
