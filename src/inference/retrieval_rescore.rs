@@ -215,4 +215,73 @@ mod tests {
         }
         assert!(matched, "expected alt/btc mismatch penalty rule to match");
     }
+
+    #[test]
+    fn oi_climbing_danger_penalizes_bullish_coil_line() {
+        let rules = default_rules_table();
+        let q = "open interest climbing way too fast feels dangerous";
+        let tl = "rising oi suggests potential volatility with a bullish lean; cautiously optimistic.";
+        let mut matched = false;
+        for rule in rules {
+            if rule.id == "oi_climbing_danger_penalize_bullish_coil_template"
+                && query_matches(rule, q)
+                && program_matches(rule, tl)
+            {
+                assert!(rule.delta < 0.0);
+                matched = true;
+            }
+        }
+        assert!(matched, "expected OI danger vs bullish-coil penalty to match");
+    }
+
+    #[test]
+    fn oi_coiled_spring_query_skips_danger_penalty() {
+        let rules = default_rules_table();
+        let q = "open interest climbing while price stays flat feels like a coiled spring";
+        let tl = "rising oi suggests potential volatility with a bullish lean; cautiously optimistic.";
+        for rule in rules {
+            if rule.id == "oi_climbing_danger_penalize_bullish_coil_template" {
+                assert!(
+                    !query_matches(rule, q) || !program_matches(rule, tl),
+                    "spring/flat query should not hit danger penalty"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn etf_outflow_penalizes_inflow_celebration_line() {
+        let rules = default_rules_table();
+        let q = "etf outflows today were massive not bullish";
+        let tl = "etf inflows hit a record; institutions are hungry.";
+        let mut matched = false;
+        for rule in rules {
+            if rule.id == "etf_outflow_penalize_inflow_celebration_line"
+                && query_matches(rule, q)
+                && program_matches(rule, tl)
+            {
+                assert!(rule.delta < 0.0);
+                matched = true;
+            }
+        }
+        assert!(matched, "expected ETF outflow penalty rule to match");
+    }
+
+    #[test]
+    fn sec_vague_penalizes_support_failure_boilerplate() {
+        let rules = default_rules_table();
+        let q = "sec statement was vague as usual";
+        let tl = "severe service failure compounded by dismissive support guidance.";
+        let mut matched = false;
+        for rule in rules {
+            if rule.id == "sec_vague_penalize_support_failure_boilerplate"
+                && query_matches(rule, q)
+                && program_matches(rule, tl)
+            {
+                assert!(rule.delta < 0.0);
+                matched = true;
+            }
+        }
+        assert!(matched, "expected SEC vague penalty rule to match");
+    }
 }
