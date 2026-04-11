@@ -18,6 +18,7 @@ use growformer::dimension::{
     MainDimension, VirtualGroup, render_action_template, generate_code_from_action,
     route_language_embedding,
 };
+use growformer::dimension::language::CausalAnnotation;
 
 use growformer::types::GroupId;
 use std::collections::HashMap;
@@ -318,6 +319,8 @@ struct JsonlLanguageSample {
     expected_response: Option<String>,
     #[serde(default)]
     expected_code: Option<String>,
+    #[serde(default)]
+    causal: Option<CausalAnnotation>,
 }
 
 fn load_language_samples_jsonl(path: &str) -> Result<Vec<LanguageSample>, String> {
@@ -337,6 +340,7 @@ fn load_language_samples_jsonl(path: &str) -> Result<Vec<LanguageSample>, String
             policy_regime: rec.policy_regime.unwrap_or_else(|| "default".to_string()),
             language_channel: rec.language_channel.unwrap_or_else(|| "english".to_string()),
             expected_response: rec.expected_response, expected_code: rec.expected_code,
+            causal: rec.causal,
         });
     }
     Ok(out)
@@ -5210,6 +5214,7 @@ fn build_language_calibration_dataset() -> CalibrationDataset {
                 language_channel: lang.to_string(),
                 expected_response: None,
                 expected_code: None,
+                causal: None,
             });
         }
     }

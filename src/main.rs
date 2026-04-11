@@ -3,7 +3,8 @@ use growformer::dimension::{
     action_target_to_type,
 };
 use growformer::dimension::language::{
-    sentiment_lattice_index_body, should_use_sentiment_joint_index, DEFAULT_BRIDGE_DIM,
+    sentiment_lattice_index_body_with_causal, should_use_sentiment_joint_index, CausalAnnotation,
+    DEFAULT_BRIDGE_DIM,
 };
 use growformer::clifford::GroupRotor;
 use growformer::dimension::group_gen::{AlgebraicCodebook, HopfCompositionTable};
@@ -594,7 +595,7 @@ fn retrain_single_gen(
                         growformer::dimension::group_gen::GEN_COND_DIM,
                     );
                     let lattice_text = if should_use_sentiment_joint_index(s) {
-                        sentiment_lattice_index_body(&s.text, r)
+                        sentiment_lattice_index_body_with_causal(&s.text, r, s.causal.as_ref())
                     } else {
                         r.to_string()
                     };
@@ -602,7 +603,7 @@ fn retrain_single_gen(
                 }
                 Err(_) => {
                     let lattice_text = if should_use_sentiment_joint_index(s) {
-                        sentiment_lattice_index_body(&s.text, r)
+                        sentiment_lattice_index_body_with_causal(&s.text, r, s.causal.as_ref())
                     } else {
                         r.to_string()
                     };
@@ -1801,7 +1802,7 @@ fn train_brain(
         let nov = novelty_scores.get(i).copied().unwrap_or(0.0);
         if let Some(r) = s.expected_response.as_deref() {
             let lattice_text = if should_use_sentiment_joint_index(s) {
-                sentiment_lattice_index_body(&s.text, r)
+                sentiment_lattice_index_body_with_causal(&s.text, r, s.causal.as_ref())
             } else {
                 r.to_string()
             };
@@ -2679,6 +2680,8 @@ struct JsonlLanguageSample {
     expected_response: Option<String>,
     #[serde(default)]
     expected_code: Option<String>,
+    #[serde(default)]
+    causal: Option<CausalAnnotation>,
 }
 
 fn load_language_samples_jsonl(path: &str) -> Result<Vec<LanguageSample>, String> {
@@ -2706,6 +2709,7 @@ fn load_language_samples_jsonl(path: &str) -> Result<Vec<LanguageSample>, String
             language_channel: rec.language_channel.unwrap_or_else(|| "english".to_string()),
             expected_response: rec.expected_response,
             expected_code: rec.expected_code,
+            causal: rec.causal,
         });
     }
     Ok(out)

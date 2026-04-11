@@ -93,6 +93,10 @@ impl Default for LanguageConfig {
     }
 }
 
+/// Optional causal slot in the sentiment **joint index** (BM25 / retrieval), placed before the witness.
+/// Stripped with the user prefix when displaying (see [`strip_sentiment_lattice_witness_for_display`]).
+pub const SENTIMENT_CAUSAL_INDEX_CORE: &str = "__GF_CAUSAL__";
+
 /// Stable witness marker between user text and `expected_response` in sentiment lattice bodies (Phase A.1).
 ///
 /// Must be a single tokenizer “word” (see [`crate::spectral::tokenize`]): it survives `encode`/`decode`.
@@ -103,8 +107,73 @@ pub const SENTIMENT_LATTICE_WITNESS_CORE: &str = "__GROWFORMER_SENT_WITNESS__";
 /// Back-compat name for older call sites / tests.
 pub const SENTIMENT_LATTICE_WITNESS_SEP: &str = " __GROWFORMER_SENT_WITNESS__ ";
 
+fn slug_ident(part: &str) -> String {
+    let mut out = String::new();
+    let mut prev_underscore = false;
+    for c in part.to_ascii_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+            prev_underscore = false;
+        } else if !prev_underscore && !out.is_empty() {
+            out.push('_');
+            prev_underscore = true;
+        }
+    }
+    out.trim_matches('_').to_string()
+}
+
+/// Compact BM25 / graph keyword token aligned with [`CausalAnnotation::index_token`].
+pub fn causal_index_token(causal_type: &str, connector: &str) -> String {
+    let t = slug_ident(causal_type);
+    let t = if t.is_empty() { "unknown".into() } else { t };
+    let c = slug_ident(connector);
+    let c = if c.is_empty() { "none".to_string() } else { c };
+    format!("gfcausal_t_{}_c_{}", t, c)
+}
+
+/// Optional causal annotation on JSONL training rows (`causal` object). Drives joint-index tokens only until Brain B exists.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CausalAnnotation {
+    /// e.g. `direct`, `compensatory`, `contrastive`, `explanatory`, `counterfactual`, `concessive`, `inferential`
+    #[serde(default)]
+    pub causal_type: String,
+    /// Surface cue: `so`, `despite`, `at least`, …
+    #[serde(default)]
+    pub connector: Option<String>,
+    #[serde(default)]
+    pub cause_span: Option<String>,
+    #[serde(default)]
+    pub effect_span: Option<String>,
+    /// Links contrastive / counterfactual minimal pairs for dataset audits (optional).
+    #[serde(default)]
+    pub contrast_group: Option<String>,
+}
+
+impl CausalAnnotation {
+    pub fn is_active(&self) -> bool {
+        !self.causal_type.trim().is_empty()
+    }
+
+    /// Single index token inserted after [`SENTIMENT_CAUSAL_INDEX_CORE`] for retrieval alignment.
+    pub fn index_token(&self) -> String {
+        causal_index_token(
+            self.causal_type.trim(),
+            self.connector.as_deref().unwrap_or("").trim(),
+        )
+    }
+}
+
 /// Joint index string for sentiment Paramecium programs: user line + response so retrieval BM25 sees scenario tokens.
 pub fn sentiment_lattice_index_body(user: &str, response: &str) -> String {
+    sentiment_lattice_index_body_with_causal(user, response, None)
+}
+
+/// Same as [`sentiment_lattice_index_body`], with an optional causal slot for BM25 / signature alignment.
+pub fn sentiment_lattice_index_body_with_causal(
+    user: &str,
+    response: &str,
+    causal: Option<&CausalAnnotation>,
+) -> String {
     const MAX_USER_CHARS: usize = 480;
     let u = user.trim();
     let u_trunc: String = if u.chars().count() > MAX_USER_CHARS {
@@ -113,9 +182,14 @@ pub fn sentiment_lattice_index_body(user: &str, response: &str) -> String {
         u.to_string()
     };
     let u_trunc = u_trunc.trim_end().replace(['\n', '\r'], " ");
+    let causal_chunk = causal
+        .filter(|c| c.is_active())
+        .map(|c| format!(" {} {}", SENTIMENT_CAUSAL_INDEX_CORE, c.index_token()))
+        .unwrap_or_default();
     format!(
-        "{} {} {}",
+        "{}{} {} {}",
         u_trunc,
+        causal_chunk,
         SENTIMENT_LATTICE_WITNESS_CORE,
         response.trim().replace(['\n', '\r'], " ")
     )
@@ -148,6 +222,8 @@ pub struct LanguageSample {
     pub language_channel: String,
     pub expected_response: Option<String>,
     pub expected_code: Option<String>,
+    #[serde(default)]
+    pub causal: Option<CausalAnnotation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1135,6 +1211,7 @@ mod tests {
                         language_channel: "english".to_string(),
                         expected_response: None,
                         expected_code: None,
+                        causal: None,
                     })
                 })
                 .collect(),
@@ -1278,11 +1355,36 @@ mod tests {
             language_channel: "english".into(),
             expected_response: Some("Forked narrative.".into()),
             expected_code: None,
+            causal: None,
         };
         let joint = sentiment_lattice_index_body(&s.text, s.expected_response.as_deref().unwrap());
         assert!(joint.contains(SENTIMENT_LATTICE_WITNESS_CORE));
         let stripped = strip_sentiment_lattice_witness_for_display(&joint);
         assert_eq!(stripped, "Forked narrative.");
+    }
+
+    #[test]
+    fn sentiment_joint_index_embeds_causal_token_before_witness() {
+        let causal = CausalAnnotation {
+            causal_type: "direct".into(),
+            connector: Some("so".into()),
+            cause_span: None,
+            effect_span: None,
+            contrast_group: None,
+        };
+        let joint = sentiment_lattice_index_body_with_causal(
+            "I lost big so I'm furious",
+            "Anger from a clear loss.",
+            Some(&causal),
+        );
+        assert!(joint.contains(SENTIMENT_CAUSAL_INDEX_CORE));
+        assert!(joint.contains("gfcausal_t_direct_c_so"));
+        assert!(
+            joint.find(SENTIMENT_CAUSAL_INDEX_CORE).unwrap()
+                < joint.find(SENTIMENT_LATTICE_WITNESS_CORE).unwrap()
+        );
+        let stripped = strip_sentiment_lattice_witness_for_display(&joint);
+        assert_eq!(stripped, "Anger from a clear loss.");
     }
 
     #[test]

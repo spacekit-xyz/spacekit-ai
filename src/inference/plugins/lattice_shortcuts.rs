@@ -10,6 +10,7 @@ use crate::dimension::DimensionManager;
 use crate::growformer_lang::MetaConcept;
 use crate::micro_brain::MetaResult;
 
+use crate::inference::causal_hints;
 use crate::inference::harness::{BrainInferencePlugin, GenerationPreemptOutcome, TemplatePostprocessFlags};
 use crate::inference::inference_toml::inference_rules_runtime;
 use crate::inference::manifest::{resolved_inference_thresholds, BrainPluginsManifest, InferenceThresholds};
@@ -442,6 +443,7 @@ impl BrainInferencePlugin for LatticeShortcutsPlugin {
                 subject_kw.push(lw);
             }
         }
+        causal_hints::extend_subject_keywords_with_causal_tokens(intent_text, subject_kw);
     }
 
     fn try_preempt_generation(

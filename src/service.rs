@@ -3484,6 +3484,7 @@ fn build_language_calibration_dataset() -> CalibrationDataset {
                 language_channel: lang.to_string(),
                 expected_response: None,
                 expected_code: None,
+                causal: None,
             });
         }
     }

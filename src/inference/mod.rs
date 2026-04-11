@@ -6,6 +6,7 @@
 //!
 //! Plugin logic lives under [`plugins`] and is driven by [`harness::InferenceHarness`].
 
+pub mod causal_hints;
 pub mod harness;
 pub mod inference_toml;
 pub mod manifest;
