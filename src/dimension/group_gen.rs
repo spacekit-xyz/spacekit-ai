@@ -3188,6 +3188,14 @@ impl IndexedGenEnv {
                 {
                     *sc -= 0.45;
                 }
+                // RSI / "not buying" mixed line is a different setup than funding vs breakdown narrative.
+                if tl.contains("rsi")
+                    && (tl.contains("disbelief")
+                        || tl.contains("not buying")
+                        || tl.contains("exhaustion"))
+                {
+                    *sc -= 0.48;
+                }
             }
             if q_compression_query && !q_breakdown_funding {
                 if tl.contains("compression implies")
@@ -3203,12 +3211,12 @@ impl IndexedGenEnv {
                     || tl.contains("altseason vs nuke")
                     || (tl.contains("forked narrative") && tl.contains("dominance"))
                 {
-                    *sc += 0.28;
+                    *sc += 0.36;
                 }
                 if tl.contains("dominance is rising")
                     || tl.contains("positive for btc but negative for altcoins")
                 {
-                    *sc -= 0.42;
+                    *sc -= 0.55;
                 }
             }
             if q_dominance_rising {
@@ -3254,18 +3262,25 @@ impl IndexedGenEnv {
             {
                 *sc -= 0.4;
             }
+            if qjoin.contains("pump")
+                && qjoin.contains("sold")
+                && (tl.contains("everyday purchase") || tl.contains("misclassified as risk"))
+            {
+                *sc -= 0.58;
+            }
             if q_vol_spike_absorb {
                 if tl.contains("aggressive absorption") || tl.contains("flat print") {
-                    *sc += 0.26;
+                    *sc += 0.34;
                 }
                 if tl.contains("adoption") && !qjoin.contains("adoption") {
-                    *sc -= 0.32;
+                    *sc -= 0.48;
                 }
             }
             if q_zero_news_positioning {
                 if tl.contains("informed positioning")
                     || tl.contains("asymmetric info")
                     || tl.contains("ahead of public news")
+                    || tl.contains("mainstream headlines")
                     || tl.contains("positioning ahead")
                     || tl.contains("someone knows framing")
                 {
