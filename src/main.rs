@@ -2,7 +2,9 @@ use growformer::dimension::{
     LanguageSample,
     action_target_to_type,
 };
-use growformer::dimension::language::DEFAULT_BRIDGE_DIM;
+use growformer::dimension::language::{
+    sentiment_lattice_index_body, should_use_sentiment_joint_index, DEFAULT_BRIDGE_DIM,
+};
 use growformer::clifford::GroupRotor;
 use growformer::dimension::group_gen::{AlgebraicCodebook, HopfCompositionTable};
 use growformer::dimension::paramecium::InfraciliaryLattice;
@@ -591,12 +593,22 @@ fn retrain_single_gen(
                         target_group, &bridged.routed_vector, &raw,
                         growformer::dimension::group_gen::GEN_COND_DIM,
                     );
-                    gen_pairs.push((cond, r.to_string(), s.semantic_intent.clone()));
+                    let lattice_text = if should_use_sentiment_joint_index(s) {
+                        sentiment_lattice_index_body(&s.text, r)
+                    } else {
+                        r.to_string()
+                    };
+                    gen_pairs.push((cond, lattice_text, s.semantic_intent.clone()));
                 }
                 Err(_) => {
+                    let lattice_text = if should_use_sentiment_joint_index(s) {
+                        sentiment_lattice_index_body(&s.text, r)
+                    } else {
+                        r.to_string()
+                    };
                     gen_pairs.push((
                         vec![0.0; growformer::dimension::group_gen::GEN_COND_DIM],
-                        r.to_string(),
+                        lattice_text,
                         s.semantic_intent.clone(),
                     ));
                 }
@@ -1776,7 +1788,7 @@ fn train_brain(
 
     // Partition training data by (group, kind), carrying novelty scores per sample.
     // Each pair now carries (bridged, raw, target) so per-group adapters can specialize conditioning.
-    let mut gen_by_group: HashMap<usize, Vec<(&[f32], &str)>> = HashMap::new();
+    let mut gen_by_group: HashMap<usize, Vec<(Vec<f32>, String)>> = HashMap::new();
     let mut gen_raw_by_group: HashMap<usize, Vec<&[f32]>> = HashMap::new();
     let mut gen_topic_by_group: HashMap<usize, Vec<&str>> = HashMap::new();
     let mut gen_novelty_by_group: HashMap<usize, Vec<f32>> = HashMap::new();
@@ -1788,7 +1800,15 @@ fn train_brain(
         let gidx = group_map(s);
         let nov = novelty_scores.get(i).copied().unwrap_or(0.0);
         if let Some(r) = s.expected_response.as_deref() {
-            gen_by_group.entry(gidx).or_default().push((bridged.as_slice(), r));
+            let lattice_text = if should_use_sentiment_joint_index(s) {
+                sentiment_lattice_index_body(&s.text, r)
+            } else {
+                r.to_string()
+            };
+            gen_by_group
+                .entry(gidx)
+                .or_default()
+                .push((bridged.clone(), lattice_text));
             gen_raw_by_group.entry(gidx).or_default().push(raw.as_slice());
             gen_topic_by_group.entry(gidx).or_default().push(s.semantic_intent.as_str());
             gen_novelty_by_group.entry(gidx).or_default().push(nov);
@@ -1941,7 +1961,7 @@ fn train_brain(
     let pairs_threshold_for_large_dict: usize = 100;
     for (&gidx, pairs) in &gen_by_group {
         if pairs.is_empty() { continue; }
-        let texts: Vec<&str> = pairs.iter().map(|(_emb, text)| *text).collect();
+        let texts: Vec<&str> = pairs.iter().map(|(_emb, text)| text.as_str()).collect();
         let max_dict = if pairs.len() >= pairs_threshold_for_large_dict { 2048 } else { 1024 };
         let dict = TokenDictionary::build(&texts, max_dict);
         let bits = bits_for_dict(dict.len());
@@ -1968,8 +1988,8 @@ fn train_brain(
     let mut code_codebooks: HashMap<usize, AlgebraicCodebook> = HashMap::new();
     for (&gidx, pairs) in &gen_by_group {
         if pairs.is_empty() { continue; }
-        let texts: Vec<&str> = pairs.iter().map(|(_emb, text)| *text).collect();
-        let embs: Vec<&[f32]> = pairs.iter().map(|(emb, _text)| *emb).collect();
+        let texts: Vec<&str> = pairs.iter().map(|(_emb, text)| text.as_str()).collect();
+        let embs: Vec<&[f32]> = pairs.iter().map(|(emb, _text)| emb.as_slice()).collect();
         let dict = gen_dicts.get(&gidx).unwrap();
         let intent_count = data_profile.as_ref()
             .and_then(|p| p.groups.get(&gidx))
@@ -2013,10 +2033,10 @@ fn train_brain(
         if let Some(cb) = gen_codebooks.get(&gidx) {
             if !cb.has_prototypes() || cb.archetypes.len() < 2 { continue; }
             let dict = gen_dicts.get(&gidx).unwrap();
-            let embs: Vec<&[f32]> = pairs.iter().map(|(emb, _)| *emb).collect();
+            let embs: Vec<&[f32]> = pairs.iter().map(|(emb, _)| emb.as_slice()).collect();
             let mut clusters: Vec<Vec<usize>> = vec![vec![]; cb.archetypes.len()];
             for (i, (_emb, text)) in pairs.iter().enumerate() {
-                let ids = dict.encode(text);
+                let ids = dict.encode(text.as_str());
                 let (arch_idx, _) = cb.match_best(&ids);
                 if arch_idx < clusters.len() { clusters[arch_idx].push(i); }
             }
@@ -2138,18 +2158,19 @@ fn train_brain(
             let raw_vecs = gen_raw_by_group.get(&gidx).unwrap();
             let topic_names = gen_topic_by_group.get(&gidx).unwrap();
             let dict = gen_dicts.get(&gidx).unwrap().clone();
-            let cb = gen_codebooks.get(&gidx).cloned().unwrap_or_else(|| AlgebraicCodebook::build(
-                &pairs.iter().map(|(_, t)| *t).collect::<Vec<_>>(), &dict, 32, None,
-            ));
+            let cb = gen_codebooks.get(&gidx).cloned().unwrap_or_else(|| {
+                let text_refs: Vec<&str> = pairs.iter().map(|(_, t)| t.as_str()).collect();
+                AlgebraicCodebook::build(&text_refs, &dict, 32, None)
+            });
             let hopf = gen_hopf.get(&gidx).cloned().unwrap_or_default();
             let training_pairs: Vec<(Vec<f32>, String, String)> = pairs.iter()
                 .zip(raw_vecs.iter())
                 .zip(topic_names.iter())
                 .map(|(((bridged, text), raw), topic_name)| {
                     let cond = svc.dm.adapt_for_group_clifford(
-                        gidx, bridged, raw, growformer::dimension::group_gen::GEN_COND_DIM,
+                        gidx, bridged.as_slice(), raw, growformer::dimension::group_gen::GEN_COND_DIM,
                     );
-                    (cond, text.to_string(), (*topic_name).to_string())
+                    (cond, text.clone(), (*topic_name).to_string())
                 })
                 .collect();
             let mut env = IndexedGenEnv::from_tagged_parts(dict, cb, hopf, &training_pairs, spawn_threshold);

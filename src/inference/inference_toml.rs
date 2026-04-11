@@ -636,6 +636,7 @@ impl InferenceRulesRuntime {
             || lower.contains("greed")
             || lower.contains("hash rate")
             || lower.contains("hashrate")
+            || lower.contains("pump")
     }
 
     fn has_mixed_silver_lining_pattern(&self, lower: &str) -> bool {

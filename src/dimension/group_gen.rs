@@ -3152,18 +3152,73 @@ impl IndexedGenEnv {
             return;
         }
         const PENALTY: f32 = 0.38;
+        let q_breakdown_funding = qjoin.contains("breakdown") && qjoin.contains("funding");
+        let q_compression_query = qjoin.contains("compression") || qjoin.contains("coil");
+        let q_dominance_bleeds = qjoin.contains("dominance")
+            && (qjoin.contains("bleed") || qjoin.contains("falling"));
+        let q_dominance_rising = qjoin.contains("dominance")
+            && (qjoin.contains("rising") || qjoin.contains("climbing"));
+        let q_vol_spike_absorb = qjoin.contains("volume")
+            && qjoin.contains("spiking")
+            && (qjoin.contains("absorbing") || qjoin.contains("absorb"));
+        let q_zero_news_positioning = qjoin.contains("zero")
+            && qjoin.contains("news")
+            && (qjoin.contains("know") || qjoin.contains("someone"));
         for (idx, sc) in scored.iter_mut() {
             let text = dictionary.decode(&topic.lattice.programs[*idx].token_sequence);
             let tl = text.to_ascii_lowercase();
             if Self::sentiment_program_looks_fintech_consumer_noise(&tl) {
                 *sc -= PENALTY;
             }
-            if qjoin.contains("breakdown")
-                && qjoin.contains("funding")
-                && tl.contains("breakdown")
-                && tl.contains("funding")
-            {
-                *sc += 0.14;
+            // Mixed-topic collision: "breakdown + funding" vs "BTC coiling / compression" share vague tape language.
+            if q_breakdown_funding {
+                if tl.contains("breakdown") && tl.contains("funding") {
+                    *sc += 0.28;
+                }
+                if !q_compression_query
+                    && (tl.contains("compression implies")
+                        || tl.contains("imminent move but not which way")
+                        || tl.contains("coiling tighter"))
+                {
+                    *sc -= 0.34;
+                }
+                // Rotation boilerplate ("BTC up / alts down") is not "funding vs breakdown" mixed tape.
+                if tl.contains("positive for btc but negative for altcoins")
+                    || (tl.contains("dominance is rising") && tl.contains("alts bleed"))
+                {
+                    *sc -= 0.45;
+                }
+            }
+            if q_compression_query && !q_breakdown_funding {
+                if tl.contains("compression implies")
+                    || tl.contains("imminent move but not which way")
+                    || (tl.contains("coil") && tl.contains("compression"))
+                {
+                    *sc += 0.2;
+                }
+            }
+            // "Dominance bleeding / altseason fork" vs "dominance rising, alts bleed" (both mixed, easy to swap).
+            if q_dominance_bleeds {
+                if tl.contains("falling btc dominance")
+                    || tl.contains("altseason vs nuke")
+                    || (tl.contains("forked narrative") && tl.contains("dominance"))
+                {
+                    *sc += 0.28;
+                }
+                if tl.contains("dominance is rising")
+                    || tl.contains("positive for btc but negative for altcoins")
+                {
+                    *sc -= 0.42;
+                }
+            }
+            if q_dominance_rising {
+                if tl.contains("dominance is rising") || tl.contains("positive for btc but negative for altcoins")
+                {
+                    *sc += 0.24;
+                }
+                if tl.contains("falling btc dominance") || tl.contains("altseason vs nuke") {
+                    *sc -= 0.36;
+                }
             }
             if qjoin.contains("dominance") && tl.contains("dominance") {
                 *sc += 0.14;
@@ -3183,7 +3238,115 @@ impl IndexedGenEnv {
                     || tl.contains("instant supply")
                     || tl.contains("sellers in control"))
             {
-                *sc += 0.12;
+                *sc += 0.22;
+            }
+            if qjoin.contains("pump")
+                && qjoin.contains("sold")
+                && tl.contains("rumor")
+                && !qjoin.contains("rumor")
+            {
+                *sc -= 0.35;
+            }
+            if qjoin.contains("pump")
+                && qjoin.contains("sold")
+                && !qjoin.contains("catalyst")
+                && tl.contains("positive catalysts")
+            {
+                *sc -= 0.4;
+            }
+            if q_vol_spike_absorb {
+                if tl.contains("aggressive absorption") || tl.contains("flat print") {
+                    *sc += 0.26;
+                }
+                if tl.contains("adoption") && !qjoin.contains("adoption") {
+                    *sc -= 0.32;
+                }
+            }
+            if q_zero_news_positioning {
+                if tl.contains("informed positioning")
+                    || tl.contains("asymmetric info")
+                    || tl.contains("ahead of public news")
+                    || tl.contains("positioning ahead")
+                    || tl.contains("someone knows framing")
+                {
+                    *sc += 0.18;
+                }
+                if tl.contains("hopium")
+                    || tl.contains("copium")
+                    || tl.contains("denial from bulls")
+                    || tl.contains("pure hopium")
+                {
+                    *sc -= 0.22;
+                }
+            }
+        }
+    }
+
+    /// Phase A.2: within `mixed` / `negative_mild`, keep only programs whose indexed user witness
+    /// matches the query domain (crypto tape vs consumer fintech).
+    ///
+    /// Programs **without** [`crate::dimension::language::SENTIMENT_LATTICE_WITNESS_CORE`] are
+    /// response-only lattice rows (pre–A.1): they are excluded for crypto-shaped queries so cosine
+    /// cannot pull fintech-only templates; they remain eligible for consumer-shaped queries.
+    fn sentiment_domain_slice_allows(crypto_query: bool, decoded: &str) -> bool {
+        match decoded.split_once(crate::dimension::language::SENTIMENT_LATTICE_WITNESS_CORE) {
+            None => !crypto_query,
+            Some((user_w, _rest)) => {
+                let user_lower = user_w.to_ascii_lowercase();
+                let prog_crypto = crate::inference::inference_toml::InferenceRulesRuntime::intent_text_suggests_crypto_market(
+                    user_lower.as_str(),
+                );
+                if crypto_query {
+                    prog_crypto
+                } else {
+                    !prog_crypto
+                }
+            }
+        }
+    }
+
+    fn sentiment_apply_topic_domain_slice(
+        cosine_scores: &mut Vec<(usize, f32)>,
+        forced_topic: &str,
+        query_terms: &[String],
+        topic: &TopicSubIndex,
+        dictionary: &TokenDictionary,
+    ) {
+        let ft = forced_topic.to_ascii_lowercase();
+        if ft != "mixed" && ft != "negative_mild" {
+            return;
+        }
+        if query_terms.is_empty() {
+            return;
+        }
+        let probe = query_terms.join(" ").to_ascii_lowercase();
+        let crypto_q =
+            crate::inference::inference_toml::InferenceRulesRuntime::intent_text_suggests_crypto_market(
+                probe.as_str(),
+            );
+        let orig = cosine_scores.clone();
+        let core = crate::dimension::language::SENTIMENT_LATTICE_WITNESS_CORE;
+        let filtered: Vec<(usize, f32)> = orig
+            .iter()
+            .copied()
+            .filter(|&(idx, _)| {
+                let decoded = dictionary.decode(&topic.lattice.programs[idx].token_sequence);
+                Self::sentiment_domain_slice_allows(crypto_q, &decoded)
+            })
+            .collect();
+        if !filtered.is_empty() {
+            *cosine_scores = filtered;
+            return;
+        }
+        // Crypto query + strict filter removed everyone: prefer any joint-indexed row over legacy-only.
+        if crypto_q {
+            let with_marker: Vec<(usize, f32)> = orig
+                .iter()
+                .copied()
+                .filter(|&(idx, _)| dictionary.decode(&topic.lattice.programs[idx].token_sequence).contains(core))
+                .collect();
+            if !with_marker.is_empty() {
+                *cosine_scores = with_marker;
             }
         }
     }
@@ -3237,6 +3400,11 @@ impl IndexedGenEnv {
         topic_match.and_then(|topic| {
                 if topic.lattice.programs.is_empty() { return None; }
 
+                let query_terms: Vec<String> = subject_keywords.unwrap_or(&[]).iter()
+                    .filter(|kw| kw.len() > 2)
+                    .map(|kw| kw.to_ascii_lowercase())
+                    .collect();
+
                 // ── Stage 1: Vector recall ──
                 // Score all programs by cosine similarity to conditioning vector.
                 let n = topic.lattice.programs.len();
@@ -3245,14 +3413,18 @@ impl IndexedGenEnv {
                     .collect();
                 cosine_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
+                Self::sentiment_apply_topic_domain_slice(
+                    &mut cosine_scores,
+                    forced_topic,
+                    &query_terms,
+                    topic,
+                    &self.dictionary,
+                );
+
                 // ── Stage 2: BM25 re-rank ──
                 // Decode program texts once, compute BM25 against query subject keywords.
                 // BM25 acts as a lexical safety net: even if cosine picks "quicksort"
                 // for a "stack" query, BM25 will boost programs containing "stack".
-                let query_terms: Vec<String> = subject_keywords.unwrap_or(&[]).iter()
-                    .filter(|kw| kw.len() > 2)
-                    .map(|kw| kw.to_ascii_lowercase())
-                    .collect();
 
                 let mut scored: Vec<(usize, f32)> = if query_terms.is_empty() {
                     cosine_scores

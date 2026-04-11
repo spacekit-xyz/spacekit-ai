@@ -196,7 +196,8 @@ pub fn sentiment_line_already_has_display_header(body: &str) -> bool {
 
 /// Prefix lattice-retrieved rationale with `LABEL —` for parity with the user-anchored shortcut line format.
 pub fn format_retrieved_sentiment_line(topic_key: &str, body: &str) -> String {
-    let cleaned = strip_leading_sentiment_display_headers(body);
+    let body = crate::dimension::language::strip_sentiment_lattice_witness_for_display(body);
+    let cleaned = strip_leading_sentiment_display_headers(&body);
     let cleaned = if cleaned.trim().is_empty() {
         body.trim().to_string()
     } else {
@@ -512,6 +513,17 @@ mod sentiment_format_tests {
         let out = format_retrieved_sentiment_line("neutral_chop", "Low activity; neutral chop.");
         assert!(out.starts_with("NEUTRAL (chop) — "));
         assert!(out.contains("Low activity"));
+    }
+
+    #[test]
+    fn format_line_strips_joint_index_witness() {
+        // Simulate decode collapsing spaces around the marker (still findable by core substring).
+        let joint = "BTC dominance line.__GROWFORMER_SENT_WITNESS__ Rationale only.".to_string();
+        assert!(joint.contains(crate::dimension::language::SENTIMENT_LATTICE_WITNESS_CORE));
+        let out = format_retrieved_sentiment_line("mixed", &joint);
+        assert!(out.starts_with("MIXED — "));
+        assert!(out.contains("Rationale only."));
+        assert!(!out.contains("BTC dominance"));
     }
 
     #[test]

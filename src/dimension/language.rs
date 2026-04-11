@@ -93,6 +93,51 @@ impl Default for LanguageConfig {
     }
 }
 
+/// Stable witness marker between user text and `expected_response` in sentiment lattice bodies (Phase A.1).
+///
+/// Must be a single tokenizer “word” (see [`crate::spectral::tokenize`]): it survives `encode`/`decode`.
+/// **Do not** match only the spaced form when stripping — `decode` may drop spaces around `_`, so use
+/// [`strip_sentiment_lattice_witness_for_display`] which searches for this core substring.
+pub const SENTIMENT_LATTICE_WITNESS_CORE: &str = "__GROWFORMER_SENT_WITNESS__";
+
+/// Back-compat name for older call sites / tests.
+pub const SENTIMENT_LATTICE_WITNESS_SEP: &str = " __GROWFORMER_SENT_WITNESS__ ";
+
+/// Joint index string for sentiment Paramecium programs: user line + response so retrieval BM25 sees scenario tokens.
+pub fn sentiment_lattice_index_body(user: &str, response: &str) -> String {
+    const MAX_USER_CHARS: usize = 480;
+    let u = user.trim();
+    let u_trunc: String = if u.chars().count() > MAX_USER_CHARS {
+        u.chars().take(MAX_USER_CHARS).collect()
+    } else {
+        u.to_string()
+    };
+    let u_trunc = u_trunc.trim_end().replace(['\n', '\r'], " ");
+    format!(
+        "{} {} {}",
+        u_trunc,
+        SENTIMENT_LATTICE_WITNESS_CORE,
+        response.trim().replace(['\n', '\r'], " ")
+    )
+}
+
+/// True when this sample should use [`sentiment_lattice_index_body`] for lattice text (vs `expected_response` only).
+pub fn should_use_sentiment_joint_index(s: &LanguageSample) -> bool {
+    s.action_target.as_deref() == Some("sentiment") || s.domain.eq_ignore_ascii_case("sentiment")
+}
+
+/// Strip the indexed user prefix before showing lattice text to the user.
+pub fn strip_sentiment_lattice_witness_for_display(full: &str) -> String {
+    if let Some(idx) = full.find(SENTIMENT_LATTICE_WITNESS_CORE) {
+        let rest = &full[idx + SENTIMENT_LATTICE_WITNESS_CORE.len()..];
+        return rest.trim_start().to_string();
+    }
+    if let Some((_u, rest)) = full.split_once("\n---\n") {
+        return rest.trim_start().to_string();
+    }
+    full.to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LanguageSample {
     pub domain: String,
@@ -1220,5 +1265,33 @@ mod tests {
     fn group_adapter_param_count() {
         let adapter = GroupAdapter::new(768, 128, 8);
         assert_eq!(adapter.param_count(), 768 * 8 + 128 * 8);
+    }
+
+    #[test]
+    fn sentiment_joint_index_and_strip_roundtrip() {
+        let s = LanguageSample {
+            domain: "sentiment".into(),
+            text: "BTC dominance bleeding".into(),
+            semantic_intent: "mixed".into(),
+            action_target: Some("sentiment".into()),
+            policy_regime: "default".into(),
+            language_channel: "english".into(),
+            expected_response: Some("Forked narrative.".into()),
+            expected_code: None,
+        };
+        let joint = sentiment_lattice_index_body(&s.text, s.expected_response.as_deref().unwrap());
+        assert!(joint.contains(SENTIMENT_LATTICE_WITNESS_CORE));
+        let stripped = strip_sentiment_lattice_witness_for_display(&joint);
+        assert_eq!(stripped, "Forked narrative.");
+    }
+
+    #[test]
+    fn sentiment_strip_finds_core_when_glued_to_text() {
+        // Decode may drop spaces around the marker; stripping must not require `SENTIMENT_LATTICE_WITNESS_SEP`.
+        let glued = "Something feels off.__GROWFORMER_SENT_WITNESS__ ETH lagging rationale.";
+        assert_eq!(
+            strip_sentiment_lattice_witness_for_display(glued),
+            "ETH lagging rationale."
+        );
     }
 }
