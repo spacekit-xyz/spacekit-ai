@@ -118,7 +118,7 @@ impl LearnedRouter {
         // K-NN voting with gradient alignment bias.
         for &(idx, sim) in scored.iter().take(k) {
             if sim < 0.0 { continue; }
-            let text = self.lattice.dictionary.decode(&self.lattice.programs[idx].token_sequence);
+            let text = self.lattice.programs[idx].display_text(&self.lattice.dictionary);
             if let Some(gid) = Self::parse_group_id(&text) {
                 if gid < self.num_groups {
                     // Gradient alignment: does this program lie in the direction ∇F points?
@@ -188,7 +188,7 @@ impl LearnedRouter {
         let mut base = routers[0].clone();
         for r in &routers[1..] {
             for prog in &r.lattice.programs {
-                let text = base.lattice.dictionary.decode(&prog.token_sequence);
+                let text = prog.display_text(&base.lattice.dictionary);
                 let pairs = vec![(prog.ema_centroid.clone(), text)];
                 base.lattice.develop(&pairs, 0.95);
             }

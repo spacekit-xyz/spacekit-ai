@@ -51,6 +51,20 @@ pub struct CognitiveNode {
     pub fingerprint: [f32; 28],
     pub centroid: Vec<f32>,
     pub token_sequence: Vec<u16>,
+    /// Mirrors [`crate::dimension::paramecium::BehavioralProgram::verbatim_display_text`].
+    #[serde(default)]
+    pub verbatim_display_text: Option<String>,
+}
+
+impl CognitiveNode {
+    pub fn display_text(&self, dict: &TokenDictionary) -> String {
+        if let Some(ref v) = self.verbatim_display_text {
+            if !v.is_empty() {
+                return v.clone();
+            }
+        }
+        dict.decode(&self.token_sequence)
+    }
 }
 
 /// An edge connecting two nodes in the cognitive map.
@@ -99,6 +113,7 @@ impl CognitiveMap {
                     fingerprint: fp,
                     centroid: prog.ema_centroid.clone(),
                     token_sequence: prog.token_sequence.clone(),
+                    verbatim_display_text: prog.verbatim_display_text.clone(),
                 });
             }
         }
@@ -216,7 +231,8 @@ impl ReasoningEngine {
 
             for &(pidx, sim) in scored.iter().take(self.activations_per_group) {
                 if sim < 0.1 { break; }
-                let text = dict.map(|d| d.decode(&env.lattice.programs[pidx].token_sequence))
+                let text = dict
+                    .map(|d| env.lattice.programs[pidx].display_text(d))
                     .unwrap_or_default();
                 let node_idx = self.cognitive_map.index
                     .get(&(gidx, pidx))
@@ -351,7 +367,7 @@ impl ReasoningEngine {
             let (node_idx, e) = best_per_group[0];
             let node = &self.cognitive_map.nodes[node_idx];
             let text = self.group_dictionaries.get(&node.group_idx)
-                .map(|d| d.decode(&node.token_sequence))
+                .map(|d| node.display_text(d))
                 .unwrap_or_default();
             return ReasoningResult {
                 text,
@@ -371,7 +387,7 @@ impl ReasoningEngine {
         let (primary_node_idx, primary_energy) = best_per_group[0];
         let primary_node = &self.cognitive_map.nodes[primary_node_idx];
         let primary_text = self.group_dictionaries.get(&primary_node.group_idx)
-            .map(|d| d.decode(&primary_node.token_sequence))
+            .map(|d| primary_node.display_text(d))
             .unwrap_or_default();
 
         // For each secondary group, extract transferred knowledge
@@ -400,7 +416,7 @@ impl ReasoningEngine {
                 .max(0.0);
 
             let text = self.group_dictionaries.get(&node.group_idx)
-                .map(|d| d.decode(&node.token_sequence))
+                .map(|d| node.display_text(d))
                 .unwrap_or_default();
 
             if alignment > 0.05 && !text.is_empty() {
@@ -974,7 +990,7 @@ impl ReasoningEngine {
 
         if best_sim >= config.min_activation {
             let prog = &env.lattice.programs[best_idx];
-            let text = dict.map(|d| d.decode(&prog.token_sequence)).unwrap_or_default();
+            let text = dict.map(|d| prog.display_text(d)).unwrap_or_default();
             let node_idx = self.cognitive_map.index.get(&(group_idx, best_idx)).copied();
 
             println!(
@@ -1219,9 +1235,9 @@ mod tests {
     fn test_wave_settling_converges() {
         let map = CognitiveMap {
             nodes: vec![
-                CognitiveNode { group_idx: 0, program_idx: 0, fingerprint: [0.1; 28], centroid: vec![1.0, 0.0], token_sequence: vec![1] },
-                CognitiveNode { group_idx: 1, program_idx: 0, fingerprint: [0.1; 28], centroid: vec![0.0, 1.0], token_sequence: vec![2] },
-                CognitiveNode { group_idx: 2, program_idx: 0, fingerprint: [0.0; 28], centroid: vec![0.5, 0.5], token_sequence: vec![3] },
+                CognitiveNode { group_idx: 0, program_idx: 0, fingerprint: [0.1; 28], centroid: vec![1.0, 0.0], token_sequence: vec![1], verbatim_display_text: None },
+                CognitiveNode { group_idx: 1, program_idx: 0, fingerprint: [0.1; 28], centroid: vec![0.0, 1.0], token_sequence: vec![2], verbatim_display_text: None },
+                CognitiveNode { group_idx: 2, program_idx: 0, fingerprint: [0.0; 28], centroid: vec![0.5, 0.5], token_sequence: vec![3], verbatim_display_text: None },
             ],
             edges: vec![
                 CognitiveEdge { source: 0, target: 1, structural_sim: 0.8 },

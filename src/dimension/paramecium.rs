@@ -61,6 +61,11 @@ pub struct BehavioralProgram {
     pub lattice_signature: Vec<f32>,
     /// The response token sequence this program produces.
     pub token_sequence: Vec<u16>,
+    /// Exact training or correction line for display and lexical retrieval.
+    /// When set, avoids [`TokenDictionary::encode`] mapping unknown words to the
+    /// nearest dictionary token by edit distance, which garbles proper nouns.
+    #[serde(default)]
+    pub verbatim_display_text: Option<String>,
     /// Activation count (how many times this program has fired during training).
     pub activation_count: u64,
     /// EMA of input embeddings that activated this program.
@@ -111,6 +116,18 @@ pub struct BehavioralProgram {
     /// suppressed in the next retrieval to force compositional diversity.
     #[serde(skip)]
     pub refractory: bool,
+}
+
+impl BehavioralProgram {
+    /// Human-visible program body and preferred surface for lexical retrieval.
+    pub fn display_text(&self, dictionary: &TokenDictionary) -> String {
+        if let Some(ref v) = self.verbatim_display_text {
+            if !v.is_empty() {
+                return v.clone();
+            }
+        }
+        dictionary.decode(&self.token_sequence)
+    }
 }
 
 fn default_reliability() -> f32 { 0.5 }
@@ -251,6 +268,7 @@ impl InfraciliaryLattice {
                 centroid: embedding.clone(),
                 lattice_signature: lattice_sig,
                 token_sequence: token_ids,
+                verbatim_display_text: Some(response.clone()),
                 activation_count: 1,
                 ema_centroid: embedding.clone(),
                 coherence: 1.0,
@@ -389,7 +407,7 @@ impl InfraciliaryLattice {
 
         // 5. Fire the selected program
         let prog = &self.programs[selected_idx];
-        let text = self.dictionary.decode(&prog.token_sequence);
+        let text = prog.display_text(&self.dictionary);
 
         // 6. Online learning: drift the centroid toward the input
         let alpha = self.learning_rate;
@@ -524,7 +542,7 @@ impl InfraciliaryLattice {
 
         scored.into_iter().take(k).map(|(idx, sim)| {
             let prog = &self.programs[idx];
-            let text = self.dictionary.decode(&prog.token_sequence);
+            let text = prog.display_text(&self.dictionary);
             ParameciumResponse {
                 text,
                 program_idx: idx,
@@ -801,6 +819,7 @@ impl InfraciliaryLattice {
                     }
                 }
                 prog.token_sequence = token_ids;
+                prog.verbatim_display_text = Some(correction_text.to_string());
                 prog.activation_count += 1;
                 self.apply_feedback(nearest_idx, true, 0.9);
                 return;
@@ -813,6 +832,7 @@ impl InfraciliaryLattice {
             centroid: embedding.to_vec(),
             lattice_signature: lattice_sig,
             token_sequence: token_ids,
+            verbatim_display_text: Some(correction_text.to_string()),
             activation_count: 1,
             ema_centroid: embedding.to_vec(),
             coherence: 1.0,
@@ -836,6 +856,7 @@ impl InfraciliaryLattice {
                 + p.lattice_signature.len() * 4
                 + p.token_sequence.len() * 2
                 + p.ema_centroid.len() * 4
+                + p.verbatim_display_text.as_ref().map(|s| s.len()).unwrap_or(0)
                 + 24 // scalar fields
         }).sum();
         let wave_bytes = self.wave.phases.len() * 4 + 12;
@@ -855,6 +876,7 @@ impl InfraciliaryLattice {
                 centroid: centroid.clone(),
                 lattice_signature: lattice_sig,
                 token_sequence: tokens.clone(),
+                verbatim_display_text: None,
                 activation_count: 1,
                 ema_centroid: centroid.clone(),
                 coherence: 1.0,
@@ -1199,6 +1221,24 @@ mod tests {
         ], 0.99);
         assert!(lattice.program_count() >= 2);
         lattice
+    }
+
+    #[test]
+    fn test_display_text_returns_verbatim_when_dict_folds_tokens() {
+        // Vocabulary too small: encode() maps unknown headline tokens by edit distance.
+        let dict = TokenDictionary::build(&["hello", "world"], 50);
+        let mut lattice = InfraciliaryLattice::new(dict.clone());
+        let line = "Kalshi wins in Arizona".to_string();
+        lattice.develop(&[(test_embedding(42.0), line.clone())], 0.99);
+        assert_eq!(lattice.program_count(), 1);
+        let prog = &lattice.programs[0];
+        assert_eq!(prog.verbatim_display_text.as_deref(), Some(line.as_str()));
+        assert_eq!(prog.display_text(&dict), line);
+        assert_ne!(
+            dict.decode(&prog.token_sequence),
+            line,
+            "decode(token_sequence) should not round-trip OOV training text"
+        );
     }
 
     #[test]

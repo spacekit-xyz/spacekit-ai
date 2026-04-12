@@ -2247,7 +2247,7 @@ impl ProgramGraph {
         // Decode all programs to tokenized word bags
         let docs: Vec<Vec<String>> = lattice.programs.iter()
             .map(|p| {
-                let text = dictionary.decode(&p.token_sequence);
+                let text = p.display_text(dictionary);
                 text.to_ascii_lowercase()
                     .split(|c: char| !c.is_alphanumeric() && c != '\'' && c != '-')
                     .filter(|w| w.len() > 2 && !lexicon.is_graph_stop(w))
@@ -3010,7 +3010,7 @@ impl IndexedGenEnv {
             }
         }
 
-        let text = self.dictionary.decode(&lattice.programs[best_idx].token_sequence);
+        let text = lattice.programs[best_idx].display_text(&self.dictionary);
         (text, best_idx, best_score.max(0.0))
     }
 
@@ -3061,7 +3061,7 @@ impl IndexedGenEnv {
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.into_iter().take(k).map(|(idx, sim)| {
-            let text = self.dictionary.decode(&lattice.programs[idx].token_sequence);
+            let text = lattice.programs[idx].display_text(&self.dictionary);
             (text, idx, sim)
         }).collect()
     }
@@ -3117,6 +3117,71 @@ impl IndexedGenEnv {
         best
     }
 
+    /// Surface forms (lowercase) to match a subject keyword against indexed lattice text.
+    fn sentiment_keyword_match_forms(kw: &str) -> Vec<String> {
+        let lower = kw.to_ascii_lowercase();
+        let mut out = Vec::new();
+        let compact: String = lower.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        if compact.len() >= 4 {
+            out.push(compact);
+        }
+        for sep in ['\'', '\u{2019}'] {
+            if let Some(pos) = lower.find(sep) {
+                let head: String = lower[..pos]
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric())
+                    .collect();
+                if head.len() >= 4 {
+                    out.push(head);
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// True when the joint lattice row's indexed user prefix contains enough subject
+    /// keywords from the current prompt (so the rationale is not from another headline).
+    fn sentiment_witness_matches_subject_keywords(joint_body: &str, query_terms: &[String]) -> bool {
+        use crate::dimension::language::{SENTIMENT_CAUSAL_INDEX_CORE, SENTIMENT_LATTICE_WITNESS_CORE};
+        if query_terms.len() < 2 {
+            return true;
+        }
+        let mut witness = joint_body
+            .split(SENTIMENT_LATTICE_WITNESS_CORE)
+            .next()
+            .unwrap_or(joint_body);
+        if let Some(pos) = witness.find(SENTIMENT_CAUSAL_INDEX_CORE) {
+            witness = &witness[..pos];
+        }
+        let w = witness.to_ascii_lowercase();
+        let mut forms: Vec<String> = Vec::new();
+        for qt in query_terms {
+            forms.extend(Self::sentiment_keyword_match_forms(qt));
+        }
+        forms.sort();
+        forms.dedup();
+        let forms: Vec<String> = forms.into_iter().filter(|s| s.len() >= 4).collect();
+        if forms.len() < 2 {
+            return true;
+        }
+        let mut hits = 0usize;
+        for f in &forms {
+            if w.contains(f.as_str()) {
+                hits += 1;
+            }
+        }
+        let n = forms.len();
+        let required = match n {
+            2 | 3 => 1,
+            4 | 5 => 2,
+            _ => ((n + 2) / 3).max(2),
+        }
+        .min(n);
+        hits >= required
+    }
+
     /// When the user line looks like crypto / tape commentary, adjust scores using declarative rules
     /// (`data/inference/sentiment_crypto_rescore.toml`) — see [`crate::inference::retrieval_rescore`].
     fn sentiment_apply_crypto_market_retrieval_rescore(
@@ -3138,7 +3203,7 @@ impl IndexedGenEnv {
         crate::inference::retrieval_rescore::apply_embedded_sentiment_crypto_rescore(
             qjoin.as_str(),
             scored.as_mut_slice(),
-            |i| dictionary.decode(&lattice.programs[i].token_sequence),
+            |i| lattice.programs[i].display_text(dictionary),
         );
     }
 
@@ -3190,7 +3255,7 @@ impl IndexedGenEnv {
             .iter()
             .copied()
             .filter(|&(idx, _)| {
-                let decoded = dictionary.decode(&topic.lattice.programs[idx].token_sequence);
+                let decoded = topic.lattice.programs[idx].display_text(dictionary);
                 Self::sentiment_domain_slice_allows(crypto_q, &decoded)
             })
             .collect();
@@ -3203,7 +3268,7 @@ impl IndexedGenEnv {
             let with_marker: Vec<(usize, f32)> = orig
                 .iter()
                 .copied()
-                .filter(|&(idx, _)| dictionary.decode(&topic.lattice.programs[idx].token_sequence).contains(core))
+                .filter(|&(idx, _)| topic.lattice.programs[idx].display_text(dictionary).contains(core))
                 .collect();
             if !with_marker.is_empty() {
                 *cosine_scores = with_marker;
@@ -3294,7 +3359,7 @@ impl IndexedGenEnv {
                     // Decode all program texts and tokenize into words
                     let docs: Vec<(usize, Vec<String>)> = cosine_scores.iter()
                         .map(|&(idx, _)| {
-                            let text = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence);
+                            let text = topic.lattice.programs[idx].display_text(&self.dictionary);
                             let words: Vec<String> = text.to_ascii_lowercase()
                                 .split(|c: char| !c.is_alphanumeric() && c != '_')
                                 .filter(|w| w.len() > 1)
@@ -3350,7 +3415,7 @@ impl IndexedGenEnv {
                             // Intent-driven nudge: implement/code/write vs explain/define/describe (lexicon-driven).
                             let intent_mod = if !self.intent_action.is_empty() {
                                 let (_, words) = &docs[di];
-                                let text = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence);
+                                let text = topic.lattice.programs[idx].display_text(&self.dictionary);
                                 let has_code = retrieval_lex.program_has_code_markers_bm25(&text);
                                 let action = self.intent_action.as_str();
                                 if retrieval_lex.intent_prefers_code(action) && has_code {
@@ -3378,7 +3443,7 @@ impl IndexedGenEnv {
                     forced_topic, n, query_terms
                 );
                 for (rank, &(idx, score)) in scored.iter().enumerate().take(3) {
-                    let snippet: String = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence)
+                    let snippet: String = topic.lattice.programs[idx].display_text(&self.dictionary)
                         .chars().take(50).collect();
                     crate::infer_trace!(
                         "      pre-graph[{}]: prog={}, score={:.3}, text=\"{}...\"",
@@ -3445,7 +3510,7 @@ impl IndexedGenEnv {
                         .collect();
                     if qcontent.len() >= 2 {
                         for (idx, sc) in scored.iter_mut() {
-                            let text = self.dictionary.decode(&topic.lattice.programs[*idx].token_sequence);
+                            let text = topic.lattice.programs[*idx].display_text(&self.dictionary);
                             let tl = text.to_ascii_lowercase();
                             let hits = qcontent.iter().filter(|qt| tl.contains(qt.as_str())).count();
                             let align = hits as f32 / qcontent.len() as f32;
@@ -3469,7 +3534,7 @@ impl IndexedGenEnv {
                 );
                 scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 for (rank, &(idx, score)) in scored.iter().enumerate().take(3) {
-                    let snippet: String = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence)
+                    let snippet: String = topic.lattice.programs[idx].display_text(&self.dictionary)
                         .chars().take(50).collect();
                     crate::infer_trace!(
                         "      post-graph[{}]: prog={}, score={:.3}, text=\"{}...\"",
@@ -3484,7 +3549,7 @@ impl IndexedGenEnv {
                     let is_python = lang_lower == "python" || lang_lower == "py";
 
                     for &(idx, score) in &scored {
-                        let text = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence);
+                        let text = topic.lattice.programs[idx].display_text(&self.dictionary);
                         let opening: String = text.chars().take(300).collect();
                         let centroid = &topic.lattice.programs[idx].ema_centroid;
                         if Self::should_reject_text(&opening, Some(centroid), Some(cond)) { continue; }
@@ -3521,7 +3586,7 @@ impl IndexedGenEnv {
 
                 for &(idx, score) in &scored {
                     if score < 0.10 { break; }
-                    let text = self.dictionary.decode(&topic.lattice.programs[idx].token_sequence);
+                    let text = topic.lattice.programs[idx].display_text(&self.dictionary);
                     if text.is_empty() { continue; }
 
                     let opening: String = text.chars().take(300).collect();
@@ -3545,6 +3610,16 @@ impl IndexedGenEnv {
                             );
                             continue;
                         }
+                    }
+                    if query_terms.len() >= 2
+                        && !Self::sentiment_witness_matches_subject_keywords(&text, &query_terms)
+                    {
+                        let snippet: String = text.chars().take(40).collect();
+                        crate::infer_trace!(
+                            "    [skip-witness-mismatch] prog={}, score={:.3}, text=\"{}...\"",
+                            idx, score, snippet
+                        );
+                        continue;
                     }
                     let snippet: String = text.chars().take(60).collect();
                     crate::infer_trace!(
@@ -3584,7 +3659,7 @@ impl IndexedGenEnv {
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.into_iter().take(k).map(|(idx, sim)| {
-            let text = self.dictionary.decode(&self.lattice.programs[idx].token_sequence);
+            let text = self.lattice.programs[idx].display_text(&self.dictionary);
             (text, idx, sim)
         }).collect()
     }
@@ -4604,6 +4679,53 @@ mod tests {
         assert_eq!(nibbles_for_bits(10), 3);
         assert_eq!(nibbles_for_bits(11), 3);
         assert_eq!(nibbles_for_bits(12), 3);
+    }
+
+    #[test]
+    fn test_sentiment_witness_subject_gate() {
+        use crate::dimension::language::sentiment_lattice_index_body;
+
+        let joint_glimpse = sentiment_lattice_index_body(
+            "After pivoting, Y Combinator grad Glimpse raises funding",
+            "NEUTRAL — funding announcement; venture growth.",
+        );
+        let joint_bolt = sentiment_lattice_index_body(
+            "How Bolt's AI Pivot Showcases an Evolution in Fintech Hiring",
+            "NEUTRAL — Corporate / HR PR headline.",
+        );
+        let terms_glimpse: Vec<String> = ["after", "pivoting", "glimpse", "combinator", "raises"]
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(IndexedGenEnv::sentiment_witness_matches_subject_keywords(
+            &joint_glimpse,
+            &terms_glimpse
+        ));
+        assert!(!IndexedGenEnv::sentiment_witness_matches_subject_keywords(
+            &joint_bolt,
+            &terms_glimpse
+        ));
+
+        let terms_kalshi: Vec<String> = ["accountant", "jackpot", "kalshi", "doge", "betting"]
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+        let joint_court = sentiment_lattice_index_body(
+            "Kalshi wins temporary pause in Arizona criminal case",
+            "NEUTRAL — Legal procedural.",
+        );
+        let joint_bet = sentiment_lattice_index_body(
+            "An accountant won a big jackpot on Kalshi by betting against DOGE",
+            "NEUTRAL — Prediction-market anecdote.",
+        );
+        assert!(!IndexedGenEnv::sentiment_witness_matches_subject_keywords(
+            &joint_court,
+            &terms_kalshi
+        ));
+        assert!(IndexedGenEnv::sentiment_witness_matches_subject_keywords(
+            &joint_bet,
+            &terms_kalshi
+        ));
     }
 
     #[test]

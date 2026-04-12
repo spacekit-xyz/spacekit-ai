@@ -84,7 +84,7 @@ impl MicroBrain {
             let sim = cosine_sim_vecs(input, &prog.ema_centroid);
             if sim > best_sim { best_sim = sim; best_idx = i; }
         }
-        let text = self.lattice.dictionary.decode(&self.lattice.programs[best_idx].token_sequence);
+        let text = self.lattice.programs[best_idx].display_text(&self.lattice.dictionary);
         let cls = parse_cls(&text).unwrap_or(0);
         let conf = best_sim.max(0.0);
         let mut logits = vec![0.0f32; self.output_dim];
@@ -195,6 +195,7 @@ impl ArchetypeBrain {
                 centroid: centroid.clone(),
                 lattice_signature: lattice_sig,
                 token_sequence: tokens.clone(),
+                verbatim_display_text: None,
                 activation_count: 1,
                 ema_centroid: centroid.clone(),
                 coherence: 1.0,

@@ -2109,7 +2109,7 @@ impl LanguageService {
 
         for (&gidx, env) in &dm.group_gen_envs {
             for prog in &env.lattice.programs {
-                let text = env.dictionary.decode(&prog.token_sequence);
+                let text = prog.display_text(&env.dictionary);
                 let concept = infer_concept(&text, None, None);
                 let lang = detect_language(&text);
                 meta_samples.push((prog.ema_centroid.clone(), concept, lang, gidx));
@@ -2117,7 +2117,7 @@ impl LanguageService {
         }
         for (&gidx, env) in &dm.group_code_envs {
             for prog in &env.lattice.programs {
-                let text = env.dictionary.decode(&prog.token_sequence);
+                let text = prog.display_text(&env.dictionary);
                 let concept = infer_concept(&text, None, None);
                 let lang = detect_language(&text);
                 meta_samples.push((prog.ema_centroid.clone(), concept, lang, gidx));

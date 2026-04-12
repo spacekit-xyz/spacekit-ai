@@ -85,7 +85,7 @@ impl SmallMlp {
             let sim = cosine_sim(input, &prog.ema_centroid);
             if sim > best_sim { best_sim = sim; best_idx = i; }
         }
-        let text = self.lattice.dictionary.decode(&self.lattice.programs[best_idx].token_sequence);
+        let text = self.lattice.programs[best_idx].display_text(&self.lattice.dictionary);
         Self::parse_cls(&text).unwrap_or(0)
     }
 
@@ -97,7 +97,7 @@ impl SmallMlp {
             let sim = cosine_sim(input, &prog.ema_centroid);
             if sim > best_sim { best_sim = sim; best_idx = i; }
         }
-        let text = self.lattice.dictionary.decode(&self.lattice.programs[best_idx].token_sequence);
+        let text = self.lattice.programs[best_idx].display_text(&self.lattice.dictionary);
         let idx = Self::parse_cls(&text).unwrap_or(0);
         (idx, best_sim.max(0.0))
     }

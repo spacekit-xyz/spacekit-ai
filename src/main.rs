@@ -2437,7 +2437,7 @@ fn train_brain(
             // Build cloze tasks from the lattice programs (distilled training data).
             let training_pairs: Vec<(Vec<f32>, String)> = env.lattice.programs.iter()
                 .map(|prog| {
-                    let text = env.dictionary.decode(&prog.token_sequence);
+                    let text = prog.display_text(&env.dictionary);
                     (prog.ema_centroid.clone(), text)
                 })
                 .collect();
@@ -2498,7 +2498,7 @@ fn train_brain(
             );
             let training_pairs: Vec<(Vec<f32>, String)> = env.lattice.programs.iter()
                 .map(|prog| {
-                    let text = env.dictionary.decode(&prog.token_sequence);
+                    let text = prog.display_text(&env.dictionary);
                     (prog.ema_centroid.clone(), text)
                 })
                 .collect();

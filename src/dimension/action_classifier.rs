@@ -111,7 +111,7 @@ impl ActionClassifier {
             let sim = cosine_sim(x, &prog.ema_centroid);
             if sim > best_sim { best_sim = sim; best_idx = i; }
         }
-        let text = self.lattice.dictionary.decode(&self.lattice.programs[best_idx].token_sequence);
+        let text = self.lattice.programs[best_idx].display_text(&self.lattice.dictionary);
         Self::parse_action(&text).unwrap_or(ActionType::Fallback)
     }
 
@@ -129,7 +129,7 @@ impl ActionClassifier {
             let sim = cosine_sim(x, &prog.ema_centroid);
             if sim > best_sim { best_sim = sim; best_idx = i; }
         }
-        let text = self.lattice.dictionary.decode(&self.lattice.programs[best_idx].token_sequence);
+        let text = self.lattice.programs[best_idx].display_text(&self.lattice.dictionary);
         let at = Self::parse_action(&text).unwrap_or(ActionType::Fallback);
         (at, best_sim.max(0.0))
     }
