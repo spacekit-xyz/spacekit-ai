@@ -131,6 +131,15 @@ pub fn causal_index_token(causal_type: &str, connector: &str) -> String {
     format!("gfcausal_t_{}_c_{}", t, c)
 }
 
+/// Optional second BM25 token: `gfcausal_st_<subtype>` (e.g. `retrospective_framing`).
+pub fn causal_subtype_index_token(subtype: &str) -> String {
+    let s = slug_ident(subtype);
+    if s.is_empty() {
+        return String::new();
+    }
+    format!("gfcausal_st_{}", s)
+}
+
 /// Optional causal annotation on JSONL training rows (`causal` object). Drives joint-index tokens only until Brain B exists.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CausalAnnotation {
@@ -147,6 +156,9 @@ pub struct CausalAnnotation {
     /// Links contrastive / counterfactual minimal pairs for dataset audits (optional).
     #[serde(default)]
     pub contrast_group: Option<String>,
+    /// Finer class: e.g. `retrospective_framing`, `interventional_counterfactual` (see `GROWFORMER_CAUSAL_AI.md`).
+    #[serde(default)]
+    pub causal_subtype: Option<String>,
 }
 
 impl CausalAnnotation {
@@ -154,12 +166,28 @@ impl CausalAnnotation {
         !self.causal_type.trim().is_empty()
     }
 
-    /// Single index token inserted after [`SENTIMENT_CAUSAL_INDEX_CORE`] for retrieval alignment.
+    /// Primary index token: `gfcausal_t_<type>_c_<connector>`.
     pub fn index_token(&self) -> String {
         causal_index_token(
             self.causal_type.trim(),
             self.connector.as_deref().unwrap_or("").trim(),
         )
+    }
+
+    /// Space-separated causal index tokens for the joint lattice body (type+connector, then optional subtype).
+    pub fn joint_index_tokens(&self) -> String {
+        let base = self.index_token();
+        let st = self
+            .causal_subtype
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(causal_subtype_index_token)
+            .filter(|s| !s.is_empty());
+        match st {
+            Some(s) => format!("{} {}", base, s),
+            None => base,
+        }
     }
 }
 
@@ -184,7 +212,7 @@ pub fn sentiment_lattice_index_body_with_causal(
     let u_trunc = u_trunc.trim_end().replace(['\n', '\r'], " ");
     let causal_chunk = causal
         .filter(|c| c.is_active())
-        .map(|c| format!(" {} {}", SENTIMENT_CAUSAL_INDEX_CORE, c.index_token()))
+        .map(|c| format!(" {} {}", SENTIMENT_CAUSAL_INDEX_CORE, c.joint_index_tokens()))
         .unwrap_or_default();
     format!(
         "{}{} {} {}",
@@ -1371,6 +1399,7 @@ mod tests {
             cause_span: None,
             effect_span: None,
             contrast_group: None,
+            causal_subtype: None,
         };
         let joint = sentiment_lattice_index_body_with_causal(
             "I lost big so I'm furious",
@@ -1385,6 +1414,25 @@ mod tests {
         );
         let stripped = strip_sentiment_lattice_witness_for_display(&joint);
         assert_eq!(stripped, "Anger from a clear loss.");
+    }
+
+    #[test]
+    fn sentiment_joint_index_includes_causal_subtype_token() {
+        let causal = CausalAnnotation {
+            causal_type: "counterfactual".into(),
+            connector: Some("if".into()),
+            cause_span: None,
+            effect_span: None,
+            contrast_group: None,
+            causal_subtype: Some("interventional_counterfactual".into()),
+        };
+        let joint = sentiment_lattice_index_body_with_causal(
+            "If they'd reviewed my PR I wouldn't be this stressed",
+            "Interventional stress relief hypothetical.",
+            Some(&causal),
+        );
+        assert!(joint.contains("gfcausal_t_counterfactual_c_if"));
+        assert!(joint.contains("gfcausal_st_interventional_counterfactual"));
     }
 
     #[test]

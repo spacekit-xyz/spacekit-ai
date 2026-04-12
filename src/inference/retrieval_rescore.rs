@@ -284,4 +284,22 @@ mod tests {
         }
         assert!(matched, "expected SEC vague penalty rule to match");
     }
+
+    #[test]
+    fn fear_greed_penalizes_btc_alt_rotation_boilerplate() {
+        let rules = default_rules_table();
+        let q = "fear greed is back greed charts tired dangerous";
+        let tl = "strength in btc contrasted with weakness in altcoins; mixed sentiment";
+        let mut matched = false;
+        for rule in rules {
+            if rule.id == "fear_greed_penalize_btc_alt_rotation_boilerplate"
+                && query_matches(rule, q)
+                && program_matches(rule, tl)
+            {
+                assert!(rule.delta < 0.0);
+                matched = true;
+            }
+        }
+        assert!(matched, "expected fear/greed vs BTC-alt rotation penalty to match");
+    }
 }

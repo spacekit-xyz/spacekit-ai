@@ -26,7 +26,8 @@ pub use codegen::{CodeGeneration, generate_code_from_action};
 pub use generation::{GeneratedResponse, render_action_template};
 pub use embedding::{GroupEmbedding, compute_group_embedding, cosine_similarity, retrieve_relevant_groups};
 pub use language::{
-    causal_index_token, CalibrationCoverage, CalibrationDataset, CalibrationRequirements, CalibrationReport,
+    causal_index_token, causal_subtype_index_token, CalibrationCoverage, CalibrationDataset,
+    CalibrationRequirements, CalibrationReport,
     CausalAnnotation, EncoderPreset, EmaSmoother, GroupAdapter, HashingLanguageEncoder, LanguageBridge,
     LanguageConfig, LanguageEncoder, LanguageRoutingDecision, LanguageRuntime, LanguageSample,
     route_language_embedding, sentiment_lattice_index_body_with_causal, SENTIMENT_CAUSAL_INDEX_CORE,

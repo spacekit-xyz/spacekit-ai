@@ -821,6 +821,51 @@ impl LanguageService {
         })
     }
 
+    fn pick_sentiment_lattice_group_idx(dm: &DimensionManager) -> Option<usize> {
+        (0..dm.main.group_order.len()).find(|&gidx| Self::generation_env_looks_like_sentiment(dm, gidx))
+    }
+
+    /// Maps logical `neutral` from inference rules onto `neutral` / `neutral_chop` (or other `neutral_*`) in this brain.
+    fn resolve_neutral_bucket_in_env(env: &crate::dimension::IndexedGenEnv) -> Option<String> {
+        if let Some(t) = env
+            .topic_subindex
+            .iter()
+            .find(|t| t.topic_name.eq_ignore_ascii_case("neutral"))
+        {
+            return Some(t.topic_name.clone());
+        }
+        env.topic_subindex
+            .iter()
+            .find(|t| {
+                t.topic_name
+                    .to_ascii_lowercase()
+                    .starts_with("neutral_")
+            })
+            .map(|t| t.topic_name.clone())
+    }
+
+    /// If `key` is absent but equals logical neutral, pick the brain's neutral bucket.
+    fn resolve_sentiment_subindex_topic_key(
+        env: &crate::dimension::IndexedGenEnv,
+        key: &str,
+    ) -> Option<String> {
+        if env
+            .topic_subindex
+            .iter()
+            .any(|t| t.topic_name.eq_ignore_ascii_case(key))
+        {
+            return env
+                .topic_subindex
+                .iter()
+                .find(|t| t.topic_name.eq_ignore_ascii_case(key))
+                .map(|t| t.topic_name.clone());
+        }
+        if key.eq_ignore_ascii_case("neutral") {
+            return Self::resolve_neutral_bucket_in_env(env);
+        }
+        None
+    }
+
     /// When lattice retrieval returns bare `expected_response` text, prepend `LABEL —` like the seven-topic shortcut path.
     fn maybe_prefix_sentiment_retrieval_line(
         dm: &DimensionManager,
@@ -1061,79 +1106,100 @@ impl LanguageService {
                 None
             };
 
+            let infer_rules_rt = crate::inference::inference_rules_runtime();
+            let pr_press = infer_rules_rt
+                .sentiment_pr_wire_neutral_key(intent_text)
+                .is_some();
+            // PR / wire headlines: force sentiment lattice + neutral bucket (MetaBrain "Identity",
+            // TopicGraph operation topics, and cross-group redirects routinely hijack these lines).
+            if pr_press {
+                if let Some(sgx) = Self::pick_sentiment_lattice_group_idx(dm) {
+                    if let Some(env) = dm.group_gen_envs.get(&sgx) {
+                        if let Some(bucket) = Self::resolve_neutral_bucket_in_env(env) {
+                            infer_trace!(
+                                "  [pr-wire] group {} + {} (PR headline; override MetaBrain / classifier)",
+                                sgx,
+                                bucket
+                            );
+                            group_idx = Some(sgx);
+                            topic_hint = Some(bucket);
+                        }
+                    }
+                }
+            }
+
+            let op_topic_opt = crate::growformer_lang::infer_operation_topic(intent_text);
             // Override topic_hint with operation-specific intent from GrowformerLang.
             // This gives the topic sub-lattice a precise key (e.g., "addition_operation")
             // instead of a generic label from the understanding layer.
-            if let Some(op_topic) = crate::growformer_lang::infer_operation_topic(intent_text) {
-                topic_hint = Some(op_topic.clone());
+            if let Some(op_topic) = op_topic_opt.as_ref() {
+                if !pr_press {
+                    topic_hint = Some(op_topic.clone());
 
-                // Cross-group topic search: find the group with the MOST programs for
-                // this topic, regardless of whether the current group also has it.
-                // This prevents false matches where a group has the topic label but
-                // few/irrelevant programs.
-                if let Some(current_g) = group_idx {
-                    let current_count = dm.group_gen_envs.get(&current_g)
-                        .map(|env| env.topic_subindex.iter()
-                            .filter(|t| t.topic_name.eq_ignore_ascii_case(&op_topic))
-                            .map(|t| t.lattice.programs.len())
-                            .sum::<usize>())
-                        .unwrap_or(0);
+                    // Cross-group topic search: find the group with the MOST programs for
+                    // this topic, regardless of whether the current group also has it.
+                    // This prevents false matches where a group has the topic label but
+                    // few/irrelevant programs.
+                    if let Some(current_g) = group_idx {
+                        let current_count = dm.group_gen_envs.get(&current_g)
+                            .map(|env| env.topic_subindex.iter()
+                                .filter(|t| t.topic_name.eq_ignore_ascii_case(op_topic))
+                                .map(|t| t.lattice.programs.len())
+                                .sum::<usize>())
+                            .unwrap_or(0);
 
-                    let mut best_redirect: Option<(usize, usize)> = None;
-                    for (&gidx, env) in &dm.group_gen_envs {
-                        if gidx == current_g { continue; }
-                        for t in &env.topic_subindex {
-                            if t.topic_name.eq_ignore_ascii_case(&op_topic) && !t.lattice.programs.is_empty() {
-                                let count = t.lattice.programs.len();
-                                if best_redirect.map(|(_, c)| count > c).unwrap_or(true) {
-                                    best_redirect = Some((gidx, count));
+                        let mut best_redirect: Option<(usize, usize)> = None;
+                        for (&gidx, env) in &dm.group_gen_envs {
+                            if gidx == current_g { continue; }
+                            for t in &env.topic_subindex {
+                                if t.topic_name.eq_ignore_ascii_case(op_topic) && !t.lattice.programs.is_empty() {
+                                    let count = t.lattice.programs.len();
+                                    if best_redirect.map(|(_, c)| count > c).unwrap_or(true) {
+                                        best_redirect = Some((gidx, count));
+                                    }
                                 }
                             }
                         }
-                    }
-                    if let Some((redirect_g, redirect_count)) = best_redirect {
-                        // Only redirect when current group has no programs for this topic,
-                        // or the other group has overwhelmingly more (3x+). Avoids sending
-                        // "stack" queries away from a group that has relevant stack programs
-                        // just because another group has more coding_implementation programs.
-                        let should_redirect = current_count == 0
-                            || (redirect_count >= current_count * 3 && current_count < 3);
-                        if should_redirect {
-                            infer_trace!("  [cross-group] topic '{}': group {} has {} progs vs current group {} with {}, redirecting",
-                                op_topic, redirect_g, redirect_count, current_g, current_count);
-                            group_idx = Some(redirect_g);
+                        if let Some((redirect_g, redirect_count)) = best_redirect {
+                            // Only redirect when current group has no programs for this topic,
+                            // or the other group has overwhelmingly more (3x+). Avoids sending
+                            // "stack" queries away from a group that has relevant stack programs
+                            // just because another group has more coding_implementation programs.
+                            let should_redirect = current_count == 0
+                                || (redirect_count >= current_count * 3 && current_count < 3);
+                            if should_redirect {
+                                infer_trace!("  [cross-group] topic '{}': group {} has {} progs vs current group {} with {}, redirecting",
+                                    op_topic, redirect_g, redirect_count, current_g, current_count);
+                                group_idx = Some(redirect_g);
+                            }
+                        }
+                        if current_count == 0 && best_redirect.is_none() {
+                            infer_trace!("  [topic-miss] '{}' not found in any group", op_topic);
                         }
                     }
-                    if current_count == 0 && best_redirect.is_none() {
-                        infer_trace!("  [topic-miss] '{}' not found in any group", op_topic);
-                    }
                 }
-            } else {
+            } else if !pr_press {
                 infer_trace!("  [topic-miss] no topic inferred for: {}", &intent_text[..intent_text.len().min(60)]);
             }
 
             // Single-group brains with many sub-topics skip lattice shortcut shape checks, so MetaBrain
             // topic alone can mis-track domain vocabulary (“fee” → negative_strong). Re-align with
             // TOML lexical / anchor cues when there is no coding operation topic override.
-            if crate::growformer_lang::infer_operation_topic(intent_text).is_none()
-                && dm.group_gen_envs.len() == 1
-            {
+            if (op_topic_opt.is_none() || pr_press) && dm.group_gen_envs.len() == 1 {
                 if let Some(env) = dm.group_gen_envs.values().next() {
                     if !env.topic_subindex.is_empty() {
-                        if let Some(k) = crate::inference::inference_rules_runtime()
-                            .sentiment_lexical_topic_key(intent_text)
-                        {
-                            let has = env
-                                .topic_subindex
-                                .iter()
-                                .any(|t| t.topic_name.eq_ignore_ascii_case(&k));
-                            if has && topic_hint.as_deref() != Some(k.as_str()) {
-                                infer_trace!(
-                                    "  [topic-lex] override {:?} → {} (TOML lexical / anchors)",
-                                    topic_hint.as_deref(),
-                                    k
-                                );
-                                topic_hint = Some(k);
+                        if let Some(k) = infer_rules_rt.sentiment_lexical_topic_key(intent_text) {
+                            if let Some(resolved) =
+                                Self::resolve_sentiment_subindex_topic_key(env, &k)
+                            {
+                                if topic_hint.as_deref() != Some(resolved.as_str()) {
+                                    infer_trace!(
+                                        "  [topic-lex] override {:?} → {} (TOML lexical / anchors)",
+                                        topic_hint.as_deref(),
+                                        resolved
+                                    );
+                                    topic_hint = Some(resolved);
+                                }
                             }
                         }
                     }
@@ -1142,9 +1208,7 @@ impl LanguageService {
 
             // Drop spurious `mixed` from MetaBrain when the line has no contrastive structure and no
             // bipolar lexicon hit — embeddings often match a long MIXED training example from its prefix.
-            if crate::growformer_lang::infer_operation_topic(intent_text).is_none()
-                && dm.group_gen_envs.len() == 1
-            {
+            if (op_topic_opt.is_none() || pr_press) && dm.group_gen_envs.len() == 1 {
                 if let Some(env) = dm.group_gen_envs.values().next() {
                     let has_mixed_bucket = env
                         .topic_subindex
@@ -1154,8 +1218,7 @@ impl LanguageService {
                         && topic_hint
                             .as_ref()
                             .is_some_and(|t| t.eq_ignore_ascii_case("mixed"))
-                        && !crate::inference::inference_rules_runtime()
-                            .sentiment_allow_forced_mixed_topic(intent_text)
+                        && !infer_rules_rt.sentiment_allow_forced_mixed_topic(intent_text)
                     {
                         infer_trace!(
                             "  [topic-mixed-guard] clearing 'mixed' (no contrast marker + no bipolar lexicon)"

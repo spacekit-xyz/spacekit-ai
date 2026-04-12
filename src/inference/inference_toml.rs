@@ -262,6 +262,11 @@ impl InferenceRulesRuntime {
             return Some("confused".to_string());
         }
 
+        // PR / wire headlines (no I/we) — not operator tape; neutral lattice beats random sentiment retrieval.
+        if let Some(k) = Self::sentiment_fintech_press_headline_topic_key(lower) {
+            return Some(k);
+        }
+
         // First- and third-person crypto tape / positioning lines — route before headline heuristics and
         // before token anchors like `like` (e.g. “feels like the calm…”, “absorbing like crazy”).
         if let Some(k) = Self::sentiment_crypto_market_operator_topic_key(lower) {
@@ -598,6 +603,74 @@ impl InferenceRulesRuntime {
             || s.contains(" me ")
             || lower.trim_start().starts_with("i ")
             || lower.trim_start().starts_with("i'm")
+    }
+
+    /// PR / wire-style headlines (no first-person). Maps to `neutral` for seven-topic sentiment brains.
+    fn sentiment_fintech_press_headline_topic_key(lower: &str) -> Option<String> {
+        if Self::looks_like_first_person_finance_user(lower) {
+            return None;
+        }
+        let t = lower.trim();
+        if t.len() < 32 {
+            return None;
+        }
+        // Title-case "How …" wire headlines, not conversational "how do I / how much …".
+        const HOW_EXCLUDE: &[&str] = &[
+            "how do ",
+            "how can ",
+            "how much",
+            "how long",
+            "how does ",
+            "how did ",
+            "how will ",
+            "how should ",
+            "how could ",
+            "how would ",
+            "how are you",
+            "how is it ",
+            "how is this ",
+            "how is that ",
+            "how is the ",
+            "how to ",
+        ];
+        let how_wire = t.starts_with("how ")
+            && t.len() >= 40
+            && !HOW_EXCLUDE.iter().any(|p| t.starts_with(p));
+        let pr = how_wire
+            || t.contains(" raises $")
+            || t.contains("valuation soars")
+            || t.contains("wins temporary pause")
+            || (t.contains("openai") && t.contains("fires"))
+            || t.contains("reportedly stalls")
+            || (t.contains("geopolitical") && t.contains("ipo"))
+            || (t.contains("stripe") && t.contains("wants to turn"))
+            || (t.contains("plugs into") && t.contains("erp"))
+            || t.contains("led by a16z")
+            || t.contains("grad glimpse")
+            || t.contains("y combinator grad")
+            || t.contains("won a big jackpot")
+            || t.contains("buys gen z")
+            || t.contains("mrbeast")
+            || ((t.contains("j.p. morgan") || t.contains("jp morgan")) && t.contains("payments"))
+            || (t.contains("bridge") && t.contains("fx") && t.contains("payments"))
+            || (t.contains("revolut") && t.contains("chatbot"))
+            || (t.contains("financial literacy") && t.contains("chatbot"))
+            || ((t.contains("modernising") || t.contains("modernizing"))
+                && (t.contains("checkout") || t.contains("fiserv")))
+            || ((t.contains("straitsx") || t.contains("kbank"))
+                && (t.contains("tourism") || t.contains("facilitating") || t.contains("asia")))
+            || (t.contains("softbank") && t.contains("paypay"))
+            || (t.contains("kalshi") && (t.contains("accountant") || t.contains("jackpot")));
+        if pr {
+            return Some("neutral".to_string());
+        }
+        None
+    }
+
+    /// Detects PR / wire copy that should use a neutral sentiment bucket (actual topic name may be `neutral_chop`, resolved in `LanguageService`).
+    pub fn sentiment_pr_wire_neutral_key(&self, intent_text: &str) -> Option<String> {
+        let lower = Self::normalize_for_rules(intent_text);
+        Self::sentiment_fintech_press_headline_topic_key(lower.as_str())
     }
 
     fn has_crypto_or_broad_market_lexicon(lower: &str) -> bool {
@@ -1358,6 +1431,39 @@ mod negation_tests {
                 )
                 .as_deref(),
             Some("mixed")
+        );
+        assert_eq!(
+            rules
+                .sentiment_lexical_topic_key(
+                    "How Bolt's AI Pivot Showcases an Evolution in Fintech Hiring"
+                )
+                .as_deref(),
+            Some("neutral")
+        );
+        assert_eq!(
+            rules
+                .sentiment_lexical_topic_key("Stripe's valuation soars 74% to $159 billion")
+                .as_deref(),
+            Some("neutral")
+        );
+        assert!(rules
+            .sentiment_pr_wire_neutral_key("How do I dispute a charge on my statement")
+            .is_none());
+        assert_eq!(
+            rules
+                .sentiment_lexical_topic_key(
+                    "How StraitsX & KBank are Facilitating SE Asia's Tourism Boom"
+                )
+                .as_deref(),
+            Some("neutral")
+        );
+        assert_eq!(
+            rules
+                .sentiment_lexical_topic_key(
+                    "Geopolitical drama reportedly stalls IPO of SoftBank-backed PayPay"
+                )
+                .as_deref(),
+            Some("neutral")
         );
         assert_eq!(
             rules

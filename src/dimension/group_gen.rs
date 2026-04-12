@@ -3766,13 +3766,15 @@ impl IndexedGenEnv {
     /// **Never** overridden by graph confidence or centroid-vs-query alignment.
     fn hard_reject_lattice_decoded_text(text: &str) -> bool {
         let t = text.to_ascii_lowercase();
-        if t.contains("[mask]") || t.contains("mask]") {
+        if t.contains("[mask]") || t.contains("mask]") || t.contains("mask][") {
             return true;
         }
         if t.contains("][") || t.contains("[]") {
             return true;
         }
         if t.contains("growformer agent")
+            || t.contains("growformer companion")
+            || t.contains("companion agent")
             || t.contains("i am growformer")
             || t.contains("specialized ai agent")
             || t.contains("built by swtch")
@@ -3802,7 +3804,27 @@ impl IndexedGenEnv {
         if t.contains("neurons grow") && t.contains("connect") {
             return true;
         }
-        if t.contains("details people details") || t.contains("people details people") {
+        if t.contains("details people details")
+            || t.contains("people details people")
+            || t.contains("people share people")
+        {
+            return true;
+        }
+        if t.contains("their lives") && t.match_indices("their lives").count() >= 2 {
+            return true;
+        }
+        if t.contains("headline snack") {
+            return true;
+        }
+        if t.contains("my intelligence comes from structure")
+            || t.contains("not weight optimization")
+            || t.contains("friendly companion")
+            || t.contains("share a moment of curiosity")
+            || t.contains("i was created to be")
+        {
+            return true;
+        }
+        if t.starts_with("no.") && t.contains("intelligence comes from") {
             return true;
         }
         if t.contains("about. about") {
