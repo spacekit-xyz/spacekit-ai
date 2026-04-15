@@ -390,6 +390,10 @@ impl InferenceRulesSection {
         }
         if s.headline_lexical_topic.is_empty() {
             s.headline_lexical_topic = defaults.headline_lexical_topic.clone();
+        } else if !defaults.headline_lexical_topic.is_empty() {
+            // Core / reference may ship minimal rows; domain packs (fintech, etc.) append so both apply.
+            s.headline_lexical_topic
+                .extend(defaults.headline_lexical_topic.iter().cloned());
         }
         if s.lattice_misfire.is_empty() {
             s.lattice_misfire = defaults.lattice_misfire.clone();
@@ -903,7 +907,7 @@ impl InferenceRulesRuntime {
     ///
     /// Brains missing any of the seven standard topic keys fail [`crate::inference::plugins::lattice_shortcuts::is_lattice_shape`];
     /// expanded taxonomies with **extra** topics still qualify when all seven keys are present,
-    /// so **user-anchored lattice preempt** does not run — but Layer‑0 keyword expansion and embedding
+    /// so **user-anchored lattice preempt** can still run. Layer‑0 keyword expansion and embedding
     /// routing still apply. Embedding routing can still follow domain
     /// words (e.g. “fee”) into a negative sub-lattice while the user clearly praises (“I love …”).
     /// When this returns [`Some`], callers may override `topic_hint` before retrieval.
@@ -1725,6 +1729,15 @@ mod negation_tests {
         assert_eq!(rules.sentiment_lexical_topic_key(h).as_deref(), Some("neutral"));
     }
 
+    #[test]
+    fn core_headline_sunset_average_instagram_neutral() {
+        let raw = include_str!("../../data/sentiment/inference_sentiment_core.toml");
+        let doc: InferenceTomlDocument = toml::from_str(raw).expect("fixture TOML");
+        let rules = InferenceRulesRuntime::from_section(doc.rules);
+        let h = "The sunset was average. Just orange. Not everything has to be Instagram-worthy.";
+        assert_eq!(rules.sentiment_lexical_topic_key(h).as_deref(), Some("neutral"));
+    }
+
     /// Default discovery merges core then fintech into empty `[rules]` slots; this mirrors that chain.
     #[test]
     fn merge_empty_from_chain_fills_fintech_headlines_after_core() {
@@ -1739,13 +1752,14 @@ mod negation_tests {
         let mut acc = InferenceRulesSection::default();
         acc = acc.merge_empty_from(&core.rules);
         assert!(
-            acc.headline_lexical_topic.is_empty(),
-            "core pack should omit headline_lexical_topic"
+            !acc.headline_lexical_topic.is_empty(),
+            "core pack should ship minimal headline_lexical_topic rows"
         );
+        let n_core_headlines = acc.headline_lexical_topic.len();
         acc = acc.merge_empty_from(&fintech.rules);
         assert!(
-            !acc.headline_lexical_topic.is_empty(),
-            "fintech pack should supply headline rows into empty slots"
+            acc.headline_lexical_topic.len() > n_core_headlines,
+            "fintech headline rows should append after core headlines"
         );
         let rules = InferenceRulesRuntime::from_section(acc);
         let sofi = "SoFi Technologies vs. Upstart: Which Fintech Stock Is the Better Long-Term Buy?";
