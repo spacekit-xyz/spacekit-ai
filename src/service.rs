@@ -21,8 +21,8 @@ use crate::spectral::{ProjectModel, EntityKind, HybridEmbedder};
 use crate::dimension::tool::{ToolRegistry, ToolSchema, ToolCallInfo, ToolResult};
 use crate::dimension::paramecium::InfraciliaryLattice;
 use crate::inference::{
-    default_inference_harness, plugins::lattice_shortcuts, BrainPluginsManifest, InferenceHarness,
-    TEMPLATE_ID_USER_ANCHORED,
+    default_inference_harness, plugins::lattice_shortcuts, sentiment_generation_lexicon,
+    BrainPluginsManifest, InferenceHarness, TEMPLATE_ID_USER_ANCHORED,
 };
 use crate::metacognition::{MetaCognition, ReflectionOutcome};
 use crate::reasoning::{ReasoningEngine, System2Config};
@@ -609,6 +609,27 @@ pub struct LanguageService {
     pub brain_plugins_manifest: Option<BrainPluginsManifest>,
     /// Built-in inference plugins (sentiment lattice, etc.); extend via [`InferenceHarness::new`].
     pub inference_harness: InferenceHarness,
+}
+
+/// P0-02: when true, skip System 2 deliberate cross-group reasoning for this turn.
+/// Sentiment-scoped runs otherwise splice unrelated lattice programs into composed text.
+fn skip_system2_for_sentiment_scoped_run(
+    dm: &DimensionManager,
+    inference_profile_opt: Option<&str>,
+    group_idx: Option<usize>,
+    retry_effective_gidx: Option<usize>,
+    topic_hint: Option<&str>,
+) -> bool {
+    let lex_active =
+        lattice_shortcuts::sentiment_toml_lexical_guards_active(dm, inference_profile_opt);
+    let sentiment_gidx = lattice_shortcuts::pick_sentiment_lattice_group_idx(dm);
+    let on_sentiment_lattice = sentiment_gidx
+        .zip(retry_effective_gidx.or(group_idx))
+        .is_some_and(|(s, g)| s == g);
+    let sentiment_topic_hint = topic_hint.is_some_and(|t| {
+        sentiment_generation_lexicon::global().is_sentiment_lattice_topic_hint(t)
+    });
+    sentiment_topic_hint || (lex_active && on_sentiment_lattice)
 }
 
 impl LanguageService {
@@ -1733,10 +1754,35 @@ impl LanguageService {
                 || resp.template_id == TEMPLATE_ID_USER_ANCHORED;
             let eff_g_for_sentiment = retry_effective_gidx.or(group_idx).unwrap_or(0);
 
+            // P0-02: skip System 2 for sentiment-scoped runs. Deliberate cross-group
+            // retrieve/transfer/compose can splice non-sentiment lattice programs (e.g. coding)
+            // into the rationale while the stance stays sentiment — garbage explanations.
+            let skip_system2_for_sentiment_scoped = skip_system2_for_sentiment_scoped_run(
+                dm_ref,
+                inference_profile_opt,
+                group_idx,
+                retry_effective_gidx,
+                topic_hint.as_deref(),
+            );
+            if skip_system2_for_sentiment_scoped {
+                infer_trace!(
+                    "  [system2] SKIP: sentiment-scoped run (lattice topic and/or TOML lexical path + sentiment group)"
+                );
+            }
+
             // System 2: deliberate multi-step reasoning for uncertain cross-domain queries.
             // When broad_summary already produced a within-group composition, trust it —
             // System 2 cross-group retrieval would mix in unrelated domains.
-            if broad_summary.is_none() && reasoning.should_reason_deliberate_ext(&cond, resp.confidence, &dm_ref.group_gen_envs, topic_hint.as_deref(), is_broad) {
+            if broad_summary.is_none()
+                && !skip_system2_for_sentiment_scoped
+                && reasoning.should_reason_deliberate_ext(
+                    &cond,
+                    resp.confidence,
+                    &dm_ref.group_gen_envs,
+                    topic_hint.as_deref(),
+                    is_broad,
+                )
+            {
                 let s2_result = reasoning.reason_deliberate(
                     &cond,
                     &dm_ref.group_gen_envs,
@@ -3759,6 +3805,19 @@ fn build_language_calibration_dataset() -> CalibrationDataset {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inference::sentiment_generation_lexicon;
+
+    // -----------------------------------------------------------------------
+    // P0-02: System 2 gated off when topic hint is a sentiment lattice key
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn system2_sentiment_skip_contract_topic_hints() {
+        let g = sentiment_generation_lexicon::global();
+        assert!(g.is_sentiment_lattice_topic_hint("neutral"));
+        assert!(g.is_sentiment_lattice_topic_hint("negative_mild"));
+        assert!(!g.is_sentiment_lattice_topic_hint("addition_operation"));
+    }
 
     // -----------------------------------------------------------------------
     // OCEAN emergent personality drift

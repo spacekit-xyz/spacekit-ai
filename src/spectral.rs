@@ -226,24 +226,41 @@ impl E8Lattice {
     /// Returns a value in {-2, -1, 0, 1, 2} for exact lattice points,
     /// or a continuous value for approximate embeddings.
     ///
+    /// Averages one cosine per ⌈n/8⌉ E8 subspaces (`n = min(len(a), len(b))`);
+    /// the final tail shorter than 8 is scored in its own subspace slice.
+    ///
     /// This replaces heuristic cosine similarity with the algebraic structure
     /// of the E8 root system for Hopf transition scoring.
     pub fn root_inner_product(a: &[f32], b: &[f32]) -> f32 {
-        let qa = Self::quantize_64d(a);
-        let qb = Self::quantize_64d(b);
+        let n = a.len().min(b.len());
+        if n == 0 {
+            return 0.0;
+        }
+        let qa = Self::quantize_64d(&a[..n]);
+        let qb = Self::quantize_64d(&b[..n]);
+        debug_assert_eq!(qa.len(), n);
+        debug_assert_eq!(qb.len(), n);
 
-        // Compute inner product in each 8d subspace, then average
+        // Cosine in each 8d E8 subspace, then mean over all subspaces (partial tail counts as one block).
+        let num_blocks = (n + 7) / 8;
         let mut total = 0.0f32;
-        for sub in 0..8 {
+        for sub in 0..num_blocks {
             let offset = sub * 8;
-            let dot: f32 = (0..8).map(|i| qa[offset + i] * qb[offset + i]).sum();
-            let na = (0..8).map(|i| qa[offset + i] * qa[offset + i]).sum::<f32>().sqrt();
-            let nb = (0..8).map(|i| qb[offset + i] * qb[offset + i]).sum::<f32>().sqrt();
+            let end = (offset + 8).min(n);
+            let slice_a = &qa[offset..end];
+            let slice_b = &qb[offset..end];
+            let dot: f32 = slice_a
+                .iter()
+                .zip(slice_b.iter())
+                .map(|(x, y)| x * y)
+                .sum();
+            let na = slice_a.iter().map(|v| v * v).sum::<f32>().sqrt();
+            let nb = slice_b.iter().map(|v| v * v).sum::<f32>().sqrt();
             if na > 1e-8 && nb > 1e-8 {
                 total += dot / (na * nb);
             }
         }
-        total / 8.0
+        total / num_blocks.max(1) as f32
     }
 
     /// Compatibility score for Hopf transition scoring.
@@ -2949,6 +2966,32 @@ mod tests {
             let is_half_int = block.iter().all(|v| (v - (v - 0.5).round() - 0.5).abs() < 1e-6);
             assert!(is_integer || is_half_int, "block {} should be E8: {:?}", sub, block);
         }
+    }
+
+    #[test]
+    fn test_e8_root_inner_product_various_dims_no_panic() {
+        for n in [1usize, 7, 8, 9, 31, 32, 63, 64, 65, 127, 128] {
+            let a: Vec<f32> = (0..n).map(|i| (i as f32 * 0.07).sin()).collect();
+            let b: Vec<f32> = (0..n).map(|i| (i as f32 * 0.11).cos()).collect();
+            let rip = E8Lattice::root_inner_product(&a, &b);
+            assert!(rip.is_finite(), "n={} rip={}", n, rip);
+            assert!(
+                rip >= -1.01 && rip <= 1.01,
+                "per-block cosines mean should stay in ~[-1,1], n={} rip={}",
+                n,
+                rip
+            );
+        }
+    }
+
+    #[test]
+    fn test_e8_root_inner_product_mismatched_lengths_uses_prefix() {
+        let a = vec![1.0f32; 10];
+        let b = vec![1.0f32; 64];
+        let rip_ab = E8Lattice::root_inner_product(&a, &b);
+        let rip_ba = E8Lattice::root_inner_product(&b, &a);
+        assert!(rip_ab.is_finite() && rip_ba.is_finite());
+        assert!((rip_ab - rip_ba).abs() < 1e-5);
     }
 
     #[test]

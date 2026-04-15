@@ -264,4 +264,48 @@ mod tests {
         let cos = cosine_similarity(&hidden, &embedding);
         assert!((cos - 1.0).abs() < 1e-5, "single sample: activation should equal embedding, cos={}", cos);
     }
+
+    /// Gold cosine in f64 (same semantics as [`cosine_similarity`]: zero on degenerate).
+    fn cosine_f64_gold(a: &[f32], b: &[f32]) -> f64 {
+        if a.len() != b.len() || a.is_empty() {
+            return 0.0;
+        }
+        let dot: f64 = a
+            .iter()
+            .zip(b.iter())
+            .map(|(&x, &y)| (x as f64) * (y as f64))
+            .sum();
+        let na: f64 = a.iter().map(|&x| (x as f64).powi(2)).sum::<f64>().sqrt();
+        let nb: f64 = b.iter().map(|&x| (x as f64).powi(2)).sum::<f64>().sqrt();
+        let denom = na * nb;
+        if denom < 1e-20 {
+            return 0.0;
+        }
+        (dot / denom).clamp(-1.0, 1.0)
+    }
+
+    #[test]
+    fn cosine_similarity_bounded_drift_vs_f64_reference() {
+        let mut rng = StdRng::seed_from_u64(2026_04_07);
+        let dims = [1usize, 2, 7, 15, 64, 128, 384];
+        let mut worst: f64 = 0.0;
+        for &dim in &dims {
+            for _ in 0..300 {
+                let a: Vec<f32> = (0..dim)
+                    .map(|_| rng.gen_range(-0.95f32..0.95))
+                    .collect();
+                let b: Vec<f32> = (0..dim)
+                    .map(|_| rng.gen_range(-0.95f32..0.95))
+                    .collect();
+                let got = cosine_similarity(&a, &b) as f64;
+                let gold = cosine_f64_gold(&a, &b);
+                worst = worst.max((got - gold).abs());
+            }
+        }
+        assert!(
+            worst < 5e-5,
+            "cosine_similarity max abs drift vs f64 gold was {}",
+            worst
+        );
+    }
 }

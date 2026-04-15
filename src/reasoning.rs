@@ -39,6 +39,7 @@ use crate::clifford::{
     apply_group_rotor, extract_conditioning, transfer_rotor,
     Multivector, Rotor, GroupRotor,
 };
+use crate::infer_trace;
 use crate::dimension::group_gen::IndexedGenEnv;
 use crate::dimension::paramecium::InfraciliaryLattice;
 use crate::spectral::TokenDictionary;
@@ -766,7 +767,7 @@ impl ReasoningEngine {
         }
         wm.update_coherence();
 
-        println!(
+        infer_trace!(
             "  [system2] seeded wm with {} entries, initial coherence={:.3}",
             wm.entries.len(),
             wm.coherence
@@ -785,7 +786,7 @@ impl ReasoningEngine {
 
             if wm.coherence >= config.coherence_threshold {
                 terminated_by = System2Termination::CoherenceReached;
-                println!(
+                infer_trace!(
                     "  [system2] step {} → TERMINATE (coherence {:.3} >= {:.3})",
                     steps_taken, wm.coherence, config.coherence_threshold
                 );
@@ -794,7 +795,7 @@ impl ReasoningEngine {
 
             if steps_taken > config.max_steps {
                 terminated_by = System2Termination::MaxSteps;
-                println!("  [system2] step {} → TERMINATE (max steps)", steps_taken);
+                infer_trace!("  [system2] step {} → TERMINATE (max steps)", steps_taken);
                 break;
             }
 
@@ -803,7 +804,7 @@ impl ReasoningEngine {
                 stall_count += 1;
                 if stall_count >= 2 {
                     terminated_by = System2Termination::NoProgress;
-                    println!("  [system2] step {} → TERMINATE (no progress)", steps_taken);
+                    infer_trace!("  [system2] step {} → TERMINATE (no progress)", steps_taken);
                     break;
                 }
             } else {
@@ -843,7 +844,7 @@ impl ReasoningEngine {
                         compose_activation_prev = Some(a);
                         if compose_plateau_count >= 2 {
                             terminated_by = System2Termination::NoProgress;
-                            println!(
+                            infer_trace!(
                                 "  [system2] step {} → TERMINATE (compose activation plateau {:.3})",
                                 steps_taken, a
                             );
@@ -853,7 +854,7 @@ impl ReasoningEngine {
                 }
                 StepAction::Terminate => {
                     terminated_by = System2Termination::CoherenceReached;
-                    println!("  [system2] step {} → operator chose TERMINATE", steps_taken);
+                    infer_trace!("  [system2] step {} → operator chose TERMINATE", steps_taken);
                     break;
                 }
             }
@@ -916,7 +917,7 @@ impl ReasoningEngine {
             let existing_group = wm.entries.first().map(|e| e.group_idx).unwrap_or(0);
             let best_related = self.find_related_group(existing_group, &group_activations, group_envs);
             if let Some(target_group) = best_related {
-                println!("  [system2] → RETRIEVE from group {} (diversify)", target_group);
+                infer_trace!("  [system2] → RETRIEVE from group {} (diversify)", target_group);
                 return StepAction::Retrieve { group_idx: target_group };
             }
             // No related groups available; try compose with what we have
@@ -938,7 +939,7 @@ impl ReasoningEngine {
             });
 
             if !has_transfer {
-                println!("  [system2] → TRANSFER from group {} to group {}", g2, g1);
+                infer_trace!("  [system2] → TRANSFER from group {} to group {}", g2, g1);
                 return StepAction::Transfer {
                     source_group: g2,
                     target_group: g1,
@@ -946,7 +947,7 @@ impl ReasoningEngine {
             }
         }
 
-        println!("  [system2] → COMPOSE (multi-group assembly)");
+        infer_trace!("  [system2] → COMPOSE (multi-group assembly)");
         StepAction::Compose
     }
 
@@ -1015,7 +1016,7 @@ impl ReasoningEngine {
             let text = dict.map(|d| prog.display_text(d)).unwrap_or_default();
             let node_idx = self.cognitive_map.index.get(&(group_idx, best_idx)).copied();
 
-            println!(
+            infer_trace!(
                 "  [system2] step {} RETRIEVE: group={}, sim={:.3}, text_len={}",
                 step, group_idx, best_sim, text.len()
             );
@@ -1070,7 +1071,7 @@ impl ReasoningEngine {
             let alignment = cosine_sim(&transferred_emb, &wm.goal).max(0.0);
 
             if alignment >= config.transfer_threshold {
-                println!(
+                infer_trace!(
                     "  [system2] step {} TRANSFER: {}→{}, alignment={:.3}",
                     step, source_group, target_group, alignment
                 );
@@ -1107,7 +1108,7 @@ impl ReasoningEngine {
         let composite = wm.composite_embedding();
         let activation = cosine_sim(&composite, &wm.goal).max(0.0);
 
-        println!(
+        infer_trace!(
             "  [system2] step {} COMPOSE: {} entries → {:.0} chars, activation={:.3}",
             step,
             fragments.len(),
