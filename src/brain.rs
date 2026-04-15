@@ -70,7 +70,8 @@ pub struct BrainPackageHeader {
     pub signature: Signature,
     pub merged_from: Vec<BrainRef>,
     /// Hint for inference-time plugins: e.g. `sentiment_lattice` (set on export for sentiment brains),
-    /// or `off` / `none` to disable sentiment shortcuts even when the lattice shape matches.
+    /// or `off` / `none` / `disabled` to disable lattice shortcuts **and** TOML headline / PR-wire /
+    /// lattice-misfire guards in generation (see `crate::inference::plugins::lattice_shortcuts::sentiment_toml_lexical_guards_active`).
     #[serde(default)]
     pub inference_profile: Option<String>,
 }

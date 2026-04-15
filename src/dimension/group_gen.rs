@@ -23,7 +23,7 @@
 
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::clifford::{
     embed_bridge_vector, causal_fingerprint, spatial_fingerprint,
@@ -38,6 +38,8 @@ use crate::spectral::{
 use crate::types::EnvironmentConfig;
 
 pub const GEN_COND_DIM: usize = 192;
+/// Scale for world-graph `sentiment_bearing` nudge on the retrieval query vector (forced-topic Stage‑1 cosine).
+pub const WORLD_GROUND_SENTIMENT_BEARING_WEIGHT: f32 = 0.10;
 pub const MAX_TOKENS: usize = 128;
 pub const GEN_HIDDEN: usize = 256;
 pub const GEN_K: usize = 64;
@@ -154,6 +156,12 @@ fn gen_cosine_sim(a: &[f32], b: &[f32]) -> f32 {
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
     if na < 1e-12 || nb < 1e-12 { return 0.0; }
     dot / (na * nb)
+}
+
+/// Deduplicate BM25 query terms (same string from multiple alias expansions), first occurrence wins.
+fn dedup_lowercase_query_terms(terms: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    terms.into_iter().filter(|t| seen.insert(t.clone())).collect()
 }
 
 /// A variable position in a response archetype.
@@ -2197,7 +2205,6 @@ pub fn e8_compose_sentences_quantum(
 // ---------------------------------------------------------------------------
 
 use crate::dimension::paramecium::InfraciliaryLattice;
-use std::collections::HashSet;
 
 // ---------------------------------------------------------------------------
 // ProgramGraph — graph over lattice nodes for structural disambiguation
@@ -2435,6 +2442,9 @@ pub struct IndexedGenEnv {
     /// Transient: query subject keywords for within-topic BM25 re-ranking.
     #[serde(skip)]
     pub subject_keywords: Vec<String>,
+    /// Transient: raw user line (same string as `extend_subject_keywords`) for world-graph valence.
+    #[serde(skip)]
+    pub retrieval_intent_text: String,
     /// Transient: query intent action (e.g., "implement", "explain").
     #[serde(skip)]
     pub intent_action: String,
@@ -2561,6 +2571,7 @@ impl IndexedGenEnv {
             last_generation_confidence: 0.0,
             diversity_bonus: 0.0,
             subject_keywords: Vec::new(),
+            retrieval_intent_text: String::new(),
             intent_action: String::new(),
             frozen: false,
             output_dim,
@@ -2592,6 +2603,7 @@ impl IndexedGenEnv {
             last_generation_confidence: 0.0,
             diversity_bonus: 0.0,
             subject_keywords: Vec::new(),
+            retrieval_intent_text: String::new(),
             intent_action: String::new(),
             frozen: false,
             output_dim,
@@ -2629,6 +2641,7 @@ impl IndexedGenEnv {
             last_generation_confidence: 0.0,
             diversity_bonus: 0.0,
             subject_keywords: Vec::new(),
+            retrieval_intent_text: String::new(),
             intent_action: String::new(),
             frozen: false,
             output_dim,
@@ -3145,6 +3158,7 @@ impl IndexedGenEnv {
     /// keywords from the current prompt (so the rationale is not from another headline).
     fn sentiment_witness_matches_subject_keywords(joint_body: &str, query_terms: &[String]) -> bool {
         use crate::dimension::language::{SENTIMENT_CAUSAL_INDEX_CORE, SENTIMENT_LATTICE_WITNESS_CORE};
+        let lex = crate::inference::sentiment_generation_lexicon::global();
         if query_terms.len() < 2 {
             return true;
         }
@@ -3162,7 +3176,10 @@ impl IndexedGenEnv {
         }
         forms.sort();
         forms.dedup();
-        let forms: Vec<String> = forms.into_iter().filter(|s| s.len() >= 4).collect();
+        let forms: Vec<String> = forms
+            .into_iter()
+            .filter(|s| s.len() >= 4 && !lex.is_witness_weak_form(s.as_str()))
+            .collect();
         if forms.len() < 2 {
             return true;
         }
@@ -3180,6 +3197,78 @@ impl IndexedGenEnv {
         }
         .min(n);
         hits >= required
+    }
+
+    /// Maps a topic sub-lattice name to a valence pole for an empirical retrieval axis (`-1` = negative
+    /// family, `+1` = positive / neutral_chop). `mixed` is ambiguous and skipped.
+    fn topic_valence_axis_bucket(topic_name: &str) -> Option<i8> {
+        let t = topic_name.to_ascii_lowercase();
+        if t == "mixed" {
+            return None;
+        }
+        if t.contains("negative") {
+            return Some(-1);
+        }
+        if t.contains("positive") || t.contains("neutral_chop") {
+            return Some(1);
+        }
+        None
+    }
+
+    /// Unit vector: mean centroids of negative-topic programs minus mean of positive-topic programs.
+    /// Used only to nudge the **query** embedding for Stage‑1 cosine when world-graph valence is non-zero.
+    fn sentiment_retrieval_axis(topic_subindex: &[TopicSubIndex], dim: usize) -> Option<Vec<f32>> {
+        let mut neg_sum = vec![0.0f32; dim];
+        let mut pos_sum = vec![0.0f32; dim];
+        let mut n_neg = 0usize;
+        let mut n_pos = 0usize;
+        for t in topic_subindex {
+            let pol = match Self::topic_valence_axis_bucket(&t.topic_name) {
+                Some(p) => p,
+                None => continue,
+            };
+            for p in &t.lattice.programs {
+                let c = &p.ema_centroid;
+                if c.is_empty() {
+                    continue;
+                }
+                let d = dim.min(c.len());
+                if pol < 0 {
+                    for i in 0..d {
+                        neg_sum[i] += c[i];
+                    }
+                    n_neg += 1;
+                } else {
+                    for i in 0..d {
+                        pos_sum[i] += c[i];
+                    }
+                    n_pos += 1;
+                }
+            }
+        }
+        if n_neg == 0 || n_pos == 0 {
+            return None;
+        }
+        let inv_neg = 1.0f32 / n_neg as f32;
+        let inv_pos = 1.0f32 / n_pos as f32;
+        for v in &mut neg_sum {
+            *v *= inv_neg;
+        }
+        for v in &mut pos_sum {
+            *v *= inv_pos;
+        }
+        let mut axis: Vec<f32> = (0..dim)
+            .map(|i| neg_sum[i] - pos_sum[i])
+            .collect();
+        let norm: f32 = axis.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm < 1e-6 {
+            return None;
+        }
+        let inv = 1.0f32 / norm;
+        for v in &mut axis {
+            *v *= inv;
+        }
+        Some(axis)
     }
 
     /// When the user line looks like crypto / tape commentary, adjust scores using declarative rules
@@ -3325,18 +3414,50 @@ impl IndexedGenEnv {
         topic_match.and_then(|topic| {
                 if topic.lattice.programs.is_empty() { return None; }
 
-                let query_terms: Vec<String> = subject_keywords.unwrap_or(&[]).iter()
-                    .filter(|kw| kw.len() > 2)
-                    .map(|kw| kw.to_ascii_lowercase())
-                    .collect();
+                let query_terms: Vec<String> = dedup_lowercase_query_terms(
+                    subject_keywords
+                        .unwrap_or(&[])
+                        .iter()
+                        .filter(|kw| kw.len() > 2)
+                        .map(|kw| kw.to_ascii_lowercase())
+                        .collect(),
+                );
+
+                let bearing =
+                    crate::inference::world_grounding::sentiment_bearing_from_intent(
+                        self.retrieval_intent_text.as_str(),
+                    );
+                let cond_retrieval_owned: Option<Vec<f32>> =
+                    if bearing.abs() > 1e-5 && !self.retrieval_intent_text.is_empty() {
+                        Self::sentiment_retrieval_axis(&self.topic_subindex, cond.len()).map(
+                            |axis| {
+                                let w = bearing * WORLD_GROUND_SENTIMENT_BEARING_WEIGHT;
+                                let mut v = cond.to_vec();
+                                let d = v.len().min(axis.len());
+                                for i in 0..d {
+                                    v[i] += w * axis[i];
+                                }
+                                crate::infer_trace!(
+                                    "    [world-ground] retrieval valence nudge: bearing={:.3} w={:.4}",
+                                    bearing,
+                                    w
+                                );
+                                v
+                            },
+                        )
+                    } else {
+                        None
+                    };
+                let cond_r: &[f32] = cond_retrieval_owned.as_deref().unwrap_or(cond);
 
                 let retrieval_lex = crate::inference::retrieval_lexicon::global_for_locale(None);
 
                 // ── Stage 1: Vector recall ──
-                // Score all programs by cosine similarity to conditioning vector.
+                // Score all programs by cosine similarity to conditioning vector (optionally nudged
+                // along an empirical valence axis when world-graph `sentiment_bearing` is active).
                 let n = topic.lattice.programs.len();
                 let mut cosine_scores: Vec<(usize, f32)> = topic.lattice.programs.iter().enumerate()
-                    .map(|(i, prog)| (i, gen_cosine_sim(cond, &prog.ema_centroid)))
+                    .map(|(i, prog)| (i, gen_cosine_sim(cond_r, &prog.ema_centroid)))
                     .collect();
                 cosine_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -3841,33 +3962,12 @@ impl IndexedGenEnv {
     /// **Never** overridden by graph confidence or centroid-vs-query alignment.
     fn hard_reject_lattice_decoded_text(text: &str) -> bool {
         let t = text.to_ascii_lowercase();
-        if t.contains("[mask]") || t.contains("mask]") || t.contains("mask][") {
-            return true;
-        }
-        if t.contains("][") || t.contains("[]") {
-            return true;
-        }
-        if t.contains("growformer agent")
-            || t.contains("growformer companion")
-            || t.contains("companion agent")
-            || t.contains("i am growformer")
-            || t.contains("specialized ai agent")
-            || t.contains("built by swtch")
-            || t.contains("swtch.ai")
-            || (t.contains("growformer") && t.contains("swtch"))
+        if crate::inference::sentiment_generation_lexicon::global().hard_reject_lexicon_substrings(&t)
         {
             return true;
         }
-        if t.contains("self-organizing neural") || t.contains("self organizing neural") {
-            return true;
-        }
-        if t.contains("drawn to curiosity") {
-            return true;
-        }
-        if t.contains("knowledge is encoded as physical neural structure") {
-            return true;
-        }
-        if t.contains("people their people") || t.contains("their people their") {
+        // Conjunction / structural rules (not single-substring lexicon entries).
+        if t.contains("growformer") && t.contains("swtch") {
             return true;
         }
         if t.match_indices("little details").count() >= 2 {
@@ -3879,30 +3979,10 @@ impl IndexedGenEnv {
         if t.contains("neurons grow") && t.contains("connect") {
             return true;
         }
-        if t.contains("details people details")
-            || t.contains("people details people")
-            || t.contains("people share people")
-        {
-            return true;
-        }
         if t.contains("their lives") && t.match_indices("their lives").count() >= 2 {
             return true;
         }
-        if t.contains("headline snack") {
-            return true;
-        }
-        if t.contains("my intelligence comes from structure")
-            || t.contains("not weight optimization")
-            || t.contains("friendly companion")
-            || t.contains("share a moment of curiosity")
-            || t.contains("i was created to be")
-        {
-            return true;
-        }
         if t.starts_with("no.") && t.contains("intelligence comes from") {
-            return true;
-        }
-        if t.contains("about. about") {
             return true;
         }
         if t.contains(" mask") && (t.contains("little") || t.contains("their")) {
@@ -4096,6 +4176,86 @@ impl IndexedGenEnv {
         truncated.to_string()
     }
 
+    /// Map fine-grained tape/meme topics to **coarse** buckets for routing-only copy (no lattice witness).
+    /// Avoids emitting HOPIUM/COPIUM/etc. when the model has no evidence row to justify that nuance.
+    pub fn sentiment_coarse_topic_key_for_routing_fallback(hint: &str) -> &'static str {
+        crate::inference::sentiment_generation_lexicon::global().routing_coarse_for_hint(hint)
+    }
+
+    /// Hard-reject for decoded lattice text or any composed inference line (System 2, service sanitizer).
+    pub fn lattice_surface_hard_reject(text: &str) -> bool {
+        let head: String = text.chars().take(1200).collect();
+        Self::hard_reject_lattice_decoded_text(&head)
+    }
+
+    /// Routing-only OOD line (matches [`Self::generate_for_topic_lang`] prompt-anchored branch).
+    pub fn sentiment_routing_only_fallback_line(&self, topic_hint: Option<&str>) -> (String, f32) {
+        let hint = topic_hint.unwrap_or("mixed");
+        let kw_refs: Vec<&str> = self.subject_keywords.iter().map(|s| s.as_str()).collect();
+        let excerpt = Self::sentiment_prompt_anchored_fallback_excerpt(
+            &kw_refs,
+            self.retrieval_intent_text.as_str(),
+        );
+        let coarse = Self::sentiment_coarse_topic_key_for_routing_fallback(hint);
+        let label = Self::sentiment_topic_hint_display_label(coarse);
+        let fb = format!(
+            "{} — {}; stance follows routing only. Cues from your text: {}.",
+            label,
+            crate::inference::sentiment_generation_lexicon::prompt_anchor_marker(),
+            excerpt
+        );
+        (fb, 0.55f32)
+    }
+
+    /// When every sub-lattice program fails the witness gate, still emit a **prompt-grounded**
+    /// line: explicit routed label + salient tokens from the user line (not an unrelated lattice row).
+    fn sentiment_topic_hint_display_label(hint: &str) -> String {
+        crate::inference::sentiment_generation_lexicon::global().display_label_for_topic(hint)
+    }
+
+    fn sentiment_prompt_anchored_fallback_excerpt(subject_kw: &[&str], intent: &str) -> String {
+        let lex = crate::inference::sentiment_generation_lexicon::global();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out: Vec<String> = Vec::new();
+        let mut push = |t: String, out: &mut Vec<String>, seen: &mut HashSet<String>| {
+            if t.len() <= 3 || lex.is_excerpt_stopword(&t) || lex.is_internal_cue_token(&t) {
+                return;
+            }
+            if seen.insert(t.clone()) {
+                out.push(t);
+            }
+        };
+        for s in subject_kw {
+            if out.len() >= 8 {
+                break;
+            }
+            push(s.to_ascii_lowercase(), &mut out, &mut seen);
+        }
+        if out.len() < 4 && !intent.is_empty() {
+            for tok in crate::spectral::tokenize(intent) {
+                if out.len() >= 8 {
+                    break;
+                }
+                let t: String = tok
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric())
+                    .collect::<String>()
+                    .to_ascii_lowercase();
+                push(t, &mut out, &mut seen);
+            }
+        }
+        if out.is_empty() {
+            intent.chars().filter(|c| !matches!(c, '\n' | '\r')).take(140).collect()
+        } else {
+            out.join(", ")
+        }
+    }
+
+    /// True when `topic_hint` is a sentiment bucket (not `identity`, not code/math operation topics).
+    fn is_sentiment_lattice_topic_hint(h: &str) -> bool {
+        crate::inference::sentiment_generation_lexicon::global().is_sentiment_lattice_topic_hint(h)
+    }
+
     pub fn generate(&mut self, cond: &[f32], _max_len: usize, _temperature: f32) -> (String, f32) {
         self.generate_for_topic(cond, None, _max_len, _temperature)
     }
@@ -4142,25 +4302,53 @@ impl IndexedGenEnv {
                 true
             });
         let forced_active = forced.is_some();
-        let (text, lattice_conf, topic_selected) = if let Some((ft, fn_name, ft_conf)) = forced {
-            if ft.len() > 5 && ft_conf > 0.10 {
-                (ft, ft_conf.max(global_conf * 0.85), Some(fn_name))
-            } else {
-                (global_text, global_conf, None)
-            }
-        } else {
-            let topic_seed = self.nearest_topic_response(cond, topic_hint);
-            match topic_seed {
-                Some((topic_text, topic_name, topic_conf)) if topic_text.len() > 5 => {
-                    if topic_conf >= global_conf - 0.03 {
-                        (topic_text, topic_conf, Some(topic_name))
-                    } else {
-                        (global_text, global_conf, None)
-                    }
+        let (text, lattice_conf, topic_selected, prompt_anchored_fallback) =
+            if let Some((ft, fn_name, ft_conf)) = forced {
+                if ft.len() > 5 && ft_conf > 0.10 {
+                    (ft, ft_conf.max(global_conf * 0.85), Some(fn_name), false)
+                } else {
+                    (global_text, global_conf, None, false)
                 }
-                _ => (global_text, global_conf, None),
-            }
-        };
+            } else if let Some(hint) = topic_hint.filter(|h| {
+                Self::is_sentiment_lattice_topic_hint(h)
+                    && self
+                        .topic_subindex
+                        .iter()
+                        .any(|t| t.topic_name.eq_ignore_ascii_case(h))
+            }) {
+                let excerpt = Self::sentiment_prompt_anchored_fallback_excerpt(
+                    &kw_refs,
+                    self.retrieval_intent_text.as_str(),
+                );
+                let coarse = Self::sentiment_coarse_topic_key_for_routing_fallback(hint);
+                let label = Self::sentiment_topic_hint_display_label(coarse);
+                let fb = format!(
+                    "{} — {}; stance follows routing only. Cues from your text: {}.",
+                    label,
+                    crate::inference::sentiment_generation_lexicon::prompt_anchor_marker(),
+                    excerpt
+                );
+                crate::infer_trace!("    [gen-fallback] prompt_anchored topic={}", hint);
+                (fb, 0.55f32, Some(hint.to_string()), true)
+            } else {
+                let topic_seed = self.nearest_topic_response(cond, topic_hint);
+                match topic_seed {
+                    Some((topic_text, topic_name, topic_conf)) if topic_text.len() > 5 => {
+                        if topic_conf >= global_conf - 0.03 {
+                            (topic_text, topic_conf, Some(topic_name), false)
+                        } else {
+                            (global_text, global_conf, None, false)
+                        }
+                    }
+                    _ => (global_text, global_conf, None, false),
+                }
+            };
+
+        if prompt_anchored_fallback {
+            self.last_selected_archetype = None;
+            self.last_generation_confidence = lattice_conf;
+            return (text, lattice_conf);
+        }
 
         // Keyword-relevance gate: if the forced-topic returned text but it has zero
         // keyword overlap with the query subject, check if the global nearest-response
@@ -4661,6 +4849,17 @@ mod tests {
     }
 
     #[test]
+    fn dedup_lowercase_query_terms_keeps_first() {
+        let v = vec![
+            "cryptocurrency".into(),
+            "cryptocurrency".into(),
+            "bitcoin".into(),
+        ];
+        let d = dedup_lowercase_query_terms(v);
+        assert_eq!(d, vec!["cryptocurrency", "bitcoin"]);
+    }
+
+    #[test]
     fn test_bits_for_dict() {
         assert_eq!(bits_for_dict(2), 1);
         assert_eq!(bits_for_dict(256), 8);
@@ -4726,6 +4925,85 @@ mod tests {
             &joint_bet,
             &terms_kalshi
         ));
+    }
+
+    /// "even" alone must not let unrelated positive_strong rows pass the witness gate.
+    #[test]
+    fn sentiment_witness_rejects_generic_even_overlap() {
+        use crate::dimension::language::SENTIMENT_LATTICE_WITNESS_CORE;
+
+        let terms: Vec<String> = [
+            "reputation", "troubled", "startup", "delve", "gotten", "worse", "even",
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
+        let joint = format!(
+            "The fraud team caught a sketchy charge before I even complained.{} ok",
+            SENTIMENT_LATTICE_WITNESS_CORE
+        );
+        assert!(!IndexedGenEnv::sentiment_witness_matches_subject_keywords(
+            &joint, &terms
+        ));
+    }
+
+    #[test]
+    fn sentiment_prompt_anchor_helpers_topic_and_excerpt() {
+        assert!(IndexedGenEnv::is_sentiment_lattice_topic_hint("negative_mild"));
+        assert!(!IndexedGenEnv::is_sentiment_lattice_topic_hint("subtraction_operation"));
+        assert!(!IndexedGenEnv::is_sentiment_lattice_topic_hint("identity"));
+        assert_eq!(
+            IndexedGenEnv::sentiment_topic_hint_display_label("negative_mild"),
+            "NEGATIVE (mild)"
+        );
+        let kw = ["mercor", "whistleblower", "lawsuit"];
+        let ex = IndexedGenEnv::sentiment_prompt_anchored_fallback_excerpt(
+            &kw,
+            "Delve sued Mercor over whistleblower retaliation claims",
+        );
+        assert!(ex.contains("mercor") || ex.contains("whistleblower"));
+    }
+
+    #[test]
+    fn sentiment_coarse_topic_maps_meme_buckets_for_routing_fallback() {
+        assert_eq!(
+            IndexedGenEnv::sentiment_coarse_topic_key_for_routing_fallback("copium"),
+            "mixed"
+        );
+        assert_eq!(
+            IndexedGenEnv::sentiment_coarse_topic_key_for_routing_fallback("hopium"),
+            "mixed"
+        );
+        assert_eq!(
+            IndexedGenEnv::sentiment_coarse_topic_key_for_routing_fallback("euphoric"),
+            "positive_strong"
+        );
+        assert_eq!(
+            IndexedGenEnv::sentiment_coarse_topic_key_for_routing_fallback("negative_mild"),
+            "negative_mild"
+        );
+    }
+
+    #[test]
+    fn sentiment_prompt_anchor_excerpt_dedupes_tokens() {
+        let kw = ["cryptocurrency", "cryptocurrency", "stolen", "recover"];
+        let ex = IndexedGenEnv::sentiment_prompt_anchored_fallback_excerpt(
+            &[kw[0], kw[1], kw[2], kw[3]],
+            "more cryptocurrency news",
+        );
+        let n = ex.matches("cryptocurrency").count();
+        assert!(n <= 1, "expected at most one 'cryptocurrency', got: {}", ex);
+    }
+
+    #[test]
+    fn sentiment_prompt_anchor_excerpt_skips_internal_graph_tokens() {
+        let kw = ["svelte", "gfcausal_t_noise", "venture"];
+        let ex = IndexedGenEnv::sentiment_prompt_anchored_fallback_excerpt(
+            &[kw[0], kw[1], kw[2]],
+            "gfcausal_t_other user content",
+        );
+        assert!(!ex.contains("gfcausal"));
+        assert!(ex.contains("svelte") && ex.contains("venture"));
     }
 
     #[test]

@@ -3,6 +3,7 @@
 #   cargo run --release -- --train-brain --project scripts/fintech-sentiment-analysis.gf.toml
 # Example infer (uses [infer].brain if you omit --brain):
 #   cargo run --release -- --infer --project scripts/fintech-sentiment-analysis.gf.toml --prompt 'I love it'
+# Unknown headline queue (batch): data/fintech/unknown_inbox.txt — see comments inside that file.
 
 schema_version = 1
 
@@ -19,6 +20,7 @@ brain_plugins_toml = "../data/plugins/example-brain-plugins.toml"
 
 [inference]
 toml = "../data/fintech/inference_fintech.toml"
+guardrails_jsonl = "../data/fintech/inference_guardrails.jsonl"
 
 [infer]
 brain = "../agent-data/fintech-analysis/fintech-brain.bin"

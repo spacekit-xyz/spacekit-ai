@@ -8,18 +8,23 @@
 
 pub mod causal_hints;
 pub mod grounding_expand;
+pub mod world_grounding;
 pub mod harness;
+pub mod inference_guardrails;
 pub mod inference_toml;
 pub mod manifest;
 pub mod plugins;
 pub mod retrieval_rescore;
 pub mod retrieval_lexicon;
+pub mod sentiment_generation_lexicon;
 
 pub use harness::{
     BrainInferencePlugin, GenerationPreemptOutcome, InferenceHarness, TemplatePostprocessFlags,
 };
+pub use inference_guardrails::{set_inference_guardrails_jsonl_path, GuardrailsDiskSummary};
 pub use inference_toml::{
-    inference_rules_runtime, inference_toml_loaded, set_inference_toml_cli_paths, LoadedInferenceToml,
+    inference_rules_runtime, inference_toml_loaded, print_train_inference_disk_summary,
+    set_inference_toml_cli_paths, LoadedInferenceToml,
 };
 pub use manifest::{
     inference_thresholds_disk, parse_plugins_manifest_bytes, serialize_plugins_manifest,

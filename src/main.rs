@@ -156,6 +156,10 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     inference_defaults_toml: Option<PathBuf>,
 
+    /// Optional inference guardrails JSONL (`lexical_topic` / `lattice_misfire` lines), merged after TOML (same as [inference].guardrails_jsonl in *.gf.toml).
+    #[arg(long, value_name = "PATH")]
+    inference_guardrails_jsonl: Option<PathBuf>,
+
     /// Enable MetaCodebook (Stage 2b) and code lattice training from `expected_code` in JSONL. Off by default; use for a standalone code brain (see `scripts/code.gf.toml`).
     #[arg(long)]
     train_code_lattice: bool,
@@ -245,6 +249,12 @@ fn apply_gf_project(args: &mut Args, project_path: &Path) -> Result<GfOverlay, S
             if let Some(t) = inf.defaults_toml.as_deref() {
                 args.inference_defaults_toml =
                     Some(growformer::project_gf::resolve_against(&base, t));
+            }
+        }
+        if args.inference_guardrails_jsonl.is_none() {
+            if let Some(p) = inf.guardrails_jsonl.as_deref() {
+                args.inference_guardrails_jsonl =
+                    Some(growformer::project_gf::resolve_against(&base, p));
             }
         }
     }
@@ -371,6 +381,7 @@ fn main() {
         args.inference_toml.clone(),
         args.inference_defaults_toml.clone(),
     );
+    growformer::inference::set_inference_guardrails_jsonl_path(args.inference_guardrails_jsonl.clone());
 
     let brain_out = args
         .brain_output
@@ -1454,6 +1465,10 @@ fn train_brain(
     let ui = train_progress::TrainUi::try_new(no_progress);
     let mut major_phase: u64 = 0;
     bump_train_phase(&ui, &mut major_phase, "Load data & augmentation");
+
+    // Same inference TOML + JSONL guardrails as runtime (`LanguageService`); warms OnceLock and
+    // prints paths so training logs show guardrails resolution (merge is lazy unless we touch it here).
+    growformer::inference::print_train_inference_disk_summary();
 
     let mut rng = StdRng::seed_from_u64(42);
 

@@ -64,6 +64,21 @@ pub struct ToolRegistry {
     tools: Vec<ToolSchema>,
 }
 
+/// "How much … lost … fraud/scam" headlines carry digits (years, dollars) but are not math tasks.
+fn fraud_loss_how_much_headline_not_math(lower: &str) -> bool {
+    let how = lower.contains("how much");
+    let fraudy = lower.contains("fraud")
+        || lower.contains("scam")
+        || lower.contains("victims")
+        || (lower.contains("lost") && lower.contains("crypto"));
+    let explicit_math = lower.contains("calculate")
+        || lower.contains("compute ")
+        || lower.contains("evaluate ")
+        || lower.contains(" what is ")
+        || lower.contains("what's ");
+    how && fraudy && !explicit_math
+}
+
 impl ToolRegistry {
     pub fn new() -> Self {
         Self { tools: Vec::new() }
@@ -98,6 +113,9 @@ impl ToolRegistry {
         let mut best: Option<(usize, &ToolSchema)> = None;
 
         for schema in &self.tools {
+            if schema.name == "calculator" && fraud_loss_how_much_headline_not_math(&lower) {
+                continue;
+            }
             if schema.name == "calculator" && !has_numeric_signal {
                 continue;
             }
@@ -400,6 +418,13 @@ mod tests {
     fn test_no_match() {
         let reg = ToolRegistry::with_builtins();
         assert!(reg.match_tool("explain the observer pattern").is_none());
+    }
+
+    #[test]
+    fn calculator_skips_fraud_loss_how_much_headline() {
+        let reg = ToolRegistry::with_builtins();
+        let s = "Here's how much Michiganders lost in crypto fraud in 2025";
+        assert!(reg.match_tool(s).is_none());
     }
 
     #[test]

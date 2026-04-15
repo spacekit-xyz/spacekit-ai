@@ -775,6 +775,9 @@ impl ReasoningEngine {
         let mut steps_taken = 0;
         let mut last_coherence = wm.coherence;
         let mut stall_count = 0;
+        /// Stop burning COMPOSE steps when `step_compose` activation barely moves (cheap early exit).
+        let mut compose_activation_prev: Option<f32> = None;
+        let mut compose_plateau_count = 0u32;
         let terminated_by;
 
         loop {
@@ -828,6 +831,25 @@ impl ReasoningEngine {
                 }
                 StepAction::Compose => {
                     self.step_compose(&mut wm, steps_taken);
+                    if let Some(last) = wm.entries.last() {
+                        let a = last.activation;
+                        if let Some(prev) = compose_activation_prev {
+                            if (a - prev).abs() < 0.015 {
+                                compose_plateau_count = compose_plateau_count.saturating_add(1);
+                            } else {
+                                compose_plateau_count = 0;
+                            }
+                        }
+                        compose_activation_prev = Some(a);
+                        if compose_plateau_count >= 2 {
+                            terminated_by = System2Termination::NoProgress;
+                            println!(
+                                "  [system2] step {} → TERMINATE (compose activation plateau {:.3})",
+                                steps_taken, a
+                            );
+                            break;
+                        }
+                    }
                 }
                 StepAction::Terminate => {
                     terminated_by = System2Termination::CoherenceReached;

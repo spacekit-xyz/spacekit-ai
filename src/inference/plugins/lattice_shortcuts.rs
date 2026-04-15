@@ -51,6 +51,60 @@ pub fn is_lattice_shape(dm: &DimensionManager) -> bool {
         .all(|k| names.contains(&k.to_string()))
 }
 
+/// Topic names suggest a consumer / wire **sentiment** generation lattice (not a code-only brain).
+///
+/// Used for TOML headline guards, PR-wire neutralization, and lattice misfire sanitization — independent
+/// of [`is_lattice_shape`] (which is single-group seven-topic only). Multi-group fintech+identity packs
+/// still expose one sentiment-shaped group.
+pub fn generation_env_looks_like_sentiment(dm: &DimensionManager, gidx: usize) -> bool {
+    dm.group_gen_envs.get(&gidx).map_or(false, |env| {
+        if env.topic_subindex.len() < 2 {
+            return false;
+        }
+        const MARKERS: &[&str] = &[
+            "positive_",
+            "negative_",
+            "neutral",
+            "mixed",
+            "sarcastic",
+            "confused",
+            "cautious",
+            "hopium",
+            "copium",
+            "euphoric",
+            "capitulation",
+        ];
+        env.topic_subindex.iter().any(|t| {
+            let n = t.topic_name.to_ascii_lowercase();
+            MARKERS.iter().any(|m| n.contains(m))
+        })
+    })
+}
+
+/// First **group env map key** (0..`group_order.len()`) whose gen env matches [`generation_env_looks_like_sentiment`].
+///
+/// This matches the historical `LanguageService` convention: `group_gen_envs` is keyed by group slot index,
+/// not raw [`crate::types::GroupId`].
+pub fn pick_sentiment_lattice_group_idx(dm: &DimensionManager) -> Option<usize> {
+    (0..dm.main.group_order.len()).find(|&gidx| generation_env_looks_like_sentiment(dm, gidx))
+}
+
+/// When false, `LanguageService` skips inference-TOML PR-wire / headline lexical / mixed guards and
+/// lattice misfire replacement (code brains, or `inference_profile` `off` / `none` / `disabled`).
+///
+/// True only if the loaded checkpoint exposes at least one sentiment-shaped gen lattice **and**
+/// the brain header does not disable inference shortcuts by name.
+pub fn sentiment_toml_lexical_guards_active(
+    dm: &DimensionManager,
+    inference_profile: Option<&str>,
+) -> bool {
+    match inference_profile.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("off") | Some("none") | Some("disabled") => return false,
+        _ => {}
+    }
+    pick_sentiment_lattice_group_idx(dm).is_some()
+}
+
 /// Lattice shortcuts require matching shape and are not explicitly disabled in the brain header.
 pub fn shortcuts_enabled(dm: &DimensionManager, inference_profile: Option<&str>) -> bool {
     if !is_lattice_shape(dm) {
@@ -433,7 +487,14 @@ impl BrainInferencePlugin for LatticeShortcutsPlugin {
         intent_text: &str,
         subject_kw: &mut Vec<String>,
     ) {
-        if !shortcuts_enabled(dm, inference_profile) {
+        // Full-line tokens + Layer‑0 / causal / rule expansion apply to **any** brain layout.
+        // `shortcuts_enabled` (seven-topic single-group) gates only preempt / weak‑GK behavior
+        // elsewhere — it must not skip world grounding or BM25 query enrichment (fintech has
+        // identity + sentiment groups and many topic keys).
+        if matches!(
+            inference_profile.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+            Some("off") | Some("none") | Some("disabled")
+        ) {
             return;
         }
         for w in intent_text.split_whitespace() {
@@ -446,6 +507,11 @@ impl BrainInferencePlugin for LatticeShortcutsPlugin {
         }
         causal_hints::extend_subject_keywords_with_causal_tokens(intent_text, subject_kw);
         grounding_expand::extend_subject_keywords_with_grounding(intent_text, subject_kw);
+        crate::inference::world_grounding::extend_subject_keywords_with_world_graph(
+            intent_text,
+            subject_kw,
+        );
+        let _ = dm;
     }
 
     fn try_preempt_generation(

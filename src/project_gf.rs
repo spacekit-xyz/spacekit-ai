@@ -46,6 +46,8 @@ pub struct TrainSection {
 pub struct InferenceSection {
     pub toml: Option<String>,
     pub defaults_toml: Option<String>,
+    /// Optional JSONL of extra `lexical_topic` / `lattice_misfire` guardrails (merged after TOML).
+    pub guardrails_jsonl: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,9 +101,11 @@ brain_plugins_toml = "data/plugins/example-brain-plugins.toml"
 
 [inference]
 # Shortcut rules + numeric gates (equivalent to --inference-toml).
-toml = "data/sentiment/inference_sentiment.toml"
+toml = "data/sentiment/inference_sentiment_core.toml"
 # Optional baseline for merging empty [rules] arrays (equivalent to --inference-defaults-toml).
-# defaults_toml = "data/sentiment/inference_sentiment.toml"
+# defaults_toml = "data/sentiment/inference_sentiment_core.toml"
+# Optional guardrails JSONL (equivalent to --inference-guardrails-jsonl); merged after TOML rules.
+# guardrails_jsonl = "data/sentiment/inference_guardrails.jsonl"
 
 [infer]
 # Default brain for `growformer --infer --project this_file.gf.toml` when --brain is omitted.

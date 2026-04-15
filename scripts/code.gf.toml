@@ -24,7 +24,7 @@ brain_plugins_toml = "../data/plugins/example-brain-plugins.toml"
 
 [inference]
 # Optional: same inference TOML pattern as other brains if you use lattice shortcuts.
-# toml = "../data/sentiment/inference_sentiment.toml"
+# toml = "../data/sentiment/inference_sentiment_core.toml"
 
 [infer]
 brain = "../agent-data/code-brain/code-brain.bin"

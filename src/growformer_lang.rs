@@ -453,6 +453,17 @@ fn replace_money_token(w: &str) -> Option<String> {
     if let Some(m) = parse_glued_money(&lower) {
         return Some(m);
     }
+    // Sterling / euro prefixes: £43bn, €1.2m (ASCII + Unicode currency symbols)
+    if let Some(rest) = w.strip_prefix('£').or_else(|| w.strip_prefix('\u{00a3}')) {
+        if let Some(m) = parse_prefixed_currency_amount(rest, "gbp") {
+            return Some(m);
+        }
+    }
+    if let Some(rest) = w.strip_prefix('€').or_else(|| w.strip_prefix('\u{20ac}')) {
+        if let Some(m) = parse_prefixed_currency_amount(rest, "eur") {
+            return Some(m);
+        }
+    }
     if !lower.starts_with('$') || lower.len() < 2 {
         return None;
     }
@@ -496,6 +507,38 @@ fn take_digits_commas(s: &str) -> (String, usize) {
         }
     }
     (out, i)
+}
+
+/// After leading `£`/`€` stripped: `43bn`, `1_200_000`, `500k`.
+fn parse_prefixed_currency_amount(rest: &str, default_ccy: &str) -> Option<String> {
+    let rl = rest.to_ascii_lowercase();
+    let rl = rl.trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']'));
+    let (scaled_digits, ccy) = if let Some(s) = rl.strip_suffix("bn") {
+        (scale_money_digits(s, 1_000_000_000u128)?, default_ccy)
+    } else if let Some(s) = rl.strip_suffix('b') {
+        (scale_money_digits(s, 1_000_000_000u128)?, default_ccy)
+    } else if let Some(s) = rl.strip_suffix('m') {
+        (scale_money_digits(s, 1_000_000u128)?, default_ccy)
+    } else if let Some(s) = rl.strip_suffix('k') {
+        (scale_money_digits(s, 1_000u128)?, default_ccy)
+    } else {
+        let (digits, _) = take_digits_commas(&rl);
+        if digits.is_empty() {
+            return None;
+        }
+        (digits, default_ccy)
+    };
+    Some(format!("money_{}_{}", ccy, scaled_digits))
+}
+
+fn scale_money_digits(num_part: &str, mult: u128) -> Option<String> {
+    let (digits, _) = take_digits_commas(num_part);
+    if digits.is_empty() {
+        return None;
+    }
+    let v: u128 = digits.parse().ok()?;
+    let scaled = v.checked_mul(mult)?;
+    Some(scaled.to_string())
 }
 
 fn parse_glued_money(lower: &str) -> Option<String> {
@@ -1738,6 +1781,13 @@ mod tests {
     fn test_normalize_inference_money_spans_dollar_glued() {
         let s = normalize_inference_money_spans("I lost $5000USD on the game last night");
         assert!(s.contains("money_usd_5000"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_normalize_inference_money_spans_sterling_bn() {
+        let s = normalize_inference_money_spans("Unlock £43bn annually");
+        assert!(s.contains("money_gbp_"), "got: {}", s);
+        assert!(s.contains("43000000000") || s.contains("43"), "scaled amount preserved: {}", s);
     }
 
     #[test]

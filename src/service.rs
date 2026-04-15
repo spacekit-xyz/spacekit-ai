@@ -13,14 +13,17 @@ use crate::dimension::{
     LanguageConfig, LanguageRoutingDecision, LanguageSample,
 };
 use crate::dimension::language::DEFAULT_BRIDGE_DIM;
-use crate::dimension::group_gen::GEN_COND_DIM;
+use crate::dimension::group_gen::{GEN_COND_DIM, IndexedGenEnv};
 use crate::dimension::action::{ActionType, ActionPayload};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::dimension::EncoderPreset;
 use crate::spectral::{ProjectModel, EntityKind, HybridEmbedder};
 use crate::dimension::tool::{ToolRegistry, ToolSchema, ToolCallInfo, ToolResult};
 use crate::dimension::paramecium::InfraciliaryLattice;
-use crate::inference::{default_inference_harness, BrainPluginsManifest, InferenceHarness};
+use crate::inference::{
+    default_inference_harness, plugins::lattice_shortcuts, BrainPluginsManifest, InferenceHarness,
+    TEMPLATE_ID_USER_ANCHORED,
+};
 use crate::metacognition::{MetaCognition, ReflectionOutcome};
 use crate::reasoning::{ReasoningEngine, System2Config};
 use crate::types::{EnvironmentConfig, GroupId, Sample};
@@ -795,36 +798,6 @@ impl LanguageService {
         }
     }
 
-    /// Heuristic: generation env for this group looks like a multi-intent sentiment lattice (not coding).
-    fn generation_env_looks_like_sentiment(dm: &DimensionManager, gidx: usize) -> bool {
-        dm.group_gen_envs.get(&gidx).map_or(false, |env| {
-            if env.topic_subindex.len() < 2 {
-                return false;
-            }
-            const MARKERS: &[&str] = &[
-                "positive_",
-                "negative_",
-                "neutral",
-                "mixed",
-                "sarcastic",
-                "confused",
-                "cautious",
-                "hopium",
-                "copium",
-                "euphoric",
-                "capitulation",
-            ];
-            env.topic_subindex.iter().any(|t| {
-                let n = t.topic_name.to_ascii_lowercase();
-                MARKERS.iter().any(|m| n.contains(m))
-            })
-        })
-    }
-
-    fn pick_sentiment_lattice_group_idx(dm: &DimensionManager) -> Option<usize> {
-        (0..dm.main.group_order.len()).find(|&gidx| Self::generation_env_looks_like_sentiment(dm, gidx))
-    }
-
     /// Maps logical `neutral` from inference rules onto `neutral` / `neutral_chop` (or other `neutral_*`) in this brain.
     fn resolve_neutral_bucket_in_env(env: &crate::dimension::IndexedGenEnv) -> Option<String> {
         if let Some(t) = env
@@ -842,6 +815,33 @@ impl LanguageService {
                     .starts_with("neutral_")
             })
             .map(|t| t.topic_name.clone())
+    }
+
+    /// When [`crate::growformer_lang::infer_operation_topic`] returns a math / data-structure lattice
+    /// key, skip headline-level sentiment TOML overrides so “add two numbers” stays on code paths.
+    ///
+    /// TopicGraph / MetaBrain often label finance wire with sentiment-like tokens (`positive_mild`);
+    /// those must **not** block laundering / HMRC / crime headline rules.
+    fn operation_topic_blocks_sentiment_lexical(op: Option<&str>) -> bool {
+        let Some(t) = op else {
+            return false;
+        };
+        let l = t.to_ascii_lowercase();
+        if l.ends_with("_operation") {
+            return true;
+        }
+        if l.ends_with("implementation") {
+            return true;
+        }
+        matches!(
+            l.as_str(),
+            "linked_list"
+                | "behavioral"
+                | "hashmap_implementation"
+                | "tree_implementation"
+                | "queue_implementation"
+                | "stack_implementation"
+        )
     }
 
     /// If `key` is absent but equals logical neutral, pick the brain's neutral bucket.
@@ -867,6 +867,8 @@ impl LanguageService {
     }
 
     /// When lattice retrieval returns bare `expected_response` text, prepend `LABEL —` like the seven-topic shortcut path.
+    /// Always strips the joint-index prefix and `__GROWFORMER_SENT_WITNESS__` sentinel before display, even when
+    /// `topic_hint` is missing or the header prefix is skipped (user-anchored / broad summary).
     fn maybe_prefix_sentiment_retrieval_line(
         dm: &DimensionManager,
         gidx: usize,
@@ -874,16 +876,26 @@ impl LanguageService {
         skip_prefix: bool,
         body: &str,
     ) -> String {
+        let body = crate::dimension::language::strip_sentiment_lattice_witness_for_display(body);
         if skip_prefix {
-            return body.to_string();
+            return body;
         }
         let Some(th) = topic_hint else {
-            return body.to_string();
+            return body;
         };
-        if !Self::generation_env_looks_like_sentiment(dm, gidx) {
-            return body.to_string();
+        if !lattice_shortcuts::generation_env_looks_like_sentiment(dm, gidx) {
+            return body;
         }
-        crate::inference::format_retrieved_sentiment_line(th, body)
+        // MetaBrain often routes finance wire to `identity` while retrieval text comes from the
+        // sentiment lattice — do not prefix those lines with "Identity —" (see routing_coarse.identity).
+        let th_for_header: &str = if th.eq_ignore_ascii_case("identity") {
+            IndexedGenEnv::sentiment_coarse_topic_key_for_routing_fallback("identity")
+        } else if body.contains(crate::inference::sentiment_generation_lexicon::prompt_anchor_marker()) {
+            IndexedGenEnv::sentiment_coarse_topic_key_for_routing_fallback(th)
+        } else {
+            th
+        };
+        crate::inference::format_retrieved_sentiment_line(th_for_header, &body)
     }
 
     pub fn generation(&mut self, text: &str) -> Result<(ActionJson, GeneratedResponse), String> {
@@ -1106,14 +1118,25 @@ impl LanguageService {
                 None
             };
 
+            let apply_toml_lexical = lattice_shortcuts::sentiment_toml_lexical_guards_active(
+                dm,
+                inference_profile_opt,
+            );
+            let sentiment_lattice_gidx =
+                lattice_shortcuts::pick_sentiment_lattice_group_idx(dm);
             let infer_rules_rt = crate::inference::inference_rules_runtime();
-            let pr_press = infer_rules_rt
-                .sentiment_pr_wire_neutral_key(intent_text)
-                .is_some();
+            let pr_press = if apply_toml_lexical {
+                infer_rules_rt
+                    .sentiment_pr_wire_neutral_key(intent_text)
+                    .is_some()
+            } else {
+                false
+            };
+            let _pr_wire_world_ground = crate::inference::world_grounding::PrWireHeadlineGuard::bind(pr_press);
             // PR / wire headlines: force sentiment lattice + neutral bucket (MetaBrain "Identity",
             // TopicGraph operation topics, and cross-group redirects routinely hijack these lines).
             if pr_press {
-                if let Some(sgx) = Self::pick_sentiment_lattice_group_idx(dm) {
+                if let Some(sgx) = sentiment_lattice_gidx {
                     if let Some(env) = dm.group_gen_envs.get(&sgx) {
                         if let Some(bucket) = Self::resolve_neutral_bucket_in_env(env) {
                             infer_trace!(
@@ -1178,19 +1201,77 @@ impl LanguageService {
                         }
                     }
                 }
-            } else if !pr_press {
-                infer_trace!("  [topic-miss] no topic inferred for: {}", &intent_text[..intent_text.len().min(60)]);
+            } else if !pr_press && topic_hint.is_none() {
+                infer_trace!(
+                    "  [topic-miss] no topic inferred for: {}",
+                    &intent_text[..intent_text.len().min(60)]
+                );
             }
 
-            // Single-group brains with many sub-topics skip lattice shortcut shape checks, so MetaBrain
-            // topic alone can mis-track domain vocabulary (“fee” → negative_strong). Re-align with
-            // TOML lexical / anchor cues when there is no coding operation topic override.
-            if (op_topic_opt.is_none() || pr_press) && dm.group_gen_envs.len() == 1 {
-                if let Some(env) = dm.group_gen_envs.values().next() {
+            // Brains with a dedicated sentiment lattice: MetaBrain / TopicGraph alone can mis-track
+            // domain vocabulary (“even worse” → positive_strong; wire headlines → positive_mild).
+            // Re-align with TOML headline rules whenever the routed group is the sentiment lattice,
+            // except when `infer_operation_topic` is a definite code/math lattice key (`*_operation`, etc.).
+            // Wire headlines about open finance / inclusion to the sentiment lattice even when
+            // the classifier lands on identity or another group (fixes hard decline + weak retrieval).
+            if apply_toml_lexical
+                && infer_rules_rt.sentiment_inclusion_open_finance_headline_positive_raw(intent_text)
+            {
+                if let Some(sgx) = sentiment_lattice_gidx {
+                    if group_idx != Some(sgx) {
+                        infer_trace!(
+                            "  [sentiment-redirect] open-finance / inclusion headline → sentiment lattice group {}",
+                            sgx
+                        );
+                        group_idx = Some(sgx);
+                    }
+                }
+            }
+            let allow_sentiment_lexical = !Self::operation_topic_blocks_sentiment_lexical(
+                op_topic_opt.as_deref(),
+            ) || pr_press;
+            let sentiment_lexical_k = if apply_toml_lexical && allow_sentiment_lexical {
+                infer_rules_rt.sentiment_lexical_topic_key(intent_text)
+            } else {
+                None
+            };
+            // Multi-group: classifier often picks identity for crypto wire; headline TOML still maps
+            // crime/laundering to negative_mild — force the sentiment lattice so lexical guards run.
+            if dm.group_gen_envs.len() > 1 {
+                if let (Some(sgx), Some(ref k)) = (sentiment_lattice_gidx, sentiment_lexical_k.as_ref())
+                {
+                    if group_idx != Some(sgx)
+                        && !infer_rules_rt.looks_like_first_person_finance_intent(intent_text)
+                    {
+                        if let Some(env) = dm.group_gen_envs.get(&sgx) {
+                            if Self::resolve_sentiment_subindex_topic_key(env, k).is_some() {
+                                infer_trace!(
+                                    "  [sentiment-redirect] headline lexical `{}` → sentiment lattice group {}",
+                                    k,
+                                    sgx
+                                );
+                                group_idx = Some(sgx);
+                            }
+                        }
+                    }
+                }
+            }
+            let apply_sentiment_lexical_guards = apply_toml_lexical
+                && allow_sentiment_lexical
+                && (dm.group_gen_envs.len() == 1
+                    || (sentiment_lattice_gidx.is_some()
+                        && group_idx.is_some_and(|g| sentiment_lattice_gidx == Some(g))));
+            if apply_sentiment_lexical_guards {
+                let env = if dm.group_gen_envs.len() == 1 {
+                    dm.group_gen_envs.values().next()
+                } else {
+                    sentiment_lattice_gidx.and_then(|g| dm.group_gen_envs.get(&g))
+                };
+                if let Some(env) = env {
                     if !env.topic_subindex.is_empty() {
-                        if let Some(k) = infer_rules_rt.sentiment_lexical_topic_key(intent_text) {
+                        if let Some(ref k) = sentiment_lexical_k {
                             if let Some(resolved) =
-                                Self::resolve_sentiment_subindex_topic_key(env, &k)
+                                Self::resolve_sentiment_subindex_topic_key(env, k)
                             {
                                 if topic_hint.as_deref() != Some(resolved.as_str()) {
                                     infer_trace!(
@@ -1208,8 +1289,13 @@ impl LanguageService {
 
             // Drop spurious `mixed` from MetaBrain when the line has no contrastive structure and no
             // bipolar lexicon hit — embeddings often match a long MIXED training example from its prefix.
-            if (op_topic_opt.is_none() || pr_press) && dm.group_gen_envs.len() == 1 {
-                if let Some(env) = dm.group_gen_envs.values().next() {
+            if apply_sentiment_lexical_guards {
+                let env = if dm.group_gen_envs.len() == 1 {
+                    dm.group_gen_envs.values().next()
+                } else {
+                    sentiment_lattice_gidx.and_then(|g| dm.group_gen_envs.get(&g))
+                };
+                if let Some(env) = env {
                     let has_mixed_bucket = env
                         .topic_subindex
                         .iter()
@@ -1273,6 +1359,7 @@ impl LanguageService {
             for env in dm.group_gen_envs.values_mut() {
                 env.diversity_bonus = div_bonus;
                 env.subject_keywords = subject_kw.clone();
+                env.retrieval_intent_text = intent_text.to_string();
                 env.intent_action = intent_act.clone();
             }
 
@@ -1398,8 +1485,15 @@ impl LanguageService {
                 })
             };
 
-            let (best_text, best_conf, best_gidx) = match primary {
-                Some(ref c) if c.confidence >= 0.70 && c.text.len() > 5 => {
+            let (mut best_text, mut best_conf, best_gidx) = match primary {
+                Some(ref c)
+                    if c.text.len() > 5
+                        && (c.confidence >= 0.70
+                            || (c.confidence >= 0.52
+                                && c.text.contains(
+                                    crate::inference::sentiment_generation_lexicon::prompt_anchor_marker(),
+                                ))) =>
+                {
                     (c.text.clone(), c.confidence, c.group_idx)
                 }
                 primary_result => {
@@ -1482,6 +1576,51 @@ impl LanguageService {
                 }
             };
 
+            if best_text.len() > 5
+                && apply_toml_lexical
+                && lattice_shortcuts::generation_env_looks_like_sentiment(dm, best_gidx)
+            {
+                let head: String = best_text.chars().take(1200).collect();
+                let hard = IndexedGenEnv::lattice_surface_hard_reject(&head);
+                let lattice_misfire = infer_rules_rt.lattice_response_misfire_hit(intent_text, &head);
+                if hard || lattice_misfire {
+                    infer_trace!(
+                        "  [sentiment-sanitize] replacing primary line (hard_reject={} lattice_misfire={})",
+                        hard,
+                        lattice_misfire
+                    );
+                    if let Some(canned) =
+                        infer_rules_rt.sentiment_lattice_misfire_replacement_line(intent_text)
+                    {
+                        best_text = canned;
+                        best_conf = 0.88;
+                    } else if let Some(env) = dm.group_gen_envs.get(&best_gidx) {
+                        let (fb, fc) = env.sentiment_routing_only_fallback_line(topic_hint.as_deref());
+                        best_text = fb;
+                        best_conf = fc;
+                    }
+                }
+            }
+
+            // Low-lattice-coverage headlines (political crypto, Kraken IPO pack): ensure non-empty
+            // routing copy before the retrieval floor so inclusion-style bypasses can apply.
+            if apply_toml_lexical
+                && sentiment_lattice_gidx.is_some()
+                && infer_rules_rt.sentiment_retrieval_confidence_floor_bypass(intent_text)
+                && best_text.len() <= 5
+            {
+                if let Some(env) = dm.group_gen_envs.get(&best_gidx) {
+                    let (fb, fc) = env.sentiment_routing_only_fallback_line(topic_hint.as_deref());
+                    if fb.len() > 5 {
+                        infer_trace!(
+                            "  [retrieval-floor-fill] routing-only fallback for confidence-floor bypass headline"
+                        );
+                        best_text = fb;
+                        best_conf = best_conf.max(fc);
+                    }
+                }
+            }
+
             // Capture conditioning + group for metacognition retry loop
             retry_conditioning = Some(gen_conditioning.clone());
             let eff_gidx = group_idx.or_else(|| meta_result.as_ref().and_then(|mr| mr.group_idx));
@@ -1491,7 +1630,14 @@ impl LanguageService {
             // the query is outside the lattice's coverage. Return an honest
             // decline instead of a low-confidence wrong answer.
             const RETRIEVAL_CONFIDENCE_FLOOR: f32 = 0.25;
-            if best_conf < RETRIEVAL_CONFIDENCE_FLOOR || best_text.len() <= 5 {
+            let inclusion_floor_bypass = apply_toml_lexical
+                && infer_rules_rt
+                    .sentiment_retrieval_confidence_floor_bypass(intent_text)
+                && best_text.len() > 5
+                && sentiment_lattice_gidx.is_some();
+            let knowledge_floor_ok =
+                best_conf >= RETRIEVAL_CONFIDENCE_FLOOR || inclusion_floor_bypass;
+            if !knowledge_floor_ok || best_text.len() <= 5 {
                 let topic_label = topic_hint.as_deref()
                     .map(|t| t.replace('_', " "))
                     .unwrap_or_default();
@@ -1583,6 +1729,9 @@ impl LanguageService {
             let mut cond = bridged.routed_vector.clone();
             cond.resize(GEN_COND_DIM, 0.0);
             let dm_ref = self.active_dm();
+            let skip_sentiment_display_header = broad_summary.is_some()
+                || resp.template_id == TEMPLATE_ID_USER_ANCHORED;
+            let eff_g_for_sentiment = retry_effective_gidx.or(group_idx).unwrap_or(0);
 
             // System 2: deliberate multi-step reasoning for uncertain cross-domain queries.
             // When broad_summary already produced a within-group composition, trust it —
@@ -1600,11 +1749,32 @@ impl LanguageService {
                         s2_result.steps_taken, s2_result.working_memory_size,
                         s2_result.final_coherence, s2_result.source_groups
                     );
+                    let s2_display = Self::maybe_prefix_sentiment_retrieval_line(
+                        dm_ref,
+                        eff_g_for_sentiment,
+                        topic_hint.as_deref(),
+                        skip_sentiment_display_header,
+                        &s2_result.text,
+                    );
+                    let s2_revert = IndexedGenEnv::lattice_surface_hard_reject(&s2_display);
+                    let s2_conf = if s2_revert {
+                        resp.confidence
+                    } else {
+                        s2_result.confidence
+                    };
+                    let s2_text = if s2_revert {
+                        infer_trace!(
+                            "  [system2] discarded composed text (identity/boilerplate hard-reject)"
+                        );
+                        resp.text.clone()
+                    } else {
+                        s2_display
+                    };
                     GeneratedResponse {
-                        text: s2_result.text,
+                        text: s2_text,
                         template_id: format!("system2_{}_steps", s2_result.steps_taken),
                         traceable: false,
-                        confidence: s2_result.confidence,
+                        confidence: s2_conf,
                     }
                 } else {
                     resp
@@ -1615,11 +1785,32 @@ impl LanguageService {
                 if reasoning.should_reason(&cond, resp.confidence, &dm_ref.group_gen_envs) {
                     let result = reasoning.reason(&cond, &dm_ref.group_gen_envs, &dm_ref.group_rotors);
                     if result.confidence > resp.confidence && result.text.len() > 10 {
+                        let r_display = Self::maybe_prefix_sentiment_retrieval_line(
+                            dm_ref,
+                            eff_g_for_sentiment,
+                            topic_hint.as_deref(),
+                            skip_sentiment_display_header,
+                            &result.text,
+                        );
+                        let r_revert = IndexedGenEnv::lattice_surface_hard_reject(&r_display);
+                        let r_conf = if r_revert {
+                            resp.confidence
+                        } else {
+                            result.confidence
+                        };
+                        let r_text = if r_revert {
+                            infer_trace!(
+                                "  [reasoning] discarded wave text (identity/boilerplate hard-reject)"
+                            );
+                            resp.text.clone()
+                        } else {
+                            r_display
+                        };
                         GeneratedResponse {
-                            text: result.text,
+                            text: r_text,
                             template_id: format!("reasoning_{}_groups", result.source_groups.len()),
                             traceable: false,
-                            confidence: result.confidence,
+                            confidence: r_conf,
                         }
                     } else { resp }
                 } else { resp }
@@ -1660,6 +1851,13 @@ impl LanguageService {
             infer_trace!(
                 "  [metacog] SKIP: topic sub-lattice gen (trust retrieval; reflection joint space mismatch)"
             );
+            resp
+        } else if resp.confidence >= 0.25
+            && resp
+                .text
+                .contains(crate::inference::sentiment_generation_lexicon::prompt_anchor_marker())
+        {
+            infer_trace!("  [metacog] SKIP: prompt-anchored OOD sentiment fallback");
             resp
         } else {
             let mc_taken = self.metacognition.take();
@@ -2367,6 +2565,7 @@ impl LanguageService {
                 .collect();
             for env in dm.group_code_envs.values_mut() {
                 env.subject_keywords = code_subject_kw.clone();
+                env.retrieval_intent_text = text.to_string();
             }
 
             // --- Level 1: Competitive multi-head inference for code ---

@@ -1,6 +1,6 @@
 //! Built-in [`super::harness::BrainInferencePlugin`] implementations.
 
-mod lattice_shortcuts;
+pub mod lattice_shortcuts;
 
 pub use lattice_shortcuts::{
     format_retrieved_sentiment_line, LatticeShortcutsPlugin, TEMPLATE_ID_USER_ANCHORED, TOPIC_KEYS,

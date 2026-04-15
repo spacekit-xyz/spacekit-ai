@@ -18,7 +18,7 @@ brain_output = "../agent-data/sentiment-analysis/sentiment-brain-v3.bin"
 brain_plugins_toml = "../data/plugins/example-brain-plugins.toml"
 
 [inference]
-toml = "../data/sentiment/inference_sentiment.toml"
+toml = "../data/sentiment/inference_sentiment_reference.toml"
 
 [infer]
 brain = "../agent-data/sentiment-analysis/sentiment-brain-v3.bin"
