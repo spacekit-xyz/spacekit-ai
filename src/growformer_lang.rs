@@ -12,25 +12,29 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Once, OnceLock};
 
 use crate::topic_graph::TopicGraph;
 
 static TOPIC_GRAPH: OnceLock<TopicGraph> = OnceLock::new();
 
+static LEGACY_OPERATION_TOPIC_WARN: Once = Once::new();
+
 /// Overlay merged after the base graph when both exist (same directory as `base_path`).
 const SENTIMENT_OVERLAY_FILENAME: &str = "knowledge_graph_sentiment_overlay.toml";
 
 /// Initialize the global TopicGraph from a TOML file.
-/// Called once at startup. If the file is not found, functions fall back
-/// to the legacy hardcoded rules (which should not happen in production).
+/// Called once at startup. If the file is not found, [`infer_operation_topic`] falls back to
+/// legacy keyword rules and emits a one-time `eprintln` diagnostic.
 pub fn init_topic_graph(toml_path: &str) -> Result<(), String> {
     let graph = TopicGraph::from_file(toml_path)?;
     TOPIC_GRAPH.set(graph).map_err(|_| "TopicGraph already initialized".to_string())
 }
 
 /// Load `base_path` and merge `knowledge_graph_sentiment_overlay.toml` from the same directory
-/// when present. If only the overlay exists, loads the overlay alone. No-op if neither exists.
+/// when present. If only the overlay exists, loads the overlay alone.
+/// Returns `Ok(())` with **no graph installed** if neither file exists (callers should use
+/// [`topic_graph_loaded`] before `--infer`).
 pub fn try_init_topic_graph_bundle(base_path: &str) -> Result<(), String> {
     let base_p = std::path::Path::new(base_path);
     let overlay_pb = base_p
@@ -71,6 +75,13 @@ pub fn init_topic_graph_from_str(toml_str: &str) -> Result<(), String> {
 /// Get a reference to the global TopicGraph, if initialized.
 pub fn topic_graph() -> Option<&'static TopicGraph> {
     TOPIC_GRAPH.get()
+}
+
+/// `true` after a successful [`try_init_topic_graph_bundle`], [`init_topic_graph`], or
+/// [`init_topic_graph_from_str`]. `false` when neither knowledge graph file existed.
+#[inline]
+pub fn topic_graph_loaded() -> bool {
+    TOPIC_GRAPH.get().is_some()
 }
 
 use crate::clifford::{
@@ -967,16 +978,23 @@ pub fn is_broad_query(text: &str) -> bool {
 /// This is finer-grained than `infer_concept` and is used as the `topic_hint` for
 /// within-group discrimination via topic sub-lattices.
 ///
-/// Delegates to the TopicGraph knowledge graph when initialized;
-/// falls back to legacy hardcoded rules otherwise.
+/// Delegates to [`TopicGraph`] (`data/knowledge_graph.toml` + optional overlay) when initialized.
+/// Otherwise uses [`infer_operation_topic_legacy`] and prints a **one-time** `eprintln` hint.
 pub fn infer_operation_topic(text: &str) -> Option<String> {
     if let Some(graph) = TOPIC_GRAPH.get() {
         return graph.infer_topic(text);
     }
-    // Legacy fallback (should not be reached in production)
+    LEGACY_OPERATION_TOPIC_WARN.call_once(|| {
+        eprintln!(
+            "[growformer] TopicGraph not loaded; infer_operation_topic uses legacy keyword rules. \
+Install data/knowledge_graph.toml (CLI and server call try_init_topic_graph_bundle at startup)."
+        );
+    });
     infer_operation_topic_legacy(text)
 }
 
+/// Last-resort keyword ladder when no [`TopicGraph`] is loaded (tests, misconfigured deploy).
+/// **Do not add production rules here** — extend `data/knowledge_graph.toml` instead.
 fn infer_operation_topic_legacy(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
 
@@ -1119,7 +1137,30 @@ fn infer_operation_topic_legacy(text: &str) -> Option<String> {
     if lower.contains("circuit breaker") || lower.contains("bulkhead") || lower.contains("resilience pattern") {
         return Some("resilience_patterns".into());
     }
-    if lower.contains("consensus") || lower.contains("raft") || lower.contains("paxos") || lower.contains("zab") {
+    // Bare "paxos" matches Paxos Labs (fintech); require CS context or exclude company phrases.
+    let paxos_company = lower.contains("paxos labs")
+        || lower.contains("paxos trust")
+        || lower.contains("paxos global")
+        || lower.contains("paxos stablecoin")
+        || lower.contains("paxos inc")
+        || lower.contains("paxos usd")
+        || lower.contains("paxos dollar");
+    let paxos_distributed = lower.contains("paxos")
+        && !paxos_company
+        && (lower.contains("protocol")
+            || lower.contains("algorithm")
+            || lower.contains("replication")
+            || lower.contains("distributed")
+            || lower.contains("leader")
+            || lower.contains("quorum")
+            || lower.contains("multi-paxos")
+            || lower.contains("two-phase")
+            || (lower.contains("explain") && lower.contains("paxos")));
+    if lower.contains("consensus") && !paxos_company
+        || lower.contains("raft")
+        || paxos_distributed
+        || lower.contains("zab")
+    {
         return Some("consensus_algorithms".into());
     }
     if lower.contains("multi-tenant") || lower.contains("multi tenant") || lower.contains("tenancy") {

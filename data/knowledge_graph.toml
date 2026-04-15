@@ -327,8 +327,26 @@ topic = "consensus_algorithms"
 concept = "TraitInterface"
 category = "architecture"
 priority = 15
+# Bare "paxos" matches Paxos Labs (fintech). Prefer phrases; use `not` for company / product disambiguators.
+[[nodes.rules]]
+any = ["raft", "zab", "distributed consensus", "consensus protocol", "consensus algorithm", "multi-paxos", "viewstamped replication", "byzantine fault", "pbft"]
 [[nodes.rules]]
 any = ["consensus", "raft", "paxos", "zab"]
+not = ["paxos labs", "paxos trust", "paxos global", "paxos stablecoin", "paxos dollar", "paxos usd", "paxos inc", "paxos pax", "paxos gold"]
+[[nodes.rules]]
+all = ["paxos", "protocol"]
+[[nodes.rules]]
+all = ["paxos", "algorithm"]
+[[nodes.rules]]
+all = ["paxos", "replication"]
+[[nodes.rules]]
+all = ["paxos", "distributed"]
+[[nodes.rules]]
+all = ["paxos", "leader"]
+[[nodes.rules]]
+all = ["paxos", "quorum"]
+[[nodes.rules]]
+all = ["explain", "paxos"]
 
 [[nodes]]
 topic = "multi_tenancy"

@@ -1,6 +1,8 @@
-//! Embedded English lexicon for sentiment lattice generation (`IndexedGenEnv`):
+//! Embedded locale lexicon for sentiment lattice generation (`IndexedGenEnv`):
 //! witness weak-forms, excerpt stops, topic hints, routing-only coarse map, display labels,
-//! hard-reject substrings, and the prompt-anchor marker string.
+//! **`hard_reject_substrings`** (substring match on ASCII-lowercased text; put lattice / Hopf
+//! cross-domain soup phrases here rather than English conjunctions in Rust), and the
+//! prompt-anchor marker string.
 //!
 //! Source: `data/sentiment/sentiment_generation_lexicon.toml`. Add `[locales.fr]` etc. when needed.
 
@@ -20,6 +22,9 @@ struct LocaleSentimentGenLex {
     #[serde(default)]
     display_labels: HashMap<String, String>,
     hard_reject_substrings: Vec<String>,
+    /// `topic_key` → rationale body when `lexical_polarity_override` wins in lattice shortcuts.
+    #[serde(default)]
+    lattice_lexical_override_bodies: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,6 +51,7 @@ pub struct SentimentGenerationLexicon {
     routing_coarse: HashMap<String, String>,
     display_labels: HashMap<String, String>,
     hard_reject_substrings: Vec<String>,
+    lattice_lexical_override_bodies: HashMap<String, String>,
 }
 
 impl SentimentGenerationLexicon {
@@ -77,6 +83,11 @@ impl SentimentGenerationLexicon {
                 .map(|(k, v)| (k.to_ascii_lowercase(), v))
                 .collect(),
             hard_reject_substrings: loc.hard_reject_substrings,
+            lattice_lexical_override_bodies: loc
+                .lattice_lexical_override_bodies
+                .into_iter()
+                .map(|(k, v)| (k.to_ascii_lowercase(), v))
+                .collect(),
         }
     }
 
@@ -160,6 +171,14 @@ impl SentimentGenerationLexicon {
             text_lower.contains(sl.as_str())
         })
     }
+
+    /// Rationale body for user-anchored line when longest `lexical_polarity` match overrides meta topic.
+    #[inline]
+    pub fn lattice_lexical_override_body(&self, topic_key: &str) -> Option<&str> {
+        self.lattice_lexical_override_bodies
+            .get(&topic_key.trim().to_ascii_lowercase())
+            .map(|s| s.as_str())
+    }
 }
 
 static EMBEDDED: OnceLock<SentimentGenerationLexicon> = OnceLock::new();
@@ -218,5 +237,12 @@ mod tests {
         assert!(g.hard_reject_lexicon_substrings("[mask]xx"));
         let paxos_garble = "consensus algorithms — corporate- hr funding; fast behavior reporting a neutral frustration,- news,'.";
         assert!(g.hard_reject_lexicon_substrings(&paxos_garble.to_ascii_lowercase()));
+        assert!(g.hard_reject_lexicon_substrings("average operation — classic stop of public grievance"));
+        assert!(g
+            .lattice_lexical_override_body("neutral")
+            .is_some_and(|s| !s.is_empty()));
+        assert!(g
+            .lattice_lexical_override_body("mixed")
+            .is_some_and(|s| !s.is_empty()));
     }
 }

@@ -319,6 +319,18 @@ fn strip_outer_wrapping_quotes(line: &str) -> String {
     chars[1..chars.len() - 1].iter().collect::<String>().trim().to_string()
 }
 
+/// Heuristic: prompt text often seen after zsh/bash expands `$12` / `$74` inside double-quoted `--prompt "..."`.
+/// The binary receives mangled text; retrieval and witness checks then misbehave.
+fn shell_dollar_expansion_likely_corruption(prompt: &str) -> bool {
+    let lower = prompt.to_ascii_lowercase();
+    lower.contains(" secures m for ")
+        || lower.contains("jumps to ,0")
+        || lower.contains("jumped to ,0")
+        || lower.contains("rally to ,0")
+        || lower.contains("hits ,0")
+        || lower.contains("hit ,0")
+}
+
 fn resolve_infer_mode(args: &Args) -> Result<InferMode, String> {
     if let Some(path) = &args.prompts_file {
         let s = std::fs::read_to_string(path)
@@ -415,6 +427,11 @@ fn main() {
     let kg_path = "data/knowledge_graph.toml";
     if let Err(e) = growformer::growformer_lang::try_init_topic_graph_bundle(kg_path) {
         eprintln!("Warning: failed to load topic graph: {}", e);
+    } else if args.infer && !growformer::growformer_lang::topic_graph_loaded() {
+        eprintln!(
+            "Warning: topic graph not loaded (missing `{}` and no `knowledge_graph_sentiment_overlay.toml` in the same directory). Operation-topic routing uses legacy rules; add the graph for production inference.",
+            kg_path
+        );
     }
 
     if args.train_brain || args.validate_brain_training {
@@ -720,6 +737,10 @@ fn retrain_single_gen(
         &gen_pairs,
         0.85,
     );
+    const TOPIC_AUTOGAMY_MERGE: f32 = 0.96;
+    for topic in &mut indexed_env.topic_subindex {
+        topic.lattice.autogamy(TOPIC_AUTOGAMY_MERGE);
+    }
     indexed_env.freeze();
     println!("  Indexed gen g{}: {} lattice programs, frozen", target_group, indexed_env.program_count());
 
@@ -810,8 +831,16 @@ fn run_inference(brain_path: &str, mode: InferMode) -> Result<(), String> {
 /// `skip_duplicate_prompt_echo`: when true, the caller already printed the prompt (batch mode).
 fn run_single_prompt(rt: &mut growformer::runtime::Runtime, prompt: &str, skip_duplicate_prompt_echo: bool) {
     let trace = growformer::infer_log::infer_trace_enabled();
-    if trace && !skip_duplicate_prompt_echo {
-        println!("\n--- prompt ---\n{}", prompt);
+    if trace {
+        if shell_dollar_expansion_likely_corruption(prompt) {
+            println!(
+                "  [input-warn] This prompt matches common shell `$` expansion artifacts (double-quoted --prompt). \
+Use single quotes, --prompt-file, or escape dollars (e.g. \\$12). See --help for --prompt."
+            );
+        }
+        if !skip_duplicate_prompt_echo {
+            println!("\n--- prompt ---\n{}", prompt);
+        }
     }
     match rt.prompt(prompt) {
         Ok(resp) => {
@@ -2190,6 +2219,12 @@ fn train_brain(
                 })
                 .collect();
             let mut env = IndexedGenEnv::from_tagged_parts(dict, cb, hopf, &training_pairs, spawn_threshold);
+            // Within-topic merge of near-duplicate exemplars (embedding grokking / compression).
+            // Root `env.lattice` stays unmerged here to avoid collapsing unlike programs.
+            const TOPIC_AUTOGAMY_MERGE: f32 = 0.96;
+            for topic in &mut env.topic_subindex {
+                topic.lattice.autogamy(TOPIC_AUTOGAMY_MERGE);
+            }
             env.freeze();
             println!(
                 "  gen[g{}]: {} lattice programs, {} topic sub-lattices, frozen",
@@ -2224,6 +2259,10 @@ fn train_brain(
                 })
                 .collect();
             let mut env = IndexedGenEnv::from_tagged_parts(dict, cb, hopf, &training_pairs, spawn_threshold);
+            const TOPIC_AUTOGAMY_MERGE: f32 = 0.96;
+            for topic in &mut env.topic_subindex {
+                topic.lattice.autogamy(TOPIC_AUTOGAMY_MERGE);
+            }
             env.freeze();
             println!(
                 "  code[g{}]: {} lattice programs, {} topic sub-lattices, frozen",

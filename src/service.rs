@@ -1327,10 +1327,30 @@ impl LanguageService {
                             .is_some_and(|t| t.eq_ignore_ascii_case("mixed"))
                         && !infer_rules_rt.sentiment_allow_forced_mixed_topic(intent_text)
                     {
-                        infer_trace!(
-                            "  [topic-mixed-guard] clearing 'mixed' (no contrast marker + no bipolar lexicon)"
+                        let n = crate::inference::inference_toml::InferenceRulesRuntime::normalize_rules_text(
+                            intent_text,
                         );
-                        topic_hint = None;
+                        if infer_rules_rt.lexical_polarity_signal(&n).is_none() {
+                            infer_trace!(
+                                "  [topic-mixed-guard] clearing 'mixed' (no contrast marker + no bipolar lexicon)"
+                            );
+                            topic_hint = None;
+                        }
+                    }
+                    // Longest `[[rules.lexical_polarity]]` rows can justify MIXED without MetaBrain's
+                    // contrast/bipolar heuristics — restore a seven-topic hint so user-anchored preempt runs.
+                    let n = crate::inference::inference_toml::InferenceRulesRuntime::normalize_rules_text(
+                        intent_text,
+                    );
+                    if let Some(k) = infer_rules_rt.lexical_polarity_signal(&n) {
+                        let k_ok = lattice_shortcuts::TOPIC_KEYS.iter().any(|t| *t == k.as_str());
+                        if k_ok {
+                            let th = topic_hint.as_deref();
+                            let th_ok = th.is_some_and(|t| lattice_shortcuts::TOPIC_KEYS.iter().any(|x| *x == t));
+                            if !th_ok {
+                                topic_hint = Some(k);
+                            }
+                        }
                     }
                 }
             }
@@ -1597,10 +1617,16 @@ impl LanguageService {
                 }
             };
 
-            if best_text.len() > 5
-                && apply_toml_lexical
-                && lattice_shortcuts::generation_env_looks_like_sentiment(dm, best_gidx)
-            {
+            // Sanitize lattice/Hopf surface text when TOML headline sentiment is active. Quantum
+            // blend can set `best_gidx` to a non-sentiment group while `group_idx` is the sentiment
+            // lattice — skipping here let cross-group fragment soup (e.g. "Consensus Algorithms — …")
+            // through because `generation_env_looks_like_sentiment(dm, best_gidx)` was false.
+            let sentiment_sanitize_primary = apply_toml_lexical
+                && sentiment_lattice_gidx.is_some_and(|sg| {
+                    lattice_shortcuts::generation_env_looks_like_sentiment(dm, best_gidx)
+                        || group_idx == Some(sg)
+                });
+            if best_text.len() > 5 && sentiment_sanitize_primary {
                 let head: String = best_text.chars().take(1200).collect();
                 let hard = IndexedGenEnv::lattice_surface_hard_reject(&head);
                 let lattice_misfire = infer_rules_rt.lattice_response_misfire_hit(intent_text, &head);
@@ -1615,10 +1641,12 @@ impl LanguageService {
                     {
                         best_text = canned;
                         best_conf = 0.88;
-                    } else if let Some(env) = dm.group_gen_envs.get(&best_gidx) {
-                        let (fb, fc) = env.sentiment_routing_only_fallback_line(topic_hint.as_deref());
-                        best_text = fb;
-                        best_conf = fc;
+                    } else if let Some(sg) = sentiment_lattice_gidx {
+                        if let Some(env) = dm.group_gen_envs.get(&sg) {
+                            let (fb, fc) = env.sentiment_routing_only_fallback_line(topic_hint.as_deref());
+                            best_text = fb;
+                            best_conf = fc;
+                        }
                     }
                 }
             }
@@ -1754,19 +1782,20 @@ impl LanguageService {
                 || resp.template_id == TEMPLATE_ID_USER_ANCHORED;
             let eff_g_for_sentiment = retry_effective_gidx.or(group_idx).unwrap_or(0);
 
-            // P0-02: skip System 2 for sentiment-scoped runs. Deliberate cross-group
-            // retrieve/transfer/compose can splice non-sentiment lattice programs (e.g. coding)
-            // into the rationale while the stance stays sentiment — garbage explanations.
-            let skip_system2_for_sentiment_scoped = skip_system2_for_sentiment_scoped_run(
+            // P0-02 / cross-group reasoning: skip System 2 **and** System 1.5 wave `reason()`
+            // for sentiment-scoped runs. Both paths activate all `group_gen_envs` and can splice
+            // unrelated programs (e.g. "Consensus Algorithms…" from architecture training) into
+            // fintech sentiment rationales.
+            let skip_cross_group_reasoning_for_sentiment = skip_system2_for_sentiment_scoped_run(
                 dm_ref,
                 inference_profile_opt,
                 group_idx,
                 retry_effective_gidx,
                 topic_hint.as_deref(),
             );
-            if skip_system2_for_sentiment_scoped {
+            if skip_cross_group_reasoning_for_sentiment {
                 infer_trace!(
-                    "  [system2] SKIP: sentiment-scoped run (lattice topic and/or TOML lexical path + sentiment group)"
+                    "  [reasoning] SKIP cross-group System 1.5/2: sentiment-scoped run (topic hint and/or TOML lexical + sentiment lattice group)"
                 );
             }
 
@@ -1774,7 +1803,7 @@ impl LanguageService {
             // When broad_summary already produced a within-group composition, trust it —
             // System 2 cross-group retrieval would mix in unrelated domains.
             if broad_summary.is_none()
-                && !skip_system2_for_sentiment_scoped
+                && !skip_cross_group_reasoning_for_sentiment
                 && reasoning.should_reason_deliberate_ext(
                     &cond,
                     resp.confidence,
@@ -1827,7 +1856,10 @@ impl LanguageService {
                 }
             }
             // System 1.5: wave settling for low-confidence short responses
-            else if resp.confidence < 0.50 && resp.text.len() < 20 {
+            else if resp.confidence < 0.50
+                && resp.text.len() < 20
+                && !skip_cross_group_reasoning_for_sentiment
+            {
                 if reasoning.should_reason(&cond, resp.confidence, &dm_ref.group_gen_envs) {
                     let result = reasoning.reason(&cond, &dm_ref.group_gen_envs, &dm_ref.group_rotors);
                     if result.confidence > resp.confidence && result.text.len() > 10 {

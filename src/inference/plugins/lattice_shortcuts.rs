@@ -30,7 +30,11 @@ pub const TOPIC_KEYS: &[&str] = &[
     "mixed",
 ];
 
-/// True when the checkpoint exposes exactly the standard seven-topic sub-lattice in one group.
+/// True when the checkpoint is a single-group sentiment pack that includes every **standard**
+/// seven-topic sub-lattice name (the historical micro-brain layout).
+///
+/// Extra topics (expanded taxonomies) are allowed — they must not disable user-anchored preempt
+/// or weak-GK shortcuts as long as the seven keys remain present.
 pub fn is_lattice_shape(dm: &DimensionManager) -> bool {
     if dm.group_gen_envs.len() != 1 {
         return false;
@@ -38,7 +42,7 @@ pub fn is_lattice_shape(dm: &DimensionManager) -> bool {
     let Some(env) = dm.group_gen_envs.values().next() else {
         return false;
     };
-    if env.topic_subindex.len() != TOPIC_KEYS.len() {
+    if env.topic_subindex.len() < TOPIC_KEYS.len() {
         return false;
     }
     let names: HashSet<String> = env
@@ -267,6 +271,8 @@ fn normalize_match_text(text: &str) -> String {
     let mut s = text.to_lowercase();
     s = s.replace('\u{2019}', "'");
     s = s.replace('\u{2018}', "'");
+    s = s.replace('\u{2014}', "-");
+    s = s.replace('\u{2013}', "-");
     s
 }
 
@@ -311,7 +317,12 @@ pub fn try_user_anchored_line(
     }
 
     let lex_polar = rules.lexical_polarity_signal(&lower);
-    if mr.confidence < cfg.min_meta_confidence_user_anchored && lex_polar.is_none() {
+    let mixed_structurally_ok = th.eq_ignore_ascii_case("mixed")
+        && rules.sentiment_allow_forced_mixed_topic(intent_text);
+    if mr.confidence < cfg.min_meta_confidence_user_anchored
+        && lex_polar.is_none()
+        && !mixed_structurally_ok
+    {
         return None;
     }
     let contrast = rules.has_contrastive_marker(&lower);
@@ -369,7 +380,29 @@ pub fn try_user_anchored_line(
         trimmed.to_string()
     };
 
-    let (body, conf) = if key.as_str() == "mixed" {
+    let (body, conf) = if key.as_str() == "mixed" && lexical_polarity_override {
+        let lex = crate::inference::sentiment_generation_lexicon::global();
+        let explain = lex
+            .lattice_lexical_override_body("mixed")
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                if contrast && bipolar {
+                    "Contrastive marker (e.g. 'but') with both laudatory and critical wording — dual valence (MIXED), not a single pole"
+                } else {
+                    "Positive and negative cues both appear; overall read is MIXED"
+                }
+                .to_string()
+            });
+        (
+            explain,
+            if force_mixed {
+                cfg.mixed_override_confidence
+            } else {
+                cfg.default_line_confidence
+            },
+        )
+    } else if key.as_str() == "mixed" {
         let explain = if contrast && bipolar {
             "Contrastive marker (e.g. 'but') with both laudatory and critical wording — dual valence (MIXED), not a single pole"
         } else {
@@ -401,17 +434,18 @@ pub fn try_user_anchored_line(
             cfg.ambiguous_line_confidence,
         )
     } else if lexical_polarity_override {
-        let explain = if key.as_str() == "positive_strong" {
-            "Strong positive idiom (e.g. 'blew me away') — read as enthusiastic praise despite weak topic scores"
-        } else {
-            "Clear non-repeat / rejection stance (e.g. wouldn't buy again) — negative on the product or experience, not praise"
-        };
+        let lex = crate::inference::sentiment_generation_lexicon::global();
+        let explain = lex
+            .lattice_lexical_override_body(key.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| key.clone());
         let c = if key.as_str() == "positive_strong" {
             cfg.default_line_confidence
         } else {
             cfg.ambiguous_line_confidence
         };
-        (explain.to_string(), c)
+        (explain, c)
     } else {
         let anchor = rules.anchor_phrase(&lower, key.as_str());
         let tone = match key.as_str() {

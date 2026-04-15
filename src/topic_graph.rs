@@ -468,6 +468,46 @@ BinaryArithmetic = ["add two", "calculator"]
         assert_eq!(g.infer_topic("explain quantum mechanics"), None);
     }
 
+    /// Paxos Labs (company) must not hit `consensus_algorithms` via bare "paxos" (regression).
+    #[test]
+    fn test_infer_topic_paxos_labs_skips_consensus_algorithms() {
+        let toml = r#"
+[[nodes]]
+topic = "consensus_algorithms"
+concept = "TraitInterface"
+category = "architecture"
+priority = 15
+[[nodes.rules]]
+any = ["raft", "zab", "distributed consensus", "consensus protocol", "consensus algorithm", "multi-paxos", "viewstamped replication", "byzantine fault", "pbft"]
+[[nodes.rules]]
+any = ["consensus", "raft", "paxos", "zab"]
+not = ["paxos labs", "paxos trust", "paxos global", "paxos stablecoin", "paxos dollar", "paxos usd", "paxos inc", "paxos pax", "paxos gold"]
+[[nodes.rules]]
+all = ["paxos", "protocol"]
+[[nodes.rules]]
+all = ["paxos", "algorithm"]
+[[nodes.rules]]
+all = ["paxos", "replication"]
+[[nodes.rules]]
+all = ["paxos", "distributed"]
+[[nodes.rules]]
+all = ["paxos", "leader"]
+[[nodes.rules]]
+all = ["paxos", "quorum"]
+[[nodes.rules]]
+all = ["explain", "paxos"]
+"#;
+        let g = TopicGraph::from_toml(toml).unwrap();
+        assert_eq!(
+            g.infer_topic("Paxos Labs secured 12M USD for crypto yield platform Amplify"),
+            None
+        );
+        assert_eq!(
+            g.infer_topic("Explain the Paxos protocol for distributed consensus"),
+            Some("consensus_algorithms".into())
+        );
+    }
+
     #[test]
     fn test_infer_concept_with_action_target() {
         let g = test_graph();

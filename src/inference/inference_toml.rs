@@ -835,7 +835,7 @@ impl InferenceRulesRuntime {
 
     /// Open-finance / inclusion headline: redirect to sentiment lattice + knowledge-floor bypass.
     pub fn sentiment_inclusion_open_finance_headline_positive_raw(&self, intent_text: &str) -> bool {
-        let lower = Self::normalize_for_rules(intent_text);
+        let lower = Self::normalize_rules_text(intent_text);
         let l = lower.as_str();
         self.headline_lexical_topic.iter().any(|r| {
             r.inclusion_redirect && self.headline_rule_matches(r, l)
@@ -847,7 +847,7 @@ impl InferenceRulesRuntime {
         if self.sentiment_inclusion_open_finance_headline_positive_raw(intent_text) {
             return true;
         }
-        let lower = Self::normalize_for_rules(intent_text);
+        let lower = Self::normalize_rules_text(intent_text);
         let s = lower.as_str();
         if s.contains("criticizing")
             && s.contains("trump")
@@ -889,17 +889,20 @@ impl InferenceRulesRuntime {
         best.map(|(_, t)| t)
     }
 
-    /// Lowercase + curly apostrophe normalization (keep aligned with `lattice_shortcuts`).
-    fn normalize_for_rules(text: &str) -> String {
+    /// Lowercase + curly apostrophe + dash normalization (keep aligned with `lattice_shortcuts`).
+    pub fn normalize_rules_text(text: &str) -> String {
         let mut s = text.to_lowercase();
         s = s.replace('\u{2019}', "'");
         s = s.replace('\u{2018}', "'");
+        s = s.replace('\u{2014}', "-"); // em dash
+        s = s.replace('\u{2013}', "-"); // en dash
         s
     }
 
     /// Sub-lattice topic key from inference TOML only (no MetaBrain).
     ///
-    /// Brains with expanded topic taxonomies fail [`crate::inference::plugins::lattice_shortcuts::is_lattice_shape`],
+    /// Brains missing any of the seven standard topic keys fail [`crate::inference::plugins::lattice_shortcuts::is_lattice_shape`];
+    /// expanded taxonomies with **extra** topics still qualify when all seven keys are present,
     /// so **user-anchored lattice preempt** does not run — but Layer‑0 keyword expansion and embedding
     /// routing still apply. Embedding routing can still follow domain
     /// words (e.g. “fee”) into a negative sub-lattice while the user clearly praises (“I love …”).
@@ -920,7 +923,7 @@ impl InferenceRulesRuntime {
     /// Phrase-level routing uses `[[rules.headline_lexical_topic]]` with optional `after_pr_wire`,
     /// `exclude_first_person`, `unless_any_cnf`, etc. (see [`HeadlineLexicalTopicRule`]).
     pub fn sentiment_lexical_topic_key(&self, intent_text: &str) -> Option<String> {
-        let lower = Self::normalize_for_rules(intent_text);
+        let lower = Self::normalize_rules_text(intent_text);
         let lower = lower.as_str();
 
         if let Some(t) = self.scan_headline_lexical_topic(lower, false) {
@@ -1032,7 +1035,7 @@ impl InferenceRulesRuntime {
     /// either a contrastive marker or both polarities in the bipolar lexicon avoids enumerating every
     /// praise adjective in TOML.
     pub fn sentiment_allow_forced_mixed_topic(&self, intent_text: &str) -> bool {
-        let lower = Self::normalize_for_rules(intent_text);
+        let lower = Self::normalize_rules_text(intent_text);
         let l = lower.as_str();
         self.has_contrastive_marker(l)
             || self.has_bipolar_lexicon(l)
@@ -1047,7 +1050,7 @@ impl InferenceRulesRuntime {
 
     /// True when a composed line matches any `[[rules.lattice_misfire]]` row (intent ∧ response side).
     pub fn lattice_response_misfire_hit(&self, intent_text: &str, response: &str) -> bool {
-        let il = Self::normalize_for_rules(intent_text);
+        let il = Self::normalize_rules_text(intent_text);
         let l = il.as_str();
         let rl = response.to_ascii_lowercase();
         let rls = rl.as_str();
@@ -1059,7 +1062,7 @@ impl InferenceRulesRuntime {
     /// After a lattice misfire strips a bad retrieved line, substitute a short canned witness when
     /// the intent shape is unambiguous (avoids routing-only for Kraken IPO vs M&A-stake collisions).
     pub fn sentiment_lattice_misfire_replacement_line(&self, intent_text: &str) -> Option<String> {
-        let lower = Self::normalize_for_rules(intent_text);
+        let lower = Self::normalize_rules_text(intent_text);
         let l = lower.as_str();
         if l.contains("kraken") && l.contains("ipo") {
             return Some(
@@ -1102,7 +1105,7 @@ impl InferenceRulesRuntime {
     /// True when intent reads as direct consumer speech (my account, I want, we need).
     /// Third-party wire headlines return false so headline TOML can route to the sentiment lattice.
     pub fn looks_like_first_person_finance_intent(&self, intent_text: &str) -> bool {
-        let lower = Self::normalize_for_rules(intent_text).to_lowercase();
+        let lower = Self::normalize_rules_text(intent_text);
         Self::looks_like_first_person_finance_user(lower.as_str())
     }
 
@@ -1155,7 +1158,7 @@ impl InferenceRulesRuntime {
 
     /// Detects PR / wire copy that should use a neutral sentiment bucket (actual topic name may be `neutral_chop`, resolved in `LanguageService`).
     pub fn sentiment_pr_wire_neutral_key(&self, intent_text: &str) -> Option<String> {
-        let lower = Self::normalize_for_rules(intent_text);
+        let lower = Self::normalize_rules_text(intent_text);
         self.sentiment_fintech_press_headline_topic_key(lower.as_str())
     }
 
@@ -1409,6 +1412,9 @@ impl InferenceRulesRuntime {
                     return None;
                 }
                 for w in &self.positive_anchor_tokens {
+                    if w == "like" && self.like_token_is_perception_idiom(lower) {
+                        continue;
+                    }
                     if tokens.contains(w.as_str()) {
                         let wl = w.to_ascii_lowercase();
                         let gloss = self
@@ -1710,6 +1716,15 @@ mod negation_tests {
         assert!(rules.lattice_response_misfire_hit(bank_intent, bank_resp));
     }
 
+    #[test]
+    fn reference_headline_sunset_average_instagram_neutral() {
+        let raw = include_str!("../../data/sentiment/inference_sentiment_reference.toml");
+        let doc: InferenceTomlDocument = toml::from_str(raw).expect("fixture TOML");
+        let rules = InferenceRulesRuntime::from_section(doc.rules);
+        let h = "The sunset was average. Just orange. Not everything has to be Instagram-worthy.";
+        assert_eq!(rules.sentiment_lexical_topic_key(h).as_deref(), Some("neutral"));
+    }
+
     /// Default discovery merges core then fintech into empty `[rules]` slots; this mirrors that chain.
     #[test]
     fn merge_empty_from_chain_fills_fintech_headlines_after_core() {
@@ -1920,6 +1935,32 @@ mod negation_tests {
         let lower = "i don't like using google";
         assert!(rules.negated_eval_phrase_hit(lower));
         assert!(rules.anchor_phrase(lower, "positive_mild").is_none());
+    }
+
+    #[test]
+    fn anchor_skips_like_in_feels_like_idiom() {
+        let raw = include_str!("../../data/sentiment/inference_sentiment_reference.toml");
+        let doc: InferenceTomlDocument = toml::from_str(raw).expect("fixture TOML");
+        let rules = InferenceRulesRuntime::from_section(doc.rules);
+        let lower = InferenceRulesRuntime::normalize_rules_text(
+            "Nothing happened today. Genuinely nothing. And somehow that feels like exactly what I needed.",
+        );
+        assert!(rules.anchor_phrase(&lower, "positive_mild").is_none());
+    }
+
+    #[test]
+    fn lexical_polarity_long_mixed_rows_match_core_phrases() {
+        let raw = include_str!("../../data/sentiment/inference_sentiment_core.toml");
+        let doc: InferenceTomlDocument = toml::from_str(raw).expect("core TOML");
+        let rules = InferenceRulesRuntime::from_section(doc.rules);
+        let acting = InferenceRulesRuntime::normalize_rules_text(
+            "The acting was fine. The script was fine. The direction was fine. Nothing about it was memorable.",
+        );
+        assert_eq!(rules.lexical_polarity_signal(&acting).as_deref(), Some("mixed"));
+        let zec = InferenceRulesRuntime::normalize_rules_text(
+            "ZEC is either misunderstood or obsolete — I can't tell which anymore.",
+        );
+        assert_eq!(rules.lexical_polarity_signal(&zec).as_deref(), Some("mixed"));
     }
 
     #[test]

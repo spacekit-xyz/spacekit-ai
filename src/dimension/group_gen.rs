@@ -3156,12 +3156,34 @@ impl IndexedGenEnv {
 
     /// True when the joint lattice row's indexed user prefix contains enough subject
     /// keywords from the current prompt (so the rationale is not from another headline).
-    fn sentiment_witness_matches_subject_keywords(joint_body: &str, query_terms: &[String]) -> bool {
+    ///
+    /// When `intent_ascii_lower` is set, only query terms that appear as substrings of the
+    /// user line are used for the hit count. That keeps world-graph / causal expansion tokens
+    /// from inflating `required` while the witness prefix is still the training headline.
+    fn sentiment_witness_matches_subject_keywords(
+        joint_body: &str,
+        query_terms: &[String],
+        intent_ascii_lower: Option<&str>,
+    ) -> bool {
         use crate::dimension::language::{SENTIMENT_CAUSAL_INDEX_CORE, SENTIMENT_LATTICE_WITNESS_CORE};
         let lex = crate::inference::sentiment_generation_lexicon::global();
         if query_terms.len() < 2 {
             return true;
         }
+        let filtered_storage: Option<Vec<String>> = intent_ascii_lower
+            .filter(|il| !il.is_empty())
+            .map(|il| {
+                query_terms
+                    .iter()
+                    .filter(|t| il.contains(t.as_str()))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .and_then(|f| if f.len() >= 2 { Some(f) } else { None });
+        let terms: &[String] = match &filtered_storage {
+            Some(f) => f.as_slice(),
+            None => query_terms,
+        };
         let mut witness = joint_body
             .split(SENTIMENT_LATTICE_WITNESS_CORE)
             .next()
@@ -3171,7 +3193,7 @@ impl IndexedGenEnv {
         }
         let w = witness.to_ascii_lowercase();
         let mut forms: Vec<String> = Vec::new();
-        for qt in query_terms {
+        for qt in terms {
             forms.extend(Self::sentiment_keyword_match_forms(qt));
         }
         forms.sort();
@@ -3705,6 +3727,9 @@ impl IndexedGenEnv {
                         .unwrap_or(false)
                 }).unwrap_or(false);
 
+                let intent_lower = self.retrieval_intent_text.to_ascii_lowercase();
+                let intent_witness = (!intent_lower.is_empty()).then_some(intent_lower.as_str());
+
                 for &(idx, score) in &scored {
                     if score < 0.10 { break; }
                     let text = topic.lattice.programs[idx].display_text(&self.dictionary);
@@ -3733,7 +3758,11 @@ impl IndexedGenEnv {
                         }
                     }
                     if query_terms.len() >= 2
-                        && !Self::sentiment_witness_matches_subject_keywords(&text, &query_terms)
+                        && !Self::sentiment_witness_matches_subject_keywords(
+                            &text,
+                            &query_terms,
+                            intent_witness,
+                        )
                     {
                         let snippet: String = text.chars().take(40).collect();
                         crate::infer_trace!(
@@ -3973,6 +4002,8 @@ impl IndexedGenEnv {
         if t.match_indices("little details").count() >= 2 {
             return true;
         }
+        // Cross-domain / garbled lattice surface: English phrases live in
+        // `data/sentiment/sentiment_generation_lexicon.toml` (`hard_reject_substrings`), not here.
         if t.contains("3d environment") && t.contains("neuron") {
             return true;
         }
@@ -4898,11 +4929,13 @@ mod tests {
             .collect();
         assert!(IndexedGenEnv::sentiment_witness_matches_subject_keywords(
             &joint_glimpse,
-            &terms_glimpse
+            &terms_glimpse,
+            None,
         ));
         assert!(!IndexedGenEnv::sentiment_witness_matches_subject_keywords(
             &joint_bolt,
-            &terms_glimpse
+            &terms_glimpse,
+            None,
         ));
 
         let terms_kalshi: Vec<String> = ["accountant", "jackpot", "kalshi", "doge", "betting"]
@@ -4919,12 +4952,50 @@ mod tests {
         );
         assert!(!IndexedGenEnv::sentiment_witness_matches_subject_keywords(
             &joint_court,
-            &terms_kalshi
+            &terms_kalshi,
+            None,
         ));
         assert!(IndexedGenEnv::sentiment_witness_matches_subject_keywords(
             &joint_bet,
-            &terms_kalshi
+            &terms_kalshi,
+            None,
         ));
+    }
+
+    /// World-graph tokens not present in the user line must not raise the witness bar so high
+    /// that a correct Kalshi headline row fails while unrelated rows are skipped.
+    #[test]
+    fn sentiment_witness_intent_filter_avoids_graph_dilution() {
+        use crate::dimension::language::sentiment_lattice_index_body;
+
+        let joint_bet = sentiment_lattice_index_body(
+            "An accountant won a big jackpot on Kalshi by betting against DOGE",
+            "NEUTRAL — Prediction-market anecdote.",
+        );
+        let mut terms_diluted: Vec<String> = ["accountant", "jackpot", "kalshi", "doge", "betting"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        for i in 0..14 {
+            terms_diluted.push(format!("zzgraphnoise_token_{i:02}_extra"));
+        }
+        let intent = "an accountant won a big jackpot on kalshi by betting against doge";
+        assert!(
+            !IndexedGenEnv::sentiment_witness_matches_subject_keywords(
+                &joint_bet,
+                &terms_diluted,
+                None,
+            ),
+            "diluted retrieval terms should fail the witness gate without intent filtering"
+        );
+        assert!(
+            IndexedGenEnv::sentiment_witness_matches_subject_keywords(
+                &joint_bet,
+                &terms_diluted,
+                Some(intent),
+            ),
+            "intent-filtered terms should match the Kalshi headline witness"
+        );
     }
 
     /// "even" alone must not let unrelated positive_strong rows pass the witness gate.
@@ -4943,7 +5014,9 @@ mod tests {
             SENTIMENT_LATTICE_WITNESS_CORE
         );
         assert!(!IndexedGenEnv::sentiment_witness_matches_subject_keywords(
-            &joint, &terms
+            &joint,
+            &terms,
+            None,
         ));
     }
 
@@ -6025,6 +6098,19 @@ mod tests {
             "Funding is negative but price holds; shorts may be trapped.",
             None,
             None
+        ));
+    }
+
+    #[test]
+    fn hard_rejects_consensus_algorithms_cross_domain_garble() {
+        let bad = "Consensus Algorithms — mildly growth- forward with- cautiously two-,-)..";
+        assert!(IndexedGenEnv::lattice_surface_hard_reject(bad));
+        let bad2 = "Consensus Algorithms — Bitcoin jumps are$ in selective' in attempt Wall Street";
+        assert!(IndexedGenEnv::lattice_surface_hard_reject(bad2));
+        let bad3 = "Consensus Algorithms — investors upward knocking a flat pullback Victim aggressive catalysts";
+        assert!(IndexedGenEnv::lattice_surface_hard_reject(bad3));
+        assert!(!IndexedGenEnv::lattice_surface_hard_reject(
+            "NEUTRAL — Venture funding for a yield product; institutional pipeline news."
         ));
     }
 

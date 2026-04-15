@@ -95,6 +95,11 @@ async fn main() {
         .unwrap_or_else(|_| "data/knowledge_graph.toml".to_string());
     if let Err(e) = growformer::growformer_lang::try_init_topic_graph_bundle(&kg_path) {
         eprintln!("Warning: failed to load topic graph: {}", e);
+    } else if !growformer::growformer_lang::topic_graph_loaded() {
+        eprintln!(
+            "Warning: topic graph not loaded from `{}`; operation-topic routing uses legacy rules.",
+            kg_path
+        );
     }
 
     // Auto-load trained brain(s)
