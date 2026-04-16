@@ -65,6 +65,8 @@ pub mod systems;
 pub mod brain;
 pub mod types;
 pub mod metacognition;
+/// Active Inference spine: belief, Markov blanket I/O, episode loop (Phases 0–3).
+pub mod active_inference;
 pub mod reasoning;
 pub mod inference;
 pub mod infer_log;

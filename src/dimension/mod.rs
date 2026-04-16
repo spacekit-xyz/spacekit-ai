@@ -19,6 +19,7 @@ pub mod observer;
 pub mod manager;
 pub mod tool;
 pub mod paramecium;
+pub mod polarity_probe;
 
 pub use composition::{EpisodicMemory, Episode, VirtualGroup};
 pub use action::{ActionJson, ActionType, action_from_routing};

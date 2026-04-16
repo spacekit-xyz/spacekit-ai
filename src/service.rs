@@ -5,6 +5,10 @@ use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::active_inference::{
+    belief_update_from_reflection, Action, BeliefState, EpisodePolicy, Observation, PolicyTurn,
+    QueuedEnvironment,
+};
 use crate::infer_trace;
 use crate::dimension::{
     action_type_one_hot, generate_code_from_action, group_id_one_hot, render_action_template, ActionJson,
@@ -609,6 +613,10 @@ pub struct LanguageService {
     pub brain_plugins_manifest: Option<BrainPluginsManifest>,
     /// Built-in inference plugins (sentiment lattice, etc.); extend via [`InferenceHarness::new`].
     pub inference_harness: InferenceHarness,
+    /// Active Inference internal belief; updated when MetaCognition runs (see [`belief_update_from_reflection`]).
+    pub active_inference_belief: BeliefState,
+    /// When [`Self::enable_active_inference_replay_log`] is used, each MetaCognition outcome is appended for offline replay.
+    pub active_inference_replay_log: Option<QueuedEnvironment>,
 }
 
 /// P0-02: when true, skip System 2 deliberate cross-group reasoning for this turn.
@@ -697,7 +705,19 @@ impl LanguageService {
             brain_package_header: None,
             brain_plugins_manifest: None,
             inference_harness: default_inference_harness(),
+            active_inference_belief: BeliefState::new(),
+            active_inference_replay_log: None,
         })
+    }
+
+    /// Start recording [`ReflectionOutcome`](crate::metacognition::ReflectionOutcome) as [`Observation`]s into a queue (see [`QueuedEnvironment`]).
+    pub fn enable_active_inference_replay_log(&mut self) {
+        self.active_inference_replay_log = Some(QueuedEnvironment::default());
+    }
+
+    /// Take the replay queue (stops recording until enabled again).
+    pub fn take_active_inference_replay_log(&mut self) -> Option<QueuedEnvironment> {
+        self.active_inference_replay_log.take()
     }
 
     /// Returns the DimensionManager used for inference (active named brain or fallback dm).
@@ -1960,6 +1980,10 @@ impl LanguageService {
                         topic_hint.as_deref(),
                         attempt,
                     );
+                    belief_update_from_reflection(&mut self.active_inference_belief, &outcome);
+                    if let Some(log) = self.active_inference_replay_log.as_mut() {
+                        log.push_reflection_outcome(&outcome);
+                    }
 
                     match outcome {
                         ReflectionOutcome::Accept { scores } => {
@@ -3511,6 +3535,41 @@ impl LanguageService {
                 modes_available: vec![AgentMode::ContextFile, AgentMode::MicroBrain],
             },
             passed,
+        }
+    }
+}
+
+/// [`EpisodePolicy`] that runs one full user turn through [`LanguageService::generation`]
+/// (routing, lattice generation, and the built-in MetaCognition retry loop when enabled).
+///
+/// For [`Observation::ReflectionCycle`], emits a trace line and completes the episode (replay path).
+pub struct RoutingGenerationMetacogEpisodePolicy<'a> {
+    pub service: &'a mut LanguageService,
+}
+
+impl<'a> EpisodePolicy for RoutingGenerationMetacogEpisodePolicy<'a> {
+    fn on_observation(
+        &mut self,
+        _belief: &mut BeliefState,
+        obs: &Observation,
+    ) -> PolicyTurn {
+        match obs {
+            Observation::UserText(text) => match self.service.generation(text) {
+                Ok((_action, resp)) => PolicyTurn::complete_after(vec![Action::Emit {
+                    text: resp.text,
+                }]),
+                Err(e) => PolicyTurn::complete_after(vec![Action::Emit {
+                    text: format!("[generation_error] {}", e),
+                }]),
+            },
+            Observation::ReflectionCycle { quality, terminal } => PolicyTurn::complete_after(vec![
+                Action::RecordTrace {
+                    message: format!(
+                        "reflection_replay quality={:.3} terminal={:?}",
+                        quality, terminal
+                    ),
+                },
+            ]),
         }
     }
 }

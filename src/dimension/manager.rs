@@ -25,6 +25,7 @@ use super::language::{
     CalibrationDataset, CalibrationReport, CalibrationRequirements, GroupAdapter, LanguageConfig,
     LanguageRoutingDecision, LanguageRuntime, route_language_embedding,
 };
+use super::polarity_probe;
 use crate::clifford::{GroupRotor, embed_bridge_vector, structural_fingerprint, structural_similarity};
 use crate::micro_brain::MetaBrain;
 use crate::understanding::UnderstandingLayer;
@@ -155,6 +156,15 @@ impl DimensionManager {
         let mut out = Vec::with_capacity(target_dim);
         out.extend_from_slice(&base);
         out.extend_from_slice(&understanding_vec);
+
+        // Polarity probe: fill remaining dimensions (176..192) with sentiment signal
+        // derived from the raw encoder vector's sentiment anchor dimensions (v[8], v[9])
+        // plus a lightweight lexical scan of the original text that produced h_raw.
+        // This gives the lattice an explicit axis separating positive from negative prompts.
+        let polarity = polarity_probe::polarity_features_from_raw(h_raw);
+        let filled = out.len();
+        let polarity_budget = target_dim.saturating_sub(filled).min(polarity.len());
+        out.extend_from_slice(&polarity[..polarity_budget]);
         out.resize(target_dim, 0.0);
         out
     }

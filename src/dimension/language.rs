@@ -396,6 +396,20 @@ impl LanguageEncoder for HashingLanguageEncoder {
             "adversarial", "noisy", "jailbreak", "prompt-injection", "ignore", "override",
             "garbled", "nonsense", "obfuscated",
         ];
+        // Sentiment anchors sourced from inference_sentiment_core.toml positive/negative_anchor_tokens.
+        let positive_sentiment_keywords = [
+            "love", "adore", "treasure", "obsessed", "enjoy", "like", "prefer", "best", "great",
+            "amazing", "wonderful", "fantastic", "excellent", "happy", "glad", "good", "nice",
+            "fine", "better", "beautiful", "incredible", "perfect",
+            "slick", "seamless", "snappy", "polished", "nifty",
+            "refunded", "reimbursed", "waived", "cleared", "approved", "resolved", "reversed",
+        ];
+        let negative_sentiment_keywords = [
+            "hate", "despise", "loathe", "awful", "terrible", "worst", "horrible", "bad",
+            "sucks", "disgusting", "dislike", "miserable", "depressing",
+            "declined", "overdraft", "frozen", "blocked", "bounced", "penalty",
+            "disappointing", "disappointed", "poor", "worse", "weak", "crash", "broken", "bug",
+        ];
         let stopwords = [
             "the", "a", "an", "and", "or", "to", "for", "of", "in", "on", "with", "is", "are",
             "this", "that", "please",
@@ -412,7 +426,38 @@ impl LanguageEncoder for HashingLanguageEncoder {
             if bytes.is_empty() {
                 continue;
             }
-            if dim >= 8 {
+            if dim >= 10 {
+                if customer_support_keywords.contains(&lower.as_str()) {
+                    v[0] += 4.0;
+                }
+                if coding_tool_keywords.contains(&lower.as_str()) {
+                    v[1] += 4.0;
+                }
+                if knowledge_qa_keywords.contains(&lower.as_str()) {
+                    v[2] += 4.0;
+                }
+                if safety_refusal_keywords.contains(&lower.as_str()) {
+                    v[3] += 4.0;
+                }
+                if procedural_instruction_keywords.contains(&lower.as_str()) {
+                    v[4] += 4.0;
+                }
+                if short_conversation_keywords.contains(&lower.as_str()) {
+                    v[5] += 4.0;
+                }
+                if multi_turn_followup_keywords.contains(&lower.as_str()) {
+                    v[6] += 4.0;
+                }
+                if adversarial_noisy_keywords.contains(&lower.as_str()) {
+                    v[7] += 4.0;
+                }
+                if positive_sentiment_keywords.contains(&lower.as_str()) {
+                    v[8] += 4.0;
+                }
+                if negative_sentiment_keywords.contains(&lower.as_str()) {
+                    v[9] += 4.0;
+                }
+            } else if dim >= 8 {
                 if customer_support_keywords.contains(&lower.as_str()) {
                     v[0] += 4.0;
                 }
