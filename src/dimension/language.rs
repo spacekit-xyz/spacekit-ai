@@ -159,6 +159,12 @@ pub struct CausalAnnotation {
     /// Finer class: e.g. `retrospective_framing`, `interventional_counterfactual` (see `GROWFORMER_CAUSAL_AI.md`).
     #[serde(default)]
     pub causal_subtype: Option<String>,
+    /// Apparent sentiment before causal/retrospective resolution (e.g. `negative_mild` for "losing $5000 was the best thing").
+    #[serde(default)]
+    pub surface_valence: Option<String>,
+    /// Settled sentiment after full causal resolution (e.g. `positive_strong` after retrospective reframe).
+    #[serde(default)]
+    pub resolved_valence: Option<String>,
 }
 
 impl CausalAnnotation {
@@ -174,20 +180,37 @@ impl CausalAnnotation {
         )
     }
 
-    /// Space-separated causal index tokens for the joint lattice body (type+connector, then optional subtype).
+    /// Space-separated causal index tokens for the joint lattice body (type+connector, optional subtype, optional valence pair).
     pub fn joint_index_tokens(&self) -> String {
         let base = self.index_token();
-        let st = self
+        let mut parts = vec![base];
+        if let Some(st) = self
             .causal_subtype
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(causal_subtype_index_token)
-            .filter(|s| !s.is_empty());
-        match st {
-            Some(s) => format!("{} {}", base, s),
-            None => base,
+            .filter(|s| !s.is_empty())
+        {
+            parts.push(st);
         }
+        if let Some(sv) = self
+            .surface_valence
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            parts.push(format!("gfcausal_sv_{}", slug_ident(sv)));
+        }
+        if let Some(rv) = self
+            .resolved_valence
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            parts.push(format!("gfcausal_rv_{}", slug_ident(rv)));
+        }
+        parts.join(" ")
     }
 }
 
@@ -1470,6 +1493,8 @@ mod tests {
             effect_span: None,
             contrast_group: None,
             causal_subtype: None,
+            surface_valence: None,
+            resolved_valence: None,
         };
         let joint = sentiment_lattice_index_body_with_causal(
             "I lost big so I'm furious",
@@ -1495,6 +1520,8 @@ mod tests {
             effect_span: None,
             contrast_group: None,
             causal_subtype: Some("interventional_counterfactual".into()),
+            surface_valence: None,
+            resolved_valence: None,
         };
         let joint = sentiment_lattice_index_body_with_causal(
             "If they'd reviewed my PR I wouldn't be this stressed",
@@ -1503,6 +1530,36 @@ mod tests {
         );
         assert!(joint.contains("gfcausal_t_counterfactual_c_if"));
         assert!(joint.contains("gfcausal_st_interventional_counterfactual"));
+    }
+
+    #[test]
+    fn causal_joint_index_emits_valence_tokens() {
+        let causal = CausalAnnotation {
+            causal_type: "retrospective_framing".into(),
+            connector: Some("turned out".into()),
+            cause_span: Some("losing the job".into()),
+            effect_span: Some("best thing that happened".into()),
+            contrast_group: None,
+            causal_subtype: Some("retrospective_framing".into()),
+            surface_valence: Some("negative_mild".into()),
+            resolved_valence: Some("positive_strong".into()),
+        };
+        let tokens = causal.joint_index_tokens();
+        assert!(tokens.contains("gfcausal_sv_negative_mild"));
+        assert!(tokens.contains("gfcausal_rv_positive_strong"));
+        assert!(tokens.contains("gfcausal_st_retrospective_framing"));
+    }
+
+    #[test]
+    fn causal_valence_absent_emits_no_valence_tokens() {
+        let causal = CausalAnnotation {
+            causal_type: "direct".into(),
+            connector: Some("so".into()),
+            ..Default::default()
+        };
+        let tokens = causal.joint_index_tokens();
+        assert!(!tokens.contains("gfcausal_sv_"));
+        assert!(!tokens.contains("gfcausal_rv_"));
     }
 
     #[test]

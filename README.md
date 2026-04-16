@@ -127,6 +127,42 @@ Growformer's safety properties are not bolted on — they are consequences of th
 
 These properties directly address regulatory requirements for AI safety in medical, financial, legal, and autonomous system deployments. See Whitepaper §5.6 for the formal treatment.
 
+### Active Inference Spine
+
+An episode-level control loop built on Active Inference principles, sitting between MetaCognition and the environment:
+
+| Component | Module | Role |
+|-----------|--------|------|
+| `BeliefState` | `active_inference/state.rs` | Step counter, last quality score, reflection retry budget |
+| `Observation` / `Action` | `active_inference/blanket.rs` | Markov Blanket boundary: inward data (observations) vs outward effects (actions) |
+| `ActiveInferenceSpine` | `active_inference/spine.rs` | Policy → Action → Observe loop with `EpisodePolicy` trait |
+| `RoutingGenerationMetacogEpisodePolicy` | `service.rs` | Full-stack policy: routing + generation + one MetaCognition cycle per turn |
+| `QueuedEnvironment` | `active_inference/harness.rs` | In-memory `EnvironmentPort` for offline replay and logging |
+
+The spine does **not** require an external LLM. It wraps the existing generation + MetaCognition stack as a policy, making each inference call a single episode turn with observable belief updates. Enable replay logging with `svc.enable_active_inference_replay_log()` to capture observation/action traces for offline analysis.
+
+### Sentiment Conditioning Pipeline
+
+Improvements to how sentiment signal flows from input text through encoding, conditioning, and lattice retrieval:
+
+| Layer | What | Where |
+|-------|------|-------|
+| **Encoder anchors** | Positive/negative sentiment keyword buckets (`v[8]`, `v[9]`) in `HashingLanguageEncoder`, sourced from TOML (single source of truth via `inference_sentiment_core.toml`) | `dimension/language.rs` |
+| **Polarity probe** | Extracts 16-D feature vector (pos mass, neg mass, net, magnitude, mixed) from raw encoder output | `dimension/polarity_probe.rs` |
+| **Clifford conditioning** | Polarity features appended to the 192-D conditioning vector (indices 176–191) via `adapt_for_group_clifford` | `dimension/manager.rs` |
+| **Spawn threshold** | Sentiment lattice groups use a lower spawn threshold (0.92 vs 0.97) to preserve finer polarity distinctions | `main.rs` |
+| **Context guardrails** | Lexical polarity rules for domain-ambiguous words (`disgusting` in gaming vs theater, crypto promotional register → neutral), garble rejection via TOML `hard_reject_substrings` | `inference_sentiment_core.toml`, `sentiment_generation_lexicon.toml` |
+
+### Causal AI (see `GROWFORMER_CAUSAL_AI.md`)
+
+Causality as a first-class field on training data, with connector-aware retrieval and a path toward Brain B (relationship-only lattice):
+
+- **`CausalAnnotation`** on JSONL rows: `causal_type`, `connector`, `cause_span`, `effect_span`, optional `causal_subtype`
+- **`gfcausal_t_*_c_*`** index tokens injected before the BM25 witness, aligning training and inference
+- **`causal_hints`**: connector detection → causal BM25 tokens at inference time (no separate brain needed)
+- **Layer 0 world grounding**: `data/inference/world_grounding.toml` — typed concept nodes/edges with bounded BFS for query enrichment before lattice retrieval
+- **`grounding_expand`**: sparse query expansion (e.g. loss+game → gambling lexicon) via `data/inference/grounding_expand.toml`
+
 ### Two-Level Lattice Hierarchy (E8 + Leech)
 
 A mathematically optimal quantization hierarchy using the two provably densest sphere packings:
@@ -228,18 +264,29 @@ growformer/
     ├── understanding.rs     — UnderstandingLayer: topic/verb classifiers, goal_magnitude
     ├── meta_brain.rs        — MetaBrain: CentroidCoordinator, ArchetypeBrain
     ├── cloze.rs             — Cloze learning: contrastive fill-in-the-blank
+    ├── active_inference/
+    │   ├── mod.rs           — Active Inference module: re-exports, unit tests
+    │   ├── state.rs         — BeliefState: step counter, quality tracker, retry budget
+    │   ├── blanket.rs       — Markov Blanket boundary: Observation, Action, EnvironmentPort
+    │   ├── spine.rs         — ActiveInferenceSpine: EpisodePolicy, PolicyTurn loop
+    │   ├── integration.rs   — MetaCognition ↔ belief-state bridge
+    │   └── harness.rs       — QueuedEnvironment: in-memory replay log for offline analysis
     ├── inference/
     │   ├── harness.rs       — InferenceHarness, BrainInferencePlugin (orchestration hooks)
     │   ├── inference_toml.rs — Merged load: thresholds + `[rules]` (CLI / disk / env; wasm embed)
+    │   ├── causal_hints.rs  — Connector → gfcausal_* BM25 tokens (retrieval prior)
+    │   ├── world_grounding.rs — Layer 0 concept graph: token-hit BFS, subject keyword enrichment
+    │   ├── grounding_expand.rs — Sparse query expansion (loss+game → gambling lexicon, etc.)
     │   ├── manifest.rs      — BrainPluginsManifest, InferenceThresholds (`[sentiment]` serde key)
     │   ├── project_gf.rs    — *.gf.toml project manifest (paths relative to manifest file)
     │   └── plugins/         — LatticeShortcutsPlugin + default_inference_harness()
     ├── dimension/
     │   ├── group_gen.rs     — IndexedGenEnv: topic sub-lattices, forced routing
     │   ├── manager.rs       — DimensionManager: conditioning pipeline, Clifford rotors
+    │   ├── polarity_probe.rs — Sentiment polarity features from raw encoder output
     │   ├── router.rs        — LearnedRouter (InfraciliaryLattice, K-NN + gradient)
     │   ├── paramecium.rs    — InfraciliaryLattice (Paramecium): one-pass learning
-    │   ├── language.rs      — Language encoder bridge (all-MiniLM-L6-v2 → 128d)
+    │   ├── language.rs      — Language encoder bridge + CausalAnnotation + sentiment anchors
     │   ├── action.rs        — Intent-to-action mapping
     │   └── tool.rs          — Tool use: schema, registry, external invocation
     └── systems/

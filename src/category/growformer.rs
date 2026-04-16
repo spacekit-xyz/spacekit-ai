@@ -18,6 +18,7 @@ use crate::category::pythagoras::{nearest_pythagorean_split, PythagorasNode};
 use crate::category::sentiment::{entity_to_aux_category, ParsedInput, SentimentFunctor};
 use crate::category::{Layer, NodeId};
 use crate::category::training::{AuxCategory, SentimentLabel, TrainingBatch};
+use crate::clifford::{embed_bridge_vector, temporal_ordering_loss};
 use std::collections::HashMap;
 
 /// Small random, partially anti-correlated leaf weights so new branches are not identical
@@ -427,7 +428,31 @@ impl GrowformerTrainer {
             &config.disentanglement,
         );
 
-        let combined = total_loss + mean_aux;
+        let causal_lambda = 0.15f32;
+        let causal_margin = 0.5f32;
+        let causal_ordering_term = {
+            let mut sum = 0.0f32;
+            let mut cnt = 0u32;
+            for r in &batch.records {
+                let Some(ref ca) = r.causal else { continue };
+                let (Some(ref cs), Some(ref es)) = (&ca.cause_span, &ca.effect_span) else {
+                    continue;
+                };
+                let cause_emb = char_hash_embed(cs, embed_dim);
+                let effect_emb = char_hash_embed(es, embed_dim);
+                let cause_mv = embed_bridge_vector(&cause_emb);
+                let effect_mv = embed_bridge_vector(&effect_emb);
+                let is_retro = ca
+                    .causal_subtype
+                    .as_deref()
+                    .map_or(false, |s| s == "retrospective_framing");
+                sum += temporal_ordering_loss(&cause_mv, &effect_mv, !is_retro, causal_margin);
+                cnt += 1;
+            }
+            if cnt > 0 { sum / cnt as f32 } else { 0.0 }
+        };
+
+        let combined = total_loss + mean_aux + causal_lambda * causal_ordering_term;
 
         let log_branch = self.config.branch_stats_sample_count > 0
             && self.config.branch_stats_every_steps > 0

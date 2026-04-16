@@ -976,9 +976,14 @@ impl LanguageService {
             return Ok((action, self.greeting_response()));
         }
 
-        // Tool call interception: if the registry matches a tool, return a
-        // ToolCall action with the call info. The caller executes the tool
-        // and optionally calls generation_with_tool_result for a composed response.
+        // Tool call interception — disabled for sentiment-only brains where
+        // topic-graph false positives (e.g. "power" in "compute power") would
+        // hijack the pipeline away from sentiment classification.
+        let sentiment_brain = lattice_shortcuts::pick_sentiment_lattice_group_idx(
+            self.active_dm(),
+        )
+        .is_some();
+        if !sentiment_brain {
         if let Some(tool_call) = self.tool_registry.match_tool(intent_text) {
             let action = ActionJson {
                 action_type: ActionType::ToolCall,
@@ -1001,6 +1006,7 @@ impl LanguageService {
             self.record_latency(start);
             return Ok((action, resp));
         }
+        } // !sentiment_brain
 
         let personality = self.personality.clone();
 
@@ -1729,6 +1735,23 @@ impl LanguageService {
                     confidence: 0.0,
                 }
             } else if best_text.len() > 5 {
+                // Global garble guard: runs on ALL groups, not just sentiment.
+                // The sentiment-specific sanitize above handles replacement with
+                // a routing-only fallback; this catch-all replaces with a clean
+                // routing-only line when a non-sentiment group produces soup.
+                if !sentiment_sanitize_primary
+                    && IndexedGenEnv::lattice_surface_hard_reject(&best_text)
+                {
+                    infer_trace!(
+                        "  [global-hard-reject] non-sentiment group produced garble, falling back to routing-only"
+                    );
+                    if let Some(env) = dm.group_gen_envs.get(&best_gidx) {
+                        let (fb, fc) = env.sentiment_routing_only_fallback_line(topic_hint.as_deref());
+                        best_text = fb;
+                        best_conf = fc;
+                    }
+                }
+
                 let skip_sentiment_header = lattice_user_anchored_used || broad_summary.is_some();
                 let display_text = Self::maybe_prefix_sentiment_retrieval_line(
                     &*dm,
@@ -2076,6 +2099,41 @@ impl LanguageService {
 
             self.metacognition = mc_taken;
             final_resp
+        };
+
+        // Final garble gate: no matter which upstream path produced the text
+        // (primary lattice, System 2, System 1.5, MetaCognition retry), reject
+        // soup that matches hard_reject_substrings and replace with a routing-only
+        // fallback from the sentiment lattice (or a generic decline).
+        let resp = if resp.template_id != "knowledge_boundary"
+            && resp.template_id != "metacog_degradation"
+            && resp.text.len() > 5
+            && IndexedGenEnv::lattice_surface_hard_reject(&resp.text)
+        {
+            infer_trace!(
+                "  [final-garble-gate] output still contains hard-reject pattern, replacing"
+            );
+            let dm = self.active_dm();
+            let fallback = lattice_shortcuts::pick_sentiment_lattice_group_idx(dm)
+                .and_then(|sg| dm.group_gen_envs.get(&sg))
+                .map(|env| env.sentiment_routing_only_fallback_line(topic_hint.as_deref()))
+                .unwrap_or_else(|| {
+                    ("No witness-matched lattice row for this wording; stance follows routing only.".to_string(), 0.40)
+                });
+            GeneratedResponse {
+                text: Self::maybe_prefix_sentiment_retrieval_line(
+                    dm,
+                    retry_effective_gidx.or(group_idx).unwrap_or(0),
+                    topic_hint.as_deref(),
+                    false,
+                    &fallback.0,
+                ),
+                template_id: "final_garble_gate".to_string(),
+                traceable: false,
+                confidence: fallback.1,
+            }
+        } else {
+            resp
         };
 
         self.record_latency(start);

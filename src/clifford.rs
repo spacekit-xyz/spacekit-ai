@@ -820,6 +820,180 @@ pub fn condition_with_understanding_goal(
     (extract_conditioning(&combined, target_dim), fingerprint)
 }
 
+// ---------------------------------------------------------------------------
+// (1+3) Causal Block — designated subspace for temporal ordering & causal geometry
+// ---------------------------------------------------------------------------
+//
+// Within the 8D grade-1 vector space of Cl(1,7) we commit to a fixed 4D
+// subspace for causal reasoning:
+//
+//   e_0  (timelike, e_0² = −1)  — temporal / causal axis
+//   e_1  (spacelike, e_1² = +1) — cause magnitude / strength
+//   e_2  (spacelike, e_2² = +1) — effect magnitude / outcome
+//   e_3  (spacelike, e_3² = +1) — context / framing
+//
+// The remaining e_4..e_7 are the "content" subspace (topic, entity, etc.).
+//
+// Metric on the causal block: diag(−1, +1, +1, +1) — Minkowski (−,+,+,+).
+//
+// Grade-2 causal 2-blades (6 total, spanned by wedge pairs within the block):
+//
+//   Boost planes (timelike ∧ spacelike — causal direction):
+//     e_01  = e_0∧e_1  — temporal ordering of cause     (forward: C→E positive)
+//     e_02  = e_0∧e_2  — temporal ordering of effect     (forward: C→E positive)
+//     e_03  = e_0∧e_3  — temporal ordering of context    (retrospective framing)
+//
+//   Rotation planes (spacelike ∧ spacelike — structural relation):
+//     e_12  = e_1∧e_2  — cause↔effect correlation        (strength vs outcome)
+//     e_13  = e_1∧e_3  — cause↔context relation           (framing modifies cause)
+//     e_23  = e_2∧e_3  — effect↔context relation           (framing modifies outcome)
+//
+// Sign convention for temporal ordering loss:
+//   Given labeled (cause, effect) pair embedded as multivectors A, B:
+//     projection of (A ∧ B) onto e_01 should be POSITIVE for forward causation (C→E)
+//     projection of (A ∧ B) onto e_01 should be NEGATIVE for retrospective (E→C narrative)
+//   This is the target for the temporal ordering auxiliary loss.
+//
+// The convention is (−,+,+,+) NOT (+,−,−,−), matching the existing e_0 timelike
+// definition in this module. Document any change here before implementing losses.
+
+/// Indices of the (1+3) causal block basis vectors within grade-1 (8D).
+pub const CAUSAL_BLOCK_INDICES: [usize; 4] = [0, 1, 2, 3];
+
+/// e_0: timelike axis of the causal block.
+pub const CAUSAL_TIME_IDX: usize = 0;
+/// e_1: cause magnitude / strength axis.
+pub const CAUSAL_CAUSE_IDX: usize = 1;
+/// e_2: effect magnitude / outcome axis.
+pub const CAUSAL_EFFECT_IDX: usize = 2;
+/// e_3: context / framing axis.
+pub const CAUSAL_CONTEXT_IDX: usize = 3;
+
+/// Number of basis vectors in the causal block.
+pub const CAUSAL_BLOCK_DIM: usize = 4;
+/// Number of 2-blades within the causal block (C(4,2) = 6).
+pub const CAUSAL_BLADE_COUNT: usize = 6;
+
+/// Blade bitmaps for the 6 causal 2-blades, in canonical order.
+/// Index into grade-2 via `blade_to_grade_index`.
+pub const CAUSAL_BLADES: [u8; CAUSAL_BLADE_COUNT] = [
+    0b0000_0011, // e_01: temporal ordering of cause
+    0b0000_0101, // e_02: temporal ordering of effect
+    0b0000_1001, // e_03: temporal ordering of context
+    0b0000_0110, // e_12: cause↔effect correlation
+    0b0000_1010, // e_13: cause↔context relation
+    0b0000_1100, // e_23: effect↔context relation
+];
+
+/// Extract the (1+3) causal block from grade-1 as a 4-element slice.
+pub fn causal_block_vector(mv: &Multivector) -> [f32; CAUSAL_BLOCK_DIM] {
+    let g1 = mv.grade(1);
+    [g1[0], g1[1], g1[2], g1[3]]
+}
+
+/// Extract the 6 causal 2-blade components from grade-2.
+pub fn causal_block_bivectors(mv: &Multivector) -> [f32; CAUSAL_BLADE_COUNT] {
+    let g2 = mv.grade(2);
+    let mut out = [0.0f32; CAUSAL_BLADE_COUNT];
+    for (i, &blade) in CAUSAL_BLADES.iter().enumerate() {
+        out[i] = g2[blade_to_grade_index(blade)];
+    }
+    out
+}
+
+/// Minkowski interval restricted to the (1+3) causal block only.
+/// s² = −(Δx₀)² + (Δx₁)² + (Δx₂)² + (Δx₃)²
+pub fn causal_block_interval(a: &Multivector, b: &Multivector) -> f32 {
+    let va = causal_block_vector(a);
+    let vb = causal_block_vector(b);
+    let mut s_sq = 0.0f32;
+    for i in 0..CAUSAL_BLOCK_DIM {
+        let d = vb[i] - va[i];
+        if i == CAUSAL_TIME_IDX {
+            s_sq -= d * d;
+        } else {
+            s_sq += d * d;
+        }
+    }
+    s_sq
+}
+
+/// Project the wedge product A∧B onto a specific causal 2-blade.
+/// Returns the signed scalar component: positive = forward (C→E), negative = retro (E→C).
+///
+/// The wedge A∧B is approximated from grade-1 components:
+///   (A∧B)_{ij} = A_i·B_j − A_j·B_i
+pub fn causal_wedge_projection(a: &Multivector, b: &Multivector, blade_idx: usize) -> f32 {
+    assert!(blade_idx < CAUSAL_BLADE_COUNT, "blade_idx out of range");
+    let blade = CAUSAL_BLADES[blade_idx];
+    let ga = a.grade(1);
+    let gb = b.grade(1);
+
+    let i = blade.trailing_zeros() as usize;
+    let j = (blade >> (i + 1)).trailing_zeros() as usize + i + 1;
+
+    ga[i] * gb[j] - ga[j] * gb[i]
+}
+
+/// Temporal ordering score on the e_01 boost plane (the primary causal direction).
+/// Positive = forward causation (cause before effect), negative = retrospective.
+pub fn temporal_ordering_score(cause_mv: &Multivector, effect_mv: &Multivector) -> f32 {
+    causal_wedge_projection(cause_mv, effect_mv, 0) // e_01
+}
+
+/// Temporal ordering auxiliary loss for a labeled (cause, effect) pair.
+/// `forward`: true for C→E (target positive), false for E→C / retrospective (target negative).
+/// Returns hinge-style loss: max(0, margin − sign·score).
+pub fn temporal_ordering_loss(
+    cause_mv: &Multivector,
+    effect_mv: &Multivector,
+    forward: bool,
+    margin: f32,
+) -> f32 {
+    let score = temporal_ordering_score(cause_mv, effect_mv);
+    let sign = if forward { 1.0 } else { -1.0 };
+    (margin - sign * score).max(0.0)
+}
+
+/// Cosine similarity restricted to the 6 causal 2-blade subspace.
+pub fn causal_block_similarity(a: &Multivector, b: &Multivector) -> f32 {
+    let fa = causal_block_bivectors(a);
+    let fb = causal_block_bivectors(b);
+    let dot: f32 = fa.iter().zip(fb.iter()).map(|(x, y)| x * y).sum();
+    let na: f32 = fa.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = fb.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na < 1e-10 || nb < 1e-10 {
+        return 0.0;
+    }
+    dot / (na * nb)
+}
+
+/// Contrastive repulsion loss between forward and retrospective pairs in the
+/// causal 2-blade subspace. Pushes apart bivector representations whose
+/// temporal ordering should differ.
+pub fn causal_contrastive_repulsion(
+    forward_pair: (&Multivector, &Multivector),
+    retro_pair: (&Multivector, &Multivector),
+    margin: f32,
+) -> f32 {
+    let fwd_bv = {
+        let ab = forward_pair.0.geo(&forward_pair.1);
+        causal_block_bivectors(&ab)
+    };
+    let ret_bv = {
+        let ab = retro_pair.0.geo(&retro_pair.1);
+        causal_block_bivectors(&ab)
+    };
+    let sim: f32 = fwd_bv.iter().zip(ret_bv.iter()).map(|(x, y)| x * y).sum();
+    let nf: f32 = fwd_bv.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nr: f32 = ret_bv.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if nf < 1e-10 || nr < 1e-10 {
+        return 0.0;
+    }
+    let cos = sim / (nf * nr);
+    (cos + margin).max(0.0) // penalize when cos > -margin (should be anti-aligned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1236,5 +1410,83 @@ mod tests {
         a.components[GRADE_OFFSETS[1] + 3] = 2.0; // spacelike e3
         let it = interval_between(&a, &b);
         assert_eq!(it, IntervalType::Spacelike);
+    }
+
+    // -----------------------------------------------------------------------
+    // (1+3) Causal block tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn causal_block_vector_extracts_first_four() {
+        let v = Multivector::vector(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        let cb = causal_block_vector(&v);
+        assert_eq!(cb, [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn causal_block_interval_timelike() {
+        let a = Multivector::vector(&[2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let b = Multivector::zero();
+        let s2 = causal_block_interval(&a, &b);
+        assert!(s2 < 0.0, "pure timelike separation should be negative: {s2}");
+        assert!((s2 - (-4.0)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn causal_block_interval_spacelike() {
+        let a = Multivector::vector(&[0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let b = Multivector::zero();
+        let s2 = causal_block_interval(&a, &b);
+        assert!(s2 > 0.0, "pure spacelike separation should be positive: {s2}");
+        assert!((s2 - 9.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn temporal_ordering_score_sign_flips_on_swap() {
+        let cause = Multivector::vector(&[1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let effect = Multivector::vector(&[0.5, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let fwd = temporal_ordering_score(&cause, &effect);
+        let rev = temporal_ordering_score(&effect, &cause);
+        assert!(
+            (fwd + rev).abs() < 1e-6,
+            "swapping cause/effect should negate score: fwd={fwd}, rev={rev}"
+        );
+    }
+
+    #[test]
+    fn temporal_ordering_loss_zero_when_aligned() {
+        let cause = Multivector::vector(&[1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let effect = Multivector::vector(&[0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let score = temporal_ordering_score(&cause, &effect);
+        if score > 0.0 {
+            let loss = temporal_ordering_loss(&cause, &effect, true, score * 0.5);
+            assert!(loss < 1e-6, "loss should be 0 when score > margin: {loss}");
+        }
+    }
+
+    #[test]
+    fn causal_contrastive_repulsion_penalizes_similar() {
+        let a = Multivector::vector(&[1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let b = Multivector::vector(&[0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let loss = causal_contrastive_repulsion((&a, &b), (&a, &b), 0.5);
+        assert!(loss > 0.0, "identical pairs should incur repulsion: {loss}");
+    }
+
+    #[test]
+    fn causal_block_bivectors_count() {
+        let v = Multivector::vector(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        let bv = causal_block_bivectors(&v);
+        assert_eq!(bv.len(), CAUSAL_BLADE_COUNT);
+    }
+
+    #[test]
+    fn causal_block_similarity_self_is_one() {
+        let mut mv = Multivector::zero();
+        let g2_start = GRADE_OFFSETS[2];
+        for (i, &blade) in CAUSAL_BLADES.iter().enumerate() {
+            mv.components[g2_start + blade_to_grade_index(blade)] = (i as f32 + 1.0) * 0.3;
+        }
+        let sim = causal_block_similarity(&mv, &mv);
+        assert!((sim - 1.0).abs() < 1e-5, "self-similarity should be 1.0: {sim}");
     }
 }

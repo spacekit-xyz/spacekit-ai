@@ -71,7 +71,7 @@ category = "arithmetic"
 priority = 20
 [[nodes.rules]]
 any = ["power", "exponent", "pow"]
-not = ["power set", "power series", "power rule"]
+not = ["power set", "power series", "power rule", "compute power", "ai compute power", "processing power", "power grid", "power plant", "power supply"]
 
 [[nodes]]
 topic = "absolute_value_operation"
@@ -672,7 +672,8 @@ concept = "GeneralKnowledge"
 category = "mathematics"
 priority = 12
 [[nodes.rules]]
-any = ["set theory", "cardinality", "countable", "uncountable", "cantor", "power set", "subset", "union", "intersection", "complement"]
+any = ["set theory", "cardinality", "countable", "uncountable", "cantor diagonal", "cantor set", "cantor's theorem", "power set", "subset", "union", "intersection", "complement"]
+not = ["cantor fitzgerald", "cantor exchange"]
 
 # ==========================================================================
 # Support intents

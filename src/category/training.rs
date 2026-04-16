@@ -292,11 +292,14 @@ pub struct TrainingRecord {
     pub aux_category: Option<AuxCategory>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embedding: Option<Vec<f32>>,
+    /// Optional causal annotation for temporal ordering training (Cl(1,7) causal block).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub causal: Option<crate::dimension::language::CausalAnnotation>,
 }
 
 impl TrainingRecord {
     pub fn new(input: impl Into<String>, sentiment: SentimentLabel, plural: bool) -> Self {
-        Self { input: input.into(), sentiment, plural, aux_category: None, embedding: None }
+        Self { input: input.into(), sentiment, plural, aux_category: None, embedding: None, causal: None }
     }
 
     pub fn with_aux(mut self, cat: AuxCategory) -> Self {
