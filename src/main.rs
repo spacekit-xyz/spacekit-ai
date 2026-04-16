@@ -2154,6 +2154,9 @@ fn train_brain(
 
     use growformer::dimension::group_gen::IndexedGenEnv;
     let spawn_threshold = 0.97;
+    // Sentiment lattices use a looser threshold so positive/negative programs stay
+    // distinct after polarity-aware encoding (P0/P1); the default 0.97 over-merges.
+    let sentiment_spawn_threshold = 0.92;
     let min_code_for_index = 10usize;
     let mut index_jobs: u64 = 0;
     for gidx in 0..num_groups {
@@ -2218,9 +2221,12 @@ fn train_brain(
                     (cond, text.clone(), (*topic_name).to_string())
                 })
                 .collect();
-            let mut env = IndexedGenEnv::from_tagged_parts(dict, cb, hopf, &training_pairs, spawn_threshold);
-            // Within-topic merge of near-duplicate exemplars (embedding grokking / compression).
-            // Root `env.lattice` stays unmerged here to avoid collapsing unlike programs.
+            let is_sentiment_group = topic_names.iter().any(|t| {
+                growformer::inference::sentiment_generation_lexicon::global()
+                    .is_sentiment_lattice_topic_hint(t)
+            });
+            let effective_spawn = if is_sentiment_group { sentiment_spawn_threshold } else { spawn_threshold };
+            let mut env = IndexedGenEnv::from_tagged_parts(dict, cb, hopf, &training_pairs, effective_spawn);
             const TOPIC_AUTOGAMY_MERGE: f32 = 0.96;
             for topic in &mut env.topic_subindex {
                 topic.lattice.autogamy(TOPIC_AUTOGAMY_MERGE);

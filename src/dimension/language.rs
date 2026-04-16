@@ -396,20 +396,10 @@ impl LanguageEncoder for HashingLanguageEncoder {
             "adversarial", "noisy", "jailbreak", "prompt-injection", "ignore", "override",
             "garbled", "nonsense", "obfuscated",
         ];
-        // Sentiment anchors sourced from inference_sentiment_core.toml positive/negative_anchor_tokens.
-        let positive_sentiment_keywords = [
-            "love", "adore", "treasure", "obsessed", "enjoy", "like", "prefer", "best", "great",
-            "amazing", "wonderful", "fantastic", "excellent", "happy", "glad", "good", "nice",
-            "fine", "better", "beautiful", "incredible", "perfect",
-            "slick", "seamless", "snappy", "polished", "nifty",
-            "refunded", "reimbursed", "waived", "cleared", "approved", "resolved", "reversed",
-        ];
-        let negative_sentiment_keywords = [
-            "hate", "despise", "loathe", "awful", "terrible", "worst", "horrible", "bad",
-            "sucks", "disgusting", "dislike", "miserable", "depressing",
-            "declined", "overdraft", "frozen", "blocked", "bounced", "penalty",
-            "disappointing", "disappointed", "poor", "worse", "weak", "crash", "broken", "bug",
-        ];
+        // Sentiment anchors: loaded once from inference TOML (single source of truth).
+        // Union of positive_anchor_tokens + bipolar_positive_tokens (and negative equivalents)
+        // so the encoder vocabulary never drifts from the rules the inference engine uses.
+        let (positive_sentiment_set, negative_sentiment_set) = sentiment_anchor_sets();
         let stopwords = [
             "the", "a", "an", "and", "or", "to", "for", "of", "in", "on", "with", "is", "are",
             "this", "that", "please",
@@ -451,10 +441,10 @@ impl LanguageEncoder for HashingLanguageEncoder {
                 if adversarial_noisy_keywords.contains(&lower.as_str()) {
                     v[7] += 4.0;
                 }
-                if positive_sentiment_keywords.contains(&lower.as_str()) {
+                if positive_sentiment_set.contains(lower.as_str()) {
                     v[8] += 4.0;
                 }
-                if negative_sentiment_keywords.contains(&lower.as_str()) {
+                if negative_sentiment_set.contains(lower.as_str()) {
                     v[9] += 4.0;
                 }
             } else if dim >= 8 {
@@ -500,6 +490,41 @@ impl LanguageEncoder for HashingLanguageEncoder {
         l2_normalize(&mut v);
         v
     }
+}
+
+use std::sync::OnceLock;
+
+/// Union of positive/negative anchor + bipolar tokens from inference TOML.
+/// Loaded once; the encoder never carries a private word list that can drift.
+fn sentiment_anchor_sets() -> (&'static HashSet<String>, &'static HashSet<String>) {
+    static POS: OnceLock<HashSet<String>> = OnceLock::new();
+    static NEG: OnceLock<HashSet<String>> = OnceLock::new();
+
+    let pos = POS.get_or_init(|| {
+        let rt = crate::inference::inference_toml::inference_rules_runtime();
+        let mut s: HashSet<String> = rt
+            .positive_anchor_tokens
+            .iter()
+            .map(|w| w.to_ascii_lowercase())
+            .collect();
+        for w in &rt.bipolar_positive_tokens {
+            s.insert(w.to_ascii_lowercase());
+        }
+        s
+    });
+    let neg = NEG.get_or_init(|| {
+        let rt = crate::inference::inference_toml::inference_rules_runtime();
+        let mut s: HashSet<String> = rt
+            .negative_anchor_tokens
+            .iter()
+            .map(|w| w.to_ascii_lowercase())
+            .collect();
+        for w in &rt.bipolar_negative_tokens {
+            s.insert(w.to_ascii_lowercase());
+        }
+        s
+    });
+    (pos, neg)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
