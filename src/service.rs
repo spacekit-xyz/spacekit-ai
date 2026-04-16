@@ -939,6 +939,45 @@ impl LanguageService {
         crate::inference::format_retrieved_sentiment_line(th_for_header, &body)
     }
 
+    /// Try categorical composition for the routing-only fallback path. When the
+    /// `categorical` feature is available, decomposes the conditioning vector into
+    /// disentangled sentiment × entity and composes a grounded explanation. Falls
+    /// back to the standard routing-only line when the feature is disabled or when
+    /// categorical confidence is too low.
+    #[cfg(feature = "categorical")]
+    fn categorical_compose_fallback(
+        env: &IndexedGenEnv,
+        topic_hint: Option<&str>,
+        intent_text: &str,
+        gen_cond: &[f32],
+    ) -> Option<(String, f32)> {
+        use crate::category::compose::CategoricalComposer;
+        let composer = CategoricalComposer::new_random(
+            gen_cond.len().max(8), 4, 42,
+        );
+        let output = composer.generate(gen_cond, intent_text, None);
+        if output.confidence >= 0.30 && output.explanation.len() > 10 {
+            infer_trace!(
+                "  [categorical-compose] composed fallback (conf={:.3}): {}",
+                output.confidence,
+                &output.explanation[..output.explanation.len().min(80)]
+            );
+            Some((output.explanation, output.confidence))
+        } else {
+            None
+        }
+    }
+
+    #[cfg(not(feature = "categorical"))]
+    fn categorical_compose_fallback(
+        _env: &IndexedGenEnv,
+        _topic_hint: Option<&str>,
+        _intent_text: &str,
+        _gen_cond: &[f32],
+    ) -> Option<(String, f32)> {
+        None
+    }
+
     pub fn generation(&mut self, text: &str) -> Result<(ActionJson, GeneratedResponse), String> {
         self.generation_with_intent_override(text, text)
     }
@@ -1669,9 +1708,16 @@ impl LanguageService {
                         best_conf = 0.88;
                     } else if let Some(sg) = sentiment_lattice_gidx {
                         if let Some(env) = dm.group_gen_envs.get(&sg) {
-                            let (fb, fc) = env.sentiment_routing_only_fallback_line(topic_hint.as_deref());
-                            best_text = fb;
-                            best_conf = fc;
+                            if let Some((ct, cc)) = Self::categorical_compose_fallback(
+                                env, topic_hint.as_deref(), intent_text, &gen_conditioning,
+                            ) {
+                                best_text = ct;
+                                best_conf = cc;
+                            } else {
+                                let (fb, fc) = env.sentiment_routing_only_fallback_line(topic_hint.as_deref());
+                                best_text = fb;
+                                best_conf = fc;
+                            }
                         }
                     }
                 }
@@ -1685,13 +1731,23 @@ impl LanguageService {
                 && best_text.len() <= 5
             {
                 if let Some(env) = dm.group_gen_envs.get(&best_gidx) {
-                    let (fb, fc) = env.sentiment_routing_only_fallback_line(topic_hint.as_deref());
-                    if fb.len() > 5 {
+                    if let Some((ct, cc)) = Self::categorical_compose_fallback(
+                        env, topic_hint.as_deref(), intent_text, &gen_conditioning,
+                    ) {
                         infer_trace!(
-                            "  [retrieval-floor-fill] routing-only fallback for confidence-floor bypass headline"
+                            "  [retrieval-floor-fill] categorical compose for confidence-floor bypass headline"
                         );
-                        best_text = fb;
-                        best_conf = best_conf.max(fc);
+                        best_text = ct;
+                        best_conf = best_conf.max(cc);
+                    } else {
+                        let (fb, fc) = env.sentiment_routing_only_fallback_line(topic_hint.as_deref());
+                        if fb.len() > 5 {
+                            infer_trace!(
+                                "  [retrieval-floor-fill] routing-only fallback for confidence-floor bypass headline"
+                            );
+                            best_text = fb;
+                            best_conf = best_conf.max(fc);
+                        }
                     }
                 }
             }
@@ -1743,10 +1799,16 @@ impl LanguageService {
                     && IndexedGenEnv::lattice_surface_hard_reject(&best_text)
                 {
                     infer_trace!(
-                        "  [global-hard-reject] non-sentiment group produced garble, falling back to routing-only"
+                        "  [global-hard-reject] non-sentiment group produced garble, falling back"
                     );
                     if let Some(env) = dm.group_gen_envs.get(&best_gidx) {
-                        let (fb, fc) = env.sentiment_routing_only_fallback_line(topic_hint.as_deref());
+                        let (fb, fc) = if let Some((ct, cc)) = Self::categorical_compose_fallback(
+                            env, topic_hint.as_deref(), intent_text, &gen_conditioning,
+                        ) {
+                            (ct, cc)
+                        } else {
+                            env.sentiment_routing_only_fallback_line(topic_hint.as_deref())
+                        };
                         best_text = fb;
                         best_conf = fc;
                     }
@@ -2116,7 +2178,16 @@ impl LanguageService {
             let dm = self.active_dm();
             let fallback = lattice_shortcuts::pick_sentiment_lattice_group_idx(dm)
                 .and_then(|sg| dm.group_gen_envs.get(&sg))
-                .map(|env| env.sentiment_routing_only_fallback_line(topic_hint.as_deref()))
+                .and_then(|env| {
+                    let cond = retry_conditioning.as_deref().unwrap_or(&[]);
+                    if let Some(composed) = Self::categorical_compose_fallback(
+                        env, topic_hint.as_deref(), intent_text, cond,
+                    ) {
+                        Some(composed)
+                    } else {
+                        Some(env.sentiment_routing_only_fallback_line(topic_hint.as_deref()))
+                    }
+                })
                 .unwrap_or_else(|| {
                     ("No witness-matched lattice row for this wording; stance follows routing only.".to_string(), 0.40)
                 });

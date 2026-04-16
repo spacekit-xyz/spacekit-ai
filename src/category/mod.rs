@@ -10,6 +10,7 @@ pub mod training;
 pub mod sentiment;
 pub mod inference;
 pub mod growformer;
+pub mod compose;
 
 pub use category::{
     CategoricalDAG, Composed, Layer, MorphismKind, NaturalTransform, Network, NodeId,
@@ -28,3 +29,4 @@ pub use growformer::{GrowformerNode, GrowformerTrainer, TrainerConfig};
 pub use inference::{infer_from_embedding, InferenceDetail, InferenceResult};
 pub use linear_head::LinearHead;
 pub use sentiment::{ParsedInput, SentimentFunctor};
+pub use compose::{CategoricalComposer, CategoricalDecomposition, ComposedOutput, ProgramTemplate};
