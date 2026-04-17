@@ -35,30 +35,64 @@ pub fn causal_bm25_tokens(intent_text: &str) -> Vec<String> {
         out.push(causal_index_token("compensatory", "at least"));
     } else if padded.contains(" would have ") || padded.contains(" would've ") {
         out.push(causal_index_token("counterfactual", "would have"));
+    } else if padded.contains(" wouldn't have ") || padded.contains(" wouldnt have ") {
+        out.push(causal_index_token("counterfactual", "would have"));
     } else if padded.contains(" which means ") {
         out.push(causal_index_token("inferential", "which means"));
+    } else if padded.contains(" which suggests ") {
+        out.push(causal_index_token("inferential", "which suggests"));
+    } else if padded.contains(" which implies ") {
+        out.push(causal_index_token("inferential", "which implies"));
     } else if padded.contains(" despite ") {
         out.push(causal_index_token("contrastive", "despite"));
     } else if padded.contains(" although ") {
         out.push(causal_index_token("contrastive", "although"));
     } else if padded.contains(" because ") {
         out.push(causal_index_token("explanatory", "because"));
+    } else if padded.contains(" triggered ") {
+        out.push(causal_index_token("direct", "triggered"));
+    } else if padded.contains(" caused ") {
+        out.push(causal_index_token("direct", "caused"));
+    } else if padded.contains(" causing ") {
+        out.push(causal_index_token("direct", "causing"));
+    } else if padded.contains(", pushing ") || padded.contains(" pushing ") {
+        out.push(causal_index_token("direct", "pushing"));
+    } else if padded.contains(" resulted in ") {
+        out.push(causal_index_token("direct", "resulted in"));
+    } else if padded.contains(" led to ") || padded.contains(" lead to ") {
+        out.push(causal_index_token("direct", "led to"));
     } else if padded.contains(" therefore ") {
         out.push(causal_index_token("direct", "therefore"));
     } else if padded.contains(" however ") {
         out.push(causal_index_token("compensatory", "however"));
+    } else if padded.contains(", implying ") || padded.contains(" implying ") {
+        out.push(causal_index_token("inferential", "implying"));
+    } else if padded.contains(", suggesting ") || padded.contains(" suggesting ") {
+        out.push(causal_index_token("inferential", "suggesting"));
+    } else if padded.contains(", meaning ") || padded.contains(" meaning ") {
+        out.push(causal_index_token("inferential", "meaning"));
+    } else if padded.contains(" yet somehow ") || padded.contains(" but somehow ") {
+        out.push(causal_index_token("concessive", "yet somehow"));
+    } else if padded.contains(" but still ") {
+        out.push(causal_index_token("concessive", "but still"));
+    } else if padded.contains(" yet ") || padded.contains(", yet ") {
+        out.push(causal_index_token("contrastive", "yet"));
     } else if padded.contains(" but ") {
         out.push(causal_index_token("compensatory", "but"));
+    } else if padded.contains(", so ") || padded.contains(". so ") || padded.contains("; so ") {
+        out.push(causal_index_token("direct", "so"));
     } else if padded.contains(" so ") {
         out.push(causal_index_token("direct", "so"));
     } else if padded.contains(" since ") {
         out.push(causal_index_token("explanatory", "since"));
-    } else if padded.contains(" thus ") {
+    } else if padded.contains(" thus ") || padded.contains(" thereby ") {
         out.push(causal_index_token("direct", "thus"));
+    } else if padded.contains("; still,") || padded.contains("; still ") {
+        out.push(causal_index_token("concessive", "still"));
     } else if padded.contains(" still ") || padded.contains(" somehow ") {
         out.push(causal_index_token("concessive", "still"));
-    } else if padded.contains(" meaning ") {
-        out.push(causal_index_token("inferential", "meaning"));
+    } else if padded.contains(" nevertheless ") {
+        out.push(causal_index_token("concessive", "nevertheless"));
     }
 
     // --- pass 2: subtype overlay (independent of pass 1) ---
@@ -176,9 +210,9 @@ mod tests {
     }
 
     #[test]
-    fn concessive_still() {
+    fn concessive_but_somehow() {
         let v = causal_bm25_tokens("The market tanked but somehow we still came out ahead.");
-        assert!(v.iter().any(|t| t.contains("compensatory")));
+        assert!(v.iter().any(|t| t.contains("concessive")));
     }
 
     #[test]

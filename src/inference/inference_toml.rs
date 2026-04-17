@@ -893,6 +893,36 @@ impl InferenceRulesRuntime {
         best.map(|(_, t)| t)
     }
 
+    /// Like [`lexical_polarity_signal`] but also returns the byte length of the
+    /// winning phrase. Used by the causal-relation preempt gate to distinguish
+    /// curated full-sentence entries (long) from short token-level hits.
+    pub fn lexical_polarity_signal_with_len(&self, lower: &str) -> Option<(String, usize)> {
+        if let Some(ref lp) = self.lexical_polarity_automaton {
+            let mut best: Option<(usize, String)> = None;
+            for m in lp.ac.find_overlapping_iter(lower) {
+                let i = m.pattern().as_usize();
+                let len = lp.pattern_len[i];
+                let topic = lp.pattern_topic[i].clone();
+                if best.as_ref().map_or(true, |(bl, _)| len > *bl) {
+                    best = Some((len, topic));
+                }
+            }
+            return best.map(|(l, t)| (t, l));
+        }
+        let mut best: Option<(usize, String)> = None;
+        for (topic, phrases) in &self.lexical_polarity {
+            for p in phrases {
+                if lower.contains(p.as_str()) {
+                    let n = p.len();
+                    if best.as_ref().map_or(true, |(best_len, _)| n > *best_len) {
+                        best = Some((n, topic.clone()));
+                    }
+                }
+            }
+        }
+        best.map(|(l, t)| (t, l))
+    }
+
     /// Lowercase + curly apostrophe + dash normalization (keep aligned with `lattice_shortcuts`).
     pub fn normalize_rules_text(text: &str) -> String {
         let mut s = text.to_lowercase();

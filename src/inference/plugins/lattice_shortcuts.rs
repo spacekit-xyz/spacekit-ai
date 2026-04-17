@@ -314,6 +314,60 @@ pub fn try_user_anchored_line(
         return Some((text, cfg.ambiguous_line_confidence));
     }
 
+    // Causal-relation preempt: when the brain has a causal group and the text
+    // contains an explicit causal connector, produce a structured output that
+    // separates the relation type ("Direct causal link", "Concessive
+    // persistence", ...) from independent per-clause sentiment scoring. This
+    // prevents retrieval misses from falling back to honest-unknown on lines
+    // like "Inventory write-downs triggered a covenant breach" (no close
+    // lattice row) or garbled multi-output on "CFO sold holdings, implying..."
+    // where the lattice blends sentiment copy into the causal explanation.
+    //
+    // Gate: bare connectors like "but", "yet", "somehow", "because", "since"
+    // are ambiguous between causal and sentiment contexts (e.g. "hospital food
+    // was terrible but nurses were incredible" is sentiment-MIXED, not a causal
+    // chain). Only fire when:
+    //  (a) the connector confidence is >= 0.9 (unambiguously causal: "triggered",
+    //      "in retrospect", "would have", "which suggests", etc.), OR
+    //  (b) the topic_hint maps to a causal topic (meta-brain routed to causal),
+    //      in which case any connector is trusted.
+    if dm.find_causal_group().is_some() {
+        let causal_topic_routed = topic_hint.map_or(false, |th| {
+            const CAUSAL_TOPICS: &[&str] = &[
+                "direct", "compensatory", "contrastive", "explanatory",
+                "concessive", "inferential", "retrospective_framing",
+                "interventional_counterfactual", "causal",
+            ];
+            CAUSAL_TOPICS.iter().any(|ct| th.eq_ignore_ascii_case(ct))
+        });
+        // When the TOML lexical_polarity list has a *long* curated phrase
+        // match (>= 40 chars — full-sentence entries like "not because it makes
+        // me happy — it makes me feel understood"), the sentiment path is
+        // authoritative and the causal preempt yields. Short TOML hits like
+        // "covenant breach" or "all-time high" don't suppress the preempt
+        // since they may only cover one clause of a multi-clause causal line.
+        let toml_long_sentiment_match = rules
+            .lexical_polarity_signal_with_len(&lower)
+            .map_or(false, |(_, len)| len >= 40);
+        if let Some(csr) = crate::inference::causal_relation::score_with_relation(intent_text) {
+            if (csr.confidence >= 0.9 || causal_topic_routed) && !toml_long_sentiment_match {
+                let text = crate::inference::causal_relation::format_causal_sentiment_line(
+                    &csr,
+                    intent_text,
+                );
+                infer_trace!(
+                    "  [lattice-direct] causal-relation preempt → {} + {} (connector '{}', conf={:.2}, causal_routed={})",
+                    csr.relation.label(),
+                    csr.sentiment_label,
+                    csr.connector,
+                    csr.confidence,
+                    causal_topic_routed,
+                );
+                return Some((text, csr.confidence.max(0.72)));
+            }
+        }
+    }
+
     // Lexicon-authoritative preempt: when the configured `lexical_polarity`
     // phrase list or the contrastive-bipolar structural check matches, the
     // TOML is ground truth for the polarity label regardless of what the
