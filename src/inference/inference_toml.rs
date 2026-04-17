@@ -1353,6 +1353,42 @@ impl InferenceRulesRuntime {
             .any(|w| lower.contains(w.as_str()))
     }
 
+    /// Apply degree-modifier promotion/demotion to a polarity key.
+    /// "deeply disappointed" → promotes `negative_mild` to `negative_strong`.
+    /// "slightly annoyed" → keeps `negative_mild` (no change).
+    /// Only operates on `_mild`/`_strong` pairs; leaves `neutral`, `mixed`,
+    /// `sarcastic` untouched.
+    pub fn apply_degree_modifiers(&self, lower: &str, key: &str) -> String {
+        const INTENSIFIERS: &[&str] = &[
+            "deeply", "profoundly", "utterly", "absolutely", "completely",
+            "thoroughly", "extremely", "incredibly", "exceptionally",
+            "overwhelmingly", "insanely", "seriously", "genuinely",
+        ];
+        const DIMINISHERS: &[&str] = &[
+            "slightly", "somewhat", "a bit", "a little", "mildly",
+            "kind of", "kinda", "sort of", "sorta", "fairly",
+        ];
+
+        let has_intensifier = INTENSIFIERS.iter().any(|m| lower.contains(m));
+        let has_diminisher = DIMINISHERS.iter().any(|m| lower.contains(m));
+
+        if has_intensifier && !has_diminisher {
+            match key {
+                "negative_mild" => return "negative_strong".to_string(),
+                "positive_mild" => return "positive_strong".to_string(),
+                _ => {}
+            }
+        }
+        if has_diminisher && !has_intensifier {
+            match key {
+                "negative_strong" => return "negative_mild".to_string(),
+                "positive_strong" => return "positive_mild".to_string(),
+                _ => {}
+            }
+        }
+        key.to_string()
+    }
+
     pub fn is_objective_factual_statement(&self, lower: &str) -> bool {
         if self.has_clear_evaluative_stance(lower) {
             return false;

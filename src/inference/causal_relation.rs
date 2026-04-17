@@ -150,6 +150,8 @@ const CONNECTOR_RULES: &[ConnectorRule] = &[
     ConnectorRule { phrase: " even though ", relation: CausalRelation::Contrastive, confidence: 1.0 },
     ConnectorRule { phrase: " despite ", relation: CausalRelation::Contrastive, confidence: 1.0 },
     ConnectorRule { phrase: " although ", relation: CausalRelation::Contrastive, confidence: 0.95 },
+    ConnectorRule { phrase: ", though ", relation: CausalRelation::Contrastive, confidence: 0.85 },
+    ConnectorRule { phrase: " though ", relation: CausalRelation::Contrastive, confidence: 0.75 },
     // --- Compensatory ---
     ConnectorRule { phrase: " at least ", relation: CausalRelation::Compensatory, confidence: 0.95 },
     ConnectorRule { phrase: " however ", relation: CausalRelation::Compensatory, confidence: 0.9 },
@@ -168,6 +170,8 @@ const CONNECTOR_RULES: &[ConnectorRule] = &[
     ConnectorRule { phrase: " since ", relation: CausalRelation::Explanatory, confidence: 0.8 },
     // --- Direct (participial and explicit connectors) ---
     ConnectorRule { phrase: " triggered ", relation: CausalRelation::Direct, confidence: 1.0 },
+    ConnectorRule { phrase: ", triggering ", relation: CausalRelation::Direct, confidence: 1.0 },
+    ConnectorRule { phrase: " triggering ", relation: CausalRelation::Direct, confidence: 0.95 },
     ConnectorRule { phrase: " caused ", relation: CausalRelation::Direct, confidence: 1.0 },
     ConnectorRule { phrase: " causing ", relation: CausalRelation::Direct, confidence: 1.0 },
     ConnectorRule { phrase: ", pushing ", relation: CausalRelation::Direct, confidence: 0.95 },
@@ -303,11 +307,13 @@ pub fn score_with_relation(
     let c1 = clause1_raw.to_ascii_lowercase();
     let c2 = clause2_raw.to_ascii_lowercase();
 
-    let pol1 = rules.lexical_polarity_signal(&c1);
+    let pol1 = rules.lexical_polarity_signal(&c1)
+        .map(|k| rules.apply_degree_modifiers(&c1, &k));
     let pol2 = if c2.is_empty() {
         None
     } else {
         rules.lexical_polarity_signal(&c2)
+            .map(|k| rules.apply_degree_modifiers(&c2, &k))
     };
 
     let coarse1 = pol1.as_deref().map(polarity_to_coarse).unwrap_or("neutral");

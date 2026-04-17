@@ -274,6 +274,52 @@ fn normalize_match_text(text: &str) -> String {
     s
 }
 
+fn abbreviate_large_number(digits: &str) -> String {
+    let n: u128 = match digits.parse() {
+        Ok(v) => v,
+        Err(_) => return digits.to_string(),
+    };
+    if n >= 1_000_000_000 && n % 1_000_000_000 == 0 {
+        format!("{}B", n / 1_000_000_000)
+    } else if n >= 1_000_000_000 {
+        let whole = n / 1_000_000_000;
+        let frac = (n % 1_000_000_000) / 100_000_000;
+        if frac > 0 { format!("{}.{}B", whole, frac) } else { format!("{}B", whole) }
+    } else if n >= 1_000_000 && n % 1_000_000 == 0 {
+        format!("{}M", n / 1_000_000)
+    } else if n >= 1_000_000 {
+        let whole = n / 1_000_000;
+        let frac = (n % 1_000_000) / 100_000;
+        if frac > 0 { format!("{}.{}M", whole, frac) } else { format!("{}M", whole) }
+    } else {
+        digits.to_string()
+    }
+}
+
+fn detokenize_money(text: &str) -> String {
+    static CCY_SYMBOLS: &[(&str, &str)] = &[
+        ("money_usd_", "$"), ("money_gbp_", "£"), ("money_eur_", "€"),
+        ("money_jpy_", "¥"), ("money_krw_", "₩"), ("money_inr_", "₹"),
+        ("money_btc_", "₿"), ("money_rub_", "₽"), ("money_php_", "₱"),
+        ("money_vnd_", "₫"), ("money_try_", "₺"), ("money_uah_", "₴"),
+        ("money_ngn_", "₦"), ("money_kzt_", "₸"), ("money_brl_", "R$"),
+        ("money_sek_", "kr"),
+    ];
+    let mut out = text.to_string();
+    for &(prefix, symbol) in CCY_SYMBOLS {
+        while let Some(start) = out.find(prefix) {
+            let num_start = start + prefix.len();
+            let num_end = out[num_start..].find(|c: char| !c.is_ascii_digit())
+                .map(|i| num_start + i)
+                .unwrap_or(out.len());
+            let amount = &out[num_start..num_end];
+            let replacement = format!("{}{}", symbol, abbreviate_large_number(amount));
+            out.replace_range(start..num_end, &replacement);
+        }
+    }
+    out
+}
+
 /// Prefer a user-anchored classification line over lattice paraphrase when shape/profile match
 /// and MetaBrain topic/confidence allow it.
 pub fn try_user_anchored_line(
@@ -290,6 +336,7 @@ pub fn try_user_anchored_line(
     let cfg = resolved_inference_thresholds(thresholds_from_manifest);
     let rules = inference_rules_runtime();
     let lower = normalize_match_text(intent_text);
+    let display_text = detokenize_money(intent_text);
 
     // Objective-fact / status-query preempt runs FIRST, before the topic-hint
     // gate. On merged brains the factual prompt often routes to a non-sentiment
@@ -299,7 +346,7 @@ pub fn try_user_anchored_line(
     if rules.is_objective_factual_statement(&lower) {
         let header = label_header("neutral");
         let body = "Measurable fact, status, or time — no evaluative opinion; read as NEUTRAL (not praise or complaint)";
-        let trimmed = intent_text.trim();
+        let trimmed = display_text.trim();
         let excerpt = if trimmed.chars().count() > 200 {
             let head: String = trimmed.chars().take(200).collect();
             format!("{}…", head)
@@ -349,8 +396,11 @@ pub fn try_user_anchored_line(
         let toml_long_sentiment_match = rules
             .lexical_polarity_signal_with_len(&lower)
             .map_or(false, |(_, len)| len >= 40);
+        // Sarcasm templates are authoritative — "Oh great, the server crashed
+        // because someone pushed to prod" should be SARCASTIC, not Explanatory.
+        let sarcasm_fires = rules.has_sarcasm_template(&lower);
         if let Some(csr) = crate::inference::causal_relation::score_with_relation(intent_text) {
-            if (csr.confidence >= 0.9 || causal_topic_routed) && !toml_long_sentiment_match {
+            if (csr.confidence >= 0.9 || causal_topic_routed) && !toml_long_sentiment_match && !sarcasm_fires {
                 let text = crate::inference::causal_relation::format_causal_sentiment_line(
                     &csr,
                     intent_text,
@@ -386,13 +436,19 @@ pub fn try_user_anchored_line(
     if !topic_in_sentiment_keys
         && (lex_polar_early.is_some() || (contrast_early && bipolar_early))
     {
-        let key = if contrast_early && bipolar_early {
+        // Sarcasm templates override the raw polarity — "Love the customer
+        // service" after a complaint should be SARCASTIC, not positive_mild.
+        let sarcasm_early = rules.has_sarcasm_template(&lower);
+        let key = if sarcasm_early {
+            "sarcastic".to_string()
+        } else if contrast_early && bipolar_early {
             "mixed".to_string()
         } else {
-            lex_polar_early.clone().unwrap_or_else(|| "neutral".to_string())
+            let raw = lex_polar_early.clone().unwrap_or_else(|| "neutral".to_string());
+            rules.apply_degree_modifiers(&lower, &raw)
         };
         let header = label_header(key.as_str());
-        let trimmed = intent_text.trim();
+        let trimmed = display_text.trim();
         let excerpt = if trimmed.chars().count() > 200 {
             let head: String = trimmed.chars().take(200).collect();
             format!("{}…", head)
@@ -480,7 +536,7 @@ pub fn try_user_anchored_line(
     let mut lexical_polarity_override = false;
     if !force_mixed {
         if let Some(k) = lex_polar {
-            key = k;
+            key = rules.apply_degree_modifiers(&lower, &k);
             lexical_polarity_override = true;
         }
     }
@@ -510,7 +566,7 @@ pub fn try_user_anchored_line(
     }
 
     let header = label_header(key.as_str());
-    let trimmed = intent_text.trim();
+    let trimmed = display_text.trim();
     let excerpt = if trimmed.chars().count() > 200 {
         let head: String = trimmed.chars().take(200).collect();
         format!("{}…", head)

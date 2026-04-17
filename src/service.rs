@@ -25,8 +25,9 @@ use crate::spectral::{ProjectModel, EntityKind, HybridEmbedder};
 use crate::dimension::tool::{ToolRegistry, ToolSchema, ToolCallInfo, ToolResult};
 use crate::dimension::paramecium::InfraciliaryLattice;
 use crate::inference::{
-    default_inference_harness, plugins::lattice_shortcuts, sentiment_generation_lexicon,
-    BrainPluginsManifest, InferenceHarness, TEMPLATE_ID_USER_ANCHORED,
+    default_inference_harness, inference_rules_runtime, plugins::lattice_shortcuts,
+    sentiment_generation_lexicon, BrainPluginsManifest, InferenceHarness,
+    TEMPLATE_ID_USER_ANCHORED,
 };
 use crate::metacognition::{MetaCognition, ReflectionOutcome};
 use crate::reasoning::{ReasoningEngine, System2Config};
@@ -1205,7 +1206,17 @@ impl LanguageService {
             // When primary concept is CausalReasoning, override the codebook's
             // (possibly stale) group mapping with the lattice-detected causal group.
             // Otherwise fall through to normal codebook-based group selection.
-            let causal_redirect = if mr.concept == crate::growformer_lang::MetaConcept::CausalReasoning {
+            // Don't redirect to causal when a sarcasm template fires — sarcasm
+            // like "Love the customer service" after a complaint uses causal
+            // connectors ("because") that would otherwise route to the causal
+            // group and produce a causal explanation instead of SARCASTIC.
+            let sarcasm_blocks_causal = {
+                let lower_for_sarcasm = intent_text.to_ascii_lowercase();
+                inference_rules_runtime().has_sarcasm_template(&lower_for_sarcasm)
+            };
+            let causal_redirect = if mr.concept == crate::growformer_lang::MetaConcept::CausalReasoning
+                && !sarcasm_blocks_causal
+            {
                 causal_group_idx
             } else {
                 None

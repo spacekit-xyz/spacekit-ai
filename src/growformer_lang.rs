@@ -466,44 +466,47 @@ fn replace_money_token(w: &str) -> Option<String> {
     if let Some(m) = parse_glued_money(&lower) {
         return Some(m);
     }
-    // Sterling / euro prefixes: £43bn, €1.2m (ASCII + Unicode currency symbols)
-    if let Some(rest) = w.strip_prefix('£').or_else(|| w.strip_prefix('\u{00a3}')) {
-        if let Some(m) = parse_prefixed_currency_amount(rest, "gbp") {
-            return Some(m);
-        }
-    }
-    if let Some(rest) = w.strip_prefix('€').or_else(|| w.strip_prefix('\u{20ac}')) {
-        if let Some(m) = parse_prefixed_currency_amount(rest, "eur") {
-            return Some(m);
+    // World currency symbol prefixes
+    static SYMBOL_CCY: &[(&str, &str, &str)] = &[
+        ("£", "\u{00a3}", "gbp"),
+        ("€", "\u{20ac}", "eur"),
+        ("¥", "\u{00a5}", "jpy"),
+        ("₩", "\u{20a9}", "krw"),
+        ("₹", "\u{20b9}", "inr"),
+        ("₿", "\u{20bf}", "btc"),
+        ("₽", "\u{20bd}", "rub"),
+        ("₱", "\u{20b1}", "php"),
+        ("₫", "\u{20ab}", "vnd"),
+        ("₺", "\u{20ba}", "try"),
+        ("₴", "\u{20b4}", "uah"),
+        ("₦", "\u{20a6}", "ngn"),
+        ("₸", "\u{20b8}", "kzt"),
+        ("R$", "", "brl"),
+        ("kr", "", "sek"),
+    ];
+    for &(ascii_sym, unicode_sym, ccy) in SYMBOL_CCY {
+        let rest = if !ascii_sym.is_empty() {
+            w.strip_prefix(ascii_sym)
+        } else {
+            None
+        };
+        let rest = rest.or_else(|| {
+            if !unicode_sym.is_empty() { w.strip_prefix(unicode_sym) } else { None }
+        });
+        if let Some(rest) = rest {
+            if let Some(m) = parse_prefixed_currency_amount(rest, ccy) {
+                return Some(m);
+            }
         }
     }
     if !lower.starts_with('$') || lower.len() < 2 {
         return None;
     }
-    let rest = &lower[1..];
-    let (int_part, after_int) = take_digits_commas(rest);
-    if int_part.is_empty() {
-        return None;
+    // $ prefix — use parse_prefixed_currency_amount to handle magnitude suffixes ($9M, $3.8B)
+    if let Some(m) = parse_prefixed_currency_amount(&w[1..], "usd") {
+        return Some(m);
     }
-    let mut i = after_int;
-    // Optional .fraction
-    if i < rest.len() && rest.as_bytes().get(i) == Some(&b'.') {
-        i += 1;
-        while i < rest.len() && rest.as_bytes()[i].is_ascii_digit() {
-            i += 1;
-        }
-    }
-    let tail = &rest[i..];
-    let ccy = if tail.starts_with("usd") {
-        "usd"
-    } else if tail.starts_with("eur") {
-        "eur"
-    } else if tail.starts_with("gbp") {
-        "gbp"
-    } else {
-        "usd"
-    };
-    Some(format!("money_{}_{}", ccy, int_part))
+    None
 }
 
 fn take_digits_commas(s: &str) -> (String, usize) {
