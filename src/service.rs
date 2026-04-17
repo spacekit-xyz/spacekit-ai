@@ -1729,7 +1729,15 @@ impl LanguageService {
                             || (c.confidence >= 0.52
                                 && c.text.contains(
                                     crate::inference::sentiment_generation_lexicon::prompt_anchor_marker(),
-                                ))) =>
+                                ))
+                            // Keep lexicon-grounded user-anchored lines at medium confidence.
+                            // They carry the "Grounded in the user's own words" marker (set by
+                            // `try_user_anchored_line` when lexical_polarity / structural bipolar
+                            // fires) — authoritative sentiment output; must not be replaced by the
+                            // E8 fan-out which otherwise emits a cue-dump.
+                            || (c.confidence >= 0.55
+                                && preempt_template_id == Some(TEMPLATE_ID_USER_ANCHORED)
+                                && c.text.contains("Grounded in the user's own words"))) =>
                 {
                     (c.text.clone(), c.confidence, c.group_idx)
                 }

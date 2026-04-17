@@ -314,13 +314,93 @@ pub fn try_user_anchored_line(
         return Some((text, cfg.ambiguous_line_confidence));
     }
 
+    // Lexicon-authoritative preempt: when the configured `lexical_polarity`
+    // phrase list or the contrastive-bipolar structural check matches, the
+    // TOML is ground truth for the polarity label regardless of what the
+    // meta-brain routed to. Without this, merged brains (Brain C) that route
+    // personal anecdotes like "They promoted me and doubled my meetings. Be
+    // careful what you wish for" to `topic_hint = identity` skip the whole
+    // user-anchored path and fall back to the cue-dump. The preempt emits a
+    // lexicon-override body when applicable and a contrastive-MIXED body
+    // otherwise — same copy the in-flow path would produce.
+    let lex_polar_early = rules.lexical_polarity_signal(&lower);
+    let contrast_early = rules.has_contrastive_marker(&lower);
+    let bipolar_early = rules.has_bipolar_lexicon(&lower);
+    let topic_in_sentiment_keys = topic_hint
+        .map(|th| TOPIC_KEYS.iter().any(|k| th.eq_ignore_ascii_case(k)))
+        .unwrap_or(false);
+    if !topic_in_sentiment_keys
+        && (lex_polar_early.is_some() || (contrast_early && bipolar_early))
+    {
+        let key = if contrast_early && bipolar_early {
+            "mixed".to_string()
+        } else {
+            lex_polar_early.clone().unwrap_or_else(|| "neutral".to_string())
+        };
+        let header = label_header(key.as_str());
+        let trimmed = intent_text.trim();
+        let excerpt = if trimmed.chars().count() > 200 {
+            let head: String = trimmed.chars().take(200).collect();
+            format!("{}…", head)
+        } else {
+            trimmed.to_string()
+        };
+        // Prefer anchor+tone for single-pole polarity keys so a product-rejection override body
+        // doesn't leak into unrelated contexts (e.g. a rehearsed apology, 7am drilling complaint).
+        // Only `mixed` / `sarcastic` use their TOML override copy since those bodies are structural
+        // ("contrastive dual-valence", "laudatory wording clashes with grievance") and fit any
+        // phrase that triggered the structural check.
+        let tone = match key.as_str() {
+            "positive_strong" | "positive_mild" => "The overall tone reads as clearly positive",
+            "negative_strong" | "negative_mild" => "The overall tone reads as clearly negative",
+            "neutral" => "The overall tone reads as mostly neutral",
+            "sarcastic" => "The line may use irony or surface/actual mismatch",
+            _ => "Classification is non-obvious from surface text alone",
+        };
+        let body = if key == "mixed" || key == "sarcastic" {
+            let lex = crate::inference::sentiment_generation_lexicon::global();
+            lex.lattice_lexical_override_body(key.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    if key == "mixed" {
+                        "Contrastive marker (e.g. 'but') with both laudatory and critical wording — dual valence (MIXED), not a single pole".to_string()
+                    } else {
+                        "Laudatory or stoic wording clashes with an obvious grievance — read as SARCASTIC / ironic, not literal".to_string()
+                    }
+                })
+        } else {
+            match rules.anchor_phrase(&lower, key.as_str()) {
+                Some(a) => format!("{}. {}", a, tone),
+                None => tone.to_string(),
+            }
+        };
+        let text = format!(
+            "{} — {}. Grounded in the user's own words: \"{}\"",
+            header, body, excerpt
+        );
+        let conf = if key == "mixed" {
+            cfg.mixed_override_confidence
+        } else if key == "positive_strong" {
+            cfg.default_line_confidence
+        } else {
+            cfg.ambiguous_line_confidence
+        };
+        infer_trace!(
+            "  [lattice-direct] lexicon-authoritative preempt → {} (topic hint {:?} bypassed)",
+            key,
+            topic_hint
+        );
+        return Some((text, conf));
+    }
+
     let mr = meta_result?;
     let th = topic_hint?;
     if !TOPIC_KEYS.iter().any(|k| th.eq_ignore_ascii_case(k)) {
         return None;
     }
 
-    let lex_polar = rules.lexical_polarity_signal(&lower);
+    let lex_polar = lex_polar_early;
     let mixed_structurally_ok = th.eq_ignore_ascii_case("mixed")
         && rules.sentiment_allow_forced_mixed_topic(intent_text);
     if mr.confidence < cfg.min_meta_confidence_user_anchored
@@ -329,8 +409,8 @@ pub fn try_user_anchored_line(
     {
         return None;
     }
-    let contrast = rules.has_contrastive_marker(&lower);
-    let bipolar = rules.has_bipolar_lexicon(&lower);
+    let contrast = contrast_early;
+    let bipolar = bipolar_early;
     let force_mixed = contrast && bipolar;
 
     let mut key: String = TOPIC_KEYS
@@ -438,12 +518,29 @@ pub fn try_user_anchored_line(
             cfg.ambiguous_line_confidence,
         )
     } else if lexical_polarity_override {
-        let lex = crate::inference::sentiment_generation_lexicon::global();
-        let explain = lex
-            .lattice_lexical_override_body(key.as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| key.clone());
+        // For single-pole keys (positive/negative/neutral), the override body in the lexicon TOML
+        // is tuned for product-review register ("wouldn't buy again", "commerce-rejection"). Prefer
+        // anchor+tone for these so non-product contexts (rehearsed apology, drilling complaint,
+        // gaming slang) don't inherit commerce framing. `mixed` and `sarcastic` still use the
+        // override since their bodies are structural, not domain-flavored.
+        let explain = if key.as_str() == "mixed" || key.as_str() == "sarcastic" {
+            let lex = crate::inference::sentiment_generation_lexicon::global();
+            lex.lattice_lexical_override_body(key.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| key.clone())
+        } else {
+            let tone = match key.as_str() {
+                "positive_strong" | "positive_mild" => "The overall tone reads as clearly positive",
+                "negative_strong" | "negative_mild" => "The overall tone reads as clearly negative",
+                "neutral" => "The overall tone reads as mostly neutral",
+                _ => "Classification is non-obvious from surface text alone",
+            };
+            match rules.anchor_phrase(&lower, key.as_str()) {
+                Some(a) => format!("{}. {}", a, tone),
+                None => tone.to_string(),
+            }
+        };
         let c = if key.as_str() == "positive_strong" {
             cfg.default_line_confidence
         } else {
