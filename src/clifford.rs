@@ -994,6 +994,134 @@ pub fn causal_contrastive_repulsion(
     (cos + margin).max(0.0) // penalize when cos > -margin (should be anti-aligned)
 }
 
+// ── Supervised causal grades ─────────────────────────────────────────────────
+// Three oriented energy functions in the causal 2-blade subspace, plus a
+// supervised grade loss that targets the correct energy profile based on
+// labeled causal_type / causal_subtype.
+
+/// The three causal grades the supervisor distinguishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CausalGrade {
+    Forward,
+    Retrospective,
+    Interventional,
+}
+
+impl CausalGrade {
+    /// Derive grade from `causal_type` and `causal_subtype` strings in JSONL.
+    pub fn from_labels(causal_type: &str, causal_subtype: Option<&str>) -> Self {
+        match causal_subtype {
+            Some("retrospective_framing") => CausalGrade::Retrospective,
+            Some("interventional_counterfactual") => CausalGrade::Interventional,
+            _ => match causal_type {
+                "counterfactual" => CausalGrade::Interventional,
+                _ => CausalGrade::Forward,
+            },
+        }
+    }
+
+    pub fn class_index(&self) -> usize {
+        match self {
+            CausalGrade::Forward => 0,
+            CausalGrade::Retrospective => 1,
+            CausalGrade::Interventional => 2,
+        }
+    }
+
+    pub fn num_classes() -> usize { 3 }
+}
+
+/// Forward causal energy: signed projection onto the e_01 (temporal cause) and
+/// e_02 (temporal effect) boost planes. Positive = forward C→E direction.
+/// Returns a 3-element vector: [e_01 projection, e_02 projection, boost-plane norm].
+pub fn causal_forward_energy(cause_mv: &Multivector, effect_mv: &Multivector) -> [f32; 3] {
+    let p01 = causal_wedge_projection(cause_mv, effect_mv, 0); // e_01
+    let p02 = causal_wedge_projection(cause_mv, effect_mv, 1); // e_02
+    let norm = (p01 * p01 + p02 * p02).sqrt();
+    [p01, p02, norm]
+}
+
+/// Retrospective energy: signed projection onto e_03 (context framing) boost plane,
+/// plus the e_13 and e_23 rotation planes (cause/effect ↔ context).
+/// High |e_03| indicates temporal reframing; e_13/e_23 capture how framing
+/// modifies the original cause/effect reading.
+pub fn causal_retro_energy(cause_mv: &Multivector, effect_mv: &Multivector) -> [f32; 3] {
+    let p03 = causal_wedge_projection(cause_mv, effect_mv, 2); // e_03
+    let p13 = causal_wedge_projection(cause_mv, effect_mv, 4); // e_13
+    let p23 = causal_wedge_projection(cause_mv, effect_mv, 5); // e_23
+    [p03, p13, p23]
+}
+
+/// Interventional energy: uses all 6 causal blades via the geometric product,
+/// measuring the total bivector magnitude in the causal subspace.
+/// Interventional/counterfactual pairs should have high magnitude (strong
+/// hypothetical divergence from actual) with ambiguous temporal direction.
+pub fn causal_intervention_energy(cause_mv: &Multivector, effect_mv: &Multivector) -> f32 {
+    let ab = cause_mv.geo(effect_mv);
+    let bv = causal_block_bivectors(&ab);
+    let mag_sq: f32 = bv.iter().map(|x| x * x).sum();
+    mag_sq.sqrt()
+}
+
+/// Compute a 3-class log-probability over causal grades from bivector energies.
+/// [forward_logit, retro_logit, intervention_logit]
+pub fn causal_grade_logits(cause_mv: &Multivector, effect_mv: &Multivector) -> [f32; 3] {
+    let fwd = causal_forward_energy(cause_mv, effect_mv);
+    let ret = causal_retro_energy(cause_mv, effect_mv);
+    let interv = causal_intervention_energy(cause_mv, effect_mv);
+
+    // Forward logit: positive e_01 projection (the primary temporal ordering signal)
+    let fwd_logit = fwd[0]; // e_01 signed value
+
+    // Retro logit: negative e_01 (reversed temporal order) + high |e_03| (context framing)
+    let retro_logit = -fwd[0] + ret[0].abs();
+
+    // Intervention logit: high total bivector magnitude + spread across planes
+    let interv_logit = interv * 0.5;
+
+    [fwd_logit, retro_logit, interv_logit]
+}
+
+fn softmax3(logits: &[f32; 3]) -> [f32; 3] {
+    let max_l = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let exp: [f32; 3] = [
+        (logits[0] - max_l).exp(),
+        (logits[1] - max_l).exp(),
+        (logits[2] - max_l).exp(),
+    ];
+    let sum = exp[0] + exp[1] + exp[2] + 1e-10;
+    [exp[0] / sum, exp[1] / sum, exp[2] / sum]
+}
+
+/// Cross-entropy loss for supervised causal grade classification.
+/// Uses bivector-derived logits; target is the labeled `CausalGrade`.
+pub fn causal_grade_loss(
+    cause_mv: &Multivector,
+    effect_mv: &Multivector,
+    target: CausalGrade,
+) -> f32 {
+    let logits = causal_grade_logits(cause_mv, effect_mv);
+    let probs = softmax3(&logits);
+    -probs[target.class_index()].max(1e-10).ln()
+}
+
+/// Combined supervised causal loss: temporal ordering (hinge) + grade classification (CE)
+/// + optional contrastive repulsion between paired rows.
+///
+/// Returns (ordering_loss, grade_loss, total).
+pub fn combined_causal_loss(
+    cause_mv: &Multivector,
+    effect_mv: &Multivector,
+    grade: CausalGrade,
+    ordering_margin: f32,
+    grade_lambda: f32,
+) -> (f32, f32, f32) {
+    let forward = grade != CausalGrade::Retrospective;
+    let ord = temporal_ordering_loss(cause_mv, effect_mv, forward, ordering_margin);
+    let grd = causal_grade_loss(cause_mv, effect_mv, grade);
+    (ord, grd, ord + grade_lambda * grd)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1488,5 +1616,85 @@ mod tests {
         }
         let sim = causal_block_similarity(&mv, &mv);
         assert!((sim - 1.0).abs() < 1e-5, "self-similarity should be 1.0: {sim}");
+    }
+
+    // ── Supervised causal grades tests ───────────────────────────────────
+
+    #[test]
+    fn causal_grade_from_labels_direct_is_forward() {
+        let g = CausalGrade::from_labels("direct", None);
+        assert_eq!(g, CausalGrade::Forward);
+    }
+
+    #[test]
+    fn causal_grade_from_labels_retrospective() {
+        let g = CausalGrade::from_labels("direct", Some("retrospective_framing"));
+        assert_eq!(g, CausalGrade::Retrospective);
+    }
+
+    #[test]
+    fn causal_grade_from_labels_interventional() {
+        let g = CausalGrade::from_labels("counterfactual", Some("interventional_counterfactual"));
+        assert_eq!(g, CausalGrade::Interventional);
+        let g2 = CausalGrade::from_labels("counterfactual", None);
+        assert_eq!(g2, CausalGrade::Interventional);
+    }
+
+    #[test]
+    fn causal_forward_energy_returns_three() {
+        let a = Multivector::vector(&[1.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let b = Multivector::vector(&[0.0, 0.0, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let e = causal_forward_energy(&a, &b);
+        assert_eq!(e.len(), 3);
+        assert!(e[2] >= 0.0, "norm should be non-negative");
+    }
+
+    #[test]
+    fn causal_retro_energy_returns_three() {
+        let a = Multivector::vector(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
+        let b = Multivector::vector(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let e = causal_retro_energy(&a, &b);
+        assert_eq!(e.len(), 3);
+    }
+
+    #[test]
+    fn causal_intervention_energy_nonnegative() {
+        let a = Multivector::vector(&[1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
+        let b = Multivector::vector(&[0.5, -0.5, 0.3, -0.3, 0.0, 0.0, 0.0, 0.0]);
+        let e = causal_intervention_energy(&a, &b);
+        assert!(e >= 0.0, "energy should be non-negative: {e}");
+    }
+
+    #[test]
+    fn causal_grade_logits_three_classes() {
+        let a = Multivector::vector(&[1.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let b = Multivector::vector(&[0.0, 0.0, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let l = causal_grade_logits(&a, &b);
+        assert_eq!(l.len(), 3);
+    }
+
+    #[test]
+    fn causal_grade_loss_bounded() {
+        let a = Multivector::vector(&[1.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let b = Multivector::vector(&[0.0, 0.0, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let loss = causal_grade_loss(&a, &b, CausalGrade::Forward);
+        assert!(loss >= 0.0, "loss should be non-negative: {loss}");
+    }
+
+    #[test]
+    fn combined_causal_loss_returns_components() {
+        let a = Multivector::vector(&[1.0, 0.5, 0.3, 0.1, 0.0, 0.0, 0.0, 0.0]);
+        let b = Multivector::vector(&[0.2, 0.0, 0.8, 0.4, 0.0, 0.0, 0.0, 0.0]);
+        let (ord, grd, total) = combined_causal_loss(&a, &b, CausalGrade::Forward, 0.5, 0.3);
+        assert!(ord >= 0.0);
+        assert!(grd >= 0.0);
+        assert!((total - (ord + 0.3 * grd)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn softmax3_sums_to_one() {
+        let s = softmax3(&[1.0, 2.0, 0.5]);
+        let sum = s[0] + s[1] + s[2];
+        assert!((sum - 1.0).abs() < 1e-5, "softmax should sum to 1: {sum}");
     }
 }

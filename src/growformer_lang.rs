@@ -166,6 +166,7 @@ pub enum MetaConcept {
     GeneralKnowledge,
     Support,
     Conversation,
+    CausalReasoning,
 }
 
 impl MetaConcept {
@@ -177,7 +178,7 @@ impl MetaConcept {
             ErrorHandling, Iteration, PatternMatching, AsyncConcurrency,
             SearchAlgorithm, SortAlgorithm, DataStructure, Composition,
             Testing, Debugging, Refactoring, InformationTheory,
-            GeneralKnowledge, Support, Conversation,
+            GeneralKnowledge, Support, Conversation, CausalReasoning,
         ]
     }
 
@@ -212,6 +213,7 @@ impl MetaConcept {
             Self::GeneralKnowledge => "general_knowledge",
             Self::Support => "support",
             Self::Conversation => "conversation",
+            Self::CausalReasoning => "causal_reasoning",
         }
     }
 
@@ -1689,6 +1691,23 @@ impl MetaCodebook {
             embedding.to_vec()
         };
 
+        // Stage 4: Detect secondary concept for multi-group blending.
+        // When primary concept is NOT CausalReasoning but text contains causal
+        // connectors, add the causal group as auxiliary so both can be consulted.
+        let auxiliary_groups = if concept != MetaConcept::CausalReasoning {
+            if has_causal_connectors(text) {
+                self.concept_to_groups.get(&MetaConcept::CausalReasoning)
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        } else {
+            // Primary IS causal — check if sentiment/other group should be auxiliary
+            // (the primary target_groups already contain the causal group)
+            Vec::new()
+        };
+
         MetaRoutingResult {
             concept,
             language,
@@ -1696,6 +1715,7 @@ impl MetaCodebook {
             margin,
             projected_embedding: projected,
             target_groups: best_group_reordered,
+            auxiliary_groups,
         }
     }
 
@@ -1730,6 +1750,10 @@ pub struct MetaRoutingResult {
     pub margin: f32,
     pub projected_embedding: Vec<f32>,
     pub target_groups: Vec<usize>,
+    /// Groups from a secondary concept that should also be consulted.
+    /// Populated when the text triggers both a primary concept (e.g. sentiment)
+    /// and a secondary concept (e.g. causal reasoning).
+    pub auxiliary_groups: Vec<usize>,
 }
 
 impl MetaRoutingResult {
@@ -1768,11 +1792,54 @@ fn concept_from_action_target(target: &str) -> Option<MetaConcept> {
         "concepts" => Some(MetaConcept::InformationTheory),
         "math" => Some(MetaConcept::GeneralKnowledge),
         "safety" => Some(MetaConcept::Conversation),
+        t if t.contains("causal") => Some(MetaConcept::CausalReasoning),
         // Broad coding categories: let keyword matching assign per-sample concepts
         // so iterator+error → ErrorHandling, struct+methods → StructDefinition, etc.
         "coding_general" | "coding" | "coding_patterns" => None,
         _ => None,
     }
+}
+
+/// Detect causal connectors in text for dual-concept routing.
+/// These are the same connectors used in `inference_causal.toml` lexicon_keywords.
+/// A match means the text likely has a causal relationship that the causal group
+/// should also evaluate, even if the primary concept is something else.
+fn has_causal_connectors(text: &str) -> bool {
+    let lower = text.to_lowercase();
+
+    // Strong causal markers: these alone indicate causal reasoning.
+    // `so` is included only as `, so ` or `. so ` (comma/period anchor) so
+    // casual usages like "so cool" or "so, anyway" don't trip it.
+    const STRONG: &[&str] = &[
+        " because ", " since ", " therefore ",
+        ", so ", ". so ", "; so ",
+        "in retrospect", "looking back", "it turned out",
+        " triggered ", " caused ", " resulted in ",
+        " pushed ", " led to ", " lead to ",
+        " so that ", " thereby ",
+    ];
+    if STRONG.iter().any(|c| lower.contains(*c)) {
+        return true;
+    }
+
+    // Contrastive markers alone are NOT causal — they're usually sentiment
+    // (MIXED / concessive). Only count as causal when paired with explicit
+    // consequence or causal verbs in the same clause.
+    const CONTRASTIVE: &[&str] = &[
+        " despite ", " although ", " even though ", " yet ",
+        " but ", " however ", " nevertheless ",
+        " meaning ", " implying ", " suggesting ",
+    ];
+    const CAUSAL_CO: &[&str] = &[
+        "spiked", "pushed", "triggered", "caused", "drove",
+        "resulted", "led to", "forced", "crashed", "tanked",
+        "surged", "plummeted", "breach", "default",
+    ];
+    let has_contrastive = CONTRASTIVE.iter().any(|c| lower.contains(*c));
+    if has_contrastive && CAUSAL_CO.iter().any(|w| lower.contains(*w)) {
+        return true;
+    }
+    false
 }
 
 fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {

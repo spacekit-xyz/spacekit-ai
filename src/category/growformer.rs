@@ -18,7 +18,10 @@ use crate::category::pythagoras::{nearest_pythagorean_split, PythagorasNode};
 use crate::category::sentiment::{entity_to_aux_category, ParsedInput, SentimentFunctor};
 use crate::category::{Layer, NodeId};
 use crate::category::training::{AuxCategory, SentimentLabel, TrainingBatch};
-use crate::clifford::{embed_bridge_vector, temporal_ordering_loss};
+use crate::clifford::{
+    embed_bridge_vector, temporal_ordering_loss, combined_causal_loss,
+    causal_contrastive_repulsion, CausalGrade,
+};
 use std::collections::HashMap;
 
 /// Small random, partially anti-correlated leaf weights so new branches are not identical
@@ -430,29 +433,75 @@ impl GrowformerTrainer {
 
         let causal_lambda = 0.15f32;
         let causal_margin = 0.5f32;
-        let causal_ordering_term = {
-            let mut sum = 0.0f32;
-            let mut cnt = 0u32;
-            for r in &batch.records {
-                let Some(ref ca) = r.causal else { continue };
-                let (Some(ref cs), Some(ref es)) = (&ca.cause_span, &ca.effect_span) else {
-                    continue;
-                };
-                let cause_emb = char_hash_embed(cs, embed_dim);
-                let effect_emb = char_hash_embed(es, embed_dim);
-                let cause_mv = embed_bridge_vector(&cause_emb);
-                let effect_mv = embed_bridge_vector(&effect_emb);
-                let is_retro = ca
-                    .causal_subtype
-                    .as_deref()
-                    .map_or(false, |s| s == "retrospective_framing");
-                sum += temporal_ordering_loss(&cause_mv, &effect_mv, !is_retro, causal_margin);
-                cnt += 1;
-            }
-            if cnt > 0 { sum / cnt as f32 } else { 0.0 }
+        let grade_lambda = 0.10f32;
+        let repulsion_lambda = 0.08f32;
+        let repulsion_margin = 0.3f32;
+
+        // Per-row supervised causal loss: ordering + grade classification
+        struct CausalRow {
+            cause_mv: crate::clifford::Multivector,
+            effect_mv: crate::clifford::Multivector,
+            grade: CausalGrade,
+            contrast_group: Option<String>,
+        }
+        let mut causal_rows: Vec<CausalRow> = Vec::new();
+        let mut causal_loss_sum = 0.0f32;
+        for r in &batch.records {
+            let Some(ref ca) = r.causal else { continue };
+            let (Some(ref cs), Some(ref es)) = (&ca.cause_span, &ca.effect_span) else {
+                continue;
+            };
+            let cause_emb = char_hash_embed(cs, embed_dim);
+            let effect_emb = char_hash_embed(es, embed_dim);
+            let cause_mv = embed_bridge_vector(&cause_emb);
+            let effect_mv = embed_bridge_vector(&effect_emb);
+            let grade = CausalGrade::from_labels(
+                &ca.causal_type,
+                ca.causal_subtype.as_deref(),
+            );
+            let (_ord, _grd, row_loss) = combined_causal_loss(
+                &cause_mv, &effect_mv, grade, causal_margin, grade_lambda,
+            );
+            causal_loss_sum += row_loss;
+            causal_rows.push(CausalRow {
+                cause_mv, effect_mv, grade,
+                contrast_group: ca.contrast_group.clone(),
+            });
+        }
+        let causal_ordering_term = if !causal_rows.is_empty() {
+            causal_loss_sum / causal_rows.len() as f32
+        } else {
+            0.0
         };
 
-        let combined = total_loss + mean_aux + causal_lambda * causal_ordering_term;
+        // Contrastive repulsion: find pairs in the same contrast_group with
+        // different causal grades and push their bivector representations apart.
+        let causal_repulsion_term = {
+            let mut rep_sum = 0.0f32;
+            let mut rep_cnt = 0u32;
+            for (i, ri) in causal_rows.iter().enumerate() {
+                let Some(ref cg_i) = ri.contrast_group else { continue };
+                for rj in causal_rows.iter().skip(i + 1) {
+                    let Some(ref cg_j) = rj.contrast_group else { continue };
+                    if cg_i != cg_j || ri.grade == rj.grade { continue; }
+                    let (fwd, ret) = if ri.grade == CausalGrade::Forward
+                        || (ri.grade != CausalGrade::Retrospective
+                            && rj.grade == CausalGrade::Retrospective)
+                    {
+                        ((&ri.cause_mv, &ri.effect_mv), (&rj.cause_mv, &rj.effect_mv))
+                    } else {
+                        ((&rj.cause_mv, &rj.effect_mv), (&ri.cause_mv, &ri.effect_mv))
+                    };
+                    rep_sum += causal_contrastive_repulsion(fwd, ret, repulsion_margin);
+                    rep_cnt += 1;
+                }
+            }
+            if rep_cnt > 0 { rep_sum / rep_cnt as f32 } else { 0.0 }
+        };
+
+        let combined = total_loss + mean_aux
+            + causal_lambda * causal_ordering_term
+            + repulsion_lambda * causal_repulsion_term;
 
         let log_branch = self.config.branch_stats_sample_count > 0
             && self.config.branch_stats_every_steps > 0
@@ -653,6 +702,30 @@ impl GrowformerTrainer {
                 sim
             );
         }
+    }
+
+    /// Extract a [`CategoricalComposer`] from the trained state: clones the parse
+    /// tree's Pythagoras composition + both linear heads. Returns `Err` if the
+    /// parse node hasn't been registered.
+    pub fn to_composer(&self) -> Result<crate::category::compose::CategoricalComposer, &'static str> {
+        let parse = self.parse_node().ok_or("parse node not registered")?;
+        Ok(crate::category::compose::CategoricalComposer::new(
+            parse.node.composition.clone(),
+            self.sentiment_head.clone(),
+            self.aux_head.clone(),
+            self.config.embed_dim,
+            self.config.branch_dim,
+        ))
+    }
+
+    /// Train for `num_steps` on `batch`, then return a composer ready for inference.
+    pub fn train_and_export_composer(
+        &mut self,
+        batch: &TrainingBatch,
+        num_steps: usize,
+    ) -> Result<crate::category::compose::CategoricalComposer, &'static str> {
+        self.train(batch, num_steps);
+        self.to_composer()
     }
 }
 

@@ -139,6 +139,15 @@ struct Args {
     #[arg(long, value_name = "DIR")]
     data_dir: Option<String>,
 
+    /// Directory containing train_*.jsonl for categorical composer bootstrap (--features categorical).
+    /// When set with --infer, trains the categorical decompose→compose pipeline on startup.
+    #[arg(long, value_name = "DIR")]
+    categorical_data: Option<PathBuf>,
+
+    /// Training steps for categorical composer bootstrap (default: 500).
+    #[arg(long, value_name = "N", default_value_t = 500)]
+    categorical_steps: usize,
+
     /// UTF-8 TOML embedded in the exported brain as the inference plugins manifest (format v2).
     /// Top-level tables, e.g. `[sentiment]`, `[language_detection]`, `[badwords]`.
     #[arg(long, value_name = "PATH")]
@@ -163,6 +172,16 @@ struct Args {
     /// Enable MetaCodebook (Stage 2b) and code lattice training from `expected_code` in JSONL. Off by default; use for a standalone code brain (see `scripts/code.gf.toml`).
     #[arg(long)]
     train_code_lattice: bool,
+
+    /// Merge an overlay brain into the base brain and export the result.
+    /// Base brain: --brain <path>. Overlay: --overlay-brain <path>.
+    /// Output: --brain-output <path> (defaults to merged-brain.bin).
+    #[arg(long)]
+    merge_brain: bool,
+
+    /// Path to the overlay brain for --merge-brain.
+    #[arg(long, value_name = "PATH")]
+    overlay_brain: Option<PathBuf>,
 
     /// Disable stderr progress bars (plain logs only; use for CI and when capturing stderr).
     #[arg(long)]
@@ -488,6 +507,19 @@ fn main() {
             eprintln!("Retrain failed: {}", e);
             std::process::exit(1);
         }
+    } else if args.merge_brain {
+        let overlay_path = match &args.overlay_brain {
+            Some(p) => p.clone(),
+            None => {
+                eprintln!("--merge-brain requires --overlay-brain <path>");
+                std::process::exit(1);
+            }
+        };
+        let output = args.brain_output.clone().unwrap_or_else(|| "merged-brain.bin".to_string());
+        if let Err(e) = merge_brains(&brain_path, overlay_path.to_str().unwrap(), &output) {
+            eprintln!("Merge failed: {}", e);
+            std::process::exit(1);
+        }
     } else if args.infer {
         let infer_mode = match resolve_infer_mode(&args) {
             Ok(m) => m,
@@ -496,7 +528,12 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        if let Err(e) = run_inference(&brain_path, infer_mode) {
+        if let Err(e) = run_inference(
+            &brain_path,
+            infer_mode,
+            args.categorical_data.as_deref(),
+            args.categorical_steps,
+        ) {
             eprintln!("Inference failed: {}", e);
             std::process::exit(1);
         }
@@ -760,14 +797,95 @@ fn retrain_single_gen(
 }
 
 // =============================================================================
+// Brain merge: combine Brain A + Brain B → Brain C
+// =============================================================================
+
+fn merge_brains(base_path: &str, overlay_path: &str, output_path: &str) -> Result<(), String> {
+    println!("=== Brain Merge ===\n");
+    println!("  Base brain:    {}", base_path);
+    println!("  Overlay brain: {}", overlay_path);
+    println!("  Output:        {}\n", output_path);
+
+    let base_data = std::fs::read(base_path)
+        .map_err(|e| format!("Failed to read base brain {}: {}", base_path, e))?;
+    let overlay_data = std::fs::read(overlay_path)
+        .map_err(|e| format!("Failed to read overlay brain {}: {}", overlay_path, e))?;
+
+    let base_peeled = growformer::brain::peel_brain_file_bytes(&base_data)?;
+    let overlay_peeled = growformer::brain::peel_brain_file_bytes(&overlay_data)?;
+
+    let mut base_dm: growformer::dimension::manager::DimensionManager =
+        growformer::systems::checkpoint::deserialize_checkpoint_from_bytes(&base_peeled.checkpoint)?;
+    let overlay_dm: growformer::dimension::manager::DimensionManager =
+        growformer::systems::checkpoint::deserialize_checkpoint_from_bytes(&overlay_peeled.checkpoint)?;
+
+    let base_groups = base_dm.main.group_order.len();
+    let base_gen_envs = base_dm.group_gen_envs.len();
+    let overlay_gen_envs = overlay_dm.group_gen_envs.len();
+    println!("  Base:    {} groups, {} gen_envs", base_groups, base_gen_envs);
+    println!("  Overlay: {} groups, {} gen_envs", overlay_dm.main.group_order.len(), overlay_gen_envs);
+
+    let summary = base_dm.merge_overlay_brain(overlay_dm);
+
+    println!("\n  Merge result:");
+    println!("    Groups added: {}", summary.overlay_groups);
+    println!("    Gen envs added: {}", summary.gen_envs_added);
+    println!("    Code envs added: {}", summary.code_envs_added);
+    println!("    Total groups: {}", base_dm.main.group_order.len());
+    println!("    Total gen envs: {}", base_dm.group_gen_envs.len());
+    for (old, new) in &summary.group_id_map {
+        println!("    overlay group {} → merged group {}", old, new);
+    }
+
+    let checkpoint_bytes = growformer::systems::checkpoint::serialize_checkpoint_to_bytes(&base_dm)?;
+
+    let mut merged_header = base_peeled.header.clone();
+    merged_header.description = format!(
+        "{} + overlay merge ({} groups added)",
+        merged_header.description, summary.overlay_groups
+    );
+
+    let merged_package = growformer::brain::BrainPackage::new(
+        merged_header,
+        checkpoint_bytes,
+        base_peeled.personality.clone(),
+        base_peeled.plugins_blob.clone(),
+    );
+
+    let out_bytes = merged_package.encode_to_bytes()?;
+    if let Some(parent) = std::path::Path::new(output_path).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create output dir: {}", e))?;
+    }
+    std::fs::write(output_path, &out_bytes)
+        .map_err(|e| format!("write merged brain: {}", e))?;
+
+    println!("\n  Merged brain written to {} ({} bytes)", output_path, out_bytes.len());
+    println!("\n=== Merge Complete ===");
+    Ok(())
+}
+
+// =============================================================================
 // Inference: load brain.bin and run prompts
 // =============================================================================
 
-fn run_inference(brain_path: &str, mode: InferMode) -> Result<(), String> {
+fn run_inference(
+    brain_path: &str,
+    mode: InferMode,
+    categorical_data: Option<&std::path::Path>,
+    categorical_steps: usize,
+) -> Result<(), String> {
     let data = std::fs::read(brain_path)
         .map_err(|e| format!("Failed to read {}: {}", brain_path, e))?;
 
     let mut rt = growformer::runtime::Runtime::from_brain_bytes(&data)?;
+
+    #[cfg(feature = "categorical")]
+    if let Some(data_dir) = categorical_data {
+        rt.svc.bootstrap_categorical_composer(data_dir, categorical_steps);
+    }
+    #[cfg(not(feature = "categorical"))]
+    { let _ = (categorical_data, categorical_steps); }
 
     let info = rt.brain_info();
     let trace = growformer::infer_log::infer_trace_enabled();

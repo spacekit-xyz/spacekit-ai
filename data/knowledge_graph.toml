@@ -4,11 +4,10 @@
 # knowledge graph. Each node maps keyword patterns to a topic (for forced-topic
 # routing) and a concept (for MetaConcept routing).
 #
-# Rule matching:
-#   any    = at least one keyword must be present (OR)
-#   all    = every keyword must be present (AND)
-#   not    = none of these keywords may be present (NOT)
-#   phrase = exact multi-word phrases (checked as substring)
+# Rule matching (only these three fields are supported):
+#   any  = at least one keyword/phrase must appear (OR)  — substrings OK
+#   all  = every keyword/phrase must appear (AND)        — substrings OK
+#   not  = none of these may appear (NOT)
 #
 # If a query matches multiple nodes, the highest priority wins.
 # Within equal priority, the most specific rule (most `all` terms) wins.
@@ -46,7 +45,7 @@ priority = 20
 [[nodes.rules]]
 any = ["multiplication", "multiply", "product function", "a * b"]
 [[nodes.rules]]
-any = ["times "]
+all = ["times", "two numbers"]
 
 [[nodes]]
 topic = "division_operation"
@@ -1105,6 +1104,101 @@ priority = 15
 any = ["typical set", "asymptotic equipartition", "aep"]
 
 # ==========================================================================
+# Causal reasoning — connectors that signal cause/effect relationships.
+# Topic names match the causal overlay lattice (Brain B) to avoid topic-miss.
+# ==========================================================================
+
+[[nodes]]
+topic = "direct"
+concept = "CausalReasoning"
+category = "causal"
+priority = 16
+[[nodes.rules]]
+any = ["crashed, so", "spiked, pushing", "triggered a", "led to", "caused a", ", so "]
+[[nodes.rules]]
+any = ["triggered", "caused", "resulted in", "pushing"]
+
+[[nodes]]
+topic = "compensatory"
+concept = "CausalReasoning"
+category = "causal"
+priority = 16
+[[nodes.rules]]
+any = ["but at least", "though the", "at least the"]
+[[nodes.rules]]
+all = ["but", "at least"]
+
+[[nodes]]
+topic = "contrastive"
+concept = "CausalReasoning"
+category = "causal"
+priority = 16
+[[nodes.rules]]
+any = ["even though", "even as"]
+[[nodes.rules]]
+any = ["despite", "although", "nevertheless", "however"]
+not = ["gdpr", "privacy", "data deletion"]
+
+[[nodes]]
+topic = "explanatory"
+concept = "CausalReasoning"
+category = "causal"
+priority = 16
+[[nodes.rules]]
+any = ["because the", "because of", "since the"]
+[[nodes.rules]]
+all = ["because", "confused"]
+[[nodes.rules]]
+all = ["because", "withdrew"]
+[[nodes.rules]]
+all = ["since", "breach"]
+[[nodes.rules]]
+all = ["since", "disclosed"]
+
+[[nodes]]
+topic = "concessive"
+concept = "CausalReasoning"
+category = "causal"
+priority = 16
+[[nodes.rules]]
+any = ["yet somehow", "but still", "still, nobody"]
+[[nodes.rules]]
+all = ["yet", "somehow"]
+[[nodes.rules]]
+all = ["still", "nobody"]
+
+[[nodes]]
+topic = "inferential"
+concept = "CausalReasoning"
+category = "causal"
+priority = 16
+[[nodes.rules]]
+any = ["which suggests", "which implies", "meaning the", "implying", "suggests"]
+
+[[nodes]]
+topic = "retrospective_framing"
+concept = "CausalReasoning"
+category = "causal"
+priority = 17
+[[nodes.rules]]
+any = ["in retrospect", "looking back", "it turned out"]
+
+[[nodes]]
+topic = "interventional_counterfactual"
+concept = "CausalReasoning"
+category = "causal"
+priority = 17
+[[nodes.rules]]
+any = ["if the regulator", "without the emergency", "had they"]
+[[nodes.rules]]
+all = ["if", "would have"]
+[[nodes.rules]]
+all = ["without", "would have"]
+[[nodes.rules]]
+all = ["had", "wouldn't"]
+not = ["password", "account", "login"]
+
+# ==========================================================================
 # Concept-only nodes (for infer_concept, no topic routing)
 # These have topic = "" meaning they only affect MetaConcept classification
 # ==========================================================================
@@ -1223,6 +1317,16 @@ priority = 11
 [[nodes.rules]]
 any = ["design pattern", "architecture", "microservice", "system design"]
 
+[[nodes]]
+topic = ""
+concept = "CausalReasoning"
+category = "concept_only"
+priority = 11
+[[nodes.rules]]
+any = ["even though", "in retrospect", "looking back", "it turned out"]
+[[nodes.rules]]
+any = ["therefore", "nevertheless", "despite"]
+
 # ==========================================================================
 # action_target → concept mappings (used during training)
 # ==========================================================================
@@ -1245,6 +1349,7 @@ reasoning = "Composition"
 concepts = "InformationTheory"
 math = "GeneralKnowledge"
 safety = "Conversation"
+causal = "CausalReasoning"
 
 # ==========================================================================
 # Concept keywords for infer_concept (broad classification from text)
@@ -1265,6 +1370,14 @@ InformationTheory = [
     "total variation", "renyi", "convolutional code", "linear block code",
     "differential entropy", "conditional entropy", "joint entropy",
     "entropy rate", "sufficient statistic", "information theory",
+]
+CausalReasoning = [
+    "because", "therefore", "so that", "triggered", "caused",
+    "despite", "although", "even though", "nevertheless",
+    "yet somehow", "but at least", "which suggests", "implying",
+    "in retrospect", "looking back", "it turned out",
+    "would have", "had they", "without the",
+    "led to", "resulted in", "pushed", "meaning the",
 ]
 BinaryArithmetic = [
     "addition function", "subtraction function", "multiplication function",

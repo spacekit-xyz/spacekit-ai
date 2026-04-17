@@ -30,29 +30,27 @@ pub const TOPIC_KEYS: &[&str] = &[
     "mixed",
 ];
 
-/// True when the checkpoint is a single-group sentiment pack that includes every **standard**
-/// seven-topic sub-lattice name (the historical micro-brain layout).
+/// True when the checkpoint exposes at least one generation group that includes every **standard**
+/// seven-topic sub-lattice name (the historical sentiment lattice layout).
 ///
-/// Extra topics (expanded taxonomies) are allowed — they must not disable user-anchored preempt
-/// or weak-GK shortcuts as long as the seven keys remain present.
+/// Single-group sentiment packs, multi-group fintech packs, and merged brains (sentiment ⊕ causal)
+/// all qualify as long as **some** group matches. Extra topics (expanded taxonomies) are allowed —
+/// user-anchored preempt and weak-GK shortcuts fire so long as the seven keys are present somewhere.
 pub fn is_lattice_shape(dm: &DimensionManager) -> bool {
-    if dm.group_gen_envs.len() != 1 {
+    if dm.group_gen_envs.is_empty() {
         return false;
     }
-    let Some(env) = dm.group_gen_envs.values().next() else {
-        return false;
-    };
-    if env.topic_subindex.len() < TOPIC_KEYS.len() {
-        return false;
-    }
-    let names: HashSet<String> = env
-        .topic_subindex
-        .iter()
-        .map(|t| t.topic_name.to_ascii_lowercase())
-        .collect();
-    TOPIC_KEYS
-        .iter()
-        .all(|k| names.contains(&k.to_string()))
+    dm.group_gen_envs.values().any(|env| {
+        if env.topic_subindex.len() < TOPIC_KEYS.len() {
+            return false;
+        }
+        let names: HashSet<String> = env
+            .topic_subindex
+            .iter()
+            .map(|t| t.topic_name.to_ascii_lowercase())
+            .collect();
+        TOPIC_KEYS.iter().all(|k| names.contains(&k.to_string()))
+    })
 }
 
 /// Topic names suggest a consumer / wire **sentiment** generation lattice (not a code-only brain).
@@ -289,15 +287,15 @@ pub fn try_user_anchored_line(
     if !shortcuts_enabled(dm, inference_profile) {
         return None;
     }
-    let mr = meta_result?;
-    let th = topic_hint?;
-    if !TOPIC_KEYS.iter().any(|k| th.eq_ignore_ascii_case(k)) {
-        return None;
-    }
     let cfg = resolved_inference_thresholds(thresholds_from_manifest);
     let rules = inference_rules_runtime();
     let lower = normalize_match_text(intent_text);
 
+    // Objective-fact / status-query preempt runs FIRST, before the topic-hint
+    // gate. On merged brains the factual prompt often routes to a non-sentiment
+    // topic (e.g. `general_knowledge`) so requiring a sentiment topic key up
+    // front would skip the preempt and leak a MIXED fallback for pure factual
+    // questions like "What nominal AC voltages..." or "List three ISO 27001...".
     if rules.is_objective_factual_statement(&lower) {
         let header = label_header("neutral");
         let body = "Measurable fact, status, or time — no evaluative opinion; read as NEUTRAL (not praise or complaint)";
@@ -314,6 +312,12 @@ pub fn try_user_anchored_line(
             header, body, excerpt
         );
         return Some((text, cfg.ambiguous_line_confidence));
+    }
+
+    let mr = meta_result?;
+    let th = topic_hint?;
+    if !TOPIC_KEYS.iter().any(|k| th.eq_ignore_ascii_case(k)) {
+        return None;
     }
 
     let lex_polar = rules.lexical_polarity_signal(&lower);

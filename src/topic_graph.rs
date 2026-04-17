@@ -40,6 +40,7 @@ pub struct NodeConfig {
 fn default_priority() -> i32 { 10 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuleConfig {
     #[serde(default)]
     pub any: Vec<String>,
@@ -368,6 +369,7 @@ fn parse_concept(s: &str) -> MetaConcept {
         "Conversation" => MetaConcept::Conversation,
         "GeneralKnowledge" => MetaConcept::GeneralKnowledge,
         "InformationTheory" => MetaConcept::InformationTheory,
+        "CausalReasoning" => MetaConcept::CausalReasoning,
         _ => {
             eprintln!("[topic-graph] WARNING: unknown concept '{}', defaulting to GeneralKnowledge", s);
             MetaConcept::GeneralKnowledge

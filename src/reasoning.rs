@@ -451,9 +451,18 @@ impl ReasoningEngine {
         let mut sentences: Vec<ScoredSentence> = Vec::new();
 
         for (frag_idx, (text, weight)) in fragments.iter().enumerate() {
-            for sent in text.split(". ").chain(text.split(".\n")) {
+            // Strip any training-prompt prefix ending in a sentiment-lattice
+            // witness marker before sentence-splitting; this prevents the
+            // synthetic marker (e.g. "__GROWFORMER_SENT_WITNESS__") and its
+            // preceding training-sample text from leaking into the composed
+            // System2 output when multiple lattice fragments are interleaved.
+            let cleaned = crate::dimension::language::strip_sentiment_lattice_witness_for_display(text);
+            for sent in cleaned.split(". ").chain(cleaned.split(".\n")) {
                 let sent = sent.trim().trim_end_matches('.');
                 if sent.len() < 5 { continue; }
+                if sent.contains(crate::dimension::language::SENTIMENT_LATTICE_WITNESS_CORE) {
+                    continue;
+                }
                 sentences.push(ScoredSentence {
                     text: sent.to_string(),
                     weight: *weight,

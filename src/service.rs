@@ -617,6 +617,10 @@ pub struct LanguageService {
     pub active_inference_belief: BeliefState,
     /// When [`Self::enable_active_inference_replay_log`] is used, each MetaCognition outcome is appended for offline replay.
     pub active_inference_replay_log: Option<QueuedEnvironment>,
+    /// Categorical composer: trained decompose→compose pipeline for generation fallback.
+    /// Wrapped in `Arc` so inference can borrow it without conflicting with `&mut self`.
+    #[cfg(feature = "categorical")]
+    pub categorical_composer: Option<std::sync::Arc<crate::category::compose::CategoricalComposer>>,
 }
 
 /// P0-02: when true, skip System 2 deliberate cross-group reasoning for this turn.
@@ -707,6 +711,8 @@ impl LanguageService {
             inference_harness: default_inference_harness(),
             active_inference_belief: BeliefState::new(),
             active_inference_replay_log: None,
+            #[cfg(feature = "categorical")]
+            categorical_composer: None,
         })
     }
 
@@ -940,21 +946,19 @@ impl LanguageService {
     }
 
     /// Try categorical composition for the routing-only fallback path. When the
-    /// `categorical` feature is available, decomposes the conditioning vector into
-    /// disentangled sentiment × entity and composes a grounded explanation. Falls
-    /// back to the standard routing-only line when the feature is disabled or when
-    /// categorical confidence is too low.
+    /// `categorical` feature is available and a trained composer exists, decomposes
+    /// the conditioning vector into disentangled sentiment x entity and composes
+    /// a grounded explanation. Falls back to `None` when the feature is disabled,
+    /// no composer is loaded, or confidence is too low.
     #[cfg(feature = "categorical")]
     fn categorical_compose_fallback(
-        env: &IndexedGenEnv,
-        topic_hint: Option<&str>,
+        composer_opt: &Option<std::sync::Arc<crate::category::compose::CategoricalComposer>>,
+        _env: &IndexedGenEnv,
+        _topic_hint: Option<&str>,
         intent_text: &str,
         gen_cond: &[f32],
     ) -> Option<(String, f32)> {
-        use crate::category::compose::CategoricalComposer;
-        let composer = CategoricalComposer::new_random(
-            gen_cond.len().max(8), 4, 42,
-        );
+        let composer = composer_opt.as_ref()?;
         let output = composer.generate(gen_cond, intent_text, None);
         if output.confidence >= 0.30 && output.explanation.len() > 10 {
             infer_trace!(
@@ -970,12 +974,73 @@ impl LanguageService {
 
     #[cfg(not(feature = "categorical"))]
     fn categorical_compose_fallback(
+        _composer_opt: &Option<std::sync::Arc<()>>,
         _env: &IndexedGenEnv,
         _topic_hint: Option<&str>,
         _intent_text: &str,
         _gen_cond: &[f32],
     ) -> Option<(String, f32)> {
         None
+    }
+
+    #[cfg(feature = "categorical")]
+    fn categorical_composer_arc(&self) -> Option<std::sync::Arc<crate::category::compose::CategoricalComposer>> {
+        self.categorical_composer.clone()
+    }
+
+    #[cfg(not(feature = "categorical"))]
+    fn categorical_composer_arc(&self) -> Option<std::sync::Arc<()>> {
+        None
+    }
+
+    /// Set a trained `CategoricalComposer` for generation fallback.
+    #[cfg(feature = "categorical")]
+    pub fn set_categorical_composer(&mut self, composer: crate::category::compose::CategoricalComposer) {
+        self.categorical_composer = Some(std::sync::Arc::new(composer));
+    }
+
+    /// Bootstrap the categorical composer by training on available sentiment JSONL.
+    /// Skips non-sentiment JSONL files (e.g. identity) gracefully.
+    #[cfg(feature = "categorical")]
+    pub fn bootstrap_categorical_composer(&mut self, data_dir: &std::path::Path, num_steps: usize) {
+        use crate::category::{
+            CurriculumScheduler, GrowformerNode, GrowformerTrainer, NodeId, TrainingBatch,
+            TrainerConfig,
+        };
+        let mut batch = TrainingBatch::default();
+        if let Ok(entries) = std::fs::read_dir(data_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.starts_with("train_") && name.ends_with(".jsonl")
+                    && name.contains("sentiment")
+                {
+                    let _ = batch.append_from_sentiment_jsonl(&p);
+                }
+            }
+        }
+        if batch.is_empty() {
+            return;
+        }
+        let config = TrainerConfig::default();
+        let curriculum = CurriculumScheduler::new(
+            num_steps / 4,
+            num_steps * 3 / 4,
+        );
+        let mut trainer = GrowformerTrainer::with_config(curriculum, config.clone());
+        trainer.add_node(GrowformerNode::new(
+            NodeId::new(0), "parse", config.embed_dim, vec![0.01; config.embed_dim],
+        ));
+        match trainer.train_and_export_composer(&batch, num_steps) {
+            Ok(composer) => {
+                self.categorical_composer = Some(std::sync::Arc::new(composer));
+                infer_trace!("  [categorical] bootstrapped composer from {} records, {} steps",
+                    batch.records.len(), num_steps);
+            }
+            Err(e) => {
+                eprintln!("[categorical] failed to bootstrap composer: {e}");
+            }
+        }
     }
 
     pub fn generation(&mut self, text: &str) -> Result<(ActionJson, GeneratedResponse), String> {
@@ -991,6 +1056,7 @@ impl LanguageService {
         intent_text: &str,
     ) -> Result<(ActionJson, GeneratedResponse), String> {
         let start = portable_instant();
+        let cat_composer = self.categorical_composer_arc();
 
         // Preserve monetary magnitude for routing/retrieval; hashing encoder skips pure-number tokens.
         // Note: shells expand `$` in double-quoted argv — prefer single quotes or `--prompt-file`.
@@ -1098,8 +1164,68 @@ impl LanguageService {
         // even with low margin (the concept matched strongly, just close to another),
         // OR the classifier had no group.
         let mut meta_routing: Option<crate::growformer_lang::MetaRoutingResult> = None;
+        let mut auxiliary_groups: Vec<usize> = Vec::new();
+        #[allow(unused_assignments)]
+        let mut has_auxiliary = false;
+
+        // Detect the causal overlay group (if the brain is a merged Brain C).
+        // Used both to redirect primary routing for CausalReasoning and to
+        // populate auxiliary_groups for multi-brain blending.
+        let causal_group_idx = dm.find_causal_group();
+
         if let Some(mr) = meta_pre {
-            if let Some(best_g) = mr.best_group() {
+            // Auxiliary blending is only activated when GrowformerLang's
+            // MetaCodebook actually detected a secondary concept (e.g. causal
+            // connectors in a non-causal prompt). Without that signal, adding
+            // the causal group as an auxiliary every time just lets the
+            // causal lattice's high-confidence canned templates hijack pure
+            // sentiment outputs. When signal IS present, prefer the
+            // lattice-detected causal group index over potentially stale
+            // codebook centroids (fixes index drift after merge).
+            if !mr.auxiliary_groups.is_empty() {
+                if let Some(cg) = causal_group_idx {
+                    if mr.concept != crate::growformer_lang::MetaConcept::CausalReasoning
+                        && !auxiliary_groups.contains(&cg)
+                        && Some(cg) != group_idx
+                    {
+                        auxiliary_groups.push(cg);
+                    }
+                } else {
+                    for &cg in &mr.auxiliary_groups {
+                        if !auxiliary_groups.contains(&cg) && Some(cg) != group_idx {
+                            auxiliary_groups.push(cg);
+                        }
+                    }
+                }
+                if !auxiliary_groups.is_empty() {
+                    infer_trace!("  [meta-route] auxiliary groups detected: {:?} (multi-group blending enabled)",
+                        auxiliary_groups);
+                }
+            }
+            // When primary concept is CausalReasoning, override the codebook's
+            // (possibly stale) group mapping with the lattice-detected causal group.
+            // Otherwise fall through to normal codebook-based group selection.
+            let causal_redirect = if mr.concept == crate::growformer_lang::MetaConcept::CausalReasoning {
+                causal_group_idx
+            } else {
+                None
+            };
+            if let Some(cg) = causal_redirect {
+                infer_trace!(
+                    "  [meta-route] concept=causal_reasoning → redirecting to causal lattice group {} (codebook suggested {:?})",
+                    cg, mr.best_group()
+                );
+                group_idx = Some(cg);
+                meta_routing = Some(crate::growformer_lang::MetaRoutingResult {
+                    concept: mr.concept,
+                    language: mr.language,
+                    confidence: mr.confidence.max(0.60),
+                    margin: mr.margin,
+                    projected_embedding: mr.projected_embedding.clone(),
+                    target_groups: vec![cg],
+                    auxiliary_groups: mr.auxiliary_groups.clone(),
+                });
+            } else if let Some(best_g) = mr.best_group() {
                 if best_g < dm.main.group_order.len() {
                     infer_trace!("  [meta-route] concept={}, lang={}, conf={:.3}, margin={:.3} → group {}",
                         mr.concept.name(), mr.language.name(), mr.confidence, mr.margin, best_g);
@@ -1591,9 +1717,14 @@ impl LanguageService {
                 })
             };
 
+            // When auxiliary groups exist (multi-brain blending), demote the
+            // user-anchored short-circuit: force E8 fan-out so both primary and
+            // auxiliary groups compete, letting the causal group contribute.
+            has_auxiliary = !auxiliary_groups.is_empty();
             let (mut best_text, mut best_conf, best_gidx) = match primary {
                 Some(ref c)
                     if c.text.len() > 5
+                        && !has_auxiliary
                         && (c.confidence >= 0.70
                             || (c.confidence >= 0.52
                                 && c.text.contains(
@@ -1608,10 +1739,28 @@ impl LanguageService {
                         contributions.push(c);
                     }
 
+                    // Auxiliary group blending: explicitly query groups from the
+                    // secondary concept (e.g. causal group when primary is sentiment).
+                    for &aux_gidx in &auxiliary_groups {
+                        if Some(aux_gidx) == group_idx { continue; }
+                        let adapted = dm.adapt_for_group_clifford(aux_gidx, &conditioned, h_raw, GEN_COND_DIM);
+                        if let Some(env) = dm.group_gen_envs.get_mut(&aux_gidx) {
+                            let (text, conf, e8) = env.generate_with_e8_for_topic(&adapted, None, 300, 0.8);
+                            if text.len() > 5 {
+                                infer_trace!("  [auxiliary-blend] group {} contributed: conf={:.3}, len={}",
+                                    aux_gidx, conf, text.len());
+                                contributions.push(E8Contribution {
+                                    group_idx: aux_gidx, lattice_point: e8, text, confidence: conf,
+                                });
+                            }
+                        }
+                    }
+
                     // MetaBrain volley: use trichocyst candidates from ArchetypeBrain
                     if let Some(ref mr) = meta_result {
                         for &(v_gidx, v_aidx, v_weight) in &mr.volley {
                             if Some(v_gidx) == group_idx { continue; }
+                            if auxiliary_groups.contains(&v_gidx) { continue; }
                             if let Some(env) = dm.group_gen_envs.get_mut(&v_gidx) {
                                 let (text, conf) = env.generate_with_archetype_for_topic(
                                     &gen_conditioning, topic_hint.as_deref(), v_aidx, v_weight, 300, 0.8,
@@ -1625,8 +1774,9 @@ impl LanguageService {
                                 }
                             }
                         }
-                    } else {
-                        // Fallback: fan out to all other groups
+                    } else if !has_auxiliary {
+                        // Fallback: fan out to all other groups (only when no
+                        // auxiliary groups, since those already cover the targeted blend)
                         let other_keys: Vec<usize> = dm.group_gen_envs.keys()
                             .filter(|&&k| Some(k) != group_idx)
                             .copied().collect();
@@ -1709,7 +1859,7 @@ impl LanguageService {
                     } else if let Some(sg) = sentiment_lattice_gidx {
                         if let Some(env) = dm.group_gen_envs.get(&sg) {
                             if let Some((ct, cc)) = Self::categorical_compose_fallback(
-                                env, topic_hint.as_deref(), intent_text, &gen_conditioning,
+                                &cat_composer, env, topic_hint.as_deref(), intent_text, &gen_conditioning,
                             ) {
                                 best_text = ct;
                                 best_conf = cc;
@@ -1732,7 +1882,7 @@ impl LanguageService {
             {
                 if let Some(env) = dm.group_gen_envs.get(&best_gidx) {
                     if let Some((ct, cc)) = Self::categorical_compose_fallback(
-                        env, topic_hint.as_deref(), intent_text, &gen_conditioning,
+                        &cat_composer, env, topic_hint.as_deref(), intent_text, &gen_conditioning,
                     ) {
                         infer_trace!(
                             "  [retrieval-floor-fill] categorical compose for confidence-floor bypass headline"
@@ -1803,7 +1953,7 @@ impl LanguageService {
                     );
                     if let Some(env) = dm.group_gen_envs.get(&best_gidx) {
                         let (fb, fc) = if let Some((ct, cc)) = Self::categorical_compose_fallback(
-                            env, topic_hint.as_deref(), intent_text, &gen_conditioning,
+                            &cat_composer, env, topic_hint.as_deref(), intent_text, &gen_conditioning,
                         ) {
                             (ct, cc)
                         } else {
@@ -1891,13 +2041,20 @@ impl LanguageService {
             // for sentiment-scoped runs. Both paths activate all `group_gen_envs` and can splice
             // unrelated programs (e.g. "Consensus Algorithms…" from architecture training) into
             // fintech sentiment rationales.
-            let skip_cross_group_reasoning_for_sentiment = skip_system2_for_sentiment_scoped_run(
-                dm_ref,
-                inference_profile_opt,
-                group_idx,
-                retry_effective_gidx,
-                topic_hint.as_deref(),
-            );
+            // When auxiliary groups are present (multi-brain blend), allow
+            // cross-group reasoning even for sentiment-scoped runs — the causal
+            // group is a deliberate blend target, not an unrelated splice.
+            let skip_cross_group_reasoning_for_sentiment = if has_auxiliary {
+                false
+            } else {
+                skip_system2_for_sentiment_scoped_run(
+                    dm_ref,
+                    inference_profile_opt,
+                    group_idx,
+                    retry_effective_gidx,
+                    topic_hint.as_deref(),
+                )
+            };
             if skip_cross_group_reasoning_for_sentiment {
                 infer_trace!(
                     "  [reasoning] SKIP cross-group System 1.5/2: sentiment-scoped run (topic hint and/or TOML lexical + sentiment lattice group)"
@@ -2181,7 +2338,7 @@ impl LanguageService {
                 .and_then(|env| {
                     let cond = retry_conditioning.as_deref().unwrap_or(&[]);
                     if let Some(composed) = Self::categorical_compose_fallback(
-                        env, topic_hint.as_deref(), intent_text, cond,
+                        &cat_composer, env, topic_hint.as_deref(), intent_text, cond,
                     ) {
                         Some(composed)
                     } else {

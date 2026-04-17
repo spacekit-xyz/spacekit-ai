@@ -4,10 +4,14 @@
 #![cfg(feature = "categorical")]
 
 use growformer::category::compose::{
-    CategoricalComposer, CategoricalDecomposition, ComposedOutput, ProgramTemplate,
+    CategoricalComposer, CategoricalDecomposition, ProgramTemplate,
 };
 use growformer::category::training::{AuxCategory, SentimentLabel};
 use growformer::category::compose::{EntitySlot, SentimentSlot};
+use growformer::category::{
+    CurriculumScheduler, GrowformerNode, GrowformerTrainer, NodeId, TrainerConfig,
+    TrainingBatch,
+};
 
 fn make_composer() -> CategoricalComposer {
     CategoricalComposer::new_random(16, 8, 77)
@@ -186,4 +190,90 @@ fn all_seven_labels_produce_composed_output() {
         assert!(!out.text.is_empty(), "label {:?} should produce non-empty text", label);
         assert!(!out.label_line.is_empty(), "label {:?} should have label_line", label);
     }
+}
+
+// ── Trained composer extraction ──────────────────────────────────────────────
+
+fn load_sentiment_batch() -> TrainingBatch {
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/fintech");
+    let files = [
+        "train_sentiment_fintech.jsonl",
+        "train_sentiment_fintech_corporate.jsonl",
+        "train_sentiment_fintech_crypto.jsonl",
+        "train_sentiment_causal.jsonl",
+    ];
+    let mut batch = TrainingBatch::default();
+    for f in &files {
+        let p = base.join(f);
+        if p.exists() {
+            let _ = batch.append_from_sentiment_jsonl(&p);
+        }
+    }
+    batch
+}
+
+fn train_and_extract_composer(steps: usize) -> CategoricalComposer {
+    let batch = load_sentiment_batch();
+    assert!(!batch.is_empty(), "training batch should have records");
+    let config = TrainerConfig::default();
+    let curriculum = CurriculumScheduler::new(steps / 4, steps * 3 / 4);
+    let mut trainer = GrowformerTrainer::with_config(curriculum, config.clone());
+    trainer.add_node(GrowformerNode::new(
+        NodeId::new(0), "parse", config.embed_dim, vec![0.01; config.embed_dim],
+    ));
+    trainer.train_and_export_composer(&batch, steps)
+        .expect("train_and_export_composer should succeed")
+}
+
+#[test]
+fn trained_composer_produces_grounded_output() {
+    let composer = train_and_extract_composer(200);
+    let prompts = [
+        "Bitcoin jumps to $74,000, but Wall Street is cautious",
+        "Bolt laid off a third of its staff, citing AI adoption",
+        "Paxos Labs Secured $12M for Crypto Yield Platform",
+        "The flight was delayed and my luggage went to a different continent",
+    ];
+    for prompt in &prompts {
+        let emb = growformer::category::forward::char_hash_embed(prompt, 64);
+        let out = composer.generate(&emb, prompt, None);
+        assert!(out.composed, "trained composer should produce composed output for: {}", prompt);
+        assert!(out.explanation.len() > 15, "explanation should be substantial for: {}", prompt);
+        assert!(out.confidence > 0.0, "confidence > 0 for: {}", prompt);
+        println!("[trained-composer] {} → {} (conf={:.3})", prompt, out.text, out.confidence);
+    }
+}
+
+#[test]
+fn trained_composer_decomposes_differently_from_random() {
+    let trained = train_and_extract_composer(200);
+    let random = make_composer();
+    let emb = growformer::category::forward::char_hash_embed(
+        "PayPal, Affirm, and SoFi stock surged", 64
+    );
+    let trained_out = trained.generate(&emb, "PayPal surged", None);
+    let random_out = random.generate(&emb, "PayPal surged", None);
+    let different = trained_out.text != random_out.text
+        || (trained_out.confidence - random_out.confidence).abs() > 0.01;
+    assert!(different, "trained and random composers should produce different outputs");
+}
+
+#[test]
+fn to_composer_round_trip_preserves_inference() {
+    let batch = load_sentiment_batch();
+    let config = TrainerConfig::default();
+    let curriculum = CurriculumScheduler::new(25, 75);
+    let mut trainer = GrowformerTrainer::with_config(curriculum, config.clone());
+    trainer.add_node(GrowformerNode::new(
+        NodeId::new(0), "parse", config.embed_dim, vec![0.01; config.embed_dim],
+    ));
+    trainer.train(&batch, 100);
+
+    let composer1 = trainer.to_composer().expect("first extraction");
+    let composer2 = trainer.to_composer().expect("second extraction");
+    let emb = growformer::category::forward::char_hash_embed("test input", 64);
+    let out1 = composer1.generate(&emb, "test input", None);
+    let out2 = composer2.generate(&emb, "test input", None);
+    assert_eq!(out1.text, out2.text, "repeated extraction should be deterministic");
+    assert!((out1.confidence - out2.confidence).abs() < 1e-6);
 }

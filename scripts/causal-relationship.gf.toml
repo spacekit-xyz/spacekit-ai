@@ -1,0 +1,34 @@
+# Brain B — Causal relationship classifier
+# Trains on causal connector types (direct, compensatory, contrastive, explanatory,
+# retrospective_framing, interventional_counterfactual, concessive, inferential).
+#
+# This brain does NOT classify sentiment — it classifies causal structure.
+# Merge with Brain A (sentiment) to produce Brain C (causal sentiment).
+#
+# Train:
+#   cargo run --release -- --train-brain --project scripts/causal-relationship.gf.toml
+# Infer:
+#   cargo run --release -- --infer --project scripts/causal-relationship.gf.toml --prompt 'Revenue surged so the board approved the dividend'
+# Merge with Brain A:
+#   cargo run --release -- --merge-brain \
+#     --brain agent-data/sentiment-analysis/sentiment-brain-v3.bin \
+#     --overlay-brain agent-data/causal-analysis/causal-brain.bin \
+#     --brain-output agent-data/merged/causal-sentiment-brain.bin
+
+schema_version = 1
+
+[project]
+name = "Causal Relationship Analysis"
+author = "Astor Rivera"
+description = "Causal relationship micro-brain. Classifies text by causal structure: direct, compensatory, contrastive, explanatory, concessive, inferential, retrospective_framing, interventional_counterfactual."
+
+[train]
+auto = true
+data_dir = "../data/causal"
+brain_output = "../agent-data/causal-analysis/causal-brain.bin"
+
+[inference]
+toml = "../data/causal/inference_causal.toml"
+
+[infer]
+brain = "../agent-data/causal-analysis/causal-brain.bin"

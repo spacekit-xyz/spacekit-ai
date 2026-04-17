@@ -2142,9 +2142,20 @@ pub fn e8_compose_sentences_quantum(
     for (ci, c) in contributions.iter().enumerate() {
         let compat = E8Lattice::compatibility_score_8d(blended, &c.lattice_point);
         let r_weight = group_weights[ci];
-        for (pos, sent) in c.text.split(". ").enumerate() {
+        // Strip any embedded witness markers (and the training prefix that
+        // precedes them) before splitting into sentences. Without this, a
+        // contribution built from a lattice row with intact witness layout
+        // can leak the training prompt string into the composed output.
+        let clean_text = crate::dimension::language::strip_sentiment_lattice_witness_for_display(
+            &c.text,
+        );
+        for (pos, sent) in clean_text.split(". ").enumerate() {
             let trimmed = sent.trim();
-            if trimmed.len() > 10 {
+            if trimmed.len() > 10
+                && !trimmed.contains(
+                    crate::dimension::language::SENTIMENT_LATTICE_WITNESS_CORE,
+                )
+            {
                 let alpha_count = trimmed.chars().filter(|ch| ch.is_alphabetic()).count();
                 let alpha_ratio = alpha_count as f32 / trimmed.len().max(1) as f32;
                 if alpha_ratio > 0.5 {
@@ -2453,6 +2464,28 @@ pub struct IndexedGenEnv {
 }
 
 impl IndexedGenEnv {
+    /// Minimal empty env for testing (no programs, empty dictionary).
+    pub fn empty_with_output_dim(output_dim: usize) -> Self {
+        let dict = TokenDictionary::build(&[], 256);
+        Self {
+            lattice: InfraciliaryLattice::new(dict.clone()),
+            topic_subindex: Vec::new(),
+            dictionary: dict,
+            codebook: None,
+            hopf_table: None,
+            schemas: Vec::new(),
+            chunk_codec: None,
+            last_selected_archetype: None,
+            last_generation_confidence: 0.0,
+            diversity_bonus: 0.0,
+            subject_keywords: Vec::new(),
+            retrieval_intent_text: String::new(),
+            intent_action: String::new(),
+            frozen: true,
+            output_dim,
+        }
+    }
+
     fn build_topic_subindex(
         dictionary: &TokenDictionary,
         training_triples: &[(Vec<f32>, String, String)],
@@ -3757,19 +3790,44 @@ impl IndexedGenEnv {
                             continue;
                         }
                     }
-                    if query_terms.len() >= 2
-                        && !Self::sentiment_witness_matches_subject_keywords(
+                    // Witness check rejects programs whose training-prefix text
+                    // doesn't share enough content words with the query. This is
+                    // important to avoid pulling an unrelated headline into the
+                    // response. For novel-wording prompts with no exact
+                    // vocabulary overlap, it can reject every candidate — but
+                    // bypassing solely on cosine is too permissive (it picks
+                    // unrelated headlines that happen to embed nearby). We
+                    // only bypass when both: (a) score ≥ 0.90, (b) graph
+                    // signature agrees strongly, (c) at least one content word
+                    // from the query appears in the program text — the minimum
+                    // evidence that we're not in a completely different topic.
+                    let witness_ok = query_terms.len() < 2
+                        || Self::sentiment_witness_matches_subject_keywords(
                             &text,
                             &query_terms,
                             intent_witness,
-                        )
-                    {
+                        );
+                    let any_overlap = {
+                        let tl = text.to_ascii_lowercase();
+                        query_terms.iter().any(|q| q.len() >= 4 && tl.contains(q.as_str()))
+                    };
+                    let semantic_bypass_ok = score >= 0.90
+                        && graph_confident
+                        && any_overlap;
+                    if !witness_ok && !semantic_bypass_ok {
                         let snippet: String = text.chars().take(40).collect();
                         crate::infer_trace!(
                             "    [skip-witness-mismatch] prog={}, score={:.3}, text=\"{}...\"",
                             idx, score, snippet
                         );
                         continue;
+                    }
+                    if !witness_ok && semantic_bypass_ok {
+                        let snippet: String = text.chars().take(40).collect();
+                        crate::infer_trace!(
+                            "    [witness-bypass] prog={}, score={:.3} (graph_confident+overlap), text=\"{}...\"",
+                            idx, score, snippet
+                        );
                     }
                     let snippet: String = text.chars().take(60).collect();
                     crate::infer_trace!(
@@ -4221,6 +4279,15 @@ impl IndexedGenEnv {
 
     /// Routing-only OOD line (matches [`Self::generate_for_topic_lang`] prompt-anchored branch).
     pub fn sentiment_routing_only_fallback_line(&self, topic_hint: Option<&str>) -> (String, f32) {
+        // Preferred path: produce a lexicon-grounded explanation citing a
+        // specific polar anchor word from the prompt (e.g. "Anchored by
+        // 'cracked' (positive valence). The overall tone reads as clearly
+        // positive."). Falls back to the legacy cue-dump only when no
+        // anchor word is found — this keeps production-grade explanations
+        // on novel wordings that share a single polar token with training.
+        if let Some(grounded) = self.sentiment_lexicon_grounded_fallback_line(topic_hint) {
+            return grounded;
+        }
         let hint = topic_hint.unwrap_or("mixed");
         let kw_refs: Vec<&str> = self.subject_keywords.iter().map(|s| s.as_str()).collect();
         let excerpt = Self::sentiment_prompt_anchored_fallback_excerpt(
@@ -4236,6 +4303,69 @@ impl IndexedGenEnv {
             excerpt
         );
         (fb, 0.55f32)
+    }
+
+    /// Build a lexicon-anchored fallback line when the lattice retrieval path
+    /// failed to produce a witness-matched program, but the prompt contains a
+    /// polar anchor word recognized by `InferenceRules`. Returns `None` when
+    /// no anchor is found so the caller can fall back to the legacy cue-dump.
+    fn sentiment_lexicon_grounded_fallback_line(
+        &self,
+        topic_hint: Option<&str>,
+    ) -> Option<(String, f32)> {
+        let intent = self.retrieval_intent_text.as_str();
+        if intent.trim().is_empty() {
+            return None;
+        }
+        let hint = topic_hint.unwrap_or("mixed");
+        let coarse: &str = Self::sentiment_coarse_topic_key_for_routing_fallback(hint);
+        let lower = intent.to_ascii_lowercase();
+
+        let rules = crate::inference::inference_toml::inference_rules_runtime();
+        let anchor = rules.anchor_phrase(&lower, coarse);
+        let label = Self::sentiment_topic_hint_display_label(coarse);
+
+        let tone: &str = match coarse {
+            "positive_strong" | "positive_mild" => {
+                "The overall tone reads as clearly positive"
+            }
+            "negative_strong" | "negative_mild" => {
+                "The overall tone reads as clearly negative"
+            }
+            "neutral" | "neutral_chop" => "The overall tone reads as mostly neutral",
+            "sarcastic" => "The line may use irony or surface/actual mismatch",
+            "mixed" => {
+                "Contrastive or dual-valence wording — both poles appear in the same line"
+            }
+            _ => "Classification is non-obvious from surface text alone",
+        };
+
+        // Body requires either (a) a polar anchor word from the lexicon, or
+        // (b) a mixed-shape line (contrastive marker) where the coarse hint
+        // itself is the explanation. Otherwise we return None so the caller
+        // falls back to the cue-dump (honest low-confidence state).
+        let body = if let Some(a) = anchor {
+            format!("{}. {}", a, tone)
+        } else if coarse == "mixed" && rules.has_contrastive_marker(&lower) {
+            tone.to_string()
+        } else {
+            return None;
+        };
+
+        let trimmed = intent.trim();
+        let excerpt: String = if trimmed.chars().count() > 200 {
+            let head: String = trimmed.chars().take(200).collect();
+            format!("{}…", head)
+        } else {
+            trimmed.to_string()
+        };
+        let text = format!(
+            "{} — {}. Grounded in the user's own words: \"{}\"",
+            label, body, excerpt
+        );
+        // Lexicon-anchored fallbacks are more trustworthy than the cue-dump
+        // routing-only fallback but still below lattice-matched retrieval.
+        Some((text, 0.62f32))
     }
 
     /// When every sub-lattice program fails the witness gate, still emit a **prompt-grounded**

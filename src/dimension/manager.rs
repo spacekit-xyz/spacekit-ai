@@ -94,7 +94,34 @@ pub struct DimensionManager {
     pub auto_spawn_k: u32,
 }
 
+/// Canonical causal topic names emitted by Brain B's lattice. Used to detect
+/// which group in a merged brain is the causal overlay.
+const CAUSAL_TOPIC_NAMES: &[&str] = &[
+    "direct", "compensatory", "contrastive", "explanatory",
+    "concessive", "inferential", "retrospective_framing",
+    "interventional_counterfactual",
+];
+
 impl DimensionManager {
+    /// Find the group index that looks like the causal overlay — the group
+    /// whose `topic_subindex` contains the most canonical causal topic names.
+    /// Returns `None` if no group has ≥3 causal topics (not a merged brain).
+    pub fn find_causal_group(&self) -> Option<usize> {
+        let mut best: Option<(usize, usize)> = None;
+        for (&gid, env) in &self.group_gen_envs {
+            let hits = env.topic_subindex.iter()
+                .filter(|s| CAUSAL_TOPIC_NAMES.contains(&s.topic_name.as_str()))
+                .count();
+            if hits >= 3 {
+                match best {
+                    Some((_, best_hits)) if best_hits >= hits => {}
+                    _ => best = Some((gid, hits)),
+                }
+            }
+        }
+        best.map(|(g, _)| g)
+    }
+
     pub fn new(config: DimensionManagerConfig) -> Self {
         Self {
             main: MainDimension::new(),
@@ -896,6 +923,76 @@ impl DimensionManager {
             episodic_episodes: self.episodic_memory.episodes.len(),
         }
     }
+
+    /// Merge an overlay brain (Brain B) into this brain (Brain A).
+    ///
+    /// Brain B's groups and gen_envs are re-numbered to avoid collisions with
+    /// Brain A's group IDs, then appended. The merged result (Brain C) retains
+    /// Brain A's router/classifier and adds Brain B's lattice programs as
+    /// additional groups reachable via multi-group retrieval.
+    ///
+    /// Returns a summary of what was merged.
+    pub fn merge_overlay_brain(&mut self, overlay: Self) -> BrainMergeSummary {
+        let max_existing = self.group_gen_envs.keys().chain(self.group_code_envs.keys())
+            .copied().max().map(|m| m + 1).unwrap_or(0);
+        let base_offset = (self.next_group_id as usize).max(max_existing);
+        let mut overlay_group_map: HashMap<usize, usize> = HashMap::new();
+        let mut gen_envs_added = 0usize;
+        let mut code_envs_added = 0usize;
+        let mut groups_added = 0usize;
+
+        for (&old_gid, env) in &overlay.group_gen_envs {
+            let new_gid = base_offset + old_gid;
+            overlay_group_map.insert(old_gid, new_gid);
+            self.group_gen_envs.insert(new_gid, env.clone());
+            gen_envs_added += 1;
+        }
+        for (&old_gid, env) in &overlay.group_code_envs {
+            let new_gid = base_offset + old_gid;
+            overlay_group_map.insert(old_gid, new_gid);
+            self.group_code_envs.insert(new_gid, env.clone());
+            code_envs_added += 1;
+        }
+        for (&old_gid, fg) in &overlay.main.groups {
+            let new_gid_u32 = (base_offset as u32) + old_gid;
+            self.main.groups.insert(new_gid_u32, fg.clone());
+            self.main.group_order.push(new_gid_u32);
+            groups_added += 1;
+        }
+        for (&old_gid, adapter) in &overlay.group_adapters {
+            let new_gid = base_offset + old_gid;
+            self.group_adapters.insert(new_gid, adapter.clone());
+        }
+        for (&old_gid, rotor) in &overlay.group_rotors {
+            let new_gid = base_offset + old_gid;
+            self.group_rotors.insert(new_gid, rotor.clone());
+        }
+        for (&old_gid, fp) in &overlay.group_fingerprints {
+            let new_gid = base_offset + old_gid;
+            self.group_fingerprints.insert(new_gid, fp.clone());
+        }
+        for emb in &overlay.main.embedding_library {
+            self.main.embedding_library.push(emb.clone());
+        }
+        self.next_group_id = (base_offset + overlay.next_group_id.max(1) as usize) as GroupId;
+
+        BrainMergeSummary {
+            base_groups_before: base_offset,
+            overlay_groups: groups_added,
+            gen_envs_added,
+            code_envs_added,
+            group_id_map: overlay_group_map,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BrainMergeSummary {
+    pub base_groups_before: usize,
+    pub overlay_groups: usize,
+    pub gen_envs_added: usize,
+    pub code_envs_added: usize,
+    pub group_id_map: HashMap<usize, usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
