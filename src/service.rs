@@ -1938,21 +1938,44 @@ impl LanguageService {
             let knowledge_floor_ok =
                 best_conf >= RETRIEVAL_CONFIDENCE_FLOOR || inclusion_floor_bypass;
             if !knowledge_floor_ok || best_text.len() <= 5 {
-                let topic_label = topic_hint.as_deref()
-                    .map(|t| t.replace('_', " "))
-                    .unwrap_or_default();
-                let decline_msg = if topic_label.is_empty() {
-                    "I don't have enough information to give you a confident answer on this topic. \
-                     Could you rephrase or ask about something more specific?".to_string()
-                } else {
-                    format!(
-                        "I don't have enough information about '{}' to give you a confident answer. \
-                         This may be outside my current knowledge. Could you rephrase or ask about a related topic?",
-                        topic_label
-                    )
-                };
                 infer_trace!("  [knowledge-boundary] conf={:.3} < floor={:.3}, declining",
                     best_conf, RETRIEVAL_CONFIDENCE_FLOOR);
+
+                let is_sentiment = sentiment_lattice_gidx.is_some()
+                    && lattice_shortcuts::generation_env_looks_like_sentiment(&*dm, best_gidx);
+                let decline_msg = if is_sentiment && apply_toml_lexical {
+                    let label = topic_hint.as_deref()
+                        .map(|th| IndexedGenEnv::sentiment_coarse_topic_key_for_routing_fallback(th))
+                        .unwrap_or("mixed");
+                    let header = lattice_shortcuts::label_header(label);
+                    let trimmed = lattice_shortcuts::detokenize_money_pub(intent_text);
+                    let trimmed = trimmed.trim();
+                    let excerpt = if trimmed.chars().count() > 200 {
+                        let head: String = trimmed.chars().take(200).collect();
+                        format!("{}…", head)
+                    } else {
+                        trimmed.to_string()
+                    };
+                    format!(
+                        "{} — I don't have enough information to explain this with confidence. \
+                         Grounded in the user's own words: \"{}\"",
+                        header, excerpt
+                    )
+                } else {
+                    let topic_label = topic_hint.as_deref()
+                        .map(|t| t.replace('_', " "))
+                        .unwrap_or_default();
+                    if topic_label.is_empty() {
+                        "I don't have enough information to give you a confident answer on this topic. \
+                         Could you rephrase or ask about something more specific?".to_string()
+                    } else {
+                        format!(
+                            "I don't have enough information about '{}' to give you a confident answer. \
+                             Could you rephrase or ask about a related topic?",
+                            topic_label
+                        )
+                    }
+                };
                 GeneratedResponse {
                     text: decline_msg,
                     template_id: "knowledge_boundary".to_string(),
@@ -1984,22 +2007,64 @@ impl LanguageService {
                 }
 
                 let skip_sentiment_header = lattice_user_anchored_used || broad_summary.is_some();
-                let display_text = Self::maybe_prefix_sentiment_retrieval_line(
-                    &*dm,
-                    best_gidx,
-                    topic_hint.as_deref(),
-                    skip_sentiment_header,
-                    &best_text,
-                );
-                GeneratedResponse {
-                    text: display_text,
-                    template_id: if lattice_user_anchored_used {
+
+                // Grounding gate: for sentiment groups, if the response is not
+                // grounded in the user's words (no preempt fired, no categorical
+                // compose, no broad summary), the lattice body comes from BM25
+                // retrieval against training rows and may describe a completely
+                // different prompt. Replace with an honest label + decline rather
+                // than presenting a contextually wrong explanation.
+                let is_sentiment_group = lattice_shortcuts::generation_env_looks_like_sentiment(&*dm, best_gidx);
+                let text_is_grounded = lattice_user_anchored_used
+                    || broad_summary.is_some()
+                    || best_text.contains("Grounded in the user");
+                let must_gate = is_sentiment_group
+                    && !text_is_grounded
+                    && apply_toml_lexical;
+
+                let (display_text, final_template_id) = if must_gate {
+                    infer_trace!(
+                        "  [grounding-gate] sentiment body not grounded in user text, replacing with honest decline"
+                    );
+                    let label = topic_hint.as_deref()
+                        .map(|th| IndexedGenEnv::sentiment_coarse_topic_key_for_routing_fallback(th))
+                        .unwrap_or("mixed");
+                    let header = crate::inference::plugins::lattice_shortcuts::label_header(label);
+                    let trimmed = crate::inference::plugins::lattice_shortcuts::detokenize_money_pub(intent_text);
+                    let trimmed = trimmed.trim();
+                    let excerpt = if trimmed.chars().count() > 200 {
+                        let head: String = trimmed.chars().take(200).collect();
+                        format!("{}…", head)
+                    } else {
+                        trimmed.to_string()
+                    };
+                    let text = format!(
+                        "{} — I don't have enough information to explain this with confidence. \
+                         Grounded in the user's own words: \"{}\"",
+                        header, excerpt
+                    );
+                    (text, "grounding_gate_decline".to_string())
+                } else {
+                    let dt = Self::maybe_prefix_sentiment_retrieval_line(
+                        &*dm,
+                        best_gidx,
+                        topic_hint.as_deref(),
+                        skip_sentiment_header,
+                        &best_text,
+                    );
+                    let tid = if lattice_user_anchored_used {
                         preempt_template_id.unwrap().to_string()
                     } else {
                         format!("growformer_gen_{}", best_gidx)
-                    },
+                    };
+                    (dt, tid)
+                };
+
+                GeneratedResponse {
+                    text: display_text,
+                    template_id: final_template_id,
                     traceable: false,
-                    confidence: best_conf,
+                    confidence: if must_gate { 0.40 } else { best_conf },
                 }
             } else if let Some(ref head) = dm.generation_head {
                 Self::legacy_gen_from_encoded(head, &encoded, &action, &dm.main.group_order)
@@ -2307,7 +2372,7 @@ impl LanguageService {
                                 }
                             }
                         }
-                        ReflectionOutcome::Degrade { scores, message, attempts_exhausted } => {
+                        ReflectionOutcome::Degrade { scores, message: _, attempts_exhausted } => {
                             infer_trace!(
                                 "  [metacog] DEGRADE: quality={:.3} after {} attempts → honest decline",
                                 scores.quality, attempts_exhausted
@@ -2320,8 +2385,51 @@ impl LanguageService {
                                     }
                                 }
                             }
+                            let mc_dm = self.active_dm();
+                            let mc_sentiment_gidx = lattice_shortcuts::pick_sentiment_lattice_group_idx(mc_dm);
+                            let is_sentiment = mc_sentiment_gidx.is_some()
+                                && retry_effective_gidx.map_or(false, |gidx|
+                                    lattice_shortcuts::generation_env_looks_like_sentiment(mc_dm, gidx)
+                                );
+                            let mc_toml_active = lattice_shortcuts::sentiment_toml_lexical_guards_active(
+                                mc_dm,
+                                inference_profile_opt,
+                            );
+                            let decline_text = if is_sentiment && mc_toml_active {
+                                let label = topic_hint.as_deref()
+                                    .map(|th| IndexedGenEnv::sentiment_coarse_topic_key_for_routing_fallback(th))
+                                    .unwrap_or("mixed");
+                                let header = lattice_shortcuts::label_header(label);
+                                let trimmed = lattice_shortcuts::detokenize_money_pub(intent_text);
+                                let trimmed = trimmed.trim();
+                                let excerpt = if trimmed.chars().count() > 200 {
+                                    let head: String = trimmed.chars().take(200).collect();
+                                    format!("{}…", head)
+                                } else {
+                                    trimmed.to_string()
+                                };
+                                format!(
+                                    "{} — I don't have enough information to explain this with confidence. \
+                                     Grounded in the user's own words: \"{}\"",
+                                    header, excerpt
+                                )
+                            } else {
+                                let topic_label = topic_hint.as_deref()
+                                    .map(|t| t.replace('_', " "))
+                                    .unwrap_or_default();
+                                if topic_label.is_empty() {
+                                    "I don't have enough information to answer this confidently. \
+                                     Could you rephrase or ask about something more specific?".to_string()
+                                } else {
+                                    format!(
+                                        "I don't have enough information about '{}' to give you a confident answer. \
+                                         Could you rephrase or ask about a related topic?",
+                                        topic_label
+                                    )
+                                }
+                            };
                             current_resp = GeneratedResponse {
-                                text: message,
+                                text: decline_text,
                                 template_id: "metacog_degradation".to_string(),
                                 traceable: true,
                                 confidence: 0.0,
@@ -2349,35 +2457,30 @@ impl LanguageService {
             && IndexedGenEnv::lattice_surface_hard_reject(&resp.text)
         {
             infer_trace!(
-                "  [final-garble-gate] output still contains hard-reject pattern, replacing"
+                "  [final-garble-gate] output still contains hard-reject pattern, replacing with honest decline"
             );
-            let dm = self.active_dm();
-            let fallback = lattice_shortcuts::pick_sentiment_lattice_group_idx(dm)
-                .and_then(|sg| dm.group_gen_envs.get(&sg))
-                .and_then(|env| {
-                    let cond = retry_conditioning.as_deref().unwrap_or(&[]);
-                    if let Some(composed) = Self::categorical_compose_fallback(
-                        &cat_composer, env, topic_hint.as_deref(), intent_text, cond,
-                    ) {
-                        Some(composed)
-                    } else {
-                        Some(env.sentiment_routing_only_fallback_line(topic_hint.as_deref()))
-                    }
-                })
-                .unwrap_or_else(|| {
-                    ("No witness-matched lattice row for this wording; stance follows routing only.".to_string(), 0.40)
-                });
+            let label = topic_hint.as_deref()
+                .map(|th| IndexedGenEnv::sentiment_coarse_topic_key_for_routing_fallback(th))
+                .unwrap_or("mixed");
+            let header = lattice_shortcuts::label_header(label);
+            let trimmed = lattice_shortcuts::detokenize_money_pub(intent_text);
+            let trimmed = trimmed.trim();
+            let excerpt = if trimmed.chars().count() > 200 {
+                let head: String = trimmed.chars().take(200).collect();
+                format!("{}…", head)
+            } else {
+                trimmed.to_string()
+            };
+            let text = format!(
+                "{} — I don't have enough information to explain this with confidence. \
+                 Grounded in the user's own words: \"{}\"",
+                header, excerpt
+            );
             GeneratedResponse {
-                text: Self::maybe_prefix_sentiment_retrieval_line(
-                    dm,
-                    retry_effective_gidx.or(group_idx).unwrap_or(0),
-                    topic_hint.as_deref(),
-                    false,
-                    &fallback.0,
-                ),
+                text,
                 template_id: "final_garble_gate".to_string(),
                 traceable: false,
-                confidence: fallback.1,
+                confidence: 0.40,
             }
         } else {
             resp

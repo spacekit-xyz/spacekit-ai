@@ -136,7 +136,7 @@ pub fn should_skip_weak_gk_for_meta_conditioning(
         && confidence < cfg.meta_gk_confidence
 }
 
-fn label_header(topic_key: &str) -> &'static str {
+pub fn label_header(topic_key: &str) -> &'static str {
     match topic_key {
         "positive_strong" => "POSITIVE (strong)",
         "positive_mild" => "POSITIVE (mild)",
@@ -294,6 +294,10 @@ fn abbreviate_large_number(digits: &str) -> String {
     } else {
         digits.to_string()
     }
+}
+
+pub fn detokenize_money_pub(text: &str) -> String {
+    detokenize_money(text)
 }
 
 fn detokenize_money(text: &str) -> String {
