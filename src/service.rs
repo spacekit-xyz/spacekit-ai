@@ -798,7 +798,25 @@ impl LanguageService {
             "what's up", "whats up", "how do you do",
             "hey there", "hi there", "hello there",
         ];
-        exact.iter().any(|p| trimmed == *p || trimmed.starts_with(&format!("{} ", p)))
+        let matched = exact.iter().any(|p| trimmed == *p || trimmed.starts_with(&format!("{} ", p)));
+        if !matched {
+            return false;
+        }
+        // Guard against company-name collisions ("Hello Clever partners with…").
+        // Real greetings are short; anything over 40 chars with a capitalized
+        // word right after the greeting token is almost certainly a headline.
+        if trimmed.len() > 40 {
+            let original_trimmed = text.trim();
+            for &prefix in &["Hello ", "Hi ", "Hey "] {
+                if original_trimmed.starts_with(prefix) {
+                    let rest = &original_trimmed[prefix.len()..];
+                    if rest.starts_with(|c: char| c.is_uppercase()) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
     }
 
     /// Second sentence for [`Self::greeting_response`]: from brain package header when set,
@@ -833,7 +851,7 @@ impl LanguageService {
     fn identity_response(&self) -> GeneratedResponse {
         let text = format!(
             "I am {}, a Growformer Agent by {}. I'm a self-organizing neural substrate \
-             that learns structure, not weights — my knowledge is encoded as physical \
+             that learns structure, not weights. My knowledge is encoded as physical \
              neural structure grown, pruned, consolidated, and frozen during training. \
              I generate responses in a single forward pass through my neural environment.",
             self.agent_name, self.agent_creator
@@ -1731,11 +1749,17 @@ impl LanguageService {
             // When auxiliary groups exist (multi-brain blending), demote the
             // user-anchored short-circuit: force E8 fan-out so both primary and
             // auxiliary groups compete, letting the causal group contribute.
+            // Exception: lexicon-grounded preempt results ("Grounded in the
+            // user's own words") are authoritative — headline rules encode
+            // multi-keyword CNF patterns that the causal E8 path cannot
+            // replicate, so let them through even with auxiliary groups.
             has_auxiliary = !auxiliary_groups.is_empty();
+            let lexicon_grounded_preempt = preempt_template_id == Some(TEMPLATE_ID_USER_ANCHORED)
+                && primary.as_ref().map_or(false, |c| c.text.contains("Grounded in the user's own words"));
             let (mut best_text, mut best_conf, best_gidx) = match primary {
                 Some(ref c)
                     if c.text.len() > 5
-                        && !has_auxiliary
+                        && (!has_auxiliary || lexicon_grounded_preempt)
                         && (c.confidence >= 0.70
                             || (c.confidence >= 0.52
                                 && c.text.contains(
@@ -1943,7 +1967,8 @@ impl LanguageService {
 
                 let is_sentiment = sentiment_lattice_gidx.is_some()
                     && lattice_shortcuts::generation_env_looks_like_sentiment(&*dm, best_gidx);
-                let decline_msg = if is_sentiment && apply_toml_lexical {
+                let has_sentiment_lattice = sentiment_lattice_gidx.is_some();
+                let decline_msg = if (is_sentiment || has_sentiment_lattice) && apply_toml_lexical {
                     let label = topic_hint.as_deref()
                         .map(|th| IndexedGenEnv::sentiment_coarse_topic_key_for_routing_fallback(th))
                         .unwrap_or("mixed");
@@ -2008,19 +2033,17 @@ impl LanguageService {
 
                 let skip_sentiment_header = lattice_user_anchored_used || broad_summary.is_some();
 
-                // Grounding gate: for sentiment groups, if the response is not
-                // grounded in the user's words (no preempt fired, no categorical
-                // compose, no broad summary), the lattice body comes from BM25
-                // retrieval against training rows and may describe a completely
-                // different prompt. Replace with an honest label + decline rather
-                // than presenting a contextually wrong explanation.
-                let is_sentiment_group = lattice_shortcuts::generation_env_looks_like_sentiment(&*dm, best_gidx);
+                // Grounding gate: when TOML lexical guards are active (sentiment
+                // inference mode), any response body that is not grounded in
+                // the user's words came from BM25 retrieval against training
+                // rows and may describe a completely different prompt. Replace
+                // with an honest label + decline. This applies to ALL groups —
+                // non-sentiment groups can also retrieve wrong-context rows.
                 let text_is_grounded = lattice_user_anchored_used
                     || broad_summary.is_some()
                     || best_text.contains("Grounded in the user");
-                let must_gate = is_sentiment_group
-                    && !text_is_grounded
-                    && apply_toml_lexical;
+                let must_gate = apply_toml_lexical
+                    && !text_is_grounded;
 
                 let (display_text, final_template_id) = if must_gate {
                     infer_trace!(
@@ -2391,11 +2414,12 @@ impl LanguageService {
                                 && retry_effective_gidx.map_or(false, |gidx|
                                     lattice_shortcuts::generation_env_looks_like_sentiment(mc_dm, gidx)
                                 );
+                            let has_sentiment_lattice = mc_sentiment_gidx.is_some();
                             let mc_toml_active = lattice_shortcuts::sentiment_toml_lexical_guards_active(
                                 mc_dm,
                                 inference_profile_opt,
                             );
-                            let decline_text = if is_sentiment && mc_toml_active {
+                            let decline_text = if (is_sentiment || has_sentiment_lattice) && mc_toml_active {
                                 let label = topic_hint.as_deref()
                                     .map(|th| IndexedGenEnv::sentiment_coarse_topic_key_for_routing_fallback(th))
                                     .unwrap_or("mixed");

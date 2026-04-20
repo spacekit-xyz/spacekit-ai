@@ -215,10 +215,27 @@ fn load_graph() -> WorldGraph {
         toml::from_str(raw).expect("parse embedded world_grounding.toml");
     assert_eq!(file.version, 1, "unsupported world_grounding.toml version");
 
+    let crypto_raw = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/data/crypto/world_grounding_crypto.toml"
+    ));
+    let tradfi_raw = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/data/fintech/world_grounding_fintech.toml"
+    ));
+
+    let mut all_nodes = file.nodes;
+    if let Ok(crypto_file) = toml::from_str::<WorldGroundingFile>(crypto_raw) {
+        all_nodes.extend(crypto_file.nodes);
+    }
+    if let Ok(tradfi_file) = toml::from_str::<WorldGroundingFile>(tradfi_raw) {
+        all_nodes.extend(tradfi_file.nodes);
+    }
+
     let mut nodes: Vec<WorldNode> = Vec::new();
     let mut lookup: HashMap<String, usize> = HashMap::new();
 
-    for n in file.nodes {
+    for n in all_nodes {
         let id_norm = normalize_key(&n.id);
         if id_norm.is_empty() {
             continue;

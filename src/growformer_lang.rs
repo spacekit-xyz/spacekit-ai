@@ -538,8 +538,15 @@ fn parse_prefixed_currency_amount(rest: &str, default_ccy: &str) -> Option<Strin
     } else if let Some(s) = rl.strip_suffix('k') {
         (scale_money_digits(s, 1_000u128)?, default_ccy)
     } else {
-        let (digits, _) = take_digits_commas(&rl);
+        let (digits, after_int) = take_digits_commas(&rl);
         if digits.is_empty() {
+            return None;
+        }
+        // If the bare amount has a decimal (e.g. "$1.50", "$0.18"), skip
+        // tokenization — the integer-only token would lose precision and
+        // detokenize to a wrong amount. Large round amounts ($67,400) and
+        // suffix amounts ($3.8B) are already handled above.
+        if after_int < rl.len() && rl.as_bytes().get(after_int) == Some(&b'.') {
             return None;
         }
         (digits, default_ccy)
@@ -548,13 +555,25 @@ fn parse_prefixed_currency_amount(rest: &str, default_ccy: &str) -> Option<Strin
 }
 
 fn scale_money_digits(num_part: &str, mult: u128) -> Option<String> {
-    let (digits, _) = take_digits_commas(num_part);
+    let (digits, after_int) = take_digits_commas(num_part);
     if digits.is_empty() {
         return None;
     }
     let v: u128 = digits.parse().ok()?;
-    let scaled = v.checked_mul(mult)?;
-    Some(scaled.to_string())
+    let base = v.checked_mul(mult)?;
+    // Handle decimal: "1.4" with mult=1e9 → 1*1e9 + 4*1e8 = 1_400_000_000
+    if after_int < num_part.len() && num_part.as_bytes().get(after_int) == Some(&b'.') {
+        let frac_str = &num_part[after_int + 1..];
+        let (frac_digits, _) = take_digits_commas(frac_str);
+        if !frac_digits.is_empty() {
+            let frac_val: u128 = frac_digits.parse().ok()?;
+            let frac_places = frac_digits.len() as u32;
+            let frac_mult = mult / 10u128.pow(frac_places);
+            let total = base.checked_add(frac_val.checked_mul(frac_mult)?)?;
+            return Some(total.to_string());
+        }
+    }
+    Some(base.to_string())
 }
 
 fn parse_glued_money(lower: &str) -> Option<String> {

@@ -1,0 +1,26 @@
+# Crypto / DeFi sentiment lattice micro-brain — run from the growformer crate root, or adjust paths.
+# Example train:
+#   cargo run --release -- --train-brain --project scripts/crypto-sentiment-analysis.gf.toml
+# Example infer (uses [infer].brain if you omit --brain):
+#   cargo run --release -- --infer --project scripts/crypto-sentiment-analysis.gf.toml --prompt 'Bitcoin surges past $100k'
+# Unknown headline queue (batch): data/crypto/unknown_inbox.txt — see comments inside that file.
+
+schema_version = 1
+
+[project]
+name = "Crypto DeFi Sentiment Analysis"
+author = "Astor Rivera"
+description = "Crypto/DeFi sentiment analysis micro-brain. Classifies cryptocurrency, blockchain, and DeFi text into positive (strong/mild), negative (strong/mild), neutral, mixed, and sarcastic with reasoning."
+
+[train]
+auto = true
+data_dir = "../data/crypto"
+brain_output = "../agent-data/crypto-analysis/crypto-brain.bin"
+brain_plugins_toml = "../data/plugins/example-brain-plugins.toml"
+
+[inference]
+toml = "../data/crypto/inference_crypto.toml"
+guardrails_jsonl = "../data/crypto/inference_guardrails.jsonl"
+
+[infer]
+brain = "../agent-data/crypto-analysis/crypto-brain.bin"

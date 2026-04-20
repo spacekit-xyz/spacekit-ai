@@ -142,10 +142,12 @@ pub fn label_header(topic_key: &str) -> &'static str {
         "positive_mild" => "POSITIVE (mild)",
         "negative_strong" => "NEGATIVE (strong)",
         "negative_mild" => "NEGATIVE (mild)",
-        "neutral" => "NEUTRAL",
+        "neutral" | "neutral_chop" => "NEUTRAL",
         "sarcastic" => "SARCASTIC",
-        "mixed" => "MIXED",
-        _ => "CLASS",
+        "mixed" | "confused" => "MIXED",
+        "cautiously_positive" => "POSITIVE (mild)",
+        "cautiously_negative" => "NEGATIVE (mild)",
+        _ => "MIXED",
     }
 }
 
@@ -342,6 +344,27 @@ pub fn try_user_anchored_line(
     let lower = normalize_match_text(intent_text);
     let display_text = detokenize_money(intent_text);
 
+    // Out-of-scope pre-filter: bare timestamps, location stubs, metadata
+    // fragments that have no evaluative content whatsoever. These should never
+    // be forced into a sentiment label — respond with an honest scope decline.
+    if rules.is_out_of_scope(&lower) {
+        let header = label_header("neutral");
+        let body = "No evaluative content detected — this appears to be metadata, a timestamp, or a non-sentiment input";
+        let trimmed = display_text.trim();
+        let excerpt = if trimmed.chars().count() > 200 {
+            let head: String = trimmed.chars().take(200).collect();
+            format!("{}…", head)
+        } else {
+            trimmed.to_string()
+        };
+        infer_trace!("  [lattice-direct] out-of-scope pre-filter → NEUTRAL (no evaluative content)");
+        let text = format!(
+            "{} — {}. Grounded in the user's own words: \"{}\"",
+            header, body, excerpt
+        );
+        return Some((text, cfg.ambiguous_line_confidence));
+    }
+
     // Objective-fact / status-query preempt runs FIRST, before the topic-hint
     // gate. On merged brains the factual prompt often routes to a non-sentiment
     // topic (e.g. `general_knowledge`) so requiring a sentiment topic key up
@@ -365,6 +388,13 @@ pub fn try_user_anchored_line(
         return Some((text, cfg.ambiguous_line_confidence));
     }
 
+    // Headline-lexical-topic pre-check: computed early so both the causal
+    // preempt and the lexicon-authoritative preempt can consult it.  When a
+    // headline rule matches, sentiment classification is authoritative — the
+    // causal preempt should yield to avoid producing a causal-formatted result
+    // that gets demoted by E8 fan-out on multi-group (causal) brains.
+    let headline_topic_override = rules.sentiment_lexical_topic_key(intent_text);
+
     // Causal-relation preempt: when the brain has a causal group and the text
     // contains an explicit causal connector, produce a structured output that
     // separates the relation type ("Direct causal link", "Concessive
@@ -382,7 +412,7 @@ pub fn try_user_anchored_line(
     //      "in retrospect", "would have", "which suggests", etc.), OR
     //  (b) the topic_hint maps to a causal topic (meta-brain routed to causal),
     //      in which case any connector is trusted.
-    if dm.find_causal_group().is_some() {
+    if dm.find_causal_group().is_some() && headline_topic_override.is_none() {
         let causal_topic_routed = topic_hint.map_or(false, |th| {
             const CAUSAL_TOPICS: &[&str] = &[
                 "direct", "compensatory", "contrastive", "explanatory",
@@ -431,6 +461,14 @@ pub fn try_user_anchored_line(
     // user-anchored path and fall back to the cue-dump. The preempt emits a
     // lexicon-override body when applicable and a contrastive-MIXED body
     // otherwise — same copy the in-flow path would produce.
+    //
+    // Headline-lexical-topic rules take priority over bare polarity matches:
+    // "IC3 Report Reveals Surge In Cryptocurrency Investment Scams" has a
+    // positive polarity hit on "surge" but the headline rule
+    // ["surge in"] + ["scams"] maps to negative_strong. Without this check
+    // the preempt emits POSITIVE on the bare polarity before the headline
+    // rule ever fires in sentiment_lexical_topic_key.
+    // (headline_topic_override is computed above, before the causal preempt.)
     let lex_polar_early = rules.lexical_polarity_signal(&lower);
     let contrast_early = rules.has_contrastive_marker(&lower);
     let bipolar_early = rules.has_bipolar_lexicon(&lower);
@@ -438,12 +476,15 @@ pub fn try_user_anchored_line(
         .map(|th| TOPIC_KEYS.iter().any(|k| th.eq_ignore_ascii_case(k)))
         .unwrap_or(false);
     if !topic_in_sentiment_keys
-        && (lex_polar_early.is_some() || (contrast_early && bipolar_early))
+        && (headline_topic_override.is_some() || lex_polar_early.is_some() || (contrast_early && bipolar_early))
     {
-        // Sarcasm templates override the raw polarity — "Love the customer
-        // service" after a complaint should be SARCASTIC, not positive_mild.
+        // Headline-lexical-topic rules are the most specific: they encode
+        // multi-keyword CNF patterns ("surge in" + "scams" → negative) that
+        // trump single-word polarity signals ("surge" → positive).
         let sarcasm_early = rules.has_sarcasm_template(&lower);
-        let key = if sarcasm_early {
+        let key = if let Some(ref ht) = headline_topic_override {
+            ht.clone()
+        } else if sarcasm_early {
             "sarcastic".to_string()
         } else if contrast_early && bipolar_early {
             "mixed".to_string()
@@ -508,6 +549,29 @@ pub fn try_user_anchored_line(
         return Some((text, conf));
     }
 
+    // First-token affect floor (early): catches "Furious: <narrative>" even
+    // when the MetaBrain routes to a non-sentiment topic. Must fire before
+    // the non-sentiment bail-out below.
+    if let Some(neg_key) = rules.first_token_affect_floor(&lower, "neutral") {
+        let header = label_header(neg_key.as_str());
+        let trimmed = display_text.trim();
+        let excerpt = if trimmed.chars().count() > 200 {
+            let head: String = trimmed.chars().take(200).collect();
+            format!("{}…", head)
+        } else {
+            trimmed.to_string()
+        };
+        let text = format!(
+            "{} — The overall tone reads as clearly negative. Grounded in the user's own words: \"{}\"",
+            header, excerpt
+        );
+        infer_trace!(
+            "  [lattice-direct] first-token affect floor (early) → {}",
+            neg_key
+        );
+        return Some((text, cfg.default_line_confidence));
+    }
+
     let mr = meta_result?;
     let th = topic_hint?;
     if !TOPIC_KEYS.iter().any(|k| th.eq_ignore_ascii_case(k)) {
@@ -539,7 +603,10 @@ pub fn try_user_anchored_line(
 
     let mut lexical_polarity_override = false;
     if !force_mixed {
-        if let Some(k) = lex_polar {
+        if let Some(ref ht) = headline_topic_override {
+            key = ht.clone();
+            lexical_polarity_override = true;
+        } else if let Some(k) = lex_polar {
             key = rules.apply_degree_modifiers(&lower, &k);
             lexical_polarity_override = true;
         }
@@ -549,6 +616,18 @@ pub fn try_user_anchored_line(
     if !force_mixed && key != "sarcastic" && rules.has_sarcasm_template(&lower) {
         key = "sarcastic".to_string();
         sarcasm_template_override = true;
+    }
+
+    // Sarcasm validation gate: if MetaBrain routed to `sarcastic` but we have
+    // no structural evidence (no sarcasm template match AND no praise-surface
+    // token in the text), demote to negative_mild. This prevents operational
+    // frustration lines from being bucketed as ironic.
+    if key == "sarcastic" && !sarcasm_template_override && !force_mixed {
+        let has_praise_surface = rules.text_has_praise_surface_token(&lower);
+        if !has_praise_surface && !rules.has_sarcasm_template(&lower) {
+            key = "negative_mild".to_string();
+            infer_trace!("  [lattice-direct] sarcasm demotion → NEGATIVE (mild): no praise surface or template match");
+        }
     }
 
     let mut ambiguous_override = false;
@@ -566,6 +645,59 @@ pub fn try_user_anchored_line(
         if let Some(new_key) = rules.disappointment_positive_override(&lower, key.as_str()) {
             key = new_key.to_string();
             disappointment_override = true;
+        }
+    }
+
+    // First-token affect floor: "Furious: …" → negative_strong regardless of
+    // what the lattice returned (typically neutral fallthrough).
+    if !force_mixed && !sarcasm_template_override {
+        if let Some(new_key) = rules.first_token_affect_floor(&lower, key.as_str()) {
+            infer_trace!(
+                "  [lattice-direct] first-token affect floor → {} (was {})",
+                new_key,
+                key
+            );
+            key = new_key;
+        }
+    }
+
+    // Negative-affect override: if key is positive but text contains strong
+    // negative anchor tokens (awful, terrible, …), flip to negative.
+    if !force_mixed && !sarcasm_template_override && !lexical_polarity_override {
+        if let Some(new_key) = rules.negative_affect_overrides_positive_key(&lower, key.as_str()) {
+            infer_trace!(
+                "  [lattice-direct] negative-affect override → {} (was {})",
+                new_key,
+                key
+            );
+            key = new_key;
+        }
+    }
+
+    // Desk-relief cap: scare + hold pattern (e.g. "bid dropped … level held")
+    // should not be positive_strong — cap to neutral.
+    if !force_mixed && !sarcasm_template_override && !lexical_polarity_override {
+        if let Some(new_key) = rules.desk_relief_caps_positive(&lower, key.as_str()) {
+            infer_trace!(
+                "  [lattice-direct] desk-relief cap → {} (was {})",
+                new_key,
+                key
+            );
+            key = new_key;
+        }
+    }
+
+    // Headline confidence floor: third-person, short, no evaluative anchor
+    // token → cap any polar key to neutral. Prevents lattice misfires on
+    // dry wire headlines.
+    if !force_mixed && !sarcasm_template_override && !lexical_polarity_override {
+        if let Some(new_key) = rules.headline_neutral_floor(&lower, key.as_str()) {
+            infer_trace!(
+                "  [lattice-direct] headline neutral floor → {} (was {})",
+                new_key,
+                key
+            );
+            key = new_key;
         }
     }
 
@@ -655,7 +787,7 @@ pub fn try_user_anchored_line(
                 None => tone.to_string(),
             }
         };
-        let c = if key.as_str() == "positive_strong" {
+        let c = if key.as_str() == "positive_strong" || headline_topic_override.is_some() {
             cfg.default_line_confidence
         } else {
             cfg.ambiguous_line_confidence

@@ -10,7 +10,7 @@ schema_version = 1
 [project]
 name = "Fintech Sentiment Analysis"
 author = "Astor Rivera"
-description = "Fintech sentiment analysis micro-brain. Classifies text into positive (strong/mild), negative (strong/mild), neutral, mixed, and sarcastic with reasoning."
+description = "Traditional fintech (TradFi) sentiment analysis micro-brain. Classifies equities, banking, corporate finance, and traditional financial services text into positive (strong/mild), negative (strong/mild), neutral, mixed, and sarcastic with reasoning."
 
 [train]
 auto = true
