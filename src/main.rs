@@ -169,6 +169,20 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     inference_guardrails_jsonl: Option<PathBuf>,
 
+    /// Repack an existing brain: load, embed current inference TOML rules, and re-export.
+    /// Use with `--brain <input> --brain-output <output> --project <gf.toml>`.
+    #[arg(long)]
+    repack: bool,
+
+    /// Print active inference rule counts (after loading brain + project TOML) and exit.
+    #[arg(long)]
+    rules_info: bool,
+
+    /// Dump raw encoder + bridge embedding for a single prompt and exit.
+    /// Use with `--brain <path> --prompt "text"`.
+    #[arg(long)]
+    debug_embedding: bool,
+
     /// Enable MetaCodebook (Stage 2b) and code lattice training from `expected_code` in JSONL. Off by default; use for a standalone code brain (see `scripts/code.gf.toml`).
     #[arg(long)]
     train_code_lattice: bool,
@@ -255,6 +269,10 @@ fn apply_gf_project(args: &mut Args, project_path: &Path) -> Result<GfOverlay, S
                         .into_owned(),
                 );
             }
+        }
+        if let Some(g) = &tr.gle_checkpoint {
+            let resolved = growformer::project_gf::resolve_against(&base, g);
+            std::env::set_var("GROWFORMER_GLE_CHECKPOINT", &resolved);
         }
     }
 
@@ -520,6 +538,66 @@ fn main() {
             eprintln!("Merge failed: {}", e);
             std::process::exit(1);
         }
+    } else if args.rules_info {
+        let data = std::fs::read(&brain_path).unwrap_or_else(|e| {
+            eprintln!("Failed to read brain: {}", e);
+            std::process::exit(1);
+        });
+        let mut svc = LanguageService::new_default().unwrap_or_else(|e| {
+            eprintln!("Failed to init: {}", e);
+            std::process::exit(1);
+        });
+        svc.load_brain(&data).unwrap_or_else(|e| {
+            eprintln!("Failed to load brain: {}", e);
+            std::process::exit(1);
+        });
+        let loaded = growformer::inference::inference_toml::inference_toml_loaded();
+        let rules = loaded.rules();
+        println!("{}", rules.rules_summary_json());
+        std::process::exit(0);
+    } else if args.debug_embedding {
+        let prompt_text = args.prompt.as_deref().unwrap_or_else(|| {
+            eprintln!("--debug-embedding requires --prompt 'text'");
+            std::process::exit(1);
+        });
+        let data = std::fs::read(&brain_path).unwrap_or_else(|e| {
+            eprintln!("Failed to read brain: {}", e);
+            std::process::exit(1);
+        });
+        let rt = growformer::runtime::Runtime::from_brain_bytes(&data).unwrap_or_else(|e| {
+            eprintln!("Failed to load: {}", e);
+            std::process::exit(1);
+        });
+        let dm = rt.svc.active_dm();
+        let (raw_enc, bridged) = dm.language_runtime.encode_and_bridge(prompt_text).unwrap_or_else(|e| {
+            eprintln!("Encode failed: {}", e);
+            std::process::exit(1);
+        });
+        let raw_first8: Vec<f32> = raw_enc.iter().take(8).copied().collect();
+        let raw_norm: f64 = raw_enc.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>().sqrt();
+        let br_vec = &bridged.routed_vector;
+        let br_first8: Vec<f32> = br_vec.iter().take(8).copied().collect();
+        let br_norm: f64 = br_vec.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>().sqrt();
+        println!(
+            "{{\"raw_dim\":{},\"raw_norm\":{:.10},\"raw_first8\":{:?},\"bridge_dim\":{},\"bridge_confidence\":{:.6},\"bridge_norm\":{:.10},\"bridge_first8\":{:?}}}",
+            raw_enc.len(), raw_norm, raw_first8,
+            br_vec.len(), bridged.confidence, br_norm, br_first8
+        );
+        std::process::exit(0);
+    } else if args.repack {
+        println!("=============================================================");
+        println!("  Growformer — Repack Brain (embed inference TOML)");
+        println!("=============================================================\n");
+        if let Err(e) = repack_brain(
+            &brain_path,
+            &brain_out,
+            args.brain_name.as_deref(),
+            args.brain_description.as_deref(),
+            args.brain_author.as_deref(),
+        ) {
+            eprintln!("Repack failed: {}", e);
+            std::process::exit(1);
+        }
     } else if args.infer {
         let infer_mode = match resolve_infer_mode(&args) {
             Ok(m) => m,
@@ -552,6 +630,41 @@ fn main() {
         println!("\nRun with --help for all options.");
         std::process::exit(1);
     }
+}
+
+// =============================================================================
+// Repack: load brain, embed current inference TOML, re-export
+// =============================================================================
+
+fn repack_brain(
+    brain_path: &str,
+    output_path: &str,
+    brain_name: Option<&str>,
+    brain_description: Option<&str>,
+    brain_author: Option<&str>,
+) -> Result<(), String> {
+    let data = std::fs::read(brain_path)
+        .map_err(|e| format!("Failed to read {}: {}", brain_path, e))?;
+    let mut svc = LanguageService::new_default()?;
+    svc.load_brain(&data)?;
+    apply_brain_package_cli(&mut svc, brain_name, brain_description, brain_author);
+    println!("Loaded brain from {} ({} KB)", brain_path, data.len() / 1024);
+
+    let loaded = growformer::inference::inference_toml::inference_toml_loaded();
+    let n_headline = loaded.rules().headline_lexical_topic.len();
+    let n_misfire = loaded.rules().lattice_misfire.len();
+    let n_pr_prefix = loaded.rules().pr_wire_neutral_prefix.len();
+    let n_pr_intent = loaded.rules().pr_wire_neutral_intent.len();
+    println!(
+        "  Inference rules to embed: {} headline, {} misfire, {} pr_prefix, {} pr_intent",
+        n_headline, n_misfire, n_pr_prefix, n_pr_intent
+    );
+
+    let brain_bytes = svc.export_brain()?;
+    let size_kb = brain_bytes.len() / 1024;
+    std::fs::write(output_path, &brain_bytes).map_err(|e| format!("write failed: {}", e))?;
+    println!("Brain repacked: {} ({} KB)", output_path, size_kb);
+    Ok(())
 }
 
 // =============================================================================
@@ -835,6 +948,12 @@ fn merge_brains(base_path: &str, overlay_path: &str, output_path: &str) -> Resul
     println!("    Total gen envs: {}", base_dm.group_gen_envs.len());
     for (old, new) in &summary.group_id_map {
         println!("    overlay group {} → merged group {}", old, new);
+    }
+
+    base_dm.language_runtime.ensure_students_preloaded();
+    let gle_count = base_dm.language_runtime.preloaded_student_count();
+    if gle_count > 0 {
+        println!("    GLE students embedded: {}", gle_count);
     }
 
     let checkpoint_bytes = growformer::systems::checkpoint::serialize_checkpoint_to_bytes(&base_dm)?;

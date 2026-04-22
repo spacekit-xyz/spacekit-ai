@@ -35,7 +35,7 @@
 //! if that becomes hot, precompile patterns or batch-check.
 
 use aho_corasick::AhoCorasick;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -105,7 +105,7 @@ fn cli_toml_paths() -> CliTomlPaths {
 // On-disk / include! document (thresholds + rules)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferenceTomlDocument {
     #[serde(flatten)]
     pub thresholds: InferenceThresholds,
@@ -114,7 +114,7 @@ pub struct InferenceTomlDocument {
 }
 
 /// PR-wire headline: normalized text must start with `prefix`, meet `min_len`, and pass excludes / `require_any`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrWireNeutralPrefixRule {
     pub prefix: String,
     #[serde(default = "default_pr_wire_prefix_min_len")]
@@ -132,7 +132,7 @@ fn default_pr_wire_prefix_min_len() -> usize {
 }
 
 /// PR-wire headline: CNF substring match on trimmed normalized intent (`min_len` applies to full headline).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrWireNeutralIntentRow {
     #[serde(default)]
     pub min_len: Option<usize>,
@@ -140,7 +140,7 @@ pub struct PrWireNeutralIntentRow {
     pub intent: Vec<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct InferenceRulesSection {
     #[serde(default)]
     pub contrastive_markers: Vec<String>,
@@ -255,26 +255,26 @@ pub struct InferenceRulesSection {
     pub anchor_negative_gloss: Vec<AnchorTokenGlossRow>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LexicalPolarityRow {
     pub topic: String,
     pub phrases: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SarcasmAndRule {
     #[serde(default)]
     pub groups: Vec<Vec<String>>,
 }
 
 /// Per-token gloss for [`InferenceRulesRuntime::anchor_phrase`] (substring / token hit on `w`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnchorTokenGlossRow {
     pub token: String,
     pub gloss: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectiveFactRule {
     #[serde(default)]
     pub requires_digit: bool,
@@ -290,7 +290,7 @@ pub struct ObjectiveFactRule {
 /// `require_crypto_lexicon` (uses `[rules].crypto_market_surface_tokens` + `crypto_market_surface_prefixes`),
 /// `unless_any_cnf` (skip rule if any inner CNF matches), `after_pr_wire` (run only after PR-wire tables),
 /// `requires_mixed_positive_outcome_cue`, `require_question_mark`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeadlineLexicalTopicRule {
     pub topic: String,
     /// Service may redirect to the sentiment lattice and bypass the knowledge floor.
@@ -337,7 +337,7 @@ impl Default for HeadlineLexicalTopicRule {
 }
 
 /// Detect composed lattice lines that contradict the headline (replace with routing-only fallback).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LatticeMisfireRule {
     #[serde(default)]
     pub intent: Vec<Vec<String>>,
@@ -590,6 +590,45 @@ pub struct InferenceRulesRuntime {
     ambiguous_neutral_conjunction_groups: Vec<Vec<String>>,
     anchor_positive_gloss: HashMap<String, String>,
     anchor_negative_gloss: HashMap<String, String>,
+}
+
+impl InferenceRulesRuntime {
+    pub fn rules_summary_json(&self) -> String {
+        format!(
+            concat!(
+                "{{",
+                "\"headline_lexical_topic\":{},",
+                "\"lattice_misfire\":{},",
+                "\"lexical_polarity\":{},",
+                "\"sarcasm_simple\":{},",
+                "\"sarcasm_and\":{},",
+                "\"positive_anchor_tokens\":{},",
+                "\"negative_anchor_tokens\":{},",
+                "\"pr_wire_neutral_prefix\":{},",
+                "\"pr_wire_neutral_intent\":{},",
+                "\"objective_fact_rules\":{},",
+                "\"contrastive_markers\":{},",
+                "\"crypto_market_surface_tokens\":{},",
+                "\"evaluative_words\":{},",
+                "\"strong_positive_tokens\":{}",
+                "}}"
+            ),
+            self.headline_lexical_topic.len(),
+            self.lattice_misfire.len(),
+            self.lexical_polarity.len(),
+            self.sarcasm_simple.len(),
+            self.sarcasm_and.len(),
+            self.positive_anchor_tokens.len(),
+            self.negative_anchor_tokens.len(),
+            self.pr_wire_neutral_prefix.len(),
+            self.pr_wire_neutral_intent.len(),
+            self.objective_fact_rules.len(),
+            self.contrastive_markers.len(),
+            self.crypto_market_surface_tokens.len(),
+            self.evaluative_words.len(),
+            self.strong_positive_tokens.len(),
+        )
+    }
 }
 
 fn cnf_groups_match(haystack: &str, groups: &[Vec<String>]) -> bool {
@@ -2045,11 +2084,20 @@ fn load_inference_toml_merged() -> InferenceTomlDocument {
     toml::from_str(WASM_EMBED).expect("wasm embedded inference TOML invalid")
 }
 
+/// Embedded core document for use as a merge baseline in [`reload_inference_toml_from_str`].
+#[cfg(target_arch = "wasm32")]
+fn wasm_core_document() -> InferenceTomlDocument {
+    const WASM_EMBED: &str = include_str!("../../data/sentiment/inference_sentiment_core.toml");
+    toml::from_str(WASM_EMBED).expect("wasm embedded inference TOML invalid")
+}
+
 /// Single load: thresholds from file + merged rule lists.
 #[derive(Debug)]
 pub struct LoadedInferenceToml {
     pub thresholds: InferenceThresholds,
     rules: Arc<InferenceRulesRuntime>,
+    /// Serializable snapshot of the merged rules (for re-embedding in brain packages).
+    pub rules_section: InferenceRulesSection,
     /// JSONL guardrails merged after TOML (native only; empty on wasm).
     pub guardrails: super::inference_guardrails::GuardrailsDiskSummary,
 }
@@ -2085,31 +2133,144 @@ pub fn print_train_inference_disk_summary() {
 #[cfg(target_arch = "wasm32")]
 pub fn print_train_inference_disk_summary() {}
 
-static FULL: OnceLock<Arc<LoadedInferenceToml>> = OnceLock::new();
+// ---------------------------------------------------------------------------
+// Native: RwLock so load_brain can replace with brain-embedded rules.
+// ---------------------------------------------------------------------------
+#[cfg(not(target_arch = "wasm32"))]
+static FULL: std::sync::RwLock<Option<Arc<LoadedInferenceToml>>> =
+    std::sync::RwLock::new(None);
 
-pub fn inference_toml_loaded() -> Arc<LoadedInferenceToml> {
-    FULL.get_or_init(|| {
-        let file = load_inference_toml_merged();
-        let mut rules = InferenceRulesRuntime::from_section(file.rules);
-        #[cfg(not(target_arch = "wasm32"))]
-        let guardrails = crate::inference::inference_guardrails::merge_guardrails_into_runtime(
-            &mut rules.headline_lexical_topic,
-            &mut rules.lattice_misfire,
-        );
-        #[cfg(target_arch = "wasm32")]
-        let guardrails = crate::inference::inference_guardrails::GuardrailsDiskSummary::default();
-        let rules = Arc::new(rules);
-        Arc::new(LoadedInferenceToml {
-            thresholds: file.thresholds,
-            rules,
-            guardrails,
-        })
+#[cfg(not(target_arch = "wasm32"))]
+fn build_native_default() -> Arc<LoadedInferenceToml> {
+    let file = load_inference_toml_merged();
+    let rules_section = file.rules.clone();
+    let mut rules = InferenceRulesRuntime::from_section(file.rules);
+    let guardrails = crate::inference::inference_guardrails::merge_guardrails_into_runtime(
+        &mut rules.headline_lexical_topic,
+        &mut rules.lattice_misfire,
+    );
+    let rules = Arc::new(rules);
+    Arc::new(LoadedInferenceToml {
+        thresholds: file.thresholds,
+        rules,
+        rules_section,
+        guardrails,
     })
-    .clone()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn inference_toml_loaded() -> Arc<LoadedInferenceToml> {
+    {
+        let guard = FULL.read().unwrap();
+        if let Some(ref cached) = *guard {
+            return cached.clone();
+        }
+    }
+    let loaded = build_native_default();
+    let mut guard = FULL.write().unwrap();
+    if guard.is_none() {
+        *guard = Some(loaded.clone());
+    }
+    guard.as_ref().unwrap().clone()
+}
+
+// ---------------------------------------------------------------------------
+// WASM: resettable RefCell so JS hosts can swap domain TOML at runtime.
+// ---------------------------------------------------------------------------
+#[cfg(target_arch = "wasm32")]
+use std::cell::RefCell;
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static WASM_FULL: RefCell<Option<Arc<LoadedInferenceToml>>> = RefCell::new(None);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn build_default_loaded() -> Arc<LoadedInferenceToml> {
+    let file = load_inference_toml_merged();
+    let rules_section = file.rules.clone();
+    let rules = Arc::new(InferenceRulesRuntime::from_section(file.rules));
+    let guardrails = super::inference_guardrails::GuardrailsDiskSummary::default();
+    Arc::new(LoadedInferenceToml {
+        thresholds: file.thresholds,
+        rules,
+        rules_section,
+        guardrails,
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn inference_toml_loaded() -> Arc<LoadedInferenceToml> {
+    WASM_FULL.with(|cell| {
+        let mut opt = cell.borrow_mut();
+        if let Some(ref cached) = *opt {
+            return cached.clone();
+        }
+        let loaded = build_default_loaded();
+        *opt = Some(loaded.clone());
+        loaded
+    })
+}
+
+/// Replace the active inference TOML on WASM with a domain-specific document.
+///
+/// The provided `toml_str` (e.g. the contents of `inference_fintech.toml`) is
+/// parsed, then its rules are merged with the embedded core baseline using
+/// [`merge_empty_from`] — exactly mirroring the native CLI merge path.
+#[cfg(target_arch = "wasm32")]
+pub fn reload_inference_toml_from_str(toml_str: &str) -> Result<(), String> {
+    let domain: InferenceTomlDocument =
+        toml::from_str(toml_str).map_err(|e| format!("invalid inference TOML: {}", e))?;
+    let core = wasm_core_document();
+    let merged_rules = domain.rules.merge_empty_from(&core.rules);
+    let rules_section = merged_rules.clone();
+    let rules = Arc::new(InferenceRulesRuntime::from_section(merged_rules));
+    let guardrails = super::inference_guardrails::GuardrailsDiskSummary::default();
+    let loaded = Arc::new(LoadedInferenceToml {
+        thresholds: domain.thresholds,
+        rules,
+        rules_section,
+        guardrails,
+    });
+    WASM_FULL.with(|cell| {
+        *cell.borrow_mut() = Some(loaded);
+    });
+    Ok(())
 }
 
 pub fn inference_rules_runtime() -> Arc<InferenceRulesRuntime> {
     inference_toml_loaded().rules()
+}
+
+/// Replace the global inference rules with brain-embedded rules.
+/// Called from [`crate::service::LanguageService::load_brain`] when the brain
+/// package carries a `[rules]` section in its plugins manifest.
+pub fn replace_loaded_from_rules_section(
+    section: InferenceRulesSection,
+    thresholds: InferenceThresholds,
+) {
+    let rules_section = section.clone();
+    let rules = Arc::new(InferenceRulesRuntime::from_section(section));
+    let guardrails = super::inference_guardrails::GuardrailsDiskSummary::default();
+    let loaded = Arc::new(LoadedInferenceToml {
+        thresholds,
+        rules,
+        rules_section,
+        guardrails,
+    });
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut guard = FULL.write().unwrap();
+        *guard = Some(loaded);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        WASM_FULL.with(|cell| {
+            *cell.borrow_mut() = Some(loaded);
+        });
+    }
 }
 
 #[cfg(test)]

@@ -72,6 +72,10 @@ pub struct BrainPluginsManifest {
     pub language_detection: Option<Table>,
     #[serde(default)]
     pub badwords: Option<Table>,
+    /// Full inference rules embedded in the brain package. When present, these
+    /// replace the disk / compiled-in TOML rules so the brain is self-contained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<super::inference_toml::InferenceRulesSection>,
 }
 
 impl BrainPluginsManifest {
@@ -83,6 +87,7 @@ impl BrainPluginsManifest {
                 .as_ref()
                 .map_or(false, |t| !t.is_empty())
             || self.badwords.as_ref().map_or(false, |t| !t.is_empty())
+            || self.rules.is_some()
     }
 }
 

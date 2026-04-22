@@ -510,10 +510,10 @@ pub fn infer_slots_with_gradient(
 }
 
 fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na < 1e-12 || nb < 1e-12 { 0.0 } else { dot / (na * nb) }
+    let dot: f64 = a.iter().zip(b.iter()).map(|(&x, &y)| (x as f64) * (y as f64)).sum();
+    let na: f64 = a.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+    let nb: f64 = b.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+    if na < 1e-20 || nb < 1e-20 { 0.0 } else { (dot / (na * nb)) as f32 }
 }
 
 /// Top-`k` programs by cosine similarity to `cond` in **O(programs.len() × k)** time.

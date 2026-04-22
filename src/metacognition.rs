@@ -539,13 +539,13 @@ fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
     if len == 0 {
         return 0.0;
     }
-    let dot: f32 = a[..len].iter().zip(b[..len].iter()).map(|(x, y)| x * y).sum();
-    let na = a[..len].iter().map(|x| x * x).sum::<f32>().sqrt();
-    let nb = b[..len].iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na < 1e-10 || nb < 1e-10 {
+    let dot: f64 = a[..len].iter().zip(b[..len].iter()).map(|(&x, &y)| (x as f64) * (y as f64)).sum();
+    let na = a[..len].iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+    let nb = b[..len].iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+    if na < 1e-20 || nb < 1e-20 {
         return 0.0;
     }
-    dot / (na * nb)
+    (dot / (na * nb)) as f32
 }
 
 #[cfg(test)]

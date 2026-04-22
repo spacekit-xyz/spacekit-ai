@@ -1865,17 +1865,19 @@ fn has_causal_connectors(text: &str) -> bool {
 }
 
 fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
-    let mut dot = 0.0f32;
-    let mut na = 0.0f32;
-    let mut nb = 0.0f32;
+    let mut dot = 0.0f64;
+    let mut na = 0.0f64;
+    let mut nb = 0.0f64;
     let len = a.len().min(b.len());
     for i in 0..len {
-        dot += a[i] * b[i];
-        na += a[i] * a[i];
-        nb += b[i] * b[i];
+        let ai = a[i] as f64;
+        let bi = b[i] as f64;
+        dot += ai * bi;
+        na += ai * ai;
+        nb += bi * bi;
     }
     let denom = na.sqrt() * nb.sqrt();
-    if denom < 1e-10 { 0.0 } else { dot / denom }
+    if denom < 1e-20 { 0.0 } else { (dot / denom) as f32 }
 }
 
 // ---------------------------------------------------------------------------

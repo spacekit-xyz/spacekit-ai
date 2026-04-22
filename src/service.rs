@@ -2868,11 +2868,11 @@ impl LanguageService {
     fn fast_cosine(a: &[f32], b: &[f32]) -> f32 {
         let len = a.len().min(b.len());
         if len == 0 { return 0.0; }
-        let dot: f32 = a[..len].iter().zip(b[..len].iter()).map(|(x, y)| x * y).sum();
-        let na = a[..len].iter().map(|x| x * x).sum::<f32>().sqrt();
-        let nb = b[..len].iter().map(|x| x * x).sum::<f32>().sqrt();
-        if na < 1e-10 || nb < 1e-10 { return 0.0; }
-        dot / (na * nb)
+        let dot: f64 = a[..len].iter().zip(b[..len].iter()).map(|(&x, &y)| (x as f64) * (y as f64)).sum();
+        let na = a[..len].iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+        let nb = b[..len].iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+        if na < 1e-20 || nb < 1e-20 { return 0.0; }
+        (dot / (na * nb)) as f32
     }
 
     /// Paramecium inference: lattice-only, no neural substrate.
@@ -3418,7 +3418,9 @@ impl LanguageService {
     /// Includes optional UTF-8 TOML plugins (see [`BrainPluginsManifest`]); sentiment lattice brains
     /// get a default `[sentiment]` section so the runtime is self-describing.
     /// [`load_brain`](Self::load_brain) accepts this envelope, format v1/v2, or legacy raw checkpoint JSON.
-    pub fn export_brain(&self) -> Result<Vec<u8>, String> {
+    pub fn export_brain(&mut self) -> Result<Vec<u8>, String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.active_dm_mut().language_runtime.ensure_students_preloaded();
         let checkpoint = crate::systems::checkpoint::serialize_checkpoint_to_bytes(self.active_dm())?;
         let personality = self.export_personality()?;
         let mut header = crate::brain::BrainPackageHeader::default();
@@ -3440,6 +3442,8 @@ impl LanguageService {
         let mut manifest = self.brain_plugins_manifest.clone().unwrap_or_default();
         self.inference_harness
             .apply_export_brain_plugins(dm, prev_profile, &mut header, &mut manifest);
+        let loaded_toml = crate::inference::inference_toml::inference_toml_loaded();
+        manifest.rules = Some(loaded_toml.rules_section.clone());
         let plugins_blob = crate::inference::serialize_plugins_manifest(&manifest)
             .ok()
             .filter(|v| !v.is_empty());
@@ -3607,7 +3611,7 @@ impl LanguageService {
 
     /// Auto-save brain to disk after every N feedback events.
     #[cfg(feature = "training")]
-    fn maybe_auto_checkpoint(&self) {
+    fn maybe_auto_checkpoint(&mut self) {
         let interval = self.continuum_config.checkpoint_interval;
         if interval == 0 { return; }
         if self.continuum_feedback_count > 0
@@ -3654,6 +3658,18 @@ impl LanguageService {
             },
             None => None,
         };
+        if let Some(ref manifest) = self.brain_plugins_manifest {
+            if let Some(ref rules_section) = manifest.rules {
+                let thresholds = manifest
+                    .inference_thresholds
+                    .clone()
+                    .unwrap_or_default();
+                crate::inference::inference_toml::replace_loaded_from_rules_section(
+                    rules_section.clone(),
+                    thresholds,
+                );
+            }
+        }
         if !peeled.header.name.is_empty() && peeled.header.name != "growformer" {
             self.agent_name = peeled.header.name.clone();
         }

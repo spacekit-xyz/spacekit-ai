@@ -123,14 +123,14 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let dot: f64 = a.iter().zip(b.iter()).map(|(&x, &y)| (x as f64) * (y as f64)).sum();
+    let na: f64 = a.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+    let nb: f64 = b.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
     let denom = na * nb;
-    if denom < 1e-10 {
+    if denom < 1e-20 {
         return 0.0;
     }
-    (dot / denom).clamp(-1.0, 1.0)
+    ((dot / denom) as f32).clamp(-1.0, 1.0)
 }
 
 /// Return group indices sorted by relevance (cosine similarity to query vector, descending).

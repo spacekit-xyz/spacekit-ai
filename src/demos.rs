@@ -3638,7 +3638,7 @@ fn demo_acceptance_report(report_path: Option<&str>) -> Result<(), String> {
 
 fn demo_export_brain(path: &str) -> Result<(), String> {
     println!("--- Export Brain ---\n");
-    let svc = LanguageService::new_default()?;
+    let mut svc = LanguageService::new_default()?;
 
     let brain_bytes = svc.export_brain()?;
     let size_kb = brain_bytes.len() / 1024;

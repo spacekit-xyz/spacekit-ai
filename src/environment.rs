@@ -413,11 +413,12 @@ impl NeuralEnvironment {
                 })
                 .collect();
 
-            // Per-neuron summation: if dendritic_branches > 1, sum per-branch and pick winner
+            // Per-neuron summation: if dendritic_branches > 1, sum per-branch and pick winner.
+            // Accumulate in f64 to eliminate native/WASM FMA divergence.
             let sums: Vec<(NeuronId, f32, u8)> = crate::maybe_par_iter!(layer_ids)
                 .map(|&nid| {
                     if n_branches <= 1 || is_output {
-                        let sum: f32 = prev_layer
+                        let sum: f64 = prev_layer
                             .iter()
                             .filter_map(|&src_id| {
                                 let act = *prev_act.get(&src_id)?;
@@ -425,19 +426,19 @@ impl NeuralEnvironment {
                                 targets
                                     .iter()
                                     .find(|(t, _, _)| *t == nid)
-                                    .map(|(_, eff_str, _)| act * eff_str)
+                                    .map(|&(_, eff_str, _)| (act as f64) * (eff_str as f64))
                             })
                             .sum();
-                        (nid, sum, 0u8)
+                        (nid, sum as f32, 0u8)
                     } else {
-                        let mut branch_sums = vec![0.0f32; n_branches];
+                        let mut branch_sums = vec![0.0f64; n_branches];
                         for &src_id in &prev_layer {
                             if let Some(act) = prev_act.get(&src_id) {
                                 if let Some(targets) = prev_synapses.get(&src_id) {
                                     for &(t, eff_str, br) in targets {
                                         if t == nid {
                                             let bi = (br as usize) % n_branches;
-                                            branch_sums[bi] += act * eff_str;
+                                            branch_sums[bi] += (*act as f64) * (eff_str as f64);
                                         }
                                     }
                                 }
@@ -448,7 +449,7 @@ impl NeuralEnvironment {
                             .enumerate()
                             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                             .unwrap_or((0, &0.0));
-                        (nid, best_sum, best_branch as u8)
+                        (nid, best_sum as f32, best_branch as u8)
                     }
                 })
                 .collect();

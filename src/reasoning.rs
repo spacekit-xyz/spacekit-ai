@@ -193,11 +193,11 @@ const DEFAULT_INHIBITION: f32 = 0.15;
 const DEFAULT_SPREAD_DECAY: f32 = 0.6;
 
 fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let na = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let nb = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na < 1e-10 || nb < 1e-10 { return 0.0; }
-    dot / (na * nb)
+    let dot: f64 = a.iter().zip(b.iter()).map(|(&x, &y)| (x as f64) * (y as f64)).sum();
+    let na = a.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+    let nb = b.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+    if na < 1e-20 || nb < 1e-20 { return 0.0; }
+    (dot / (na * nb)) as f32
 }
 
 impl ReasoningEngine {

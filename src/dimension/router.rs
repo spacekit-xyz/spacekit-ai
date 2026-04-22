@@ -92,53 +92,56 @@ impl LearnedRouter {
 
         // Compute field gradient: ∇F at the query point, where each program
         // is a source with strength proportional to its similarity.
+        // All accumulation in f64 to eliminate FMA vs non-FMA divergence (native vs WASM).
         let dim = input.len();
-        let mut gradient = vec![0.0f32; dim];
-        let mut weight_sum = 0.0f32;
+        let mut gradient = vec![0.0f64; dim];
+        let mut weight_sum = 0.0f64;
         for &(idx, sim) in scored.iter().take(k * 3) {
             if sim < 0.01 { break; }
             let centroid = &self.lattice.programs[idx].ema_centroid;
-            let mut disp_norm_sq = 0.0f32;
+            let mut disp_norm_sq = 0.0f64;
             for j in 0..dim.min(centroid.len()) {
-                let d = input[j] - centroid[j];
+                let d = (input[j] - centroid[j]) as f64;
                 disp_norm_sq += d * d;
             }
-            if disp_norm_sq < 1e-10 { continue; }
-            let green_w = sim / disp_norm_sq;
+            if disp_norm_sq < 1e-20 { continue; }
+            let green_w = (sim as f64) / disp_norm_sq;
             for j in 0..dim.min(centroid.len()) {
-                gradient[j] += green_w * (input[j] - centroid[j]);
+                gradient[j] += green_w * (input[j] - centroid[j]) as f64;
             }
             weight_sum += green_w;
         }
-        if weight_sum > 1e-10 {
+        if weight_sum > 1e-20 {
             for v in &mut gradient { *v /= weight_sum; }
         }
-        let grad_mag: f32 = gradient.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let grad_mag: f64 = gradient.iter().map(|x| x * x).sum::<f64>().sqrt();
 
-        // K-NN voting with gradient alignment bias.
+        // K-NN voting with gradient alignment bias (f64 accumulators).
+        let mut logits_f64 = vec![0.0f64; self.num_groups];
         for &(idx, sim) in scored.iter().take(k) {
             if sim < 0.0 { continue; }
             let text = self.lattice.programs[idx].display_text(&self.lattice.dictionary);
             if let Some(gid) = Self::parse_group_id(&text) {
                 if gid < self.num_groups {
-                    // Gradient alignment: does this program lie in the direction ∇F points?
-                    let grad_bonus = if grad_mag > 1e-6 {
+                    let grad_bonus = if grad_mag > 1e-12 {
                         let centroid = &self.lattice.programs[idx].ema_centroid;
                         let min_dim = dim.min(centroid.len()).min(gradient.len());
-                        let dot: f32 = (0..min_dim)
-                            .map(|j| (centroid[j] - input[j]) * gradient[j])
+                        let dot: f64 = (0..min_dim)
+                            .map(|j| (centroid[j] - input[j]) as f64 * gradient[j])
                             .sum();
                         let alignment = (dot / grad_mag).clamp(-1.0, 1.0);
-                        (alignment + 1.0) / 2.0  // map [-1,1] → [0,1]
+                        (alignment + 1.0) / 2.0
                     } else {
                         0.5
                     };
 
-                    // Weight: 65% proximity + 35% gradient alignment
-                    let vote = sim.max(0.0) * (0.65 + 0.35 * grad_bonus);
-                    logits[gid] += vote;
+                    let vote = (sim as f64).max(0.0) * (0.65 + 0.35 * grad_bonus);
+                    logits_f64[gid] += vote;
                 }
             }
+        }
+        for (dst, src) in logits.iter_mut().zip(logits_f64.iter()) {
+            *dst = *src as f32;
         }
 
         logits
@@ -206,16 +209,18 @@ impl LearnedRouter {
 }
 
 fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
-    let mut dot = 0.0f32;
-    let mut na = 0.0f32;
-    let mut nb = 0.0f32;
+    let mut dot = 0.0f64;
+    let mut na = 0.0f64;
+    let mut nb = 0.0f64;
     for i in 0..a.len().min(b.len()) {
-        dot += a[i] * b[i];
-        na += a[i] * a[i];
-        nb += b[i] * b[i];
+        let ai = a[i] as f64;
+        let bi = b[i] as f64;
+        dot += ai * bi;
+        na += ai * ai;
+        nb += bi * bi;
     }
     let denom = na.sqrt() * nb.sqrt();
-    if denom < 1e-10 { 0.0 } else { dot / denom }
+    if denom < 1e-20 { 0.0 } else { (dot / denom) as f32 }
 }
 
 // ---------------------------------------------------------------------------

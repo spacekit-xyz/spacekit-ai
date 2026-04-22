@@ -79,7 +79,7 @@ pub fn growformer_load_brain(data: &[u8]) -> Result<(), JsValue> {
 /// Export current brain state as bytes for caching.
 #[wasm_bindgen]
 pub fn growformer_export_brain() -> Result<Vec<u8>, JsValue> {
-    with_rt_ref(|rt| rt.svc.export_brain())
+    with_rt(|rt| rt.svc.export_brain())
 }
 
 /// Return brain metadata as JSON.
@@ -193,6 +193,48 @@ pub fn growformer_acceptance_report() -> Result<JsValue, JsValue> {
         serde_json::to_string(&report).map_err(|e| e.to_string())
     })
     .map(|json| JsValue::from_str(&json))
+}
+
+/// Return JSON summary of active inference rule counts (for diagnostics).
+#[wasm_bindgen]
+pub fn growformer_inference_rules_info() -> Result<JsValue, JsValue> {
+    let loaded = crate::inference::inference_toml::inference_toml_loaded();
+    let rules = loaded.rules();
+    Ok(JsValue::from_str(&rules.rules_summary_json()))
+}
+
+/// Diagnostic: dump raw encoder vec + bridge output for a given text.
+#[wasm_bindgen]
+pub fn growformer_debug_embedding(text: &str) -> Result<JsValue, JsValue> {
+    with_rt(|rt| {
+        let dm = rt.svc.active_dm_mut();
+        let (raw_enc, bridged) = dm.language_runtime.encode_and_bridge(text)?;
+        let raw_first8: Vec<f32> = raw_enc.iter().take(8).copied().collect();
+        let raw_norm: f64 = raw_enc.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>().sqrt();
+        let br_vec = &bridged.routed_vector;
+        let br_first8: Vec<f32> = br_vec.iter().take(8).copied().collect();
+        let br_norm: f64 = br_vec.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>().sqrt();
+        Ok(format!(
+            "{{\"raw_dim\":{},\"raw_norm\":{:.10},\"raw_first8\":{:?},\"bridge_dim\":{},\"bridge_confidence\":{:.6},\"bridge_norm\":{:.10},\"bridge_first8\":{:?}}}",
+            raw_enc.len(), raw_norm, raw_first8,
+            br_vec.len(), bridged.confidence, br_norm, br_first8
+        ))
+    })
+    .map(|s| JsValue::from_str(&s))
+}
+
+/// Load domain-specific inference TOML (e.g. `inference_fintech.toml` or
+/// `inference_crypto.toml`) to replace the embedded core rules. The domain
+/// document is merged with the compiled-in core baseline so that any rule
+/// lists the domain file leaves empty are filled from core — matching
+/// the native CLI merge behavior.
+///
+/// Call **before** the first inference so the rules are active. Calling again
+/// replaces the previous rules (hot-swap is safe on WASM's single thread).
+#[wasm_bindgen]
+pub fn growformer_load_inference_toml(toml_str: &str) -> Result<(), JsValue> {
+    crate::inference::inference_toml::reload_inference_toml_from_str(toml_str)
+        .map_err(|e| JsValue::from_str(&e))
 }
 
 #[wasm_bindgen]

@@ -850,22 +850,23 @@ impl LanguageBridge {
         }
         let mut normalized = vec![0.0f32; self.input_dim];
         for i in 0..self.input_dim {
-            normalized[i] = (encoder_vec[i] - self.input_mean[i]) / self.input_std[i].max(1e-6);
+            normalized[i] = ((encoder_vec[i] as f64 - self.input_mean[i] as f64)
+                / (self.input_std[i].max(1e-6) as f64)) as f32;
         }
         let mut z = vec![0.0f32; self.output_dim];
         for (o, zo) in z.iter_mut().enumerate() {
-            let mut acc = self.bias[o];
+            let mut acc = self.bias[o] as f64;
             for i in 0..self.input_dim {
-                acc += self.projection[o][i] * normalized[i];
+                acc += (self.projection[o][i] as f64) * (normalized[i] as f64);
             }
-            *zo = acc;
+            *zo = acc as f32;
         }
         layer_norm_affine(&mut z, &self.ln_gamma, &self.ln_beta);
-        let mut confidence_logit = self.confidence_bias;
+        let mut confidence_logit = self.confidence_bias as f64;
         for (w, v) in self.confidence_head.iter().zip(z.iter()) {
-            confidence_logit += w * v.abs();
+            confidence_logit += (*w as f64) * (v.abs() as f64);
         }
-        let confidence = sigmoid(confidence_logit);
+        let confidence = sigmoid(confidence_logit as f32);
         l2_normalize(&mut z);
         Ok(BridgeOutput {
             routed_vector: z,
@@ -917,7 +918,7 @@ pub struct LanguageRuntime {
     pub encoder: HashingLanguageEncoder,
     pub bridge: LanguageBridge,
     pub smoother: EmaSmoother,
-    #[serde(skip)]
+    #[serde(default)]
     preloaded_students: Vec<GleStudentCheckpoint>,
 }
 
@@ -1051,6 +1052,36 @@ impl LanguageRuntime {
         None
     }
 
+    /// Ensure GLE students are loaded into `preloaded_students` (from disk if needed)
+    /// so they survive checkpoint serialization.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn ensure_students_preloaded(&mut self) {
+        if !self.preloaded_students.is_empty() {
+            return;
+        }
+        if let EncoderPreset::BertClass = &self.config.encoder {
+            let paths = resolved_gle_checkpoint_paths(&self.config);
+            let mut target_out_dim: Option<usize> = None;
+            for path in paths {
+                if let Ok(student) = GleStudentCheckpoint::load(&path) {
+                    let out_dim = student.output_dim();
+                    if let Some(target) = target_out_dim {
+                        if out_dim == target {
+                            self.preloaded_students.push(student);
+                        }
+                    } else {
+                        target_out_dim = Some(out_dim);
+                        self.preloaded_students.push(student);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn preloaded_student_count(&self) -> usize {
+        self.preloaded_students.len()
+    }
+
     /// Load GLE student checkpoints from byte slices (WASM-compatible path).
     pub fn load_students_from_bytes(&mut self, data: &[&[u8]]) -> Result<usize, String> {
         let mut count = 0;
@@ -1106,19 +1137,19 @@ impl GleStudentCheckpoint {
     fn predict(&self, x: &[f32]) -> Vec<f32> {
         let mut h = vec![0.0f32; self.w1.len()];
         for (j, hj) in h.iter_mut().enumerate() {
-            let mut acc = self.b1[j];
+            let mut acc = self.b1[j] as f64;
             for (i, &xi) in x.iter().enumerate() {
-                acc += self.w1[j][i] * xi;
+                acc += (self.w1[j][i] as f64) * (xi as f64);
             }
-            *hj = acc.tanh();
+            *hj = (acc as f32).tanh();
         }
         let mut y = vec![0.0f32; self.w2.len()];
         for (o, yo) in y.iter_mut().enumerate() {
-            let mut acc = self.b2[o];
+            let mut acc = self.b2[o] as f64;
             for (j, &hj) in h.iter().enumerate() {
-                acc += self.w2[o][j] * hj;
+                acc += (self.w2[o][j] as f64) * (hj as f64);
             }
-            *yo = acc;
+            *yo = acc as f32;
         }
         l2_normalize(&mut y);
         y
@@ -1284,30 +1315,31 @@ fn layer_norm_affine(x: &mut [f32], gamma: &[f32], beta: &[f32]) {
     if x.is_empty() || x.len() != gamma.len() || x.len() != beta.len() {
         return;
     }
-    let mean = x.iter().sum::<f32>() / x.len() as f32;
+    let n = x.len() as f64;
+    let mean = x.iter().map(|&v| v as f64).sum::<f64>() / n;
     let var = x
         .iter()
-        .map(|v| {
-            let d = *v - mean;
+        .map(|&v| {
+            let d = v as f64 - mean;
             d * d
         })
-        .sum::<f32>()
-        / x.len() as f32;
-    let inv_std = 1.0 / (var + 1e-5).sqrt();
+        .sum::<f64>()
+        / n;
+    let inv_std = 1.0 / (var + 1e-5_f64).sqrt();
     for i in 0..x.len() {
-        x[i] = ((x[i] - mean) * inv_std) * gamma[i] + beta[i];
+        x[i] = (((x[i] as f64 - mean) * inv_std) * gamma[i] as f64 + beta[i] as f64) as f32;
     }
 }
 
 fn sigmoid(x: f32) -> f32 {
-    1.0 / (1.0 + (-x).exp())
+    (1.0 / (1.0 + (-(x as f64)).exp())) as f32
 }
 
 fn l2_normalize(v: &mut [f32]) {
-    let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if n > 1e-10 {
-        for x in v {
-            *x /= n;
+    let n = v.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+    if n > 1e-20 {
+        for x in v.iter_mut() {
+            *x = (*x as f64 / n) as f32;
         }
     }
 }

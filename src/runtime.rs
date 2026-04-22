@@ -92,7 +92,7 @@ impl Runtime {
     }
 
     /// Export current brain state as bytes (for caching / saving).
-    pub fn export_brain(&self) -> Result<Vec<u8>, String> {
+    pub fn export_brain(&mut self) -> Result<Vec<u8>, String> {
         self.svc.export_brain()
     }
 

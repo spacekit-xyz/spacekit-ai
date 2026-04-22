@@ -40,6 +40,9 @@ pub struct TrainSection {
     pub brain_epochs: Option<u32>,
     pub brain_gen_epochs: Option<u32>,
     pub brain_gen_replicas: Option<u32>,
+    /// Path to a GLE student checkpoint JSON (relative to manifest).
+    /// Enables the neural encoder instead of the hash-based encoder.
+    pub gle_checkpoint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
