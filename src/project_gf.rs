@@ -43,6 +43,9 @@ pub struct TrainSection {
     /// Path to a GLE student checkpoint JSON (relative to manifest).
     /// Enables the neural encoder instead of the hash-based encoder.
     pub gle_checkpoint: Option<String>,
+    /// Encoder preset override: "clifford_e8" for MLP-free Clifford encoder.
+    /// When set, takes precedence over gle_checkpoint.
+    pub encoder: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

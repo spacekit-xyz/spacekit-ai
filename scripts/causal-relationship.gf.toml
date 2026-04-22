@@ -26,6 +26,7 @@ description = "Causal relationship micro-brain. Classifies text by causal struct
 auto = true
 data_dir = "../data/causal"
 brain_output = "../agent-data/causal-analysis/causal-brain.bin"
+encoder = "clifford_e8"
 
 [inference]
 toml = "../data/causal/inference_causal.toml"

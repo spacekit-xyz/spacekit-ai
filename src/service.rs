@@ -663,7 +663,7 @@ impl LanguageService {
         let gle_checkpoints = parse_csv_env("GROWFORMER_GLE_CHECKPOINTS");
         let gle_checkpoint_weights = parse_csv_env_f32("GROWFORMER_GLE_WEIGHTS");
         let config = LanguageConfig {
-            encoder: EncoderPreset::BertClass,
+            encoder: EncoderPreset::from_env(),
             bridge_output_dim: DEFAULT_BRIDGE_DIM,
             ema_alpha: 0.2,
             ood_similarity_threshold: 0.15,
@@ -4073,7 +4073,7 @@ pub fn build_language_demo_manager(
     let gle_checkpoints = parse_csv_env("GROWFORMER_GLE_CHECKPOINTS");
     let gle_checkpoint_weights = parse_csv_env_f32("GROWFORMER_GLE_WEIGHTS");
     let config = LanguageConfig {
-        encoder: EncoderPreset::BertClass,
+        encoder: EncoderPreset::from_env(),
         bridge_output_dim: DEFAULT_BRIDGE_DIM,
         ema_alpha,
         ood_similarity_threshold: 0.15,

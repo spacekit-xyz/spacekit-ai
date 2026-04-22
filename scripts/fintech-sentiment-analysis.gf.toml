@@ -17,7 +17,7 @@ auto = true
 data_dir = "../data/fintech"
 brain_output = "../agent-data/fintech-analysis/fintech-brain.bin"
 brain_plugins_toml = "../data/plugins/example-brain-plugins.toml"
-gle_checkpoint = "../checkpoints/gle_student_routing_tuned.json"
+encoder = "clifford_e8"
 
 [inference]
 toml = "../data/fintech/inference_fintech.toml"

@@ -270,6 +270,9 @@ fn apply_gf_project(args: &mut Args, project_path: &Path) -> Result<GfOverlay, S
                 );
             }
         }
+        if let Some(enc) = &tr.encoder {
+            std::env::set_var("GROWFORMER_ENCODER", enc);
+        }
         if let Some(g) = &tr.gle_checkpoint {
             let resolved = growformer::project_gf::resolve_against(&base, g);
             std::env::set_var("GROWFORMER_GLE_CHECKPOINT", &resolved);

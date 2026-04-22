@@ -24,6 +24,8 @@ pub enum EncoderPreset {
     MiniLmL6V2,
     MiniLmMultilingualL12V2,
     BertClass,
+    /// MLP-free encoder: 256-d hash → E8 quantize → Cl(1,7) embed → 128-d grade extract.
+    CliffordE8,
     Custom { model_name: String, output_dim: usize },
 }
 
@@ -35,6 +37,7 @@ impl EncoderPreset {
                 "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2".to_string()
             }
             EncoderPreset::BertClass => "bert-base-uncased".to_string(),
+            EncoderPreset::CliffordE8 => "clifford-e8-hash".to_string(),
             EncoderPreset::Custom { model_name, .. } => model_name.clone(),
         }
     }
@@ -44,6 +47,7 @@ impl EncoderPreset {
             EncoderPreset::MiniLmL6V2 => 384,
             EncoderPreset::MiniLmMultilingualL12V2 => 384,
             EncoderPreset::BertClass => 768,
+            EncoderPreset::CliffordE8 => CLIFFORD_ENCODER_OUTPUT_DIM,
             EncoderPreset::Custom { output_dim, .. } => *output_dim,
         }
     }
@@ -52,6 +56,18 @@ impl EncoderPreset {
 impl Default for EncoderPreset {
     fn default() -> Self {
         EncoderPreset::BertClass
+    }
+}
+
+impl EncoderPreset {
+    /// Resolve from the `GROWFORMER_ENCODER` env var, falling back to `BertClass`.
+    pub fn from_env() -> Self {
+        match std::env::var("GROWFORMER_ENCODER").ok().as_deref() {
+            Some("clifford_e8") | Some("CliffordE8") | Some("clifford-e8") => {
+                EncoderPreset::CliffordE8
+            }
+            _ => EncoderPreset::BertClass,
+        }
     }
 }
 
@@ -978,6 +994,9 @@ impl LanguageRuntime {
     }
 
     fn build_encoder(&self) -> Box<dyn LanguageEncoder> {
+        if let EncoderPreset::CliffordE8 = &self.config.encoder {
+            return Box::new(CliffordLanguageEncoder::new());
+        }
         if let Some(enc) = self.build_encoder_from_preloaded() {
             return enc;
         }
@@ -1095,6 +1114,9 @@ impl LanguageRuntime {
 }
 
 fn configured_encoder_dim(config: &LanguageConfig) -> Option<usize> {
+    if let EncoderPreset::CliffordE8 = &config.encoder {
+        return Some(CLIFFORD_ENCODER_OUTPUT_DIM);
+    }
     #[cfg(not(target_arch = "wasm32"))]
     if let EncoderPreset::BertClass = &config.encoder {
         for path in resolved_gle_checkpoint_paths(config) {
@@ -1243,6 +1265,75 @@ impl LanguageEncoder for MultiGleEncoder {
                 out[i] += w * y[i];
             }
         }
+        l2_normalize(&mut out);
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CliffordLanguageEncoder — MLP-free encoder using the neural physics substrate
+// ---------------------------------------------------------------------------
+//
+// Pipeline: 256-d hash → E8 lattice quantize → Cl(1,7) embed → grade extract → L2 norm
+//
+// Replaces the GLE distilled MLP (256→192→384) with pure geometric algebra.
+// Grade structure encodes semantics:
+//   grade-1 (8d)  — direction / content signal
+//   grade-2 (28d) — relational / causal bivectors (boost + rotation)
+//   grade-0 (1d)  — scalar magnitude
+// Total: 37 meaningful dimensions, padded to output_dim (default 128).
+//
+// The E8 quantization step snaps the hash vector to lattice points, providing
+// a discrete nonlinearity that regularises hash collisions without learned params.
+// The Clifford wedge products between successive 8-d blocks inject cross-subspace
+// interaction into the bivector grades — a geometric nonlinearity that an MLP
+// would need a hidden layer to approximate.
+//
+// Zero learned parameters in the encoder itself; downstream GroupRotor (28 SPSA
+// params) handles per-group adaptation in the same Cl(1,7) space.
+
+const CLIFFORD_ENCODER_HASH_DIM: usize = 256;
+
+/// Grade features extracted from Cl(1,7): grade-1 (8) + grade-2 boost (7)
+/// + grade-2 rotation (21) + scalar (1) = 37 geometric dimensions.
+const CLIFFORD_GRADE_FEATURES: usize = 8 + 7 + 21 + 1;
+
+/// Hash (256) + Clifford grade features (37) = 293.
+/// Preserves per-dimension lexical anchors AND geometric cross-subspace structure.
+const CLIFFORD_ENCODER_OUTPUT_DIM: usize = CLIFFORD_ENCODER_HASH_DIM + CLIFFORD_GRADE_FEATURES;
+
+#[derive(Debug, Clone)]
+struct CliffordLanguageEncoder {
+    base: HashingLanguageEncoder,
+}
+
+impl CliffordLanguageEncoder {
+    fn new() -> Self {
+        let base = HashingLanguageEncoder::new(EncoderPreset::Custom {
+            model_name: "clifford-e8-hash".to_string(),
+            output_dim: CLIFFORD_ENCODER_HASH_DIM,
+        });
+        Self { base }
+    }
+}
+
+impl LanguageEncoder for CliffordLanguageEncoder {
+    fn output_dim(&self) -> usize {
+        CLIFFORD_ENCODER_OUTPUT_DIM
+    }
+
+    fn encode(&self, text: &str) -> Vec<f32> {
+        let hash_vec = self.base.encode(text);
+
+        let quantized = crate::spectral::E8Lattice::quantize_64d(&hash_vec);
+
+        let mv = crate::clifford::embed_bridge_vector(&quantized);
+
+        let mut out = Vec::with_capacity(CLIFFORD_ENCODER_OUTPUT_DIM);
+        out.extend_from_slice(&quantized);
+        let grades = crate::clifford::extract_conditioning(&mv, CLIFFORD_GRADE_FEATURES);
+        out.extend_from_slice(&grades);
+
         l2_normalize(&mut out);
         out
     }
