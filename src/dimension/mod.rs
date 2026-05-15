@@ -27,10 +27,11 @@ pub use codegen::{CodeGeneration, generate_code_from_action};
 pub use generation::{GeneratedResponse, render_action_template};
 pub use embedding::{GroupEmbedding, compute_group_embedding, cosine_similarity, retrieve_relevant_groups};
 pub use language::{
-    causal_index_token, causal_subtype_index_token, CalibrationCoverage, CalibrationDataset,
-    CalibrationRequirements, CalibrationReport,
+    append_language_samples_from_training_jsonl_dir, causal_index_token, causal_subtype_index_token,
+    CalibrationCoverage, CalibrationDataset, CalibrationRequirements, CalibrationReport,
     CausalAnnotation, EncoderPreset, EmaSmoother, GroupAdapter, HashingLanguageEncoder, LanguageBridge,
     LanguageConfig, LanguageEncoder, LanguageRoutingDecision, LanguageRuntime, LanguageSample,
+    is_brain_training_jsonl_filename, is_inference_guardrails_jsonl_filename, load_language_samples_jsonl,
     route_language_embedding, sentiment_lattice_index_body_with_causal, SENTIMENT_CAUSAL_INDEX_CORE,
 };
 pub use crate::clifford::GroupRotor;

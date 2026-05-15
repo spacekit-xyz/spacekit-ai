@@ -7,6 +7,9 @@
 //! - objective routing outputs (winner, margin, OOD reject).
 
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::Path;
 
 #[cfg(feature = "native")]
 use reqwest::blocking::Client;
@@ -37,7 +40,7 @@ impl EncoderPreset {
                 "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2".to_string()
             }
             EncoderPreset::BertClass => "bert-base-uncased".to_string(),
-            EncoderPreset::CliffordE8 => "clifford-e8-hash".to_string(),
+            EncoderPreset::CliffordE8 => "clifford-e8-cata".to_string(),
             EncoderPreset::Custom { model_name, .. } => model_name.clone(),
         }
     }
@@ -55,18 +58,19 @@ impl EncoderPreset {
 
 impl Default for EncoderPreset {
     fn default() -> Self {
-        EncoderPreset::BertClass
+        EncoderPreset::CliffordE8
     }
 }
 
+// Default to CliffordE8 at all times. BERT to be deprecated.
 impl EncoderPreset {
-    /// Resolve from the `GROWFORMER_ENCODER` env var, falling back to `BertClass`.
+    /// Resolve from the `GROWFORMER_ENCODER` env var, falling back to `CliffordE8`.
     pub fn from_env() -> Self {
         match std::env::var("GROWFORMER_ENCODER").ok().as_deref() {
             Some("clifford_e8") | Some("CliffordE8") | Some("clifford-e8") => {
                 EncoderPreset::CliffordE8
             }
-            _ => EncoderPreset::BertClass,
+            _ => EncoderPreset::CliffordE8,
         }
     }
 }
@@ -291,6 +295,101 @@ pub struct LanguageSample {
     pub expected_code: Option<String>,
     #[serde(default)]
     pub causal: Option<CausalAnnotation>,
+}
+
+// --- Brain-training JSONL directory scans ------------------------------------
+
+/// Inference guardrails use a different schema (`kind` / `intent`), not [`LanguageSample`] rows.
+#[inline]
+pub fn is_inference_guardrails_jsonl_filename(name: &str) -> bool {
+    name == "inference_guardrails.jsonl"
+}
+
+/// Whether a basename in a training `data_dir` should be merged into brain training / M5-style calibration loads.
+///
+/// Every `*.jsonl` sample corpus is included except [`is_inference_guardrails_jsonl_filename`] and `eval_*.jsonl` holdouts.
+#[inline]
+pub fn is_brain_training_jsonl_filename(name: &str) -> bool {
+    name.ends_with(".jsonl")
+        && !is_inference_guardrails_jsonl_filename(name)
+        && !name.starts_with("eval_")
+}
+
+#[derive(Deserialize)]
+struct JsonlLanguageSampleRow {
+    text: String,
+    #[serde(default)]
+    semantic_intent: Option<String>,
+    #[serde(default)]
+    intent: Option<String>,
+    #[serde(default)]
+    domain: Option<String>,
+    #[serde(default)]
+    action_target: Option<String>,
+    #[serde(default)]
+    policy_regime: Option<String>,
+    #[serde(default)]
+    language_channel: Option<String>,
+    #[serde(default)]
+    expected_response: Option<String>,
+    #[serde(default)]
+    expected_code: Option<String>,
+    #[serde(default)]
+    causal: Option<CausalAnnotation>,
+}
+
+/// Load newline-delimited [`LanguageSample`] records from one JSONL file (brain / distill corpora).
+pub fn load_language_samples_jsonl(path: &str) -> Result<Vec<LanguageSample>, String> {
+    let file = File::open(path).map_err(|e| format!("open failed: {}", e))?;
+    let reader = BufReader::new(file);
+    let mut out = Vec::new();
+    for (idx, line) in reader.lines().enumerate() {
+        let line = line.map_err(|e| format!("line {} read failed: {}", idx + 1, e))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let rec: JsonlLanguageSampleRow = serde_json::from_str(&line)
+            .map_err(|e| format!("line {} json parse failed: {}", idx + 1, e))?;
+        let intent = rec
+            .semantic_intent
+            .or(rec.intent)
+            .unwrap_or_else(|| "unknown_intent".to_string());
+        out.push(LanguageSample {
+            domain: rec.domain.unwrap_or_else(|| "custom".to_string()),
+            text: rec.text,
+            semantic_intent: intent,
+            action_target: rec.action_target,
+            policy_regime: rec.policy_regime.unwrap_or_else(|| "default".to_string()),
+            language_channel: rec.language_channel.unwrap_or_else(|| "english".to_string()),
+            expected_response: rec.expected_response,
+            expected_code: rec.expected_code,
+            causal: rec.causal,
+        });
+    }
+    Ok(out)
+}
+
+/// Append all brain-training JSONL files from `dir` into `all` (sorted by filename).
+pub fn append_language_samples_from_training_jsonl_dir(
+    all: &mut Vec<LanguageSample>,
+    dir: &Path,
+) -> Result<(), String> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|e| format!("read_dir failed ({}): {}", dir.display(), e))?
+        .filter_map(|e| e.ok())
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !is_brain_training_jsonl_filename(&name) {
+            continue;
+        }
+        let path = entry.path();
+        let samples = load_language_samples_jsonl(path.to_str().unwrap())?;
+        println!("  loaded {}: {} samples", path.display(), samples.len());
+        all.extend(samples);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -936,6 +1035,10 @@ pub struct LanguageRuntime {
     pub smoother: EmaSmoother,
     #[serde(default)]
     preloaded_students: Vec<GleStudentCheckpoint>,
+    /// Corpus-built dictionary for the Clifford+ChunkCodec encoder path.
+    /// Populated during training, serialized into the brain package.
+    #[serde(default)]
+    pub preloaded_dictionary: Option<crate::spectral::TokenDictionary>,
 }
 
 impl LanguageRuntime {
@@ -950,6 +1053,7 @@ impl LanguageRuntime {
             bridge,
             smoother,
             preloaded_students: Vec::new(),
+            preloaded_dictionary: None,
         }
     }
 
@@ -995,7 +1099,9 @@ impl LanguageRuntime {
 
     fn build_encoder(&self) -> Box<dyn LanguageEncoder> {
         if let EncoderPreset::CliffordE8 = &self.config.encoder {
-            return Box::new(CliffordLanguageEncoder::new());
+            return Box::new(CliffordLanguageEncoder::new(
+                self.preloaded_dictionary.clone(),
+            ));
         }
         if let Some(enc) = self.build_encoder_from_preloaded() {
             return enc;
@@ -1302,18 +1408,35 @@ const CLIFFORD_GRADE_FEATURES: usize = 8 + 7 + 21 + 1;
 /// Preserves per-dimension lexical anchors AND geometric cross-subspace structure.
 const CLIFFORD_ENCODER_OUTPUT_DIM: usize = CLIFFORD_ENCODER_HASH_DIM + CLIFFORD_GRADE_FEATURES;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct CliffordLanguageEncoder {
+    /// Fallback hash encoder (used when no dictionary is available, and for
+    /// lexical anchor dimensions v[0..9] which are always injected).
     base: HashingLanguageEncoder,
+    /// Vocabulary-grounded CDMA codec, built from training corpus.
+    codec: Option<(crate::spectral::TokenDictionary, crate::text_autoencoder::ChunkCodec)>,
+}
+
+impl std::fmt::Debug for CliffordLanguageEncoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CliffordLanguageEncoder")
+            .field("has_codec", &self.codec.is_some())
+            .field("vocab_size", &self.codec.as_ref().map(|(d, _)| d.len()))
+            .finish()
+    }
 }
 
 impl CliffordLanguageEncoder {
-    fn new() -> Self {
+    fn new(dict: Option<crate::spectral::TokenDictionary>) -> Self {
         let base = HashingLanguageEncoder::new(EncoderPreset::Custom {
-            model_name: "clifford-e8-hash".to_string(),
+            model_name: "clifford-e8-cata".to_string(),
             output_dim: CLIFFORD_ENCODER_HASH_DIM,
         });
-        Self { base }
+        let codec = dict.map(|d| {
+            let codec = crate::text_autoencoder::ChunkCodec::new(d.len());
+            (d, codec)
+        });
+        Self { base, codec }
     }
 }
 
@@ -1323,9 +1446,23 @@ impl LanguageEncoder for CliffordLanguageEncoder {
     }
 
     fn encode(&self, text: &str) -> Vec<f32> {
-        let hash_vec = self.base.encode(text);
+        let base_vec = if let Some((ref dict, ref codec)) = self.codec {
+            let seq = codec.encode_text(text, dict);
+            let mut centroid = seq.centroid().to_vec();
+            // Inject lexical anchors from the hash encoder into v[0..10].
+            // The hash encoder places sentiment/domain signals in these
+            // dimensions; the CATA centroid has no reserved slots for them.
+            let anchor_vec = self.base.encode(text);
+            let n_anchors = 10.min(centroid.len()).min(anchor_vec.len());
+            for i in 0..n_anchors {
+                centroid[i] += anchor_vec[i];
+            }
+            centroid
+        } else {
+            self.base.encode(text)
+        };
 
-        let quantized = crate::spectral::E8Lattice::quantize_64d(&hash_vec);
+        let quantized = crate::spectral::E8Lattice::quantize_64d(&base_vec);
 
         let mv = crate::clifford::embed_bridge_vector(&quantized);
 

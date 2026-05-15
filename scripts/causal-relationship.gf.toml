@@ -27,6 +27,7 @@ auto = true
 data_dir = "../data/causal"
 brain_output = "../agent-data/causal-analysis/causal-brain.bin"
 encoder = "clifford_e8"
+brain_gen_epochs = 3000
 
 [inference]
 toml = "../data/causal/inference_causal.toml"

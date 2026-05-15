@@ -13,12 +13,12 @@
 use growformer::environment::NeuralEnvironment;
 use growformer::types::NeuronId;
 use growformer::dimension::{
-    CalibrationDataset, CalibrationReport, CalibrationRequirements, EncoderPreset, LanguageConfig, LanguageSample,
-    DimensionManager, DimensionManagerConfig, HashingLanguageEncoder, LanguageEncoder,
-    MainDimension, VirtualGroup, render_action_template, generate_code_from_action,
+    append_language_samples_from_training_jsonl_dir, CalibrationDataset, CalibrationReport,
+    CalibrationRequirements, EncoderPreset, LanguageConfig, LanguageSample, DimensionManager,
+    DimensionManagerConfig, HashingLanguageEncoder, LanguageEncoder, MainDimension, VirtualGroup,
+    load_language_samples_jsonl, render_action_template, generate_code_from_action,
     route_language_embedding,
 };
-use growformer::dimension::language::CausalAnnotation;
 
 use growformer::types::GroupId;
 use std::collections::HashMap;
@@ -296,56 +296,6 @@ fn main() {
     }
 }
 
-// =============================================================================
-// Data loading (shared with main binary)
-// =============================================================================
-
-#[derive(Deserialize)]
-struct JsonlLanguageSample {
-    text: String,
-    #[serde(default)]
-    semantic_intent: Option<String>,
-    #[serde(default)]
-    intent: Option<String>,
-    #[serde(default)]
-    domain: Option<String>,
-    #[serde(default)]
-    action_target: Option<String>,
-    #[serde(default)]
-    policy_regime: Option<String>,
-    #[serde(default)]
-    language_channel: Option<String>,
-    #[serde(default)]
-    expected_response: Option<String>,
-    #[serde(default)]
-    expected_code: Option<String>,
-    #[serde(default)]
-    causal: Option<CausalAnnotation>,
-}
-
-fn load_language_samples_jsonl(path: &str) -> Result<Vec<LanguageSample>, String> {
-    use std::io::BufRead;
-    let file = std::fs::File::open(path).map_err(|e| format!("open failed: {}", e))?;
-    let reader = std::io::BufReader::new(file);
-    let mut out = Vec::new();
-    for (idx, line) in reader.lines().enumerate() {
-        let line = line.map_err(|e| format!("line {} read failed: {}", idx + 1, e))?;
-        if line.trim().is_empty() { continue; }
-        let rec: JsonlLanguageSample = serde_json::from_str(&line)
-            .map_err(|e| format!("line {} json parse failed: {}", idx + 1, e))?;
-        let intent = rec.semantic_intent.or(rec.intent).unwrap_or_else(|| "unknown_intent".to_string());
-        out.push(LanguageSample {
-            domain: rec.domain.unwrap_or_else(|| "custom".to_string()),
-            text: rec.text, semantic_intent: intent, action_target: rec.action_target,
-            policy_regime: rec.policy_regime.unwrap_or_else(|| "default".to_string()),
-            language_channel: rec.language_channel.unwrap_or_else(|| "english".to_string()),
-            expected_response: rec.expected_response, expected_code: rec.expected_code,
-            causal: rec.causal,
-        });
-    }
-    Ok(out)
-}
-
 fn load_m5_or_synthetic() -> CalibrationDataset {
     match load_all_m5_training_data() {
         Ok(samples) if !samples.is_empty() => { println!("Loaded M5 training data: {} samples", samples.len()); CalibrationDataset { samples } }
@@ -354,38 +304,20 @@ fn load_m5_or_synthetic() -> CalibrationDataset {
     }
 }
 
-fn load_train_jsonl_dir(all: &mut Vec<LanguageSample>, dir: &std::path::Path) -> Result<(), String> {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .map_err(|e| format!("read_dir failed ({}): {}", dir.display(), e))?
-        .filter_map(|e| e.ok())
-        .collect();
-    entries.sort_by_key(|e| e.file_name());
-    for entry in entries {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with("train_") && name.ends_with(".jsonl") {
-            let path = entry.path();
-            let samples = load_language_samples_jsonl(path.to_str().unwrap())?;
-            println!("  loaded {}: {} samples", path.display(), samples.len());
-            all.extend(samples);
-        }
-    }
-    Ok(())
-}
-
 fn load_all_m5_training_data() -> Result<Vec<LanguageSample>, String> {
     let m5 = std::path::Path::new("data/language/m5");
     if !m5.exists() {
         return Err(format!("M5 data directory not found: {}", m5.display()));
     }
     let mut all = Vec::new();
-    load_train_jsonl_dir(&mut all, m5)?;
+    append_language_samples_from_training_jsonl_dir(&mut all, m5)?;
     let agent = std::path::Path::new("data/agent");
     if agent.exists() {
-        load_train_jsonl_dir(&mut all, agent)?;
+        append_language_samples_from_training_jsonl_dir(&mut all, agent)?;
     }
     let routekit = std::path::Path::new("data/routekit");
     if routekit.exists() {
-        load_train_jsonl_dir(&mut all, routekit)?;
+        append_language_samples_from_training_jsonl_dir(&mut all, routekit)?;
     }
     Ok(all)
 }

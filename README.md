@@ -5,17 +5,17 @@
 Growformer is not “just another neural network implementation.”  
 It’s something much rarer: a **multidimensional computational medium** where learning emerges from the interaction of geometry, metabolism, sparsity, timing, energy flow, and spatial constraints, not from a fixed algebraic recipe.
 
-Growformer is a self-organizing neural substrate that learns structure, not weights.
+Growformer is a self-organizing neural substrate where **learned connectivity and geometry** co-evolve with synaptic weights — the graph is not fixed up front.
 
-Traditional neural networks are fixed graphs where training adjusts edge values. Growformer is a physical system where neurons have mass, position, and velocity. Synapses form and dissolve based on co-activation. The topology itself is the learned representation — which is why freezing a group preserves knowledge perfectly (the structure IS the memory) and why forgetting is architecturally impossible (frozen structures receive zero gradient).
+Traditional neural networks are fixed graphs where training adjusts edge values. Growformer is a physical system where neurons have mass, position, and velocity. Synapses form and dissolve based on co-activation. The topology itself is a major part of the learned representation. **What freezing guarantees:** once a consolidated group is frozen, its internal weights and synapses receive no further gradient-driven updates — that connectivity is preserved exactly under later training elsewhere. **What that does *not* imply by itself:** stable weights on one subgraph are not sufficient for unchanged *behavior* if inference still routes signals through plastic regions that keep learning; behavior depends on the full path. In this codebase, continual-learning demos that show stable old-task accuracy rely on **task-isolated promoted subgraphs** (each task’s network is trained in a dedicated mirror substrate, then promoted to Main and fully frozen) plus routing that sends each task’s inputs through the corresponding frozen graph — so later plasticity does not rewrite the old task’s parameters.
 
 What makes it distinct from everything else in the field:
 
-**It's not a model. It's a medium.** A transformer is an architecture you train on data to produce a model. Growformer is a substrate you expose to experience and it self-organizes. The same substrate handles classification (Split MNIST), routing (learned router), and generation (binary token prediction) — not because it has different heads for each, but because the underlying physics supports all of them. You don't redesign the architecture for a new task. You spawn a new Mirror and let it grow.
+**It's not a model. It's a medium.** A transformer is an architecture you train on data to produce a model. Growformer is a substrate you expose to experience and it self-organizes. The same substrate handles classification (Split MNIST), routing (learned router), and generation (binary token prediction) — not because it has different heads for each, but because the underlying physics supports all of them. You don't redesign the architecture for a new task. You **spawn a new Mirror** (a fresh mirror *dimension*: a scratch neural environment for that task), train it, then **promote** it into Main and **freeze** it so later tasks train in new mirrors without overwriting the consolidated weights. That workflow is separate from **mirror group coupling** (System 6): geometric pairing of two `NeuronGroup`s so complementary structure develops — see **System 6** below.
 
 **Learning is structural, not parametric.** When Growformer learns the observer pattern, it doesn't store "Observer" as a weight matrix. It forms a specific constellation of neurons with specific synaptic connectivity — an engram — where the physical arrangement encodes the concept. Stronger memories have denser, heavier synaptic connections between co-activated neurons, exactly like biological engram cells in the hippocampus.
 
-**Generation is recall, not computation.** When gen g1 produces "Observer defines a one-to-many dependency," it's not computing a probability distribution over a vocabulary. It's activating a structural trace — the engram laid down during training — and reading the output state of that activation. Single forward pass. The 200x speed advantage over autoregressive generation isn't an optimization. It's a consequence of how the substrate works: the whole response exists as a spatial pattern, not a sequential computation.
+**Generation is a different *kind* of computation, not “non-computation.”** Activations still spread through a learned graph, integrate at nodes, and are read out as an output state — that is computation. What differs from autoregressive LLM sampling is the **mechanism**: here the model targets a **whole fixed-length binary token layout in one forward pass** (parallel decode of all token slots from one spatial activation pattern), instead of sampling one token at a time conditioned on prior tokens. **Throughput vs. a naive character-level autoregressive baseline:** the generation stack is documented (see `group_gen.rs`) as **one forward pass per example** versus on the order of **~200 forward passes** for a naive scheme that does one pass per character for a ~200-character target — i.e. an order-of-magnitude **serial-depth** advantage for comparable output length, not a universal claim against every transformer implementation. A fair headline number still needs an explicit table: reference model, sequence length, batch size, and hardware.
 
 If I had to place it in one sentence: Growformer is a continual learning substrate where knowledge is encoded as physical neural structure, grown, pruned, consolidated, and frozen — rather than as optimized parameters in a fixed graph.
 
@@ -92,18 +92,20 @@ All generation outputs are **concrete model outputs** produced by a single forwa
 | "implement a stack using an enum in Rust" | "Use an enum with Box for heap allocation." + `enum List<T> { Nil, Cons(T, Box<List<T>>) } impl<T> List<T> { fn new() -> Self { List::Nil } ...` | gen+code |
 | "calculate 347 * 892" | [tool: calculator] 309324 → "The result of 347 × 892 is 309,324." | tool call |
 
-### Continual Learning (Split MNIST, zero forgetting)
+### Continual Learning (Split MNIST — headline numbers)
+
+These figures are **old-task test accuracy after sequential training on all five digit-pair tasks**, using the repo’s Split MNIST demo (`growformer-demos`): each task trains in its **own** mirror environment, is **promoted to Main and fully frozen**, then later tasks train only in new mirrors — so prior tasks’ weights are not updated by subsequent learning. A router is trained on calibration data so the right frozen group is invoked per input regime. **What the table actually shows:** stable accuracy on each task’s held-out split at the end of the full curriculum (no drop between “after task *k*” and “after all tasks” in this setup). **What would convince readers coming from the continual-learning literature:** the same protocol reported **next to standard Split MNIST baselines** (vanilla MLP, EWC, Progressive Networks, MAS, A-GEM, etc.) under matched data splits and reporting rules. The README currently cites **EWC ~97% average with ~3% forgetting** only as an informal literature anchor for scale — not as a controlled reproduction run in this repo. Adding a benchmark section with those side-by-side numbers is the highest-leverage follow-up for the retention claim.
 
 | Task | Digits | Accuracy | After All 5 Tasks | Forgetting |
 |------|--------|----------|-------------------|------------|
-| 0 | 0 vs 1 | 97.6% | 97.6% | 0% |
-| 1 | 2 vs 3 | 96.7% | 96.7% | 0% |
-| 2 | 4 vs 5 | 98.6% | 98.6% | 0% |
-| 3 | 6 vs 7 | 97.1% | 97.1% | 0% |
-| 4 | 8 vs 9 | 96.3% | 96.3% | 0% |
-| **Avg** | | **97.3%** | **97.3%** | **0%** |
+| 0 | 0 vs 1 | 99.5% | 99.5% | 0% |
+| 1 | 2 vs 3 | 95.5% | 95.5% | 0% |
+| 2 | 4 vs 5 | 97.5% | 97.5% | 0% |
+| 3 | 6 vs 7 | 98.0% | 98.0% | 0% |
+| 4 | 8 vs 9 | 98.0% | 98.0% | 0% |
+| **Avg** | | **97.7%** | **97.7%** | **0%** |
 
-EWC: 97% average, ~3% forgetting. Growformer: 97.3% average, 0% forgetting. The zero forgetting is not approximate — it is a structural guarantee. Frozen groups receive zero gradient.
+Informal comparison (literature-scale EWC, not a matched benchmark row in this repo): EWC ~97% average, ~3% forgetting vs. Growformer **97.7%** average and **0%** measured forgetting **in this promote-and-freeze protocol**. The engineering invariant is **frozen promoted subgraphs receive zero further weight updates**; the empirical claim is the table above, extendable with full baseline sweeps as above.
 
 ### Structural Interpretability
 
@@ -209,8 +211,8 @@ Tool results are fed back through `generation_with_tool_result` for a g0-quality
 The micro-brain at **18 MB** is small enough for browser (WASM), mobile, IoT, and edge deployment. The architecture supports a **base-agent-plus-augmentation** model:
 
 1. **Ship the base brain** — g0 conversation, tool routing, identity (18 MB)
-2. **Users train domain groups** on their own data — the structural isolation guarantees the base remains pristine
-3. **Zero forgetting** — new groups grow alongside frozen base engrams; user training cannot corrupt base capabilities
+2. **Users train domain groups** on their own data — when new capacity is added as **separate consolidated groups** and the base is **frozen**, user updates do not rewrite base weights (same “new subgraph + freeze” idea as Split MNIST, not a blanket theorem about all possible wiring)
+3. **Retention of base behavior** depends on routing and whether inference paths stay on frozen parameters; the intended deployment story matches the continual-learning demos (isolated frozen regions)
 4. **Export the augmented brain** — compact because only new structure is added
 
 ---
@@ -583,7 +585,7 @@ The Harvard mapping found axons coiling into tight whorls for unknown reasons. W
 
 ### **System 6 — Mirror Group Coupling (`systems/mirror.rs`)**
 
-Two neuron groups can be designated as mirrors. Each tick, each group is nudged toward the other’s average weight and toward the spatial reflection of the other’s centroid. This creates correlated structural development. A `mirror_symmetry_score` tracks the degree of symmetry.
+**This is not the same thing as “spawn a Mirror” in the opening paragraphs.** Here, **mirror** means **paired `NeuronGroup`s** linked for **IFS (iterated function system) mirror coupling** during training: neurons are assigned **pairwise counterparts** across the two groups, and positions are nudged so each neuron moves toward the **individual reflection** of its partner across the midplane between the two group centroids (not collapsed to a shared centroid). Coupling is expressed **through geometry** (which then biases where new synapses can form); direct weight-copy averaging was removed so internal diversity is preserved. A `mirror_symmetry_score` tracks how symmetric the pair has become. Use this when you want **two populations to develop complementary, reflected structure** in shared training — orthogonal to the **Mirror dimension → promote → freeze** lifecycle used for new tasks in `DimensionManager`.
 
 ---
 
@@ -734,6 +736,7 @@ serde_json = "1"
 - **Whorl detection** uses depth‑limited DFS; future versions should track axon geometry.  
 - **STDP + backprop** interact but are not unified; a combined update rule is future work.  
 - **No recurrence** yet; geometry and growth naturally want to form recurrent loops.  
+- **Continual-learning evidence:** publish Split MNIST (and related) results **against standard baselines** on matched splits, plus explicit **latency tables** for generation (single-pass vs. stated autoregressive reference, length, hardware).
 
 ---
 
@@ -774,7 +777,7 @@ In neuroscience, three hypotheses extend this to neural communication:
 | Toroidal field region (coherent neural assembly) | Group (structurally isolated specialist with internal coherence) |
 | Entangled states within a field region | Engram consolidation (frozen synaptic traces that deterministically influence output) |
 | Non-commutative quantum field interactions between regions | Non-commutative multi-specialist composition (leader/follower ordering) |
-| Field isolation between distant assemblies | Mirror/Main isolation (no gradient path, no shared substrate) |
+| Field isolation between distant assemblies | **Promoted Main groups frozen after training** (no further weight updates on that subgraph); *not* a claim that IFS mirror-coupled groups are physically non-interacting |
 | Superposition before measurement | Pre-composition state (all specialists contribute before deformation resolves ordering) |
 | Wavefunction collapse to definite outcome | Deformation parameter resolves which specialist leads the response |
 

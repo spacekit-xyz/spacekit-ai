@@ -131,7 +131,10 @@ pub fn should_skip_weak_gk_for_meta_conditioning(
         return false;
     }
     let cfg = resolved_inference_thresholds(thresholds_from_manifest);
-    matches!(concept, MetaConcept::GeneralKnowledge)
+    matches!(
+        concept,
+        MetaConcept::GeneralKnowledge | MetaConcept::PetCompanion
+    )
         && margin < cfg.meta_gk_margin
         && confidence < cfg.meta_gk_confidence
 }

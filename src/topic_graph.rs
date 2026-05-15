@@ -5,8 +5,9 @@
 //! routing), and a MetaConcept (for meta-codebook routing). The graph is loaded
 //! once at startup and queried per-prompt at inference time.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use serde::Deserialize;
+use std::sync::{Mutex, OnceLock};
 
 use crate::growformer_lang::MetaConcept;
 use crate::text_keywords::keyword_matches_in_lower;
@@ -346,6 +347,9 @@ impl TopicGraph {
 // MetaConcept parsing from string
 // ---------------------------------------------------------------------------
 
+// Log each unknown TOML concept string at most once per process (avoid spam on large overlays).
+static UNKNOWN_CONCEPT_WARNINGS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
 fn parse_concept(s: &str) -> MetaConcept {
     match s {
         "BinaryArithmetic" => MetaConcept::BinaryArithmetic,
@@ -367,11 +371,19 @@ fn parse_concept(s: &str) -> MetaConcept {
         "Refactoring" => MetaConcept::Refactoring,
         "Support" => MetaConcept::Support,
         "Conversation" => MetaConcept::Conversation,
+        "PetCompanion" => MetaConcept::PetCompanion,
         "GeneralKnowledge" => MetaConcept::GeneralKnowledge,
         "InformationTheory" => MetaConcept::InformationTheory,
         "CausalReasoning" => MetaConcept::CausalReasoning,
         _ => {
-            eprintln!("[topic-graph] WARNING: unknown concept '{}', defaulting to GeneralKnowledge", s);
+            let set = UNKNOWN_CONCEPT_WARNINGS.get_or_init(|| Mutex::new(HashSet::new()));
+            let first = set.lock().unwrap().insert(s.to_string());
+            if first {
+                eprintln!(
+                    "[topic-graph] WARNING: unknown concept '{}', defaulting to GeneralKnowledge",
+                    s
+                );
+            }
             MetaConcept::GeneralKnowledge
         }
     }

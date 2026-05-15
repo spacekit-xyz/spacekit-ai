@@ -36,6 +36,17 @@ pub fn init_topic_graph(toml_path: &str) -> Result<(), String> {
 /// Returns `Ok(())` with **no graph installed** if neither file exists (callers should use
 /// [`topic_graph_loaded`] before `--infer`).
 pub fn try_init_topic_graph_bundle(base_path: &str) -> Result<(), String> {
+    try_init_topic_graph_bundle_with_extras(base_path, &[])
+}
+
+/// Same as [`try_init_topic_graph_bundle`], then merges each existing file in
+/// `extra_overlay_paths` (e.g. `spacekit-projects/pets/data/knowledge_graph_pet_overlay.toml`)
+/// so `infer_operation_topic` sees pet phrase → `semantic_intent` routing without requiring
+/// `--project` when `--brain` lives under a `pets/` tree.
+pub fn try_init_topic_graph_bundle_with_extras(
+    base_path: &str,
+    extra_overlay_paths: &[std::path::PathBuf],
+) -> Result<(), String> {
     let base_p = std::path::Path::new(base_path);
     let overlay_pb = base_p
         .parent()
@@ -48,7 +59,7 @@ pub fn try_init_topic_graph_bundle(base_path: &str) -> Result<(), String> {
     let base_exists = base_p.exists();
     let overlay_exists = overlay_pb.exists();
 
-    let graph = match (base_exists, overlay_exists) {
+    let mut graph = match (base_exists, overlay_exists) {
         (true, true) => {
             let base_g = TopicGraph::from_file(base_path)?;
             let overlay_content = std::fs::read_to_string(overlay_s)
@@ -61,6 +72,16 @@ pub fn try_init_topic_graph_bundle(base_path: &str) -> Result<(), String> {
         (false, false) => return Ok(()),
     };
 
+    for p in extra_overlay_paths {
+        if p.is_file() {
+            let s = p.to_str().ok_or_else(|| {
+                format!("Topic overlay path is not valid UTF-8: {}", p.display())
+            })?;
+            let overlay_g = TopicGraph::from_file(s)?;
+            graph = graph.merge_overlay(overlay_g);
+        }
+    }
+
     TOPIC_GRAPH
         .set(graph)
         .map_err(|_| "TopicGraph already initialized".to_string())
@@ -69,6 +90,11 @@ pub fn try_init_topic_graph_bundle(base_path: &str) -> Result<(), String> {
 /// Initialize from an inline TOML string (for tests or embedded configs).
 pub fn init_topic_graph_from_str(toml_str: &str) -> Result<(), String> {
     let graph = TopicGraph::from_toml(toml_str)?;
+    TOPIC_GRAPH.set(graph).map_err(|_| "TopicGraph already initialized".to_string())
+}
+
+/// Install a pre-built [`TopicGraph`] (for embedders that parse + merge themselves).
+pub fn init_topic_graph_direct(graph: TopicGraph) -> Result<(), String> {
     TOPIC_GRAPH.set(graph).map_err(|_| "TopicGraph already initialized".to_string())
 }
 
@@ -166,6 +192,8 @@ pub enum MetaConcept {
     GeneralKnowledge,
     Support,
     Conversation,
+    /// Digital pet / companion agents (topic-graph overlays, e.g. Luna).
+    PetCompanion,
     CausalReasoning,
 }
 
@@ -178,7 +206,7 @@ impl MetaConcept {
             ErrorHandling, Iteration, PatternMatching, AsyncConcurrency,
             SearchAlgorithm, SortAlgorithm, DataStructure, Composition,
             Testing, Debugging, Refactoring, InformationTheory,
-            GeneralKnowledge, Support, Conversation, CausalReasoning,
+            GeneralKnowledge, Support, Conversation, PetCompanion, CausalReasoning,
         ]
     }
 
@@ -213,6 +241,7 @@ impl MetaConcept {
             Self::GeneralKnowledge => "general_knowledge",
             Self::Support => "support",
             Self::Conversation => "conversation",
+            Self::PetCompanion => "pet_companion",
             Self::CausalReasoning => "causal_reasoning",
         }
     }
@@ -1787,7 +1816,10 @@ impl MetaRoutingResult {
     /// Whether this is a coding concept (vs general/support).
     pub fn is_coding(&self) -> bool {
         !matches!(self.concept,
-            MetaConcept::GeneralKnowledge | MetaConcept::Support | MetaConcept::Conversation)
+            MetaConcept::GeneralKnowledge
+                | MetaConcept::Support
+                | MetaConcept::Conversation
+                | MetaConcept::PetCompanion)
     }
 }
 
@@ -1809,6 +1841,8 @@ fn concept_from_action_target(target: &str) -> Option<MetaConcept> {
         t if t.contains("debugging") || t.contains("debug") => Some(MetaConcept::Debugging),
         t if t.contains("support") => Some(MetaConcept::Support),
         t if t.contains("conversation") || t.contains("identity") => Some(MetaConcept::Conversation),
+        t if t.contains("pet_chat") || t.contains("pet_create") || t.contains("pet_questionnaire") =>
+            Some(MetaConcept::PetCompanion),
         t if t.contains("general_knowledge") => Some(MetaConcept::GeneralKnowledge),
         t if t.contains("reasoning") => Some(MetaConcept::Composition),
         "concepts" => Some(MetaConcept::InformationTheory),

@@ -1,10 +1,8 @@
 use growformer::dimension::{
-    LanguageSample,
-    action_target_to_type,
+    LanguageSample, action_target_to_type, append_language_samples_from_training_jsonl_dir,
 };
 use growformer::dimension::language::{
-    sentiment_lattice_index_body_with_causal, should_use_sentiment_joint_index, CausalAnnotation,
-    DEFAULT_BRIDGE_DIM,
+    sentiment_lattice_index_body_with_causal, should_use_sentiment_joint_index, DEFAULT_BRIDGE_DIM,
 };
 use growformer::clifford::GroupRotor;
 use growformer::dimension::group_gen::{AlgebraicCodebook, HopfCompositionTable};
@@ -18,7 +16,6 @@ use rayon::prelude::*;
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rand::rngs::StdRng;
-use serde::Deserialize;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
@@ -134,12 +131,13 @@ struct Args {
     #[arg(long, value_name = "GROUP_IDX")]
     retrain_gen: Option<usize>,
 
-    /// Custom data directory containing train_*.jsonl files. When set, ONLY this
-    /// directory is loaded (skips default m5/agent/routekit). Use for focused micro-brains.
+    /// Custom data directory: every `*.jsonl` sample corpus is loaded except `inference_guardrails.jsonl`
+    /// and `eval_*.jsonl`. When set, ONLY this directory is used (skips default m5/agent/routekit).
     #[arg(long, value_name = "DIR")]
     data_dir: Option<String>,
 
-    /// Directory containing train_*.jsonl for categorical composer bootstrap (--features categorical).
+    /// Directory of JSONL corpora for categorical composer bootstrap (`--features categorical`);
+    /// uses the same inclusion rules as `--data-dir` (all `*.jsonl` except guardrails and `eval_*`).
     /// When set with --infer, trains the categorical decompose→compose pipeline on startup.
     #[arg(long, value_name = "DIR")]
     categorical_data: Option<PathBuf>,
@@ -401,6 +399,29 @@ fn resolve_infer_mode(args: &Args) -> Result<InferMode, String> {
     }
 }
 
+/// Optional `data/knowledge_graph_pet_overlay.toml` beside a pets `*.gf.toml` or anywhere
+/// on the path from `--brain` …/pets/agent/foo.bin up to filesystem root (first wins, deduped).
+fn pet_topic_overlay_paths(args: &Args) -> Vec<std::path::PathBuf> {
+    use std::path::Path;
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    let mut push = |p: std::path::PathBuf| {
+        if p.is_file() && !out.iter().any(|x| x == &p) {
+            out.push(p);
+        }
+    };
+    if let Some(ref proj) = args.project {
+        if let Some(dir) = proj.parent() {
+            push(dir.join("data/knowledge_graph_pet_overlay.toml"));
+        }
+    }
+    if let Some(ref b) = args.brain {
+        for anc in Path::new(b).ancestors() {
+            push(anc.join("data/knowledge_graph_pet_overlay.toml"));
+        }
+    }
+    out
+}
+
 fn main() {
     let cli = CliRoot::parse();
 
@@ -463,9 +484,11 @@ fn main() {
     let infer_quiet = args.infer && !args.verbose;
     growformer::infer_log::set_infer_trace_quiet(infer_quiet);
 
-    // Initialize topic knowledge graph + optional sentiment NL overlay (same directory).
+    // Initialize topic knowledge graph + optional sentiment NL overlay (same directory),
+    // plus optional pets overlay when --project/--brain points at a pets workspace.
     let kg_path = "data/knowledge_graph.toml";
-    if let Err(e) = growformer::growformer_lang::try_init_topic_graph_bundle(kg_path) {
+    let pet_overlays = pet_topic_overlay_paths(&args);
+    if let Err(e) = growformer::growformer_lang::try_init_topic_graph_bundle_with_extras(kg_path, &pet_overlays) {
         eprintln!("Warning: failed to load topic graph: {}", e);
     } else if args.infer && !growformer::growformer_lang::topic_graph_loaded() {
         eprintln!(
@@ -614,6 +637,7 @@ fn main() {
             infer_mode,
             args.categorical_data.as_deref(),
             args.categorical_steps,
+            args.project.is_some() || args.inference_toml.is_some(),
         ) {
             eprintln!("Inference failed: {}", e);
             std::process::exit(1);
@@ -996,11 +1020,15 @@ fn run_inference(
     mode: InferMode,
     categorical_data: Option<&std::path::Path>,
     categorical_steps: usize,
+    reload_disk_inference_after_brain: bool,
 ) -> Result<(), String> {
     let data = std::fs::read(brain_path)
         .map_err(|e| format!("Failed to read {}: {}", brain_path, e))?;
 
     let mut rt = growformer::runtime::Runtime::from_brain_bytes(&data)?;
+    if reload_disk_inference_after_brain {
+        growformer::inference::inference_toml::force_native_inference_rebuild_from_disk();
+    }
 
     #[cfg(feature = "categorical")]
     if let Some(data_dir) = categorical_data {
@@ -1676,7 +1704,6 @@ fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> usize {
     while end > 0 && !s.is_char_boundary(end) { end -= 1; }
     end
 }
-
 /// Discover the unique group names from the training data's action_target field.
 /// Returns a stable, sorted list of group names. The order defines group indices.
 fn discover_group_names(samples: &[growformer::dimension::LanguageSample]) -> Vec<String> {
@@ -1748,7 +1775,7 @@ fn train_brain(
         }
         println!("--- Custom data directory: {} ---", dir);
         let mut all = Vec::new();
-        load_train_jsonl_dir(&mut all, path)?;
+        append_language_samples_from_training_jsonl_dir(&mut all, path)?;
         all
     } else {
         load_all_m5_training_data()?
@@ -1770,6 +1797,10 @@ fn train_brain(
         println!("  [saliency] Built lexicon with {} keywords for training augmentation", lexicon.keyword_count());
         lexicon
     });
+
+    // Record original sample count BEFORE augmentation so the gen lattice
+    // can exclude augmented (masked/corrupted) samples that produce garbled text.
+    let original_sample_count = samples.len();
 
     // Augment training data with salient span masking + RTD.
     // Masked augments reinforce salient-keyword representations.
@@ -1840,6 +1871,17 @@ fn train_brain(
     let mut svc = LanguageService::new_with_groups(&group_name_refs)?;
     apply_brain_package_cli(&mut svc, brain_name, brain_description, brain_author);
     apply_optional_brain_plugins_toml(&mut svc, brain_plugins_toml)?;
+
+    // Build a global TokenDictionary from all training texts for the Clifford+CATA encoder.
+    // Must happen before embedding computation so the encoder has vocabulary-grounded features.
+    if matches!(svc.dm.language_runtime.config.encoder, growformer::dimension::language::EncoderPreset::CliffordE8) {
+        let all_texts: Vec<&str> = samples.iter().map(|s| s.text.as_str()).collect();
+        let max_dict = if all_texts.len() >= 100 { 2048 } else { 1024 };
+        let encoder_dict = TokenDictionary::build(&all_texts, max_dict);
+        println!("  [clifford] Built encoder dictionary: {} tokens from {} training texts",
+            encoder_dict.len(), all_texts.len());
+        svc.dm.language_runtime.preloaded_dictionary = Some(encoder_dict);
+    }
 
     // Compute both raw and bridged embeddings.
     // Bridged vectors for routing/classification; raw vectors for generation conditioning.
@@ -2084,19 +2126,25 @@ fn train_brain(
     for (i, ((bridged, raw), s)) in bridged_embeddings.iter().zip(raw_embeddings.iter()).zip(samples.iter()).enumerate() {
         let gidx = group_map(s);
         let nov = novelty_scores.get(i).copied().unwrap_or(0.0);
-        if let Some(r) = s.expected_response.as_deref() {
-            let lattice_text = if should_use_sentiment_joint_index(s) {
-                sentiment_lattice_index_body_with_causal(&s.text, r, s.causal.as_ref())
-            } else {
-                r.to_string()
-            };
-            gen_by_group
-                .entry(gidx)
-                .or_default()
-                .push((bridged.clone(), lattice_text));
-            gen_raw_by_group.entry(gidx).or_default().push(raw.as_slice());
-            gen_topic_by_group.entry(gidx).or_default().push(s.semantic_intent.as_str());
-            gen_novelty_by_group.entry(gidx).or_default().push(nov);
+        // Only include original (non-augmented) samples in the gen lattice.
+        // Augmented samples (salient-mask, RTD) contain [MASK] tokens and
+        // corrupted text that produces garbled output when decoded.
+        let is_original = i < original_sample_count;
+        if is_original {
+            if let Some(r) = s.expected_response.as_deref() {
+                let lattice_text = if should_use_sentiment_joint_index(s) {
+                    sentiment_lattice_index_body_with_causal(&s.text, r, s.causal.as_ref())
+                } else {
+                    r.to_string()
+                };
+                gen_by_group
+                    .entry(gidx)
+                    .or_default()
+                    .push((bridged.clone(), lattice_text));
+                gen_raw_by_group.entry(gidx).or_default().push(raw.as_slice());
+                gen_topic_by_group.entry(gidx).or_default().push(s.semantic_intent.as_str());
+                gen_novelty_by_group.entry(gidx).or_default().push(nov);
+            }
         }
         if train_code_lattice {
             if let Some(c) = s.expected_code.as_deref() {
@@ -2397,6 +2445,10 @@ fn train_brain(
     // Sentiment lattices use a looser threshold so positive/negative programs stay
     // distinct after polarity-aware encoding (P0/P1); the default 0.97 over-merges.
     let sentiment_spawn_threshold = 0.92;
+    // Chat/generative brains (pet companion, etc.) use bridged embeddings directly
+    // (bypassing Clifford conditioning). Bridged embeddings have good natural
+    // discrimination so we use a moderate threshold matching the pre-lattice.
+    let chat_spawn_threshold = 0.85;
     let min_code_for_index = 10usize;
     let mut index_jobs: u64 = 0;
     for gidx in 0..num_groups {
@@ -2451,6 +2503,14 @@ fn train_brain(
                 AlgebraicCodebook::build(&text_refs, &dict, 32, None)
             });
             let hopf = gen_hopf.get(&gidx).cloned().unwrap_or_default();
+            let is_sentiment_group = topic_names.iter().any(|t| {
+                growformer::inference::sentiment_generation_lexicon::global()
+                    .is_sentiment_lattice_topic_hint(t)
+            });
+            let is_chat_group = !is_sentiment_group
+                && topic_names.len() >= 5
+                && pairs.iter().all(|(_, text)| !text.contains("fn ") && !text.contains("def "));
+
             let training_pairs: Vec<(Vec<f32>, String, String)> = pairs.iter()
                 .zip(raw_vecs.iter())
                 .zip(topic_names.iter())
@@ -2461,11 +2521,17 @@ fn train_brain(
                     (cond, text.clone(), (*topic_name).to_string())
                 })
                 .collect();
-            let is_sentiment_group = topic_names.iter().any(|t| {
-                growformer::inference::sentiment_generation_lexicon::global()
-                    .is_sentiment_lattice_topic_hint(t)
-            });
-            let effective_spawn = if is_sentiment_group { sentiment_spawn_threshold } else { spawn_threshold };
+
+            let effective_spawn = if is_sentiment_group {
+                sentiment_spawn_threshold
+            } else if is_chat_group {
+                chat_spawn_threshold
+            } else {
+                spawn_threshold
+            };
+            let unique_topics: std::collections::HashSet<&str> = topic_names.iter().map(|s| &**s).collect();
+            println!("  gen[g{}]: spawn_threshold={:.3} (sentiment={} chat={} unique_topics={})",
+                gidx, effective_spawn, is_sentiment_group, is_chat_group, unique_topics.len());
             let mut env = IndexedGenEnv::from_tagged_parts(dict, cb, hopf, &training_pairs, effective_spawn);
             const TOPIC_AUTOGAMY_MERGE: f32 = 0.96;
             for topic in &mut env.topic_subindex {
@@ -2961,96 +3027,24 @@ fn train_brain(
 // Data loading
 // =============================================================================
 
-#[derive(Deserialize)]
-struct JsonlLanguageSample {
-    text: String,
-    #[serde(default)]
-    semantic_intent: Option<String>,
-    #[serde(default)]
-    intent: Option<String>,
-    #[serde(default)]
-    domain: Option<String>,
-    #[serde(default)]
-    action_target: Option<String>,
-    #[serde(default)]
-    policy_regime: Option<String>,
-    #[serde(default)]
-    language_channel: Option<String>,
-    #[serde(default)]
-    expected_response: Option<String>,
-    #[serde(default)]
-    expected_code: Option<String>,
-    #[serde(default)]
-    causal: Option<CausalAnnotation>,
-}
-
-fn load_language_samples_jsonl(path: &str) -> Result<Vec<LanguageSample>, String> {
-    use std::io::BufRead;
-    let file = std::fs::File::open(path).map_err(|e| format!("open failed: {}", e))?;
-    let reader = std::io::BufReader::new(file);
-    let mut out = Vec::new();
-    for (idx, line) in reader.lines().enumerate() {
-        let line = line.map_err(|e| format!("line {} read failed: {}", idx + 1, e))?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let rec: JsonlLanguageSample = serde_json::from_str(&line)
-            .map_err(|e| format!("line {} json parse failed: {}", idx + 1, e))?;
-        let intent = rec
-            .semantic_intent
-            .or(rec.intent)
-            .unwrap_or_else(|| "unknown_intent".to_string());
-        out.push(LanguageSample {
-            domain: rec.domain.unwrap_or_else(|| "custom".to_string()),
-            text: rec.text,
-            semantic_intent: intent,
-            action_target: rec.action_target,
-            policy_regime: rec.policy_regime.unwrap_or_else(|| "default".to_string()),
-            language_channel: rec.language_channel.unwrap_or_else(|| "english".to_string()),
-            expected_response: rec.expected_response,
-            expected_code: rec.expected_code,
-            causal: rec.causal,
-        });
-    }
-    Ok(out)
-}
-
-/// Load all `train_*.jsonl` from a directory into `all`.
-fn load_train_jsonl_dir(all: &mut Vec<LanguageSample>, dir: &std::path::Path) -> Result<(), String> {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .map_err(|e| format!("read_dir failed ({}): {}", dir.display(), e))?
-        .filter_map(|e| e.ok())
-        .collect();
-    entries.sort_by_key(|e| e.file_name());
-    for entry in entries {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with("train_") && name.ends_with(".jsonl") {
-            let path = entry.path();
-            let samples = load_language_samples_jsonl(path.to_str().unwrap())?;
-            println!("  loaded {}: {} samples", path.display(), samples.len());
-            all.extend(samples);
-        }
-    }
-    Ok(())
-}
-
 fn load_all_m5_training_data() -> Result<Vec<LanguageSample>, String> {
     let m5 = std::path::Path::new("data/language/m5");
     if !m5.exists() {
         return Err(format!("M5 data directory not found: {}", m5.display()));
     }
     let mut all = Vec::new();
-    load_train_jsonl_dir(&mut all, m5)?;
+    append_language_samples_from_training_jsonl_dir(&mut all, m5)?;
     let agent = std::path::Path::new("data/agent");
     if agent.exists() {
         println!("--- Agent behavioral data (data/agent) ---");
-        load_train_jsonl_dir(&mut all, agent)?;
+        append_language_samples_from_training_jsonl_dir(&mut all, agent)?;
     }
     let routekit = std::path::Path::new("data/routekit");
     if routekit.exists() {
         println!("--- RouteKit routing data (data/routekit) ---");
-        load_train_jsonl_dir(&mut all, routekit)?;
+        append_language_samples_from_training_jsonl_dir(&mut all, routekit)?;
     }
     Ok(all)
 }
+
 

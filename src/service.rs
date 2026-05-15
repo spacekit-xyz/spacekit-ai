@@ -1027,11 +1027,12 @@ impl LanguageService {
             TrainerConfig,
         };
         let mut batch = TrainingBatch::default();
-        if let Ok(entries) = std::fs::read_dir(data_dir) {
-            for entry in entries.flatten() {
-                let p = entry.path();
+        if let Ok(mut entries) = std::fs::read_dir(data_dir) {
+            let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+            paths.sort();
+            for p in paths {
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if name.starts_with("train_") && name.ends_with(".jsonl")
+                if crate::dimension::language::is_brain_training_jsonl_filename(name)
                     && name.contains("sentiment")
                 {
                     let _ = batch.append_from_sentiment_jsonl(&p);
@@ -1088,18 +1089,6 @@ impl LanguageService {
         let intent_text = intent_text_owned.as_str();
         let text = text_owned.as_str();
 
-        if Self::is_identity_query(intent_text) {
-            let action = self.active_dm_mut().route_text_to_action_stateless(text)?;
-            self.record_latency(start);
-            return Ok((action, self.identity_response()));
-        }
-
-        if Self::is_greeting(intent_text) {
-            let action = self.active_dm_mut().route_text_to_action_stateless(text)?;
-            self.record_latency(start);
-            return Ok((action, self.greeting_response()));
-        }
-
         // Tool call interception — disabled for sentiment-only brains where
         // topic-graph false positives (e.g. "power" in "compute power") would
         // hijack the pipeline away from sentiment classification.
@@ -1107,6 +1096,23 @@ impl LanguageService {
             self.active_dm(),
         )
         .is_some();
+
+        // Greeting/identity intercepts only fire for sentiment-shaped brains.
+        // Non-sentiment brains (pet companion, code, etc.) treat greetings as
+        // real prompts that should route through the lattice.
+        if sentiment_brain {
+            if Self::is_identity_query(intent_text) {
+                let action = self.active_dm_mut().route_text_to_action_stateless(text)?;
+                self.record_latency(start);
+                return Ok((action, self.identity_response()));
+            }
+
+            if Self::is_greeting(intent_text) {
+                let action = self.active_dm_mut().route_text_to_action_stateless(text)?;
+                self.record_latency(start);
+                return Ok((action, self.greeting_response()));
+            }
+        }
         if !sentiment_brain {
         if let Some(tool_call) = self.tool_registry.match_tool(intent_text) {
             let action = ActionJson {
@@ -1345,7 +1351,14 @@ impl LanguageService {
                     infer_trace!("  [meta-brain] topic={}, verb={}, action={:?}, conf={:.3}",
                         r.topic, r.verb, r.action, r.confidence);
                     if group_idx.is_none() && r.group_idx.is_some() { group_idx = r.group_idx; }
-                    topic_hint = Some(r.topic.clone());
+                    // For sentiment brains, trust MetaBrain's topic classification.
+                    // For chat brains, MetaBrain's topic classifier is non-functional
+                    // (always returns the same default topic with conf=0.0), so skip
+                    // setting topic_hint — let retrieval use pure embedding similarity
+                    // across all sub-lattices instead of biasing toward one.
+                    if sentiment_brain {
+                        topic_hint = Some(r.topic.clone());
+                    }
                     Some(r)
                 } else { None }
             } else {
@@ -1353,7 +1366,9 @@ impl LanguageService {
                     if !ul.is_empty() {
                         let (_, _, topic, verb) = ul.classify(h_raw);
                         infer_trace!("  [understanding] topic={}, verb={}", topic, verb);
-                        topic_hint = Some(topic);
+                        if sentiment_brain {
+                            topic_hint = Some(topic);
+                        }
                     }
                 }
                 None
@@ -1575,7 +1590,6 @@ impl LanguageService {
                 }
             }
 
-            // Use MetaBrain conditioning when available, else fall back to Clifford path
             let mut gen_conditioning = if let Some(ref mr) = meta_result {
                 mr.conditioning.clone()
             } else if let Some(gidx) = group_idx {
@@ -1960,7 +1974,8 @@ impl LanguageService {
                 && best_text.len() > 5
                 && sentiment_lattice_gidx.is_some();
             let knowledge_floor_ok =
-                best_conf >= RETRIEVAL_CONFIDENCE_FLOOR || inclusion_floor_bypass;
+                best_conf >= RETRIEVAL_CONFIDENCE_FLOOR || inclusion_floor_bypass
+                || !sentiment_brain;
             if !knowledge_floor_ok || best_text.len() <= 5 {
                 infer_trace!("  [knowledge-boundary] conf={:.3} < floor={:.3}, declining",
                     best_conf, RETRIEVAL_CONFIDENCE_FLOOR);
@@ -2012,7 +2027,10 @@ impl LanguageService {
                 // The sentiment-specific sanitize above handles replacement with
                 // a routing-only fallback; this catch-all replaces with a clean
                 // routing-only line when a non-sentiment group produces soup.
+                // Non-sentiment brains (chat/generative) have pre-validated training
+                // data — skip the hard-reject filter designed for sentiment garble.
                 if !sentiment_sanitize_primary
+                    && sentiment_brain
                     && IndexedGenEnv::lattice_surface_hard_reject(&best_text)
                 {
                     infer_trace!(
@@ -2103,12 +2121,15 @@ impl LanguageService {
         // Sentence-level coherence guard: strip trailing sentences that diverge
         // from the prompt's topic (e.g., identity text appended to an IT query).
         // Skip for user-anchored lattice shortcut: the second sentence ("Grounded in…") is intentional.
+        // Skip for non-sentiment brains (chat / companion) where short evocative fragments
+        // followed by narrative sentences are the intended output style.
+        let skip_coherence = self
+            .inference_harness
+            .template_postprocess_flags(&resp.template_id)
+            .skip_coherence_truncate
+            || !sentiment_brain;
         let resp = if let Some((_, ref bridged)) = encoded {
-            if self
-                .inference_harness
-                .template_postprocess_flags(&resp.template_id)
-                .skip_coherence_truncate
-            {
+            if skip_coherence {
                 resp
             } else {
                 let truncated = Self::coherence_truncate(&bridged.routed_vector, &resp.text);
@@ -2267,8 +2288,13 @@ impl LanguageService {
         } else { resp };
 
         // MetaCognition: reflective quality gate with retry-reconditioning loop.
-        // Skip for: broad query summaries, knowledge boundary declines, degradation.
-        let resp = if is_decline {
+        // Skip for: broad query summaries, knowledge boundary declines, degradation,
+        // and non-sentiment (chat/generative) brains where the relevance/coherence
+        // metrics don't apply (cat monologue isn't "relevant" by document standards).
+        let resp = if !sentiment_brain {
+            infer_trace!("  [metacog] SKIP: non-sentiment brain (chat/generative)");
+            resp
+        } else if is_decline {
             infer_trace!("  [metacog] SKIP: knowledge boundary decline");
             resp
         } else if is_broad && broad_summary.is_some() {
@@ -2475,7 +2501,9 @@ impl LanguageService {
         // (primary lattice, System 2, System 1.5, MetaCognition retry), reject
         // soup that matches hard_reject_substrings and replace with a routing-only
         // fallback from the sentiment lattice (or a generic decline).
-        let resp = if resp.template_id != "knowledge_boundary"
+        // Skip for non-sentiment brains whose training data is pre-validated.
+        let resp = if sentiment_brain
+            && resp.template_id != "knowledge_boundary"
             && resp.template_id != "metacog_degradation"
             && resp.text.len() > 5
             && IndexedGenEnv::lattice_surface_hard_reject(&resp.text)

@@ -196,6 +196,8 @@ pub fn growformer_acceptance_report() -> Result<JsValue, JsValue> {
 }
 
 /// Return JSON summary of active inference rule counts (for diagnostics).
+/// Gated behind `wasm-debug` feature to avoid leaking rule internals in production.
+#[cfg(feature = "wasm-debug")]
 #[wasm_bindgen]
 pub fn growformer_inference_rules_info() -> Result<JsValue, JsValue> {
     let loaded = crate::inference::inference_toml::inference_toml_loaded();
@@ -204,6 +206,8 @@ pub fn growformer_inference_rules_info() -> Result<JsValue, JsValue> {
 }
 
 /// Diagnostic: dump raw encoder vec + bridge output for a given text.
+/// Gated behind `wasm-debug` feature to avoid leaking embedding dimensions and structure.
+#[cfg(feature = "wasm-debug")]
 #[wasm_bindgen]
 pub fn growformer_debug_embedding(text: &str) -> Result<JsValue, JsValue> {
     with_rt(|rt| {

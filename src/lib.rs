@@ -82,6 +82,22 @@ macro_rules! infer_trace {
 }
 #[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 pub mod project_gf;
+/// Full Growformer train / merge / infer CLI (same as the `growformer` binary). Used by SpaceKit and tests.
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+mod cli_impl;
+
+/// Run the full growformer CLI from an argv-like iterator.
+///
+/// `argv[0]` is the program name (ignored by clap except for help text).
+/// Returns `Ok(())` on success or `Err(message)` on failure.
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+pub fn run_cli<I, T>(argv: I) -> Result<(), String>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    cli_impl::run_from_argv(argv)
+}
 pub mod service;
 pub mod runtime;
 pub mod spectral;

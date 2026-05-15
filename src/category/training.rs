@@ -272,9 +272,10 @@ struct SentimentFileRow {
 /// Which `.jsonl` files to merge from a directory such as `data/sentiment`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SentimentJsonlSelection {
-    /// Only `train_*.jsonl` (excludes `eval_*` holdouts).
+    /// Sample corpora: every `*.jsonl` except `inference_guardrails.jsonl` and `eval_*.jsonl`
+    /// (same rule as `--data-dir` / brain training).
     TrainFilesOnly,
-    /// Every `*.jsonl` file in the directory.
+    /// Every `*.jsonl` except `inference_guardrails.jsonl` (includes `eval_*` holdouts — use only when intentional).
     AllJsonl,
 }
 
@@ -427,8 +428,13 @@ impl TrainingBatch {
         for p in paths {
             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
             let include = match selection {
-                SentimentJsonlSelection::TrainFilesOnly => name.starts_with("train_"),
-                SentimentJsonlSelection::AllJsonl => true,
+                SentimentJsonlSelection::TrainFilesOnly => {
+                    crate::dimension::language::is_brain_training_jsonl_filename(name)
+                }
+                SentimentJsonlSelection::AllJsonl => {
+                    name.ends_with(".jsonl")
+                        && !crate::dimension::language::is_inference_guardrails_jsonl_filename(name)
+                }
             };
             if include {
                 batch.append_from_sentiment_jsonl(&p)?;

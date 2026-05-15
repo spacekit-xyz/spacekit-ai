@@ -38,6 +38,10 @@ use crate::spectral::{
 use crate::types::EnvironmentConfig;
 
 pub const GEN_COND_DIM: usize = 192;
+/// Minimum blended score to accept a candidate in forced-topic sub-lattice retrieval.
+/// Pet/chat conditioning is weaker than sentiment headlines; a floor of 0.10 discarded
+/// the entire hinted sub-lattice and fell back to global mealtime-dominant retrieval.
+pub const FORCED_TOPIC_SCORE_FLOOR: f32 = 0.02;
 /// Scale for world-graph `sentiment_bearing` nudge on the retrieval query vector (forced-topic Stage‑1 cosine).
 pub const WORLD_GROUND_SENTIMENT_BEARING_WEIGHT: f32 = 0.10;
 pub const MAX_TOKENS: usize = 128;
@@ -3736,7 +3740,7 @@ impl IndexedGenEnv {
                         } else {
                             true
                         };
-                        if matches_lang && !text.is_empty() && score > 0.10 {
+                        if matches_lang && !text.is_empty() && score > FORCED_TOPIC_SCORE_FLOOR {
                             let snippet: String = text.chars().take(60).collect();
                             crate::infer_trace!(
                                 "    [forced-topic] '{}' → {} progs, conf={:.3}, text=\"{}...\"",
@@ -3764,7 +3768,7 @@ impl IndexedGenEnv {
                 let intent_witness = (!intent_lower.is_empty()).then_some(intent_lower.as_str());
 
                 for &(idx, score) in &scored {
-                    if score < 0.10 { break; }
+                    if score < FORCED_TOPIC_SCORE_FLOOR { break; }
                     let text = topic.lattice.programs[idx].display_text(&self.dictionary);
                     if text.is_empty() { continue; }
 
@@ -3801,7 +3805,9 @@ impl IndexedGenEnv {
                     // signature agrees strongly, (c) at least one content word
                     // from the query appears in the program text — the minimum
                     // evidence that we're not in a completely different topic.
-                    let witness_ok = query_terms.len() < 2
+                    let sentiment_forced = Self::is_sentiment_lattice_topic_hint(forced_topic);
+                    let witness_ok = !sentiment_forced
+                        || query_terms.len() < 2
                         || Self::sentiment_witness_matches_subject_keywords(
                             &text,
                             &query_terms,
@@ -4450,7 +4456,7 @@ impl IndexedGenEnv {
         let forced = topic_hint
             .and_then(|h| self.forced_topic_response_lang(cond, h, lang_hint, kw_opt))
             .filter(|(ft, _, ft_conf)| {
-                if *ft_conf <= 0.10 || ft.len() <= 5 {
+                if *ft_conf <= FORCED_TOPIC_SCORE_FLOOR || ft.len() <= 5 {
                     return false;
                 }
                 let open: String = ft.chars().take(400).collect();
@@ -4465,7 +4471,7 @@ impl IndexedGenEnv {
         let forced_active = forced.is_some();
         let (text, lattice_conf, topic_selected, prompt_anchored_fallback) =
             if let Some((ft, fn_name, ft_conf)) = forced {
-                if ft.len() > 5 && ft_conf > 0.10 {
+                if ft.len() > 5 && ft_conf > FORCED_TOPIC_SCORE_FLOOR {
                     (ft, ft_conf.max(global_conf * 0.85), Some(fn_name), false)
                 } else {
                     (global_text, global_conf, None, false)
@@ -4493,9 +4499,18 @@ impl IndexedGenEnv {
                 (fb, 0.55f32, Some(hint.to_string()), true)
             } else {
                 let topic_seed = self.nearest_topic_response(cond, topic_hint);
+                let topic_margin = topic_hint
+                    .map(|h| {
+                        if Self::is_sentiment_lattice_topic_hint(h) {
+                            0.03f32
+                        } else {
+                            0.18f32
+                        }
+                    })
+                    .unwrap_or(0.03f32);
                 match topic_seed {
                     Some((topic_text, topic_name, topic_conf)) if topic_text.len() > 5 => {
-                        if topic_conf >= global_conf - 0.03 {
+                        if topic_conf >= global_conf - topic_margin {
                             (topic_text, topic_conf, Some(topic_name), false)
                         } else {
                             (global_text, global_conf, None, false)
@@ -4795,16 +4810,25 @@ impl IndexedGenEnv {
         let forced = topic_hint.and_then(|h| self.forced_topic_response(cond, h));
         let forced_active = forced.is_some();
         let (text, lattice_conf, topic_selected) = if let Some((ft, fn_name, ft_conf)) = forced {
-            if ft.len() > 5 && ft_conf > 0.10 {
+            if ft.len() > 5 && ft_conf > FORCED_TOPIC_SCORE_FLOOR {
                 (ft, ft_conf.max(global_conf * 0.85), Some(fn_name))
             } else {
                 (global_text, global_conf, None)
             }
         } else {
             let topic_seed = self.nearest_topic_response(cond, topic_hint);
+            let topic_margin = topic_hint
+                .map(|h| {
+                    if Self::is_sentiment_lattice_topic_hint(h) {
+                        0.03f32
+                    } else {
+                        0.18f32
+                    }
+                })
+                .unwrap_or(0.03f32);
             match topic_seed {
                 Some((topic_text, topic_name, topic_conf)) if topic_text.len() > 5 => {
-                    if topic_conf >= global_conf - 0.03 {
+                    if topic_conf >= global_conf - topic_margin {
                         (topic_text, topic_conf, Some(topic_name))
                     } else {
                         (global_text, global_conf, None)

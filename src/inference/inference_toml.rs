@@ -2158,6 +2158,16 @@ fn build_native_default() -> Arc<LoadedInferenceToml> {
     })
 }
 
+/// Rebuild the native inference TOML cache from disk paths (CLI / env / discovery).
+/// Call after [`crate::service::LanguageService::load_brain`] when a brain's embedded
+/// `plugins_blob` has overwritten rules but `--project` / `--inference-toml` should win for local dev.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn force_native_inference_rebuild_from_disk() {
+    let loaded = build_native_default();
+    let mut guard = FULL.write().unwrap();
+    *guard = Some(loaded);
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn inference_toml_loaded() -> Arc<LoadedInferenceToml> {
     {

@@ -14,10 +14,13 @@ description = "Crypto/DeFi sentiment analysis micro-brain. Classifies cryptocurr
 
 [train]
 auto = true
+# Paths are relative to this file (`scripts/`): `../data/crypto` → crate `data/crypto`.
+# Training merges sample JSONL from that directory (filename-sorted). `inference_guardrails.jsonl` lives there too but is loaded only for inference via `[inference].guardrails_jsonl`, not as training rows.
 data_dir = "../data/crypto"
 brain_output = "../agent-data/crypto-analysis/crypto-brain.bin"
 brain_plugins_toml = "../data/plugins/example-brain-plugins.toml"
 encoder = "clifford_e8"
+brain_gen_epochs = 3000
 
 [inference]
 toml = "../data/crypto/inference_crypto.toml"

@@ -55,6 +55,7 @@ training = []
 categorical = []
 cli = ["clap", "indicatif", "mnist", "kiddo", "training"]
 wasm-bindgen = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:console_error_panic_hook"]
+wasm-debug = ["wasm-bindgen"]
 
 [dependencies]
 clap = { version = "4.5.60", features = ["derive"], optional = true }
