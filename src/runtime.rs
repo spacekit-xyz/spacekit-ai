@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::dimension::action::ActionJson;
 use crate::dimension::generation::GeneratedResponse;
 use crate::dimension::tool::{ToolCallInfo, ToolResult};
+use crate::service::AgentRuntimeState;
 use crate::dimension::LanguageConfig;
 use crate::service::{AgentMode, LanguageService, OceanProfile};
 
@@ -129,7 +130,8 @@ impl Runtime {
     /// resolution, topic-shift detection.
     pub fn converse(&mut self, text: &str) -> Result<RuntimeResponse, String> {
         let (action, resp) = self.svc.converse(text)?;
-        Ok(pack_response(&action, &resp))
+        let validated = self.validate_response(resp);
+        Ok(pack_response(&action, &validated))
     }
 
     /// Code generation for the given prompt.
@@ -184,6 +186,67 @@ impl Runtime {
 
     pub fn personality(&self) -> &OceanProfile {
         &self.svc.personality
+    }
+
+    /// Enable stochastic top-k retrieval on all generation environments.
+    /// Temperature controls sampling sharpness (0.85 typical for chat).
+    pub fn enable_stochastic_retrieval(&mut self, temperature: f32) {
+        self.svc.enable_stochastic_retrieval(temperature);
+    }
+
+    // TODO: petstate needs to be generalized petstate is too specific
+    /// Set agent state from a JSON string. The state modulates the conversation
+    /// context prefix injected before generation (arbitrary dimensions + profile).
+    pub fn set_agent_state_from_json(&mut self, json_str: &str) -> Result<(), String> {
+        let state: AgentRuntimeState = serde_json::from_str(json_str)
+            .map_err(|e| format!("parse agent state JSON: {}", e))?;
+        self.svc.agent_state = Some(state);
+        Ok(())
+    }
+
+    /// Validate a generated response against the `[response_shaping]` rules.
+    /// Returns the original response if validation passes or is disabled,
+    /// otherwise returns a truncated/cleaned version.
+    fn validate_response(
+        &self,
+        mut resp: crate::dimension::GeneratedResponse,
+    ) -> crate::dimension::GeneratedResponse {
+        let loaded = crate::inference::inference_toml::inference_toml_loaded();
+        let shaping = loaded.response_shaping();
+        let validation = loaded.validation_config();
+
+        if !validation.enabled {
+            return resp;
+        }
+
+        // Length bounds
+        if resp.text.len() > shaping.max_response_chars {
+            let truncated = &resp.text[..shaping.max_response_chars];
+            if let Some(last_period) = truncated.rfind(". ") {
+                resp.text = truncated[..=last_period].to_string();
+            } else if let Some(last_space) = truncated.rfind(' ') {
+                resp.text = truncated[..last_space].to_string();
+            } else {
+                resp.text = truncated.to_string();
+            }
+        }
+
+        // Forbidden phrases
+        let text_lower = resp.text.to_ascii_lowercase();
+        for phrase in &shaping.forbidden_phrases {
+            if text_lower.contains(&phrase.to_ascii_lowercase()) {
+                resp.confidence *= 0.3;
+                crate::infer_trace!("  [validation] forbidden phrase hit: {:?}", phrase);
+                break;
+            }
+        }
+
+        // Forbid asterisks (narrative action markers)
+        if shaping.forbid_asterisks && resp.text.contains('*') {
+            resp.text = resp.text.replace('*', "");
+        }
+
+        resp
     }
 
     pub fn set_identity(&mut self, name: &str, creator: &str) {

@@ -2463,6 +2463,12 @@ pub struct IndexedGenEnv {
     /// Transient: query intent action (e.g., "implement", "explain").
     #[serde(skip)]
     pub intent_action: String,
+    /// Temperature for stochastic retrieval (0.0 = deterministic argmax, higher = more random).
+    #[serde(skip)]
+    pub retrieval_temperature: f32,
+    /// When true, sample from top-k candidates weighted by score instead of pure argmax.
+    #[serde(skip)]
+    pub stochastic_retrieval: bool,
     pub frozen: bool,
     pub output_dim: usize,
 }
@@ -2485,9 +2491,19 @@ impl IndexedGenEnv {
             subject_keywords: Vec::new(),
             retrieval_intent_text: String::new(),
             intent_action: String::new(),
+            retrieval_temperature: 0.85,
+            stochastic_retrieval: false,
             frozen: true,
             output_dim,
         }
+    }
+
+    /// Enable stochastic top-k retrieval with the given temperature.
+    /// When enabled, `nearest_response` samples from top-k candidates
+    /// weighted by score instead of always returning the argmax.
+    pub fn enable_stochastic_retrieval(&mut self, temperature: f32) {
+        self.stochastic_retrieval = true;
+        self.retrieval_temperature = temperature.max(0.01);
     }
 
     fn build_topic_subindex(
@@ -2610,6 +2626,8 @@ impl IndexedGenEnv {
             subject_keywords: Vec::new(),
             retrieval_intent_text: String::new(),
             intent_action: String::new(),
+            retrieval_temperature: 0.85,
+            stochastic_retrieval: false,
             frozen: false,
             output_dim,
         }
@@ -2642,6 +2660,8 @@ impl IndexedGenEnv {
             subject_keywords: Vec::new(),
             retrieval_intent_text: String::new(),
             intent_action: String::new(),
+            retrieval_temperature: 0.85,
+            stochastic_retrieval: false,
             frozen: false,
             output_dim,
         }
@@ -2680,6 +2700,8 @@ impl IndexedGenEnv {
             subject_keywords: Vec::new(),
             retrieval_intent_text: String::new(),
             intent_action: String::new(),
+            retrieval_temperature: 0.85,
+            stochastic_retrieval: false,
             frozen: false,
             output_dim,
         };
@@ -3064,8 +3086,111 @@ impl IndexedGenEnv {
         (text, best_idx, best_score.max(0.0))
     }
 
+    /// Stochastic retrieval: collect top-k candidates and sample weighted by score.
+    /// Temperature controls sharpness: 0 → deterministic (argmax), higher → more uniform.
+    fn stochastic_nearest_response_in_lattice(
+        &self,
+        lattice: &InfraciliaryLattice,
+        cond: &[f32],
+        temperature: f32,
+        k: usize,
+    ) -> (String, usize, f32) {
+        if lattice.programs.is_empty() {
+            return (String::new(), 0, 0.0);
+        }
+
+        let input_mv = embed_bridge_vector(cond);
+        let input_spatial = spatial_fingerprint(&input_mv);
+        let input_causal = causal_fingerprint(&input_mv);
+
+        let mut scored: Vec<(usize, f32)> = lattice.programs.iter().enumerate()
+            .map(|(i, prog)| {
+                let effective = lattice.effective_centroid(i);
+                let centroid = if effective.is_empty() { &prog.ema_centroid } else { &effective };
+                let cosine = gen_cosine_sim(cond, centroid);
+                let prog_mv = embed_bridge_vector(centroid);
+                let prog_spatial = spatial_fingerprint(&prog_mv);
+                let prog_causal = causal_fingerprint(&prog_mv);
+                let sp_dot: f32 = input_spatial.iter().zip(prog_spatial.iter())
+                    .map(|(a, b)| a * b).sum();
+                let sp_na: f32 = input_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let sp_nb: f32 = prog_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let spatial_align = if sp_na < 1e-8 || sp_nb < 1e-8 { 0.0 }
+                    else { (sp_dot / (sp_na * sp_nb)).clamp(-1.0, 1.0) };
+                let ca_dot: f32 = input_causal.iter().zip(prog_causal.iter())
+                    .map(|(a, b)| a * b).sum();
+                let ca_na: f32 = input_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let ca_nb: f32 = prog_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let causal_align = if ca_na < 1e-8 || ca_nb < 1e-8 { 0.0 }
+                    else { (ca_dot / (ca_na * ca_nb)).clamp(-1.0, 1.0) };
+                let disp_norm_sq: f32 = cond.iter()
+                    .zip(centroid.iter())
+                    .map(|(a, b)| (a - b) * (a - b))
+                    .sum();
+                let proximity = if disp_norm_sq < 1e-8 { 1.0 }
+                    else { (1.0 / disp_norm_sq).min(100.0).sqrt() / 10.0 };
+                let base_score = 0.30 * cosine.max(0.0)
+                    + 0.35 * (spatial_align + 1.0) / 2.0
+                    + 0.20 * (causal_align + 1.0) / 2.0
+                    + 0.15 * proximity;
+                let bias = lattice.retrieval_bias(i);
+                (i, base_score * bias)
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let top = scored.iter().take(k).copied().collect::<Vec<_>>();
+
+        if top.is_empty() {
+            return (String::new(), 0, 0.0);
+        }
+
+        let effective_temp = temperature.max(0.01);
+        let max_score = top[0].1;
+        let weights: Vec<f32> = top.iter()
+            .map(|(_, s)| ((s - max_score) / effective_temp).exp())
+            .collect();
+        let sum: f32 = weights.iter().sum();
+        let probs: Vec<f32> = weights.iter().map(|w| w / sum).collect();
+
+        // Deterministic-seeded sampling using a hash of the conditioning vector
+        // to provide variety across different sessions while being reproducible
+        // within the same request context.
+        let seed: u64 = cond.iter().enumerate()
+            .fold(0x517cc1b727220a95u64, |acc, (i, &v)| {
+                acc.wrapping_mul(6364136223846793005)
+                    .wrapping_add(((v * 1000.0) as u64).wrapping_add(i as u64))
+            });
+        // Mix in the sum of per-program retrieval counts for turn-level variation
+        let call_mix: u64 = lattice.programs.iter()
+            .map(|p| p.total_retrievals)
+            .sum();
+        let mixed_seed = seed.wrapping_add(call_mix.wrapping_mul(0x9E3779B97F4A7C15));
+        let uniform = ((mixed_seed >> 11) as f64) / ((1u64 << 53) as f64);
+
+        let mut cumulative = 0.0f64;
+        let mut selected = 0;
+        for (i, &p) in probs.iter().enumerate() {
+            cumulative += p as f64;
+            if uniform < cumulative {
+                selected = i;
+                break;
+            }
+        }
+
+        let (idx, score) = top[selected];
+        let text = lattice.programs[idx].display_text(&self.dictionary);
+        (text, idx, score.max(0.0))
+    }
+
     fn nearest_response(&self, cond: &[f32]) -> (String, usize, f32) {
-        self.nearest_response_in_lattice(&self.lattice, cond)
+        if self.stochastic_retrieval && self.retrieval_temperature > 0.01 {
+            self.stochastic_nearest_response_in_lattice(
+                &self.lattice, cond, self.retrieval_temperature, 4,
+            )
+        } else {
+            self.nearest_response_in_lattice(&self.lattice, cond)
+        }
     }
 
     /// Return top-K programs from a lattice, scored by equivariant STA similarity.
@@ -4445,6 +4570,10 @@ impl IndexedGenEnv {
         _max_len: usize,
         _temperature: f32,
     ) -> (String, f32) {
+        // Wire temperature into stochastic retrieval when enabled
+        if self.stochastic_retrieval && _temperature > 0.0 {
+            self.retrieval_temperature = _temperature;
+        }
         let (global_text, prog_idx, global_conf) = self.nearest_response(cond);
         let global_text_backup = global_text.clone();
 

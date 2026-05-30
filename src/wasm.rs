@@ -279,7 +279,29 @@ pub fn growformer_debug_dictionary() -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 pub fn growformer_load_inference_toml(toml_str: &str) -> Result<(), JsValue> {
     crate::inference::inference_toml::reload_inference_toml_from_str(toml_str)
-        .map_err(|e| JsValue::from_str(&e))
+        .map_err(|e| JsValue::from_str(&e))?;
+
+    // Auto-enable stochastic retrieval if the TOML [generation] section specifies it
+    let loaded = crate::inference::inference_toml::inference_toml_loaded();
+    let gen = loaded.generation_config();
+    if gen.stochastic_retrieval {
+        with_rt(|rt| {
+            rt.enable_stochastic_retrieval(gen.temperature);
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+/// Enable stochastic top-k retrieval on all generation environments.
+/// Temperature controls sampling sharpness: lower = more deterministic, higher = more varied.
+/// Typical values: 0.7 (conservative) to 1.2 (creative). Call after `growformer_load_brain`.
+#[wasm_bindgen]
+pub fn growformer_enable_stochastic_retrieval(temperature: f32) -> Result<(), JsValue> {
+    with_rt(|rt| {
+        rt.enable_stochastic_retrieval(temperature);
+        Ok(())
+    })
 }
 
 /// Load a knowledge graph TOML (topic routing rules) into the global TopicGraph.
@@ -305,6 +327,28 @@ pub fn growformer_load_topic_graph(base_toml: &str, overlay_toml: Option<String>
     };
     crate::growformer_lang::init_topic_graph_direct(final_graph)
         .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Load a world grounding graph TOML (concept nodes, typed edges, disambiguation).
+/// This enables BM25 keyword expansion, anchor resolution, and disambiguation
+/// during retrieval. Call after `growformer_load_brain` and before inference.
+#[wasm_bindgen]
+pub fn growformer_load_grounding_graph(toml_str: &str) -> Result<(), JsValue> {
+    crate::inference::world_grounding::load_grounding_graph_from_str(toml_str)
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Set agent runtime state for state-conditioned generation.
+/// Accepts a JSON object with arbitrary string→float state dimensions
+/// and an optional archetype/profile string. The state is blended into the
+/// conditioning vector on subsequent `growformer_converse` calls.
+///
+/// Example: `{"dimensions": {"hunger": 0.4, "energy": 0.6, "mood": 0.7}, "profile": "cheerful_companion", "turn": 3}`
+#[wasm_bindgen]
+pub fn growformer_set_agent_state(state_json: &str) -> Result<(), JsValue> {
+    with_rt(|rt| {
+        rt.set_agent_state_from_json(state_json)
+    })
 }
 
 #[wasm_bindgen]

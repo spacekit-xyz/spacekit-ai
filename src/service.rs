@@ -37,6 +37,25 @@ use crate::types::{EnvironmentConfig, GroupId, Sample};
 // M6: Agent Modes
 // ---------------------------------------------------------------------------
 
+/// Generic runtime state for any agent type. Dimensions are arbitrary
+/// float values (e.g. hunger, energy, mood for pets; confidence, focus for
+/// assistants). The profile string selects archetype-specific behavior.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRuntimeState {
+    /// Arbitrary named dimensions (0.0–1.0 typically).
+    #[serde(default)]
+    pub dimensions: HashMap<String, f32>,
+    /// Optional profile/archetype identifier.
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// Conversation turn counter.
+    #[serde(default)]
+    pub turn: u32,
+    /// Minutes since last interaction (for session-aware behavior).
+    #[serde(default)]
+    pub minutes_idle: f32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentMode {
     ContextFile,
@@ -622,6 +641,9 @@ pub struct LanguageService {
     /// Wrapped in `Arc` so inference can borrow it without conflicting with `&mut self`.
     #[cfg(feature = "categorical")]
     pub categorical_composer: Option<std::sync::Arc<crate::category::compose::CategoricalComposer>>,
+    /// Runtime agent state: arbitrary dimensions (hunger, energy, mood, etc.)
+    /// injected into generation conditioning for state-aware response selection.
+    pub agent_state: Option<AgentRuntimeState>,
 }
 
 /// P0-02: when true, skip System 2 deliberate cross-group reasoning for this turn.
@@ -714,6 +736,7 @@ impl LanguageService {
             active_inference_replay_log: None,
             #[cfg(feature = "categorical")]
             categorical_composer: None,
+            agent_state: None,
         })
     }
 
@@ -771,6 +794,14 @@ impl LanguageService {
             .brain_package_header
             .get_or_insert_with(crate::brain::BrainPackageHeader::default);
         h.inference_profile = profile;
+    }
+
+    /// Enable stochastic top-k retrieval on all loaded generation environments.
+    pub fn enable_stochastic_retrieval(&mut self, temperature: f32) {
+        let dm = self.active_dm_mut();
+        for (_, env) in dm.group_gen_envs.iter_mut() {
+            env.enable_stochastic_retrieval(temperature);
+        }
     }
 
     /// Replace the in-memory plugins manifest (embedded on next [`Self::export_brain`] as TOML v2).
@@ -1157,6 +1188,7 @@ impl LanguageService {
 
         // Snapshot conversation context before mutable borrow of DimensionManager
         let conv_ctx_snapshot = self.conversation.context_embedding.clone();
+        let agent_state_snapshot = self.agent_state.clone();
 
         let inference_profile_cached = self
             .brain_package_header
@@ -1610,6 +1642,29 @@ impl LanguageService {
                 for i in 0..dim {
                     gen_conditioning[i] = (1.0 - blend) * gen_conditioning[i]
                         + blend * conv_ctx_snapshot[i];
+                }
+            }
+
+            // Agent state conditioning: quantize runtime state dimensions into
+            // the tail of the conditioning vector so retrieval is biased toward
+            // state-appropriate responses (e.g. low-energy → sleepy programs).
+            if let Some(ref state) = agent_state_snapshot {
+                let dim = gen_conditioning.len();
+                if dim >= 16 && !state.dimensions.is_empty() {
+                    let state_blend = 0.20f32;
+                    let slot_count = state.dimensions.len().min(16);
+                    let base_offset = dim - 16;
+                    for (i, (_, &val)) in state.dimensions.iter().enumerate().take(slot_count) {
+                        let idx = base_offset + i;
+                        let quantized = (val.clamp(0.0, 1.0) - 0.5) * 2.0;
+                        gen_conditioning[idx] = (1.0 - state_blend) * gen_conditioning[idx]
+                            + state_blend * quantized;
+                    }
+                    // Turn counter modulates the first state slot for variety across turns
+                    if state.turn > 0 {
+                        let turn_signal = ((state.turn as f32) * 0.1).sin() * 0.15;
+                        gen_conditioning[base_offset] += turn_signal;
+                    }
                 }
             }
 

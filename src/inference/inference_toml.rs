@@ -111,6 +111,130 @@ pub struct InferenceTomlDocument {
     pub thresholds: InferenceThresholds,
     #[serde(default)]
     pub rules: InferenceRulesSection,
+    #[serde(default)]
+    pub generation: GenerationConfig,
+    #[serde(default)]
+    pub response_shaping: ResponseShapingConfig,
+    #[serde(default)]
+    pub validation: ValidationConfig,
+}
+
+/// Configuration for the generation/decoding stage, parsed from `[generation]` in inference TOML.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GenerationConfig {
+    #[serde(default = "default_generation_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_generation_top_k")]
+    pub top_k: usize,
+    #[serde(default)]
+    pub top_p: f32,
+    #[serde(default = "default_repetition_penalty")]
+    pub repetition_penalty: f32,
+    #[serde(default)]
+    pub min_tokens: usize,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: usize,
+    #[serde(default)]
+    pub stop_sequences: Vec<String>,
+    #[serde(default)]
+    pub enforce_min_tokens: bool,
+    /// Enable stochastic top-k retrieval (when true, temperature controls sampling).
+    #[serde(default = "default_stochastic_retrieval")]
+    pub stochastic_retrieval: bool,
+}
+
+fn default_generation_temperature() -> f32 { 0.85 }
+fn default_generation_top_k() -> usize { 4 }
+fn default_repetition_penalty() -> f32 { 1.08 }
+fn default_max_tokens() -> usize { 90 }
+fn default_stochastic_retrieval() -> bool { true }
+
+impl Default for GenerationConfig {
+    fn default() -> Self {
+        Self {
+            temperature: default_generation_temperature(),
+            top_k: default_generation_top_k(),
+            top_p: 0.92,
+            repetition_penalty: default_repetition_penalty(),
+            min_tokens: 18,
+            max_tokens: default_max_tokens(),
+            stop_sequences: Vec::new(),
+            enforce_min_tokens: true,
+            stochastic_retrieval: default_stochastic_retrieval(),
+        }
+    }
+}
+
+/// Response shaping rules parsed from `[response_shaping]` section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResponseShapingConfig {
+    #[serde(default = "default_min_response_chars")]
+    pub min_response_chars: usize,
+    #[serde(default = "default_max_response_chars")]
+    pub max_response_chars: usize,
+    #[serde(default)]
+    pub require_first_person: bool,
+    #[serde(default)]
+    pub forbid_asterisks: bool,
+    #[serde(default)]
+    pub forbid_third_person_self_reference: bool,
+    #[serde(default)]
+    pub forbid_brain_metadata_in_output: bool,
+    #[serde(default)]
+    pub require_sensory_or_vocalization: bool,
+    #[serde(default)]
+    pub forbidden_phrases: Vec<String>,
+    #[serde(default)]
+    pub voice_violation_patterns: Vec<String>,
+    #[serde(default)]
+    pub required_signal_patterns: Vec<String>,
+}
+
+fn default_min_response_chars() -> usize { 60 }
+fn default_max_response_chars() -> usize { 320 }
+
+impl Default for ResponseShapingConfig {
+    fn default() -> Self {
+        Self {
+            min_response_chars: default_min_response_chars(),
+            max_response_chars: default_max_response_chars(),
+            require_first_person: false,
+            forbid_asterisks: false,
+            forbid_third_person_self_reference: false,
+            forbid_brain_metadata_in_output: false,
+            require_sensory_or_vocalization: false,
+            forbidden_phrases: Vec::new(),
+            voice_violation_patterns: Vec::new(),
+            required_signal_patterns: Vec::new(),
+        }
+    }
+}
+
+/// Validation pipeline config parsed from `[validation]` section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u8,
+    #[serde(default = "default_retry_temperature_decay")]
+    pub retry_temperature_decay: f32,
+    #[serde(default)]
+    pub fallback_strategy: String,
+}
+
+fn default_max_retries() -> u8 { 2 }
+fn default_retry_temperature_decay() -> f32 { 0.15 }
+
+impl Default for ValidationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_retries: default_max_retries(),
+            retry_temperature_decay: default_retry_temperature_decay(),
+            fallback_strategy: "nearest_training_example".to_string(),
+        }
+    }
 }
 
 /// PR-wire headline: normalized text must start with `prefix`, meet `min_len`, and pass excludes / `require_any`.
@@ -2100,11 +2224,26 @@ pub struct LoadedInferenceToml {
     pub rules_section: InferenceRulesSection,
     /// JSONL guardrails merged after TOML (native only; empty on wasm).
     pub guardrails: super::inference_guardrails::GuardrailsDiskSummary,
+    /// Generation config from `[generation]` section.
+    pub generation: GenerationConfig,
+    /// Response shaping rules from `[response_shaping]` section.
+    pub response_shaping: ResponseShapingConfig,
+    /// Validation pipeline config from `[validation]` section.
+    pub validation: ValidationConfig,
 }
 
 impl LoadedInferenceToml {
     pub fn rules(&self) -> Arc<InferenceRulesRuntime> {
         self.rules.clone()
+    }
+    pub fn generation_config(&self) -> &GenerationConfig {
+        &self.generation
+    }
+    pub fn response_shaping(&self) -> &ResponseShapingConfig {
+        &self.response_shaping
+    }
+    pub fn validation_config(&self) -> &ValidationConfig {
+        &self.validation
     }
 }
 
@@ -2155,6 +2294,9 @@ fn build_native_default() -> Arc<LoadedInferenceToml> {
         rules,
         rules_section,
         guardrails,
+        generation: file.generation,
+        response_shaping: file.response_shaping,
+        validation: file.validation,
     })
 }
 
@@ -2206,6 +2348,9 @@ fn build_default_loaded() -> Arc<LoadedInferenceToml> {
         rules,
         rules_section,
         guardrails,
+        generation: file.generation,
+        response_shaping: file.response_shaping,
+        validation: file.validation,
     })
 }
 
@@ -2241,6 +2386,9 @@ pub fn reload_inference_toml_from_str(toml_str: &str) -> Result<(), String> {
         rules,
         rules_section,
         guardrails,
+        generation: domain.generation,
+        response_shaping: domain.response_shaping,
+        validation: domain.validation,
     });
     WASM_FULL.with(|cell| {
         *cell.borrow_mut() = Some(loaded);
@@ -2267,6 +2415,9 @@ pub fn replace_loaded_from_rules_section(
         rules,
         rules_section,
         guardrails,
+        generation: GenerationConfig::default(),
+        response_shaping: ResponseShapingConfig::default(),
+        validation: ValidationConfig::default(),
     });
 
     #[cfg(not(target_arch = "wasm32"))]

@@ -278,8 +278,79 @@ fn load_graph() -> WorldGraph {
 
 static GRAPH: OnceLock<WorldGraph> = OnceLock::new();
 
+/// Domain-specific grounding graph loaded at runtime (e.g., pet_world_grounding.toml).
+/// On WASM this is thread-local; on native it uses a RwLock.
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static DOMAIN_GRAPH: std::cell::RefCell<Option<WorldGraph>> = std::cell::RefCell::new(None);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+static DOMAIN_GRAPH_NATIVE: std::sync::RwLock<Option<WorldGraph>> = std::sync::RwLock::new(None);
+
 fn graph() -> &'static WorldGraph {
     GRAPH.get_or_init(load_graph)
+}
+
+fn parse_grounding_toml(toml_str: &str) -> Result<WorldGraph, String> {
+    let file: WorldGroundingFile = toml::from_str(toml_str)
+        .map_err(|e| format!("parse grounding TOML: {}", e))?;
+
+    let mut nodes: Vec<WorldNode> = Vec::new();
+    let mut lookup: HashMap<String, usize> = HashMap::new();
+
+    for n in file.nodes {
+        let id_norm = normalize_key(&n.id);
+        if id_norm.is_empty() { continue; }
+        let idx = nodes.len();
+        let mut edges: Vec<WorldEdge> = Vec::new();
+        for e in n.edges {
+            let t = normalize_key(&e.target);
+            if t.is_empty() { continue; }
+            let kind = e.kind.trim().to_ascii_lowercase();
+            if kind.is_empty() { continue; }
+            edges.push(WorldEdge {
+                kind,
+                target: t,
+                weight: e.weight,
+                requires_context: e.requires_context.as_ref().map(|s| normalize_key(s)).filter(|s| !s.is_empty()),
+            });
+        }
+        nodes.push(WorldNode {
+            id: id_norm.clone(),
+            magnitude_sensitive: n.magnitude_sensitive,
+            causal_anchor: n.causal_anchor,
+            edges,
+        });
+        lookup.insert(id_norm, idx);
+        for a in n.aliases {
+            let an = normalize_key(&a);
+            if !an.is_empty() {
+                lookup.entry(an).or_insert(idx);
+            }
+        }
+    }
+
+    Ok(WorldGraph { lookup, nodes })
+}
+
+/// Load a domain-specific grounding graph from a TOML string at runtime.
+/// This augments the embedded base graph with domain-specific concepts.
+pub fn load_grounding_graph_from_str(toml_str: &str) -> Result<(), String> {
+    let graph = parse_grounding_toml(toml_str)?;
+    #[cfg(target_arch = "wasm32")]
+    {
+        DOMAIN_GRAPH.with(|cell| {
+            *cell.borrow_mut() = Some(graph);
+        });
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut guard = DOMAIN_GRAPH_NATIVE.write()
+            .map_err(|e| format!("lock domain graph: {}", e))?;
+        *guard = Some(graph);
+    }
+    Ok(())
 }
 
 fn activated_roots(intent_text: &str) -> Vec<usize> {
@@ -406,24 +477,116 @@ fn expand_from_roots(
 /// Append Layer‑0 graph expansion keywords (deduped, min length 3) for BM25 / alignment.
 pub fn extend_subject_keywords_with_world_graph(intent_text: &str, subject_kw: &mut Vec<String>) {
     let roots = activated_roots(intent_text);
-    if roots.is_empty() {
+    if roots.is_empty() && !has_domain_graph() {
         return;
     }
-    let expanded = expand_from_roots(&roots, intent_text, 2, 24);
-    let mut added: Vec<String> = Vec::new();
-    for kw in expanded {
-        if kw.len() > 2 && !subject_kw.iter().any(|x| x == &kw) {
-            subject_kw.push(kw.clone());
-            added.push(kw);
+    if !roots.is_empty() {
+        let expanded = expand_from_roots(&roots, intent_text, 2, 24);
+        let mut added: Vec<String> = Vec::new();
+        for kw in expanded {
+            if kw.len() > 2 && !subject_kw.iter().any(|x| x == &kw) {
+                subject_kw.push(kw.clone());
+                added.push(kw);
+            }
         }
+        if !added.is_empty() {
+            crate::infer_trace!(
+                "  [world-ground] layer-0 graph: roots={:?} +keywords {:?}",
+                roots
+                    .iter()
+                    .filter_map(|&i| graph().nodes.get(i).map(|n| n.id.as_str()))
+                    .collect::<Vec<_>>(),
+                added
+            );
+        }
+    }
+    // Also walk the domain-specific graph
+    extend_subject_keywords_with_domain_graph(intent_text, subject_kw);
+}
+
+fn has_domain_graph() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        DOMAIN_GRAPH.with(|cell| cell.borrow().is_some())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        DOMAIN_GRAPH_NATIVE.read().map(|g| g.is_some()).unwrap_or(false)
+    }
+}
+
+/// Walk the domain-specific grounding graph for keyword expansion.
+fn extend_subject_keywords_with_domain_graph(intent_text: &str, subject_kw: &mut Vec<String>) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        DOMAIN_GRAPH.with(|cell| {
+            let borrow = cell.borrow();
+            if let Some(ref dg) = *borrow {
+                domain_graph_expand(dg, intent_text, subject_kw);
+            }
+        });
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if let Ok(guard) = DOMAIN_GRAPH_NATIVE.read() {
+            if let Some(ref dg) = *guard {
+                domain_graph_expand(dg, intent_text, subject_kw);
+            }
+        }
+    }
+}
+
+/// Expand keywords from a domain graph: find activated roots, walk edges, collect targets.
+fn domain_graph_expand(dg: &WorldGraph, intent_text: &str, subject_kw: &mut Vec<String>) {
+    let mut roots = Vec::new();
+    let mut seen_idx = HashSet::new();
+    for tok in tokenize(intent_text) {
+        let k = normalize_key(&tok);
+        if k.len() < 2 { continue; }
+        if let Some(&ix) = dg.lookup.get(&k) {
+            if seen_idx.insert(ix) {
+                roots.push(ix);
+            }
+        }
+    }
+    if roots.is_empty() { return; }
+
+    let mut added: Vec<String> = Vec::new();
+    let mut visited = HashSet::new();
+    let mut queue: VecDeque<(usize, u8)> = roots.iter().map(|&r| (r, 0u8)).collect();
+
+    while let Some((idx, depth)) = queue.pop_front() {
+        if depth > 2 || !visited.insert(idx) { continue; }
+        let node = &dg.nodes[idx];
+        for e in &node.edges {
+            let kind = e.kind.as_str();
+            if kind == "disambiguated_by" { continue; }
+            if let Some(ref ctx) = e.requires_context {
+                if !roots.iter().any(|&r| dg.nodes[r].id == *ctx) { continue; }
+            }
+            if e.weight < 0.3 { continue; }
+            let target_key = &e.target;
+            if target_key.len() > 2
+                && !subject_kw.iter().any(|x| x == target_key)
+                && !added.iter().any(|x| x == target_key)
+            {
+                added.push(target_key.clone());
+            }
+            if let Some(&tix) = dg.lookup.get(target_key.as_str()) {
+                if depth < 2 {
+                    queue.push_back((tix, depth + 1));
+                }
+            }
+        }
+    }
+
+    for kw in &added {
+        subject_kw.push(kw.clone());
     }
     if !added.is_empty() {
         crate::infer_trace!(
-            "  [world-ground] layer-0 graph: roots={:?} +keywords {:?}",
-            roots
-                .iter()
-                .filter_map(|&i| graph().nodes.get(i).map(|n| n.id.as_str()))
-                .collect::<Vec<_>>(),
+            "  [domain-ground] activated {:?} +keywords {:?}",
+            roots.iter().filter_map(|&i| dg.nodes.get(i).map(|n| n.id.as_str())).collect::<Vec<_>>(),
             added
         );
     }
