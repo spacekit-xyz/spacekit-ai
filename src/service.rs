@@ -4471,6 +4471,8 @@ fn build_language_calibration_dataset() -> CalibrationDataset {
                 expected_response: None,
                 expected_code: None,
                 causal: None,
+                history: Vec::new(),
+                conversation_turn: 1,
             });
         }
     }

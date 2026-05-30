@@ -295,6 +295,18 @@ pub struct LanguageSample {
     pub expected_code: Option<String>,
     #[serde(default)]
     pub causal: Option<CausalAnnotation>,
+    /// Prior conversation turns as `(role, text)` pairs (role is "user" or "pet"/"agent").
+    /// Empty for single-turn samples. Used to build history-aware generation conditioning
+    /// that matches the runtime conversation context blend (see service `update_geometric_context`).
+    #[serde(default)]
+    pub history: Vec<(String, String)>,
+    /// 1-based conversation turn index. 1 for the opening turn, >1 for follow-ups.
+    #[serde(default = "default_conversation_turn")]
+    pub conversation_turn: u32,
+}
+
+fn default_conversation_turn() -> u32 {
+    1
 }
 
 // --- Brain-training JSONL directory scans ------------------------------------
@@ -313,6 +325,23 @@ pub fn is_brain_training_jsonl_filename(name: &str) -> bool {
     name.ends_with(".jsonl")
         && !is_inference_guardrails_jsonl_filename(name)
         && !name.starts_with("eval_")
+}
+
+#[derive(Deserialize)]
+struct HistoryTurnRow {
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    text: String,
+}
+
+/// Pet companion rows nest `history` / `conversation_turn` under a `pet` object.
+#[derive(Deserialize)]
+struct PetRow {
+    #[serde(default)]
+    history: Option<Vec<HistoryTurnRow>>,
+    #[serde(default)]
+    conversation_turn: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -336,6 +365,14 @@ struct JsonlLanguageSampleRow {
     expected_code: Option<String>,
     #[serde(default)]
     causal: Option<CausalAnnotation>,
+    /// Multi-turn history may appear at the top level …
+    #[serde(default)]
+    history: Option<Vec<HistoryTurnRow>>,
+    #[serde(default)]
+    conversation_turn: Option<u32>,
+    /// … or nested under a `pet` object (pet companion corpora).
+    #[serde(default)]
+    pet: Option<PetRow>,
 }
 
 /// Load newline-delimited [`LanguageSample`] records from one JSONL file (brain / distill corpora).
@@ -354,6 +391,25 @@ pub fn load_language_samples_jsonl(path: &str) -> Result<Vec<LanguageSample>, St
             .semantic_intent
             .or(rec.intent)
             .unwrap_or_else(|| "unknown_intent".to_string());
+        // History / turn index may be at the top level or nested under `pet`.
+        let mut history_rows = rec.history;
+        let mut conv_turn = rec.conversation_turn;
+        if let Some(pet) = rec.pet {
+            if history_rows.is_none() {
+                history_rows = pet.history;
+            }
+            if conv_turn.is_none() {
+                conv_turn = pet.conversation_turn;
+            }
+        }
+        let history: Vec<(String, String)> = history_rows
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|h| !h.text.trim().is_empty())
+            .map(|h| (h.role, h.text))
+            .collect();
+        let conversation_turn =
+            conv_turn.unwrap_or(if history.is_empty() { 1 } else { 2 });
         out.push(LanguageSample {
             domain: rec.domain.unwrap_or_else(|| "custom".to_string()),
             text: rec.text,
@@ -364,6 +420,8 @@ pub fn load_language_samples_jsonl(path: &str) -> Result<Vec<LanguageSample>, St
             expected_response: rec.expected_response,
             expected_code: rec.expected_code,
             causal: rec.causal,
+            history,
+            conversation_turn,
         });
     }
     Ok(out)
@@ -1593,6 +1651,8 @@ mod tests {
                         expected_response: None,
                         expected_code: None,
                         causal: None,
+                        history: Vec::new(),
+                        conversation_turn: 1,
                     })
                 })
                 .collect(),
@@ -1737,6 +1797,8 @@ mod tests {
             expected_response: Some("Forked narrative.".into()),
             expected_code: None,
             causal: None,
+            history: Vec::new(),
+            conversation_turn: 1,
         };
         let joint = sentiment_lattice_index_body(&s.text, s.expected_response.as_deref().unwrap());
         assert!(joint.contains(SENTIMENT_LATTICE_WITNESS_CORE));

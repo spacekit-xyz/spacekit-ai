@@ -1893,6 +1893,83 @@ fn train_brain(
     let raw_dim = raw_embeddings.first().map_or(384, |e| e.len());
     let bridge_dim = bridged_embeddings.first().map_or(DEFAULT_BRIDGE_DIM, |e| e.len());
     println!("  {} samples: raw={}d, bridged={}d", samples.len(), raw_dim, bridge_dim);
+
+    // History-aware generation conditioning for multi-turn samples.
+    //
+    // At inference (service `converse`), a follow-up turn does NOT encode the bare
+    // user message — it encodes a context-augmented prompt:
+    //     "{context_window} | user: {text}"
+    // where `context_window` joins recent turns as "user: …" / "agent: …" by " | ".
+    // It then additionally blends the decayed geometric `context_embedding` into the
+    // conditioning with weight 0.28. Training previously stored follow-up programs at
+    // the bare-prompt point, so inference (querying from the history-prefixed point)
+    // never retrieved them. Mirror BOTH steps here: encode the identical prefixed
+    // string, then apply the same 0.28 geometric blend (decay 0.65, turn-center =
+    // (query + response) / 2). The blend is applied identically on both sides, so it
+    // cannot cause a train/infer mismatch.
+    const CONV_CONTEXT_BLEND: f32 = 0.28;
+    let multi_turn_count = samples
+        .iter()
+        .filter(|s| !s.history.is_empty() && s.conversation_turn > 1)
+        .count();
+    let gen_cond_embeddings: Vec<Vec<f32>> = {
+        let runtime = &svc.dm.language_runtime;
+        samples
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let base = bridged_embeddings[i].clone();
+                if s.history.is_empty() || s.conversation_turn <= 1 {
+                    return base;
+                }
+                // Build the context-augmented prompt exactly like service `converse`.
+                let mut parts: Vec<String> = Vec::with_capacity(s.history.len() + 1);
+                for (role, text) in &s.history {
+                    let r = if role.eq_ignore_ascii_case("user") {
+                        "user"
+                    } else {
+                        "agent"
+                    };
+                    parts.push(format!("{}: {}", r, text));
+                }
+                parts.push(format!("user: {}", s.text));
+                let context_prompt = parts.join(" | ");
+                let mut cond = match runtime.encode_and_bridge(&context_prompt) {
+                    Ok((_, b)) => b.routed_vector,
+                    Err(_) => base.clone(),
+                };
+                // Secondary geometric blend, replaying history through the same accumulator.
+                let mut ctx = crate::service::ConversationContext::default();
+                let mut pending_user: Option<Vec<f32>> = None;
+                for (role, text) in &s.history {
+                    let emb = match runtime.encode_and_bridge(text) {
+                        Ok((_, b)) => b.routed_vector,
+                        Err(_) => continue,
+                    };
+                    if role.eq_ignore_ascii_case("user") {
+                        pending_user = Some(emb);
+                    } else {
+                        let q = pending_user.take().unwrap_or_else(|| emb.clone());
+                        ctx.update_geometric_context(&q, &emb);
+                    }
+                }
+                if !ctx.context_embedding.is_empty() {
+                    let dim = cond.len().min(ctx.context_embedding.len());
+                    for j in 0..dim {
+                        cond[j] = (1.0 - CONV_CONTEXT_BLEND) * cond[j]
+                            + CONV_CONTEXT_BLEND * ctx.context_embedding[j];
+                    }
+                }
+                cond
+            })
+            .collect()
+    };
+    if multi_turn_count > 0 {
+        println!(
+            "  history-aware conditioning: {} multi-turn samples re-encoded with context prefix (blend={})",
+            multi_turn_count, CONV_CONTEXT_BLEND
+        );
+    }
     if let Some(u) = &ui {
         u.detail_finish_clear();
     }
@@ -2113,10 +2190,13 @@ fn train_brain(
             } else {
                 r.to_string()
             };
+            // Use the history-aware conditioning for the generation lattice so
+            // multi-turn programs land where inference queries them (single-turn
+            // samples are unchanged — `gen_cond_embeddings[i] == bridged`).
             gen_by_group
                 .entry(gidx)
                 .or_default()
-                .push((bridged.clone(), lattice_text));
+                .push((gen_cond_embeddings[i].clone(), lattice_text));
             gen_raw_by_group.entry(gidx).or_default().push(raw.as_slice());
             gen_topic_by_group.entry(gidx).or_default().push(s.semantic_intent.as_str());
             gen_novelty_by_group.entry(gidx).or_default().push(nov);

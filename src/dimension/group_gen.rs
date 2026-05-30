@@ -4399,6 +4399,19 @@ impl IndexedGenEnv {
                 run = 0;
             }
         }
+
+        // Signal 4: a sentence that is a single function word (e.g. "The." / "To.").
+        // Valid terse pet lines are single CONTENT words ("Trill.", "Twice."), never
+        // a bare article/copula/preposition standing alone as a sentence.
+        for sentence in t.split(|c| c == '.' || c == '!' || c == '?') {
+            let toks: Vec<&str> = sentence
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .collect();
+            if toks.len() == 1 && FUNC.contains(&toks[0]) {
+                return true;
+            }
+        }
         false
     }
 
