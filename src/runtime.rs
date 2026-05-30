@@ -194,6 +194,10 @@ impl Runtime {
         self.svc.enable_stochastic_retrieval(temperature);
     }
 
+    pub fn apply_loaded_generation_config(&mut self) {
+        self.svc.apply_loaded_generation_config();
+    }
+
     // TODO: petstate needs to be generalized petstate is too specific
     /// Set agent state from a JSON string. The state modulates the conversation
     /// context prefix injected before generation (arbitrary dimensions + profile).

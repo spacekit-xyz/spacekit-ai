@@ -2469,6 +2469,10 @@ pub struct IndexedGenEnv {
     /// When true, sample from top-k candidates weighted by score instead of pure argmax.
     #[serde(skip)]
     pub stochastic_retrieval: bool,
+    /// Monotonically increasing counter; mixed into the stochastic seed so that
+    /// even identical conditioning vectors produce different samples on each call.
+    #[serde(skip)]
+    pub session_call_counter: u64,
     pub frozen: bool,
     pub output_dim: usize,
 }
@@ -2493,6 +2497,7 @@ impl IndexedGenEnv {
             intent_action: String::new(),
             retrieval_temperature: 0.85,
             stochastic_retrieval: false,
+            session_call_counter: 0,
             frozen: true,
             output_dim,
         }
@@ -2628,6 +2633,7 @@ impl IndexedGenEnv {
             intent_action: String::new(),
             retrieval_temperature: 0.85,
             stochastic_retrieval: false,
+            session_call_counter: 0,
             frozen: false,
             output_dim,
         }
@@ -2662,6 +2668,7 @@ impl IndexedGenEnv {
             intent_action: String::new(),
             retrieval_temperature: 0.85,
             stochastic_retrieval: false,
+            session_call_counter: 0,
             frozen: false,
             output_dim,
         }
@@ -2702,6 +2709,7 @@ impl IndexedGenEnv {
             intent_action: String::new(),
             retrieval_temperature: 0.85,
             stochastic_retrieval: false,
+            session_call_counter: 0,
             frozen: false,
             output_dim,
         };
@@ -3094,6 +3102,7 @@ impl IndexedGenEnv {
         cond: &[f32],
         temperature: f32,
         k: usize,
+        call_counter: u64,
     ) -> (String, usize, f32) {
         if lattice.programs.is_empty() {
             return (String::new(), 0, 0.0);
@@ -3154,18 +3163,20 @@ impl IndexedGenEnv {
         let probs: Vec<f32> = weights.iter().map(|w| w / sum).collect();
 
         // Deterministic-seeded sampling using a hash of the conditioning vector
-        // to provide variety across different sessions while being reproducible
-        // within the same request context.
+        // PLUS a monotonically increasing session counter so that even identical
+        // conditioning produces different samples on consecutive calls.
         let seed: u64 = cond.iter().enumerate()
             .fold(0x517cc1b727220a95u64, |acc, (i, &v)| {
                 acc.wrapping_mul(6364136223846793005)
                     .wrapping_add(((v * 1000.0) as u64).wrapping_add(i as u64))
             });
-        // Mix in the sum of per-program retrieval counts for turn-level variation
+        // Mix in the call counter AND per-program retrieval counts for turn-level variation
         let call_mix: u64 = lattice.programs.iter()
             .map(|p| p.total_retrievals)
             .sum();
-        let mixed_seed = seed.wrapping_add(call_mix.wrapping_mul(0x9E3779B97F4A7C15));
+        let mixed_seed = seed
+            .wrapping_add(call_mix.wrapping_mul(0x9E3779B97F4A7C15))
+            .wrapping_add(call_counter.wrapping_mul(0x6C62272E07BB0142));
         let uniform = ((mixed_seed >> 11) as f64) / ((1u64 << 53) as f64);
 
         let mut cumulative = 0.0f64;
@@ -3183,10 +3194,94 @@ impl IndexedGenEnv {
         (text, idx, score.max(0.0))
     }
 
+    /// When stochastic retrieval is enabled, pick a primary candidate from top-k
+    /// (with refractory bias) and fall back through the rest in score order.
+    fn stochastic_selection_order(
+        &self,
+        lattice: &InfraciliaryLattice,
+        scored: &[(usize, f32)],
+        k: usize,
+    ) -> Vec<usize> {
+        if scored.is_empty() {
+            return Vec::new();
+        }
+        if !self.stochastic_retrieval || self.retrieval_temperature <= 0.01 {
+            return scored.iter().map(|&(idx, _)| idx).collect();
+        }
+
+        let top: Vec<(usize, f32)> = scored.iter().take(k).copied().collect();
+        let effective_temp = self.retrieval_temperature.max(0.01);
+        let max_score = top[0].1;
+        let weights: Vec<f32> = top.iter()
+            .map(|&(idx, s)| {
+                let bias = lattice.retrieval_bias(idx);
+                ((s * bias - max_score) / effective_temp).exp()
+            })
+            .collect();
+        let sum: f32 = weights.iter().sum();
+        if sum <= 0.0 {
+            return scored.iter().map(|&(idx, _)| idx).collect();
+        }
+        let probs: Vec<f32> = weights.iter().map(|w| w / sum).collect();
+
+        let seed: u64 = top.iter().enumerate()
+            .fold(self.session_call_counter.wrapping_mul(0x6C62272E07BB0142), |acc, (i, &(idx, s))| {
+                acc.wrapping_mul(6364136223846793005)
+                    .wrapping_add((idx as u64).wrapping_add((s * 1000.0) as u64).wrapping_add(i as u64))
+            });
+        let uniform = ((seed >> 11) as f64) / ((1u64 << 53) as f64);
+
+        let mut cumulative = 0.0f64;
+        let mut selected = 0usize;
+        for (i, &p) in probs.iter().enumerate() {
+            cumulative += p as f64;
+            if uniform < cumulative {
+                selected = i;
+                break;
+            }
+        }
+
+        let primary = top[selected].0;
+        let mut order = vec![primary];
+        for &(idx, _) in scored {
+            if idx != primary {
+                order.push(idx);
+            }
+        }
+        order
+    }
+
+    /// Scan the main lattice by cosine score and return the highest-scoring program
+    /// whose verbatim text is coherent (non-empty, not fragmented, not hard-rejected).
+    /// Used as a garble fallback: verbatim programs are real training sentences.
+    pub fn best_coherent_response(&self, cond: &[f32]) -> Option<(String, f32)> {
+        if self.lattice.programs.is_empty() {
+            return None;
+        }
+        let mut scored: Vec<(usize, f32)> = self
+            .lattice
+            .programs
+            .iter()
+            .enumerate()
+            .map(|(i, prog)| (i, gen_cosine_sim(cond, &prog.ema_centroid)))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        for (idx, score) in scored.into_iter().take(8) {
+            let text = self.lattice.programs[idx].display_text(&self.dictionary);
+            if text.len() > 5
+                && !Self::looks_fragmented(&text)
+                && !Self::hard_reject_lattice_decoded_text(&text)
+            {
+                return Some((text, score.max(0.0)));
+            }
+        }
+        None
+    }
+
     fn nearest_response(&self, cond: &[f32]) -> (String, usize, f32) {
         if self.stochastic_retrieval && self.retrieval_temperature > 0.01 {
             self.stochastic_nearest_response_in_lattice(
-                &self.lattice, cond, self.retrieval_temperature, 4,
+                &self.lattice, cond, self.retrieval_temperature, 4, self.session_call_counter,
             )
         } else {
             self.nearest_response_in_lattice(&self.lattice, cond)
@@ -3557,11 +3652,11 @@ impl IndexedGenEnv {
     /// When `lang_hint` is Some (e.g., "rust"), programs whose decoded text matches the
     /// target language's markers are preferred, preventing Python code from being returned
     /// when Rust was requested.
-    fn forced_topic_response(&self, cond: &[f32], forced_topic: &str) -> Option<(String, String, f32)> {
+    fn forced_topic_response(&mut self, cond: &[f32], forced_topic: &str) -> Option<(String, String, f32)> {
         self.forced_topic_response_lang(cond, forced_topic, None, None)
     }
 
-    fn forced_topic_response_lang(&self, cond: &[f32], forced_topic: &str, lang_hint: Option<&str>, subject_keywords: Option<&[&str]>) -> Option<(String, String, f32)> {
+    fn forced_topic_response_lang(&mut self, cond: &[f32], forced_topic: &str, lang_hint: Option<&str>, subject_keywords: Option<&[&str]>) -> Option<(String, String, f32)> {
         // Exact match first, then fuzzy word-overlap fallback
         let topic_match = self.topic_subindex.iter()
             .find(|t| t.topic_name.eq_ignore_ascii_case(forced_topic))
@@ -3847,13 +3942,19 @@ impl IndexedGenEnv {
                     );
                 }
 
+                let try_order = self.stochastic_selection_order(&topic.lattice, &scored, 4);
+
                 // When a language hint is provided, try to find a program matching that language
                 if let Some(lang) = lang_hint {
                     let lang_lower = lang.to_lowercase();
                     let is_rust = lang_lower == "rust";
                     let is_python = lang_lower == "python" || lang_lower == "py";
 
-                    for &(idx, score) in &scored {
+                    for &idx in &try_order {
+                        let score = scored.iter()
+                            .find(|(i, _)| *i == idx)
+                            .map(|(_, s)| *s)
+                            .unwrap_or(0.0);
                         let text = topic.lattice.programs[idx].display_text(&self.dictionary);
                         let opening: String = text.chars().take(300).collect();
                         let centroid = &topic.lattice.programs[idx].ema_centroid;
@@ -3892,7 +3993,11 @@ impl IndexedGenEnv {
                 let intent_lower = self.retrieval_intent_text.to_ascii_lowercase();
                 let intent_witness = (!intent_lower.is_empty()).then_some(intent_lower.as_str());
 
-                for &(idx, score) in &scored {
+                for &idx in &try_order {
+                    let score = scored.iter()
+                        .find(|(i, _)| *i == idx)
+                        .map(|(_, s)| *s)
+                        .unwrap_or(0.0);
                     if score < FORCED_TOPIC_SCORE_FLOOR { break; }
                     let text = topic.lattice.programs[idx].display_text(&self.dictionary);
                     if text.is_empty() { continue; }
@@ -4208,6 +4313,9 @@ impl IndexedGenEnv {
         if t.contains(" mask") && (t.contains("little") || t.contains("their")) {
             return true;
         }
+        if Self::looks_fragmented(text) {
+            return true;
+        }
         Self::hard_reject_repeated_bigram(&t)
     }
 
@@ -4220,6 +4328,75 @@ impl IndexedGenEnv {
         for w in words.windows(4) {
             if w[0] == w[2] && w[1] == w[3] && w[0].len() > 2 && w[1].len() > 2 {
                 return true;
+            }
+        }
+        false
+    }
+
+    // TODO: Add from config.
+    /// Detect grammatically fragmented lattice/cloze output
+    /// (e.g. `"I do is the and warm. I front I, you back paws. I. to.. Mrrp."`)
+    /// without rejecting valid terse pet speech (`"Trill."`, `"I slow blink. Twice."`).
+    ///
+    /// Conservative by design — every signal here is something valid English never
+    /// produces, so real (even very short) lines are never flagged:
+    ///   1. A mid-text double dot that is not an ellipsis (`"to.."`).
+    ///   2. Two consecutive auxiliary/copula verbs (`"do is"`, `"is was"`).
+    ///   3. A run of ≥5 consecutive function words (`"i do is the and"`).
+    pub fn looks_fragmented(text: &str) -> bool {
+        let t = text.to_ascii_lowercase();
+
+        // Signal 1: exactly-double dot (".." but not "..." ellipsis).
+        let b = t.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'.' {
+                let mut run = 0;
+                let mut j = i;
+                while j < b.len() && b[j] == b'.' {
+                    run += 1;
+                    j += 1;
+                }
+                if run == 2 {
+                    return true;
+                }
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
+
+        let words: Vec<&str> = t
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .collect();
+
+        // Signal 2: two adjacent auxiliary/copula verbs — never grammatical.
+        const AUX: &[&str] = &[
+            "is", "am", "are", "was", "were", "be", "been", "being", "do", "does", "did",
+        ];
+        for w in words.windows(2) {
+            if AUX.contains(&w[0]) && AUX.contains(&w[1]) {
+                return true;
+            }
+        }
+
+        // Signal 3: ≥5 consecutive function words.
+        const FUNC: &[&str] = &[
+            "i", "a", "an", "the", "and", "or", "but", "is", "am", "are", "was", "were", "be",
+            "been", "do", "does", "did", "to", "of", "in", "on", "at", "it", "you", "my", "your",
+            "then", "that", "this", "so", "as", "if", "for", "with", "by", "we", "he", "she",
+            "they",
+        ];
+        let mut run = 0;
+        for w in &words {
+            if FUNC.contains(w) {
+                run += 1;
+                if run >= 5 {
+                    return true;
+                }
+            } else {
+                run = 0;
             }
         }
         false
@@ -4574,13 +4751,15 @@ impl IndexedGenEnv {
         if self.stochastic_retrieval && _temperature > 0.0 {
             self.retrieval_temperature = _temperature;
         }
+        self.session_call_counter = self.session_call_counter.wrapping_add(1);
         let (global_text, prog_idx, global_conf) = self.nearest_response(cond);
         let global_text_backup = global_text.clone();
 
         // When a specific operation topic is provided (e.g., "subtraction_operation"),
         // bypass cross-topic competition and directly query the matching sub-lattice.
         // This prevents addition's high cosine similarity from drowning out subtraction.
-        let kw_refs: Vec<&str> = self.subject_keywords.iter().map(|s| s.as_str()).collect();
+        let kw_owned: Vec<String> = self.subject_keywords.clone();
+        let kw_refs: Vec<&str> = kw_owned.iter().map(|s| s.as_str()).collect();
         let kw_opt: Option<&[&str]> = if kw_refs.is_empty() { None } else { Some(&kw_refs) };
         let forced = topic_hint
             .and_then(|h| self.forced_topic_response_lang(cond, h, lang_hint, kw_opt))
@@ -4800,10 +4979,19 @@ impl IndexedGenEnv {
                     let decoded_text = Self::truncate_archetype(
                         &cb.archetypes, arch_idx, &decoded_ids, &decoded_text,
                     );
-                    if decoded_text.len() > 5 {
+                    // Coherence gate: cloze slot-inference can compose token soup when the
+                    // query lands between programs. Reject fragmented composition and fall
+                    // through to the verbatim retrieved program (a real training sentence).
+                    if decoded_text.len() > 5 && !Self::looks_fragmented(&decoded_text) {
                         self.last_selected_archetype = Some(arch_idx);
                         self.last_generation_confidence = lattice_conf;
                         return (decoded_text, lattice_conf);
+                    }
+                    if Self::looks_fragmented(&decoded_text) {
+                        crate::infer_trace!(
+                            "    [coherence-gate] cloze decode fragmented, using verbatim program: \"{}\"",
+                            decoded_text.chars().take(60).collect::<String>()
+                        );
                     }
                 }
             }
@@ -4935,6 +5123,7 @@ impl IndexedGenEnv {
         _max_len: usize,
         _temperature: f32,
     ) -> (String, f32) {
+        self.session_call_counter = self.session_call_counter.wrapping_add(1);
         let (global_text, prog_idx, global_conf) = self.nearest_response(cond);
 
         let forced = topic_hint.and_then(|h| self.forced_topic_response(cond, h));

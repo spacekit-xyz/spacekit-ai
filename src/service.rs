@@ -804,6 +804,15 @@ impl LanguageService {
         }
     }
 
+    /// Apply `[generation]` from loaded inference TOML (stochastic retrieval, temperature).
+    pub fn apply_loaded_generation_config(&mut self) {
+        let loaded = crate::inference::inference_toml::inference_toml_loaded();
+        let gen = loaded.generation_config();
+        if gen.stochastic_retrieval {
+            self.enable_stochastic_retrieval(gen.temperature);
+        }
+    }
+
     /// Replace the in-memory plugins manifest (embedded on next [`Self::export_brain`] as TOML v2).
     pub fn set_brain_plugins_manifest(&mut self, manifest: Option<BrainPluginsManifest>) {
         self.brain_plugins_manifest = manifest;
@@ -1188,6 +1197,7 @@ impl LanguageService {
 
         // Snapshot conversation context before mutable borrow of DimensionManager
         let conv_ctx_snapshot = self.conversation.context_embedding.clone();
+        let conversation_turn_count = self.conversation.turn_count();
         let agent_state_snapshot = self.agent_state.clone();
 
         let inference_profile_cached = self
@@ -1361,13 +1371,19 @@ impl LanguageService {
             };
 
             // Multi-turn: blend context embedding into the base routing vector.
-            // 70% intent (what the user is asking NOW) + 30% context (conversation history).
+            // Later turns weight history more so follow-ups diverge from turn-1 greetings.
             let blended = if let Some((_, ref ctx_bridged)) = context_encoded {
                 let ctx_vec = &ctx_bridged.routed_vector;
                 let dim = base_vector.len().min(ctx_vec.len());
                 let mut v = vec![0.0f32; dim];
+                let intent_w = if chat_passthrough && conversation_turn_count > 1 {
+                    0.55
+                } else {
+                    0.7
+                };
+                let ctx_w = 1.0 - intent_w;
                 for i in 0..dim {
-                    v[i] = base_vector[i] * 0.7 + ctx_vec[i] * 0.3;
+                    v[i] = base_vector[i] * intent_w + ctx_vec[i] * ctx_w;
                 }
                 v
             } else {
@@ -1637,7 +1653,11 @@ impl LanguageService {
             // into the generation conditioning so retrieval is biased toward
             // topic continuity. Only applies when conversation has history.
             if !conv_ctx_snapshot.is_empty() {
-                let blend = 0.15f32;
+                let blend = if chat_passthrough && conversation_turn_count > 1 {
+                    0.28f32
+                } else {
+                    0.15f32
+                };
                 let dim = gen_conditioning.len().min(conv_ctx_snapshot.len());
                 for i in 0..dim {
                     gen_conditioning[i] = (1.0 - blend) * gen_conditioning[i]
@@ -2086,22 +2106,29 @@ impl LanguageService {
                 // Non-sentiment brains (chat/generative) have pre-validated training
                 // data — skip the hard-reject filter designed for sentiment garble.
                 if !sentiment_sanitize_primary
-                    && sentiment_shortcuts
+                    && (sentiment_shortcuts || chat_passthrough)
                     && IndexedGenEnv::lattice_surface_hard_reject(&best_text)
                 {
                     infer_trace!(
-                        "  [global-hard-reject] non-sentiment group produced garble, falling back"
+                        "  [global-hard-reject] group produced garble, falling back to coherent program"
                     );
-                    if let Some(env) = dm.group_gen_envs.get(&best_gidx) {
-                        let (fb, fc) = if let Some((ct, cc)) = Self::categorical_compose_fallback(
+                    if let Some(env) = dm.group_gen_envs.get_mut(&best_gidx) {
+                        // Prefer a verbatim coherent program from this group; only fall back to
+                        // categorical compose / routing-only line if no clean program exists.
+                        if let Some((clean, cc)) = env.best_coherent_response(&gen_conditioning) {
+                            best_text = clean;
+                            best_conf = cc.max(best_conf * 0.85);
+                        } else if let Some((ct, cc)) = Self::categorical_compose_fallback(
                             &cat_composer, env, topic_hint.as_deref(), intent_text, &gen_conditioning,
                         ) {
-                            (ct, cc)
+                            best_text = ct;
+                            best_conf = cc;
                         } else {
-                            env.sentiment_routing_only_fallback_line(topic_hint.as_deref())
-                        };
-                        best_text = fb;
-                        best_conf = fc;
+                            let (fb, fc) =
+                                env.sentiment_routing_only_fallback_line(topic_hint.as_deref());
+                            best_text = fb;
+                            best_conf = fc;
+                        }
                     }
                 }
 
@@ -3785,6 +3812,7 @@ impl LanguageService {
         self.rebuild_reasoning();
         self.rebuild_schemas();
         self.configure_novelty_from_profile();
+        self.apply_loaded_generation_config();
         Ok(())
     }
 

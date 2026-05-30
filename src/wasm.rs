@@ -281,15 +281,10 @@ pub fn growformer_load_inference_toml(toml_str: &str) -> Result<(), JsValue> {
     crate::inference::inference_toml::reload_inference_toml_from_str(toml_str)
         .map_err(|e| JsValue::from_str(&e))?;
 
-    // Auto-enable stochastic retrieval if the TOML [generation] section specifies it
-    let loaded = crate::inference::inference_toml::inference_toml_loaded();
-    let gen = loaded.generation_config();
-    if gen.stochastic_retrieval {
-        with_rt(|rt| {
-            rt.enable_stochastic_retrieval(gen.temperature);
-            Ok(())
-        })?;
-    }
+    with_rt(|rt| {
+        rt.apply_loaded_generation_config();
+        Ok(())
+    })?;
     Ok(())
 }
 
