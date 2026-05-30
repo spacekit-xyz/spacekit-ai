@@ -2473,6 +2473,11 @@ pub struct IndexedGenEnv {
     /// even identical conditioning vectors produce different samples on each call.
     #[serde(skip)]
     pub session_call_counter: u64,
+    /// Last few response texts returned this session. Used to suppress immediate
+    /// verbatim repeats (a dominant program would otherwise win the softmax every
+    /// time) — the selector skips a recent line when a viable alternative exists.
+    #[serde(skip)]
+    pub recent_responses: std::collections::VecDeque<String>,
     pub frozen: bool,
     pub output_dim: usize,
 }
@@ -2498,6 +2503,7 @@ impl IndexedGenEnv {
             retrieval_temperature: 0.85,
             stochastic_retrieval: false,
             session_call_counter: 0,
+            recent_responses: std::collections::VecDeque::new(),
             frozen: true,
             output_dim,
         }
@@ -2634,6 +2640,7 @@ impl IndexedGenEnv {
             retrieval_temperature: 0.85,
             stochastic_retrieval: false,
             session_call_counter: 0,
+            recent_responses: std::collections::VecDeque::new(),
             frozen: false,
             output_dim,
         }
@@ -2669,6 +2676,7 @@ impl IndexedGenEnv {
             retrieval_temperature: 0.85,
             stochastic_retrieval: false,
             session_call_counter: 0,
+            recent_responses: std::collections::VecDeque::new(),
             frozen: false,
             output_dim,
         }
@@ -2710,6 +2718,7 @@ impl IndexedGenEnv {
             retrieval_temperature: 0.85,
             stochastic_retrieval: false,
             session_call_counter: 0,
+            recent_responses: std::collections::VecDeque::new(),
             frozen: false,
             output_dim,
         };
@@ -3690,7 +3699,11 @@ impl IndexedGenEnv {
                 best.map(|(t, _)| t)
             });
 
-        topic_match.and_then(|topic| {
+        // Snapshot recently-returned lines so the selector can skip an immediate
+        // verbatim repeat (closure borrows `self` immutably; we push back after).
+        let recent_snapshot: Vec<String> = self.recent_responses.iter().cloned().collect();
+
+        let result = topic_match.and_then(|topic| {
                 if topic.lattice.programs.is_empty() { return None; }
 
                 let query_terms: Vec<String> = dedup_lowercase_query_terms(
@@ -3993,6 +4006,9 @@ impl IndexedGenEnv {
                 let intent_lower = self.retrieval_intent_text.to_ascii_lowercase();
                 let intent_witness = (!intent_lower.is_empty()).then_some(intent_lower.as_str());
 
+                // Anti-repeat: hold a recently-returned line as fallback and prefer
+                // a fresh candidate; only return the repeat if nothing else qualifies.
+                let mut recent_fallback: Option<(String, String, f32)> = None;
                 for &idx in &try_order {
                     let score = scored.iter()
                         .find(|(i, _)| *i == idx)
@@ -4070,10 +4086,26 @@ impl IndexedGenEnv {
                         "    [forced-topic] '{}' → {} progs, conf={:.3}, graph_conf={}, text=\"{}...\"",
                         forced_topic, topic.lattice.programs.len(), score, graph_confident, snippet
                     );
+                    if recent_snapshot.iter().any(|r| r == &text) {
+                        if recent_fallback.is_none() {
+                            recent_fallback = Some((text, topic.topic_name.clone(), score));
+                        }
+                        continue;
+                    }
                     return Some((text, topic.topic_name.clone(), score));
                 }
-                None
-            })
+                // Every fresh candidate was filtered out — fall back to the most
+                // recent acceptable line rather than returning nothing.
+                recent_fallback
+            });
+
+        if let Some((ref text, _, _)) = result {
+            self.recent_responses.push_back(text.clone());
+            while self.recent_responses.len() > 4 {
+                self.recent_responses.pop_front();
+            }
+        }
+        result
     }
 
     /// Top-K nearest responses using STA field scoring with multi-timescale bias.
@@ -5266,6 +5298,7 @@ impl IndexedGenEnv {
         for sub in &mut self.topic_subindex {
             sub.lattice.begin_session();
         }
+        self.recent_responses.clear();
     }
 
     /// Record that a program was retrieved. Delegates to the appropriate lattice.
