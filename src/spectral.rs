@@ -2407,6 +2407,10 @@ impl TokenDictionary {
         self.tokens.len()
     }
 
+    pub fn lookup_len(&self) -> usize {
+        self.lookup.len()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.tokens.len() <= 1
     }

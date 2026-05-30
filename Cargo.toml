@@ -16,6 +16,11 @@ path = "src/main.rs"
 required-features = ["cli"]
 
 [[bin]]
+name = "growformer-cli"
+path = "src/bin/growformer_cli.rs"
+required-features = ["standalone_cli"]
+
+[[bin]]
 name = "growformer-demos"
 path = "src/demos.rs"
 required-features = ["cli"]
@@ -54,6 +59,7 @@ training = []
 # Categorical DAG + Pythagoras sentiment trainer (disable with --no-default-features for lean builds).
 categorical = []
 cli = ["clap", "indicatif", "mnist", "kiddo", "training"]
+standalone_cli = ["cli"]
 wasm-bindgen = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:console_error_panic_hook"]
 wasm-debug = ["wasm-bindgen"]
 

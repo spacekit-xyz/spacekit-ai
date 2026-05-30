@@ -208,7 +208,13 @@ pub struct InfraciliaryLattice {
     pub last_program: Option<usize>,
     /// Last inference confidence.
     pub last_confidence: f32,
+    /// Novelty pressure factor for retrieval bias (1.0 = default, 2.0 = chat/companion).
+    /// Set by the host after brain load based on inference_profile.
+    #[serde(default = "default_novelty_factor")]
+    pub novelty_factor: f32,
 }
+
+fn default_novelty_factor() -> f32 { 1.0 }
 
 /// Result of a paramecium inference step.
 #[derive(Clone, Debug)]
@@ -230,6 +236,7 @@ impl InfraciliaryLattice {
             learning_rate: 0.05,
             last_program: None,
             last_confidence: 0.0,
+            novelty_factor: 1.0,
         }
     }
 
@@ -747,6 +754,13 @@ impl InfraciliaryLattice {
     ///   > 1.0 = boost (high quality, high reliability, low activation)
     ///   < 1.0 = suppress (low quality, refractory, over-activated)
     pub fn retrieval_bias(&self, program_idx: usize) -> f32 {
+        self.retrieval_bias_with_novelty(program_idx, self.novelty_factor)
+    }
+
+    /// Retrieval bias with configurable novelty pressure.
+    /// `novelty_factor` scales the refractory/activation penalties:
+    ///   1.0 = default (sentiment brains), 2.0+ = strong novelty (chat brains).
+    pub fn retrieval_bias_with_novelty(&self, program_idx: usize, novelty_factor: f32) -> f32 {
         if program_idx >= self.programs.len() { return 1.0; }
         let prog = &self.programs[program_idx];
 
@@ -755,11 +769,16 @@ impl InfraciliaryLattice {
         let reliability_factor = 0.7 + prog.reliability * 0.6;  // [0.7, 1.3]
 
         // Short-term: refractory suppression prevents monoculture
-        let refractory_penalty = if prog.refractory { 0.7 } else { 1.0 };
-        let activation_penalty = 1.0 - (prog.activation_level * 0.3).min(0.3); // [0.7, 1.0]
+        // novelty_factor amplifies suppression for chat brains (e.g. 2.0 → 0.4 penalty)
+        let base_refractory = 0.3 * novelty_factor;
+        let refractory_penalty = if prog.refractory {
+            (1.0 - base_refractory).max(0.2)
+        } else { 1.0 };
+        let activation_suppress = (prog.activation_level * 0.3 * novelty_factor).min(0.5);
+        let activation_penalty = 1.0 - activation_suppress;
 
         (quality_factor * reliability_factor * refractory_penalty * activation_penalty)
-            .clamp(0.5, 1.5)
+            .clamp(0.3, 1.5)
     }
 
     /// Commit session drift to persistent centroid (end-of-session consolidation).

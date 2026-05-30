@@ -91,6 +91,35 @@ pub fn pick_sentiment_lattice_group_idx(dm: &DimensionManager) -> Option<usize> 
     (0..dm.main.group_order.len()).find(|&gidx| generation_env_looks_like_sentiment(dm, gidx))
 }
 
+fn normalize_inference_profile(profile: Option<&str>) -> Option<String> {
+    profile
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+}
+
+/// Greeting/identity template shortcuts apply only to brains exported with `inference_profile = "sentiment_lattice"`.
+pub fn sentiment_lattice_shortcuts_active(inference_profile: Option<&str>) -> bool {
+    normalize_inference_profile(inference_profile).as_deref() == Some("sentiment_lattice")
+}
+
+/// Chat-brained agents bypass greeting/tool template intercepts and route all prompts through the lattice.
+pub fn chat_passthrough_generation(inference_profile: Option<&str>, dm: &DimensionManager) -> bool {
+    if sentiment_lattice_shortcuts_active(inference_profile) {
+        return false;
+    }
+    if matches!(
+        normalize_inference_profile(inference_profile).as_deref(),
+        Some("off") | Some("none") | Some("disabled") | Some("pet_chat") | Some("chat") | Some("converse")
+    ) {
+        return true;
+    }
+    if pick_sentiment_lattice_group_idx(dm).is_some() {
+        return true;
+    }
+    // Generative-only exports (no code envs) without an explicit profile: companion/chat mode.
+    inference_profile.is_none() && dm.group_code_envs.is_empty()
+}
+
 /// When false, `LanguageService` skips inference-TOML PR-wire / headline lexical / mixed guards and
 /// lattice misfire replacement (code brains, or `inference_profile` `off` / `none` / `disabled`).
 ///

@@ -4605,6 +4605,9 @@ impl IndexedGenEnv {
         // Inhibited OR medium confidence: use gradient-aware slot inference.
         // The field gradient tells us WHICH DIRECTION the response should shift,
         // enabling discrimination between add/sub/mul within the same group.
+        // Mark nearest program as accessed regardless of which generation path fires,
+        // so refractory suppression always engages for repeated queries.
+        self.lattice.on_retrieval(prog_idx, cond);
         if lattice_conf >= 0.55 || field_inhibited {
             if let Some(ref cb) = self.codebook {
                 if cb.has_prototypes() {
@@ -4783,8 +4786,6 @@ impl IndexedGenEnv {
         // Final fallback: return lattice text as-is
         self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
         self.last_generation_confidence = lattice_conf;
-        // Track retrieval for Continuum multi-timescale state
-        self.lattice.on_retrieval(prog_idx, cond);
         (text, lattice_conf)
     }
 

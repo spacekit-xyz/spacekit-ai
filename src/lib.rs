@@ -86,10 +86,17 @@ pub mod project_gf;
 #[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 mod cli_impl;
 
+/// Entitlement gate for embedded distribution (SpaceKit CLI).
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+pub mod entitlement;
+
 /// Run the full growformer CLI from an argv-like iterator.
 ///
 /// `argv[0]` is the program name (ignored by clap except for help text).
 /// Returns `Ok(())` on success or `Err(message)` on failure.
+///
+/// Standalone `growformer` binary calls this without entitlement enforcement.
+/// SpaceKit must use [`run_cli_with_entitlement`].
 #[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 pub fn run_cli<I, T>(argv: I) -> Result<(), String>
 where
@@ -97,6 +104,23 @@ where
     T: Into<std::ffi::OsString> + Clone,
 {
     cli_impl::run_from_argv(argv)
+}
+
+/// Run growformer CLI with entitlement enforcement (library-embedded distribution).
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+pub fn run_cli_with_entitlement<I, T>(
+    argv: I,
+    ctx: entitlement::EntitlementContext,
+) -> Result<(), String>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    entitlement::set_context(ctx);
+    entitlement::set_enforced(true);
+    let result = cli_impl::run_from_argv(argv);
+    entitlement::clear_context();
+    result
 }
 pub mod service;
 pub mod runtime;

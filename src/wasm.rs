@@ -212,6 +212,27 @@ pub fn growformer_inference_rules_info() -> Result<JsValue, JsValue> {
 pub fn growformer_debug_embedding(text: &str) -> Result<JsValue, JsValue> {
     with_rt(|rt| {
         let dm = rt.svc.active_dm_mut();
+
+        // Step 1: tokenize and dictionary lookup
+        let dict = dm.language_runtime.preloaded_dictionary.as_ref();
+        let (tok_ids, tok_count, dict_len) = if let Some(d) = dict {
+            let ids = d.encode(text);
+            (ids.clone(), ids.len(), d.len())
+        } else {
+            (vec![], 0usize, 0usize)
+        };
+
+        // Step 2: manually test ChunkCodec encoding
+        let centroid_norm: f64 = if let Some(d) = dict {
+            let codec = crate::text_autoencoder::ChunkCodec::new(d.len());
+            let seq = codec.encode_text(text, d);
+            let c = seq.centroid();
+            c.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>().sqrt()
+        } else {
+            0.0
+        };
+
+        // Step 3: full encode_and_bridge
         let (raw_enc, bridged) = dm.language_runtime.encode_and_bridge(text)?;
         let raw_first8: Vec<f32> = raw_enc.iter().take(8).copied().collect();
         let raw_norm: f64 = raw_enc.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>().sqrt();
@@ -219,9 +240,29 @@ pub fn growformer_debug_embedding(text: &str) -> Result<JsValue, JsValue> {
         let br_first8: Vec<f32> = br_vec.iter().take(8).copied().collect();
         let br_norm: f64 = br_vec.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>().sqrt();
         Ok(format!(
-            "{{\"raw_dim\":{},\"raw_norm\":{:.10},\"raw_first8\":{:?},\"bridge_dim\":{},\"bridge_confidence\":{:.6},\"bridge_norm\":{:.10},\"bridge_first8\":{:?}}}",
+            "{{\"dict_size\":{},\"token_ids\":{:?},\"tok_count\":{},\"centroid_norm\":{:.10},\"raw_dim\":{},\"raw_norm\":{:.10},\"raw_first8\":{:?},\"bridge_dim\":{},\"bridge_confidence\":{:.6},\"bridge_norm\":{:.10},\"bridge_first8\":{:?}}}",
+            dict_len, tok_ids, tok_count, centroid_norm,
             raw_enc.len(), raw_norm, raw_first8,
             br_vec.len(), bridged.confidence, br_norm, br_first8
+        ))
+    })
+    .map(|s| JsValue::from_str(&s))
+}
+
+/// Diagnostic: check language runtime dictionary and encoder state.
+#[cfg(feature = "wasm-debug")]
+#[wasm_bindgen]
+pub fn growformer_debug_dictionary() -> Result<JsValue, JsValue> {
+    with_rt(|rt| {
+        let dm = rt.svc.active_dm();
+        let lr = &dm.language_runtime;
+        let dict_tokens = lr.preloaded_dictionary.as_ref().map(|d| d.tokens.len()).unwrap_or(0);
+        let dict_lookup = lr.preloaded_dictionary.as_ref().map(|d| d.lookup_len()).unwrap_or(0);
+        let encoder_preset = format!("{:?}", lr.config.encoder);
+        let bridge_out = lr.config.bridge_output_dim;
+        Ok(format!(
+            "{{\"encoder_preset\":\"{}\",\"preloaded_dict_tokens\":{},\"preloaded_dict_lookup\":{},\"bridge_out_dim\":{}}}",
+            encoder_preset, dict_tokens, dict_lookup, bridge_out
         ))
     })
     .map(|s| JsValue::from_str(&s))
@@ -238,6 +279,31 @@ pub fn growformer_debug_embedding(text: &str) -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 pub fn growformer_load_inference_toml(toml_str: &str) -> Result<(), JsValue> {
     crate::inference::inference_toml::reload_inference_toml_from_str(toml_str)
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Load a knowledge graph TOML (topic routing rules) into the global TopicGraph.
+/// This is essential for WASM inference — without it, `infer_operation_topic` falls
+/// back to legacy keyword rules that only know math operations, not domain-specific
+/// topics (e.g., pet chat greeting/anxiety/play topics).
+///
+/// Accepts a base TOML string and an optional overlay TOML string.
+/// Call after `growformer_load_brain` and before inference.
+#[wasm_bindgen]
+pub fn growformer_load_topic_graph(base_toml: &str, overlay_toml: Option<String>) -> Result<(), JsValue> {
+    if crate::growformer_lang::topic_graph_loaded() {
+        return Ok(());
+    }
+    let base_graph = crate::topic_graph::TopicGraph::from_toml(base_toml)
+        .map_err(|e| JsValue::from_str(&format!("topic graph base: {}", e)))?;
+    let final_graph = if let Some(ref overlay) = overlay_toml {
+        let overlay_graph = crate::topic_graph::TopicGraph::from_toml_quiet(overlay)
+            .map_err(|e| JsValue::from_str(&format!("topic graph overlay: {}", e)))?;
+        base_graph.merge_overlay(overlay_graph)
+    } else {
+        base_graph
+    };
+    crate::growformer_lang::init_topic_graph_direct(final_graph)
         .map_err(|e| JsValue::from_str(&e))
 }
 

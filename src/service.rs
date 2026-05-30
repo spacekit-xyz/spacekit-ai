@@ -1089,18 +1089,17 @@ impl LanguageService {
         let intent_text = intent_text_owned.as_str();
         let text = text_owned.as_str();
 
-        // Tool call interception — disabled for sentiment-only brains where
-        // topic-graph false positives (e.g. "power" in "compute power") would
-        // hijack the pipeline away from sentiment classification.
-        let sentiment_brain = lattice_shortcuts::pick_sentiment_lattice_group_idx(
-            self.active_dm(),
-        )
-        .is_some();
+        let inference_profile_opt = self
+            .brain_package_header
+            .as_ref()
+            .and_then(|h| h.inference_profile.as_deref());
+        let sentiment_shortcuts =
+            lattice_shortcuts::sentiment_lattice_shortcuts_active(inference_profile_opt);
+        let chat_passthrough =
+            lattice_shortcuts::chat_passthrough_generation(inference_profile_opt, self.active_dm());
 
-        // Greeting/identity intercepts only fire for sentiment-shaped brains.
-        // Non-sentiment brains (pet companion, code, etc.) treat greetings as
-        // real prompts that should route through the lattice.
-        if sentiment_brain {
+        // Greeting/identity template shortcuts: sentiment_lattice brains only.
+        if sentiment_shortcuts {
             if Self::is_identity_query(intent_text) {
                 let action = self.active_dm_mut().route_text_to_action_stateless(text)?;
                 self.record_latency(start);
@@ -1113,7 +1112,9 @@ impl LanguageService {
                 return Ok((action, self.greeting_response()));
             }
         }
-        if !sentiment_brain {
+
+        // Tool call interception: code/general brains only — not sentiment or chat passthrough.
+        if !sentiment_shortcuts && !chat_passthrough {
         if let Some(tool_call) = self.tool_registry.match_tool(intent_text) {
             let action = ActionJson {
                 action_type: ActionType::ToolCall,
@@ -1136,7 +1137,7 @@ impl LanguageService {
             self.record_latency(start);
             return Ok((action, resp));
         }
-        } // !sentiment_brain
+        } // !sentiment_shortcuts && !chat_passthrough
 
         let personality = self.personality.clone();
 
@@ -1356,7 +1357,7 @@ impl LanguageService {
                     // (always returns the same default topic with conf=0.0), so skip
                     // setting topic_hint — let retrieval use pure embedding similarity
                     // across all sub-lattices instead of biasing toward one.
-                    if sentiment_brain {
+                    if sentiment_shortcuts {
                         topic_hint = Some(r.topic.clone());
                     }
                     Some(r)
@@ -1366,7 +1367,7 @@ impl LanguageService {
                     if !ul.is_empty() {
                         let (_, _, topic, verb) = ul.classify(h_raw);
                         infer_trace!("  [understanding] topic={}, verb={}", topic, verb);
-                        if sentiment_brain {
+                        if sentiment_shortcuts {
                             topic_hint = Some(topic);
                         }
                     }
@@ -1975,7 +1976,7 @@ impl LanguageService {
                 && sentiment_lattice_gidx.is_some();
             let knowledge_floor_ok =
                 best_conf >= RETRIEVAL_CONFIDENCE_FLOOR || inclusion_floor_bypass
-                || !sentiment_brain;
+                || chat_passthrough;
             if !knowledge_floor_ok || best_text.len() <= 5 {
                 infer_trace!("  [knowledge-boundary] conf={:.3} < floor={:.3}, declining",
                     best_conf, RETRIEVAL_CONFIDENCE_FLOOR);
@@ -2030,7 +2031,7 @@ impl LanguageService {
                 // Non-sentiment brains (chat/generative) have pre-validated training
                 // data — skip the hard-reject filter designed for sentiment garble.
                 if !sentiment_sanitize_primary
-                    && sentiment_brain
+                    && sentiment_shortcuts
                     && IndexedGenEnv::lattice_surface_hard_reject(&best_text)
                 {
                     infer_trace!(
@@ -2127,7 +2128,7 @@ impl LanguageService {
             .inference_harness
             .template_postprocess_flags(&resp.template_id)
             .skip_coherence_truncate
-            || !sentiment_brain;
+            || chat_passthrough;
         let resp = if let Some((_, ref bridged)) = encoded {
             if skip_coherence {
                 resp
@@ -2291,7 +2292,7 @@ impl LanguageService {
         // Skip for: broad query summaries, knowledge boundary declines, degradation,
         // and non-sentiment (chat/generative) brains where the relevance/coherence
         // metrics don't apply (cat monologue isn't "relevant" by document standards).
-        let resp = if !sentiment_brain {
+        let resp = if chat_passthrough {
             infer_trace!("  [metacog] SKIP: non-sentiment brain (chat/generative)");
             resp
         } else if is_decline {
@@ -2502,7 +2503,7 @@ impl LanguageService {
         // soup that matches hard_reject_substrings and replace with a routing-only
         // fallback from the sentiment lattice (or a generic decline).
         // Skip for non-sentiment brains whose training data is pre-validated.
-        let resp = if sentiment_brain
+        let resp = if sentiment_shortcuts
             && resp.template_id != "knowledge_boundary"
             && resp.template_id != "metacog_degradation"
             && resp.text.len() > 5
@@ -3728,7 +3729,34 @@ impl LanguageService {
         self.rebuild_metacognition();
         self.rebuild_reasoning();
         self.rebuild_schemas();
+        self.configure_novelty_from_profile();
         Ok(())
+    }
+
+    /// Rebuild transient structures from lattice programs after brain load:
+    /// schema templates and chunk codecs (neither is serialized).
+    fn configure_novelty_from_profile(&mut self) {
+        use crate::inference::plugins::lattice_shortcuts;
+        let profile = self.brain_package_header.as_ref()
+            .and_then(|h| h.inference_profile.as_deref());
+        let is_chat = lattice_shortcuts::chat_passthrough_generation(profile, self.active_dm());
+        let factor = if is_chat { 2.5 } else { 1.0 };
+        let dm = self.active_dm_mut();
+        for env in dm.group_gen_envs.values_mut() {
+            env.lattice.novelty_factor = factor;
+            for sub in &mut env.topic_subindex {
+                sub.lattice.novelty_factor = factor;
+            }
+        }
+        for env in dm.group_code_envs.values_mut() {
+            env.lattice.novelty_factor = factor;
+            for sub in &mut env.topic_subindex {
+                sub.lattice.novelty_factor = factor;
+            }
+        }
+        if is_chat && factor > 1.0 {
+            infer_trace!("  [novelty] chat brain detected; novelty_factor = {:.1}", factor);
+        }
     }
 
     /// Rebuild transient structures from lattice programs after brain load:

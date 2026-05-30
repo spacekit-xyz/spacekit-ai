@@ -19,7 +19,7 @@ use rayon::prelude::*;
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rand::rngs::StdRng;
-use clap::{Parser, Subcommand};
+use clap::{error::ErrorKind, Parser, Subcommand};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -439,7 +439,14 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let cli = CliRoot::try_parse_from(argv).map_err(|e| e.to_string())?;
+    let cli = match CliRoot::try_parse_from(argv) {
+        Ok(c) => c,
+        Err(e) if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) => {
+            print!("{e}");
+            return Ok(());
+        }
+        Err(e) => return Err(e.to_string()),
+    };
 
     if let Some(cmd) = &cli.command {
         match cmd {
@@ -519,6 +526,7 @@ where
     }
 
     if args.train_brain || args.validate_brain_training {
+        crate::entitlement::require_capability(crate::entitlement::CAP_TRAIN)?;
         println!("=============================================================");
         println!("  Growformer — Brain Training");
         println!("=============================================================\n");
@@ -551,6 +559,7 @@ where
             args.no_progress,
         ).map_err(|e| format!("Failed to train brain: {}", e))?;
     } else if let Some(group_idx) = args.retrain_gen {
+        crate::entitlement::require_capability(crate::entitlement::CAP_TRAIN)?;
         println!("=============================================================");
         println!("  Growformer — Retrain Gen Group {}", group_idx);
         println!("=============================================================\n");
@@ -567,6 +576,7 @@ where
             args.brain_plugins_toml.as_deref(),
         ).map_err(|e| format!("Retrain failed: {}", e))?;
     } else if args.merge_brain {
+        crate::entitlement::require_capability(crate::entitlement::CAP_MERGE)?;
         let overlay_path = args.overlay_brain.clone()
             .ok_or_else(|| "--merge-brain requires --overlay-brain <path>".to_string())?;
         let output = args.brain_output.clone().unwrap_or_else(|| "merged-brain.bin".to_string());
@@ -605,6 +615,7 @@ where
         );
         return Ok(());
     } else if args.repack {
+        crate::entitlement::require_capability(crate::entitlement::CAP_TRAIN)?;
         println!("=============================================================");
         println!("  Growformer — Repack Brain (embed inference TOML)");
         println!("=============================================================\n");
@@ -616,6 +627,7 @@ where
             args.brain_author.as_deref(),
         ).map_err(|e| format!("Repack failed: {}", e))?;
     } else if args.infer {
+        crate::entitlement::require_capability(crate::entitlement::CAP_INFER)?;
         let infer_mode = resolve_infer_mode(&args)?;
         run_inference(
             &brain_path,
