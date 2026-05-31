@@ -198,7 +198,6 @@ impl Runtime {
         self.svc.apply_loaded_generation_config();
     }
 
-    // TODO: petstate needs to be generalized petstate is too specific
     /// Set agent state from a JSON string. The state modulates the conversation
     /// context prefix injected before generation (arbitrary dimensions + profile).
     pub fn set_agent_state_from_json(&mut self, json_str: &str) -> Result<(), String> {
@@ -206,6 +205,19 @@ impl Runtime {
             .map_err(|e| format!("parse agent state JSON: {}", e))?;
         self.svc.agent_state = Some(state);
         Ok(())
+    }
+
+    /// Set (or clear with `None`) the retrocausal goal-attractor toward a target
+    /// retrieval topic's centroid. The reflective field pulls each turn's
+    /// conditioning toward this desired emotional landing. No-op unless the
+    /// reflective field is enabled; errors if the topic is unknown.
+    pub fn set_goal(&mut self, topic: Option<&str>, pull: f32) -> Result<(), String> {
+        self.svc.set_goal(topic, pull)
+    }
+
+    /// All retrieval topic names available as goal-attractor targets.
+    pub fn available_topics(&self) -> Vec<String> {
+        self.svc.available_topics()
     }
 
     /// Validate a generated response against the `[response_shaping]` rules.

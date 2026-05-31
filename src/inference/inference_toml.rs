@@ -145,6 +145,11 @@ pub struct GenerationConfig {
     /// Off by default so it is a clean A/B against base behavior.
     #[serde(default)]
     pub drive_field: bool,
+    /// Enable the reflective field: unified Identity ⊕ Activity ⊕ Drive composition
+    /// of the generation conditioning (one neuromodulator-coupled policy instead of
+    /// scattered blend constants). Off by default for a clean A/B.
+    #[serde(default)]
+    pub reflective_field: bool,
 }
 
 fn default_generation_temperature() -> f32 { 0.85 }
@@ -166,6 +171,7 @@ impl Default for GenerationConfig {
             enforce_min_tokens: true,
             stochastic_retrieval: default_stochastic_retrieval(),
             drive_field: false,
+            reflective_field: false,
         }
     }
 }

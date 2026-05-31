@@ -650,6 +650,9 @@ pub struct LanguageService {
     /// Modulation computed for the in-flight turn (set in `converse`, read by the
     /// generation conditioning step). `None` falls back to neutral defaults.
     pub active_drive_modulation: Option<crate::drive_field::FieldModulation>,
+    /// Unified present-state composition policy (Identity ⊕ Activity ⊕ Drive).
+    /// `None` until enabled via inference TOML (`[generation] reflective_field = true`).
+    pub reflective_field: Option<crate::reflective_field::ReflectiveField>,
 }
 
 /// P0-02: when true, skip System 2 deliberate cross-group reasoning for this turn.
@@ -745,6 +748,7 @@ impl LanguageService {
             agent_state: None,
             drive_field: None,
             active_drive_modulation: None,
+            reflective_field: None,
         })
     }
 
@@ -839,6 +843,96 @@ impl LanguageService {
         } else if let Some(f) = self.drive_field.as_mut() {
             f.enabled = false;
         }
+
+        if gen.reflective_field {
+            if self.reflective_field.is_none() {
+                infer_trace!("  [reflective-field] enabled; unified Identity⊕Activity⊕Drive composition");
+                self.reflective_field =
+                    Some(crate::reflective_field::ReflectiveField::new(true));
+            } else if let Some(f) = self.reflective_field.as_mut() {
+                f.enabled = true;
+            }
+        } else if let Some(f) = self.reflective_field.as_mut() {
+            f.enabled = false;
+        }
+    }
+
+    /// Unit conditioning centroid of a named retrieval topic, in `gen_conditioning`
+    /// space, averaged across every group that contains the topic. This is the
+    /// natural goal-attractor target: the topic's lattice programs were developed
+    /// from exactly these vectors, so pulling the present toward the centroid
+    /// raises that topic's program scores (it *aims*, rather than perturbs).
+    pub fn topic_centroid(&self, topic: &str) -> Option<Vec<f32>> {
+        let dm = self.active_dm();
+        let mut acc: Vec<f32> = Vec::new();
+        let mut matches = 0usize;
+        for env in dm.group_gen_envs.values() {
+            for sub in &env.topic_subindex {
+                if sub.topic_name.eq_ignore_ascii_case(topic) {
+                    if acc.is_empty() {
+                        acc = vec![0.0f32; sub.centroid.len()];
+                    }
+                    let n = acc.len().min(sub.centroid.len());
+                    for i in 0..n {
+                        acc[i] += sub.centroid[i];
+                    }
+                    matches += 1;
+                }
+            }
+        }
+        if matches == 0 {
+            return None;
+        }
+        let norm = acc.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 1e-6 {
+            for v in &mut acc {
+                *v /= norm;
+            }
+        }
+        acc.resize(crate::dimension::group_gen::GEN_COND_DIM, 0.0);
+        Some(acc)
+    }
+
+    /// All retrieval topic names available across groups (sorted, de-duplicated).
+    /// Useful for picking / validating a goal-attractor target affect.
+    pub fn available_topics(&self) -> Vec<String> {
+        let dm = self.active_dm();
+        let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for env in dm.group_gen_envs.values() {
+            for sub in &env.topic_subindex {
+                set.insert(sub.topic_name.clone());
+            }
+        }
+        set.into_iter().collect()
+    }
+
+    /// Set (or clear, with `None`) the retrocausal goal-attractor toward a target
+    /// retrieval topic's centroid (a desired "emotional landing"). Each turn the
+    /// composed present-state is pulled toward it by `pull ∈ [0,1]`. Requires the
+    /// reflective field to be enabled; returns an error if the topic is unknown
+    /// (so callers can pick a valid affect from [`Self::available_topics`]).
+    pub fn set_goal(&mut self, topic: Option<&str>, pull: f32) -> Result<(), String> {
+        if self.reflective_field.is_none() {
+            return Ok(());
+        }
+        let attractor = match topic {
+            Some(t) if !t.trim().is_empty() => {
+                let target = self.topic_centroid(t).ok_or_else(|| {
+                    format!(
+                        "goal topic '{}' not found; available: {}",
+                        t,
+                        self.available_topics().join(", ")
+                    )
+                })?;
+                infer_trace!("  [goal-attractor] set goal topic '{}' (pull={:.2})", t, pull);
+                Some(crate::reflective_field::GoalAttractor::new(target, pull, t.to_string()))
+            }
+            _ => None,
+        };
+        if let Some(f) = self.reflective_field.as_mut() {
+            f.set_attractor(attractor);
+        }
+        Ok(())
     }
 
     /// Run one homeostatic step for the in-flight turn and push the resulting
@@ -1284,6 +1378,20 @@ impl LanguageService {
         let conversation_turn_count = self.conversation.turn_count();
         let agent_state_snapshot = self.agent_state.clone();
         let drive_modulation_snapshot = self.active_drive_modulation;
+        // Reflective field (Identity ⊕ Activity ⊕ Drive) — snapshot the policy and
+        // the current neuromodulators so the composition step can run after the
+        // mutable borrow of the DimensionManager.
+        let reflective_field_snapshot = self
+            .reflective_field
+            .as_ref()
+            .filter(|f| f.enabled)
+            .cloned();
+        let drive_nm_snapshot = self
+            .drive_field
+            .as_ref()
+            .filter(|f| f.enabled)
+            .map(|f| f.state.map_neuromodulators());
+        let ocean_snapshot = self.personality.as_vec();
 
         let inference_profile_cached = self
             .brain_package_header
@@ -1734,47 +1842,72 @@ impl LanguageService {
                 c
             };
 
-            // Geometric conversation context: blend accumulated turn embeddings
-            // into the generation conditioning so retrieval is biased toward
-            // topic continuity. Only applies when conversation has history.
-            if !conv_ctx_snapshot.is_empty() {
-                let blend = if chat_passthrough && conversation_turn_count > 1 {
-                    0.28f32
-                } else {
-                    0.15f32
-                };
-                let dim = gen_conditioning.len().min(conv_ctx_snapshot.len());
-                for i in 0..dim {
-                    gen_conditioning[i] = (1.0 - blend) * gen_conditioning[i]
-                        + blend * conv_ctx_snapshot[i];
-                }
-            }
-
-            // Agent state conditioning: quantize runtime state dimensions into
-            // the tail of the conditioning vector so retrieval is biased toward
-            // state-appropriate responses (e.g. low-energy → sleepy programs).
-            if let Some(ref state) = agent_state_snapshot {
-                let dim = gen_conditioning.len();
-                if dim >= 16 && !state.dimensions.is_empty() {
-                    // Norepinephrine (urgency) pushes harder toward state-appropriate
-                    // programs: a starving agent leans into food responses.
-                    let state_blend = (0.20f32
-                        * drive_modulation_snapshot
-                            .map(|m| m.state_blend_scale)
-                            .unwrap_or(1.0))
-                    .clamp(0.0, 0.6);
-                    let slot_count = state.dimensions.len().min(16);
-                    let base_offset = dim - 16;
-                    for (i, (_, &val)) in state.dimensions.iter().enumerate().take(slot_count) {
-                        let idx = base_offset + i;
-                        let quantized = (val.clamp(0.0, 1.0) - 0.5) * 2.0;
-                        gen_conditioning[idx] = (1.0 - state_blend) * gen_conditioning[idx]
-                            + state_blend * quantized;
+            if let Some(ref reflective) = reflective_field_snapshot {
+                // Unified present-state composition: one coherent pass blends
+                // Identity (OCEAN) ⊕ Activity (conversation momentum) ⊕ Drive
+                // (runtime state), with the balance set by current neuromodulators.
+                let multi_turn = chat_passthrough && conversation_turn_count > 1;
+                let drive_vals: Vec<f32> = agent_state_snapshot
+                    .as_ref()
+                    .map(|s| s.dimensions.values().copied().collect())
+                    .unwrap_or_default();
+                let turn = agent_state_snapshot.as_ref().map(|s| s.turn).unwrap_or(0);
+                let applied = reflective.compose(
+                    &mut gen_conditioning,
+                    ocean_snapshot,
+                    &conv_ctx_snapshot,
+                    &drive_vals,
+                    drive_nm_snapshot,
+                    multi_turn,
+                    turn,
+                );
+                infer_trace!(
+                    "  [reflective-field] {}",
+                    crate::reflective_field::ReflectiveField::summary(&applied)
+                );
+            } else {
+                // Geometric conversation context: blend accumulated turn embeddings
+                // into the generation conditioning so retrieval is biased toward
+                // topic continuity. Only applies when conversation has history.
+                if !conv_ctx_snapshot.is_empty() {
+                    let blend = if chat_passthrough && conversation_turn_count > 1 {
+                        0.28f32
+                    } else {
+                        0.15f32
+                    };
+                    let dim = gen_conditioning.len().min(conv_ctx_snapshot.len());
+                    for i in 0..dim {
+                        gen_conditioning[i] = (1.0 - blend) * gen_conditioning[i]
+                            + blend * conv_ctx_snapshot[i];
                     }
-                    // Turn counter modulates the first state slot for variety across turns
-                    if state.turn > 0 {
-                        let turn_signal = ((state.turn as f32) * 0.1).sin() * 0.15;
-                        gen_conditioning[base_offset] += turn_signal;
+                }
+
+                // Agent state conditioning: quantize runtime state dimensions into
+                // the tail of the conditioning vector so retrieval is biased toward
+                // state-appropriate responses (e.g. low-energy → sleepy programs).
+                if let Some(ref state) = agent_state_snapshot {
+                    let dim = gen_conditioning.len();
+                    if dim >= 16 && !state.dimensions.is_empty() {
+                        // Norepinephrine (urgency) pushes harder toward state-appropriate
+                        // programs: a starving agent leans into food responses.
+                        let state_blend = (0.20f32
+                            * drive_modulation_snapshot
+                                .map(|m| m.state_blend_scale)
+                                .unwrap_or(1.0))
+                        .clamp(0.0, 0.6);
+                        let slot_count = state.dimensions.len().min(16);
+                        let base_offset = dim - 16;
+                        for (i, (_, &val)) in state.dimensions.iter().enumerate().take(slot_count) {
+                            let idx = base_offset + i;
+                            let quantized = (val.clamp(0.0, 1.0) - 0.5) * 2.0;
+                            gen_conditioning[idx] = (1.0 - state_blend) * gen_conditioning[idx]
+                                + state_blend * quantized;
+                        }
+                        // Turn counter modulates the first state slot for variety across turns
+                        if state.turn > 0 {
+                            let turn_signal = ((state.turn as f32) * 0.1).sin() * 0.15;
+                            gen_conditioning[base_offset] += turn_signal;
+                        }
                     }
                 }
             }

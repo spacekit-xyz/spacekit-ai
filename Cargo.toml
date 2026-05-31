@@ -54,6 +54,10 @@ required-features = ["categorical"]
 name = "drive_field_ab"
 path = "examples/drive_field_ab.rs"
 
+[[example]]
+name = "reflective_field_ab"
+path = "examples/reflective_field_ab.rs"
+
 [features]
 default = ["native", "server", "parallel", "cli"]
 native = ["reqwest"]
