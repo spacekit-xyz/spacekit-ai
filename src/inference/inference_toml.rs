@@ -141,6 +141,10 @@ pub struct GenerationConfig {
     /// Enable stochastic top-k retrieval (when true, temperature controls sampling).
     #[serde(default = "default_stochastic_retrieval")]
     pub stochastic_retrieval: bool,
+    /// Enable the homeostatic drive field: drives → neuromodulators → knob gains.
+    /// Off by default so it is a clean A/B against base behavior.
+    #[serde(default)]
+    pub drive_field: bool,
 }
 
 fn default_generation_temperature() -> f32 { 0.85 }
@@ -161,6 +165,7 @@ impl Default for GenerationConfig {
             stop_sequences: Vec::new(),
             enforce_min_tokens: true,
             stochastic_retrieval: default_stochastic_retrieval(),
+            drive_field: false,
         }
     }
 }
@@ -2298,6 +2303,35 @@ fn build_native_default() -> Arc<LoadedInferenceToml> {
         response_shaping: file.response_shaping,
         validation: file.validation,
     })
+}
+
+/// Replace the active native inference TOML from a provided string (parity with the
+/// wasm `reload_inference_toml_from_str`). Useful for hosts/tests that inject a TOML
+/// document directly instead of via `--inference-toml` discovery.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn reload_inference_toml_from_str(toml_str: &str) -> Result<(), String> {
+    let mut file: InferenceTomlDocument =
+        toml::from_str(toml_str).map_err(|e| format!("invalid inference TOML: {}", e))?;
+    let defaults = baseline_rules_section();
+    file.rules = file.rules.merge_empty_from(&defaults);
+    let rules_section = file.rules.clone();
+    let mut rules = InferenceRulesRuntime::from_section(file.rules);
+    let guardrails = crate::inference::inference_guardrails::merge_guardrails_into_runtime(
+        &mut rules.headline_lexical_topic,
+        &mut rules.lattice_misfire,
+    );
+    let loaded = Arc::new(LoadedInferenceToml {
+        thresholds: file.thresholds,
+        rules: Arc::new(rules),
+        rules_section,
+        guardrails,
+        generation: file.generation,
+        response_shaping: file.response_shaping,
+        validation: file.validation,
+    });
+    let mut guard = FULL.write().unwrap();
+    *guard = Some(loaded);
+    Ok(())
 }
 
 /// Rebuild the native inference TOML cache from disk paths (CLI / env / discovery).

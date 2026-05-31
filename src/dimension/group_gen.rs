@@ -42,6 +42,12 @@ pub const GEN_COND_DIM: usize = 192;
 /// Pet/chat conditioning is weaker than sentiment headlines; a floor of 0.10 discarded
 /// the entire hinted sub-lattice and fell back to global mealtime-dominant retrieval.
 pub const FORCED_TOPIC_SCORE_FLOOR: f32 = 0.02;
+/// Temperature multiplier applied to global retrieval when a query is out-of-distribution
+/// (no topic routed). Spreads softmax mass across nearby coherent programs so OOD prompts
+/// stop collapsing onto a single high-prior canned response.
+pub const OOD_EXPLORATION_FACTOR: f32 = 3.5;
+/// Candidate pool size for OOD exploration + anti-repeat candidate walking.
+pub const OOD_TOPK: usize = 8;
 /// Scale for world-graph `sentiment_bearing` nudge on the retrieval query vector (forced-topic Stage‑1 cosine).
 pub const WORLD_GROUND_SENTIMENT_BEARING_WEIGHT: f32 = 0.10;
 pub const MAX_TOKENS: usize = 128;
@@ -3287,6 +3293,21 @@ impl IndexedGenEnv {
         None
     }
 
+    /// Record a returned line in the recent-response ring (bounded) so subsequent
+    /// turns can avoid echoing it. Shared by the global and forced-topic paths.
+    fn record_recent_response(&mut self, text: &str) {
+        if text.len() <= 5 {
+            return;
+        }
+        if self.recent_responses.iter().any(|r| r == text) {
+            return;
+        }
+        self.recent_responses.push_back(text.to_string());
+        while self.recent_responses.len() > 4 {
+            self.recent_responses.pop_front();
+        }
+    }
+
     fn nearest_response(&self, cond: &[f32]) -> (String, usize, f32) {
         if self.stochastic_retrieval && self.retrieval_temperature > 0.01 {
             self.stochastic_nearest_response_in_lattice(
@@ -3295,6 +3316,140 @@ impl IndexedGenEnv {
         } else {
             self.nearest_response_in_lattice(&self.lattice, cond)
         }
+    }
+
+    /// Global-lattice retrieval for the generation path, with two anti-collapse
+    /// behaviors layered on top of `nearest_response`:
+    ///
+    /// 1. **OOD exploration.** When the query is out-of-distribution (`topic_miss`,
+    ///    i.e. no topic routed), the single nearest "prior" program tends to
+    ///    dominate the score so heavily that softmax sampling collapses onto it
+    ///    for *every* OOD prompt. We raise the effective temperature so retrieval
+    ///    spreads across the nearby coherent programs instead of always returning
+    ///    the same canned line.
+    /// 2. **Anti-repeat.** We walk the sampled candidate order and skip any line
+    ///    already in the recent-response ring (when a fresh coherent alternative
+    ///    exists), so asking the same OOD prompt twice does not echo verbatim.
+    ///
+    /// Falls back to plain `nearest_response` when stochastic retrieval is off.
+    fn nearest_response_explore(&mut self, cond: &[f32], topic_miss: bool) -> (String, usize, f32) {
+        // In-domain queries keep the exact original behavior — only out-of-distribution
+        // (topic-miss) queries get the wider, anti-repeat candidate walk. This protects
+        // the well-routed paths from any retrieval drift.
+        if !topic_miss || !(self.stochastic_retrieval && self.retrieval_temperature > 0.01) {
+            return self.nearest_response(cond);
+        }
+        let temp =
+            (self.retrieval_temperature * OOD_EXPLORATION_FACTOR).max(self.retrieval_temperature);
+        let ordered = self.stochastic_ordered_candidates(&self.lattice, cond, temp, OOD_TOPK);
+        if ordered.is_empty() {
+            return self.nearest_response(cond);
+        }
+        let recent: Vec<String> = self.recent_responses.iter().cloned().collect();
+        let mut fallback: Option<(String, usize, f32)> = None;
+        for (idx, text, score) in ordered {
+            if text.len() <= 5 || Self::looks_fragmented(&text) {
+                continue;
+            }
+            if fallback.is_none() {
+                fallback = Some((text.clone(), idx, score));
+            }
+            if !recent.iter().any(|r| r == &text) {
+                return (text, idx, score);
+            }
+        }
+        fallback.unwrap_or_else(|| self.nearest_response(cond))
+    }
+
+    /// Score all programs (refractory-biased), take the top-k, sample a primary by
+    /// temperature-weighted softmax, and return `[primary, …rest by score]` as
+    /// `(idx, text, score)`. Shared core for OOD exploration + anti-repeat.
+    fn stochastic_ordered_candidates(
+        &self,
+        lattice: &InfraciliaryLattice,
+        cond: &[f32],
+        temperature: f32,
+        k: usize,
+    ) -> Vec<(usize, String, f32)> {
+        if lattice.programs.is_empty() {
+            return Vec::new();
+        }
+        let input_mv = embed_bridge_vector(cond);
+        let input_spatial = spatial_fingerprint(&input_mv);
+        let input_causal = causal_fingerprint(&input_mv);
+
+        let mut scored: Vec<(usize, f32)> = lattice.programs.iter().enumerate()
+            .map(|(i, prog)| {
+                let effective = lattice.effective_centroid(i);
+                let centroid = if effective.is_empty() { &prog.ema_centroid } else { &effective };
+                let cosine = gen_cosine_sim(cond, centroid);
+                let prog_mv = embed_bridge_vector(centroid);
+                let prog_spatial = spatial_fingerprint(&prog_mv);
+                let prog_causal = causal_fingerprint(&prog_mv);
+                let sp_dot: f32 = input_spatial.iter().zip(prog_spatial.iter()).map(|(a, b)| a * b).sum();
+                let sp_na: f32 = input_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let sp_nb: f32 = prog_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let spatial_align = if sp_na < 1e-8 || sp_nb < 1e-8 { 0.0 }
+                    else { (sp_dot / (sp_na * sp_nb)).clamp(-1.0, 1.0) };
+                let ca_dot: f32 = input_causal.iter().zip(prog_causal.iter()).map(|(a, b)| a * b).sum();
+                let ca_na: f32 = input_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let ca_nb: f32 = prog_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let causal_align = if ca_na < 1e-8 || ca_nb < 1e-8 { 0.0 }
+                    else { (ca_dot / (ca_na * ca_nb)).clamp(-1.0, 1.0) };
+                let disp_norm_sq: f32 = cond.iter().zip(centroid.iter())
+                    .map(|(a, b)| (a - b) * (a - b)).sum();
+                let proximity = if disp_norm_sq < 1e-8 { 1.0 }
+                    else { (1.0 / disp_norm_sq).min(100.0).sqrt() / 10.0 };
+                let base_score = 0.30 * cosine.max(0.0)
+                    + 0.35 * (spatial_align + 1.0) / 2.0
+                    + 0.20 * (causal_align + 1.0) / 2.0
+                    + 0.15 * proximity;
+                (i, base_score * lattice.retrieval_bias(i))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let top: Vec<(usize, f32)> = scored.iter().take(k).copied().collect();
+        if top.is_empty() {
+            return Vec::new();
+        }
+
+        let effective_temp = temperature.max(0.01);
+        let max_score = top[0].1;
+        let weights: Vec<f32> = top.iter().map(|(_, s)| ((s - max_score) / effective_temp).exp()).collect();
+        let sum: f32 = weights.iter().sum();
+        let probs: Vec<f32> = weights.iter().map(|w| w / sum.max(1e-8)).collect();
+
+        let seed: u64 = cond.iter().enumerate()
+            .fold(0x517cc1b727220a95u64, |acc, (i, &v)| {
+                acc.wrapping_mul(6364136223846793005)
+                    .wrapping_add(((v * 1000.0) as u64).wrapping_add(i as u64))
+            });
+        let call_mix: u64 = lattice.programs.iter().map(|p| p.total_retrievals).sum();
+        let mixed_seed = seed
+            .wrapping_add(call_mix.wrapping_mul(0x9E3779B97F4A7C15))
+            .wrapping_add(self.session_call_counter.wrapping_mul(0x6C62272E07BB0142));
+        let uniform = ((mixed_seed >> 11) as f64) / ((1u64 << 53) as f64);
+
+        let mut cumulative = 0.0f64;
+        let mut primary = 0usize;
+        for (i, &p) in probs.iter().enumerate() {
+            cumulative += p as f64;
+            if uniform < cumulative {
+                primary = i;
+                break;
+            }
+        }
+
+        let primary_idx = top[primary].0;
+        let mut order: Vec<(usize, f32)> = vec![top[primary]];
+        for &(idx, s) in &top {
+            if idx != primary_idx {
+                order.push((idx, s));
+            }
+        }
+        order.into_iter()
+            .map(|(idx, s)| (idx, lattice.programs[idx].display_text(&self.dictionary), s.max(0.0)))
+            .collect()
     }
 
     /// Return top-K programs from a lattice, scored by equivariant STA similarity.
@@ -4435,6 +4590,19 @@ impl IndexedGenEnv {
         // Signal 4: a sentence that is a single function word (e.g. "The." / "To.").
         // Valid terse pet lines are single CONTENT words ("Trill.", "Twice."), never
         // a bare article/copula/preposition standing alone as a sentence.
+        //
+        // Signal 5: a sentence ending in a DANGLING determiner / preposition /
+        // conjunction ("...mrrp my.", "dig a..."). These function words require a
+        // following noun/clause, so ending on them is always a broken fragment.
+        // No valid Luna line ends this way (they end on content words or vocal tags).
+        // Conservative set: determiners, possessives, coordinating conjunctions, and
+        // prepositions that essentially never end an English clause. Deliberately
+        // EXCLUDES particle-prepositions ("on", "in", "by", "up", "out", "over") that
+        // legitimately end sentences ("go on", "come in", "stop by") to avoid false rejects.
+        const DANGLING: &[&str] = &[
+            "a", "an", "the", "my", "your", "our", "their", "his", "her", "its",
+            "and", "or", "but", "nor", "of", "with", "from", "into", "onto", "than",
+        ];
         for sentence in t.split(|c| c == '.' || c == '!' || c == '?') {
             let toks: Vec<&str> = sentence
                 .split(|c: char| !c.is_ascii_alphanumeric())
@@ -4442,6 +4610,11 @@ impl IndexedGenEnv {
                 .collect();
             if toks.len() == 1 && FUNC.contains(&toks[0]) {
                 return true;
+            }
+            if let Some(last) = toks.last() {
+                if toks.len() >= 2 && DANGLING.contains(last) {
+                    return true;
+                }
             }
         }
         false
@@ -4797,7 +4970,10 @@ impl IndexedGenEnv {
             self.retrieval_temperature = _temperature;
         }
         self.session_call_counter = self.session_call_counter.wrapping_add(1);
-        let (global_text, prog_idx, global_conf) = self.nearest_response(cond);
+        // OOD/topic-miss queries explore a wider candidate set and avoid recently
+        // returned lines, so out-of-training prompts stop collapsing to one canned answer.
+        let (global_text, prog_idx, global_conf) =
+            self.nearest_response_explore(cond, topic_hint.is_none());
         let global_text_backup = global_text.clone();
 
         // When a specific operation topic is provided (e.g., "subtraction_operation"),
@@ -4952,6 +5128,9 @@ impl IndexedGenEnv {
             self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
             self.last_generation_confidence = lattice_conf;
             self.lattice.on_retrieval(prog_idx, cond);
+            if topic_selected.is_none() {
+                self.record_recent_response(&text);
+            }
             return (text, lattice_conf);
         }
 
@@ -4961,6 +5140,9 @@ impl IndexedGenEnv {
         // Mark nearest program as accessed regardless of which generation path fires,
         // so refractory suppression always engages for repeated queries.
         self.lattice.on_retrieval(prog_idx, cond);
+        if topic_selected.is_none() {
+            self.record_recent_response(&text);
+        }
         if lattice_conf >= 0.55 || field_inhibited {
             if let Some(ref cb) = self.codebook {
                 if cb.has_prototypes() {
@@ -5169,7 +5351,8 @@ impl IndexedGenEnv {
         _temperature: f32,
     ) -> (String, f32) {
         self.session_call_counter = self.session_call_counter.wrapping_add(1);
-        let (global_text, prog_idx, global_conf) = self.nearest_response(cond);
+        let (global_text, prog_idx, global_conf) =
+            self.nearest_response_explore(cond, topic_hint.is_none());
 
         let forced = topic_hint.and_then(|h| self.forced_topic_response(cond, h));
         let forced_active = forced.is_some();
@@ -5366,6 +5549,28 @@ mod tests {
     use super::*;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
+
+    #[test]
+    fn looks_fragmented_catches_dangling_endings() {
+        // Garble class the coherence gate must reject (cloze word-salad).
+        assert!(IndexedGenEnv::looks_fragmented("My claws is polite mrrp my."));
+        assert!(IndexedGenEnv::looks_fragmented("I kick. dig a. I kick the flag."));
+        assert!(IndexedGenEnv::looks_fragmented("I do is the and warm."));
+    }
+
+    #[test]
+    fn looks_fragmented_passes_valid_lines() {
+        // Grammatical lines (incl. particle-preposition endings) must NOT be rejected.
+        assert!(!IndexedGenEnv::looks_fragmented("Go on."));
+        assert!(!IndexedGenEnv::looks_fragmented("I trust you."));
+        assert!(!IndexedGenEnv::looks_fragmented("Come in. Stop by."));
+        assert!(!IndexedGenEnv::looks_fragmented(
+            "I flick both ears forward and trot over. Trill."
+        ));
+        assert!(!IndexedGenEnv::looks_fragmented(
+            "The bowl is empty and has been empty for ages. I sit next to it. Mrrp."
+        ));
+    }
 
     fn test_dict() -> TokenDictionary {
         TokenDictionary::build(

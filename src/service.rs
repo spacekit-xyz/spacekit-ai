@@ -644,6 +644,12 @@ pub struct LanguageService {
     /// Runtime agent state: arbitrary dimensions (hunger, energy, mood, etc.)
     /// injected into generation conditioning for state-aware response selection.
     pub agent_state: Option<AgentRuntimeState>,
+    /// Homeostatic drive field: maps drives → neuromodulators → knob gains.
+    /// `None` until enabled via inference TOML (`[generation] drive_field = true`).
+    pub drive_field: Option<crate::drive_field::DriveField>,
+    /// Modulation computed for the in-flight turn (set in `converse`, read by the
+    /// generation conditioning step). `None` falls back to neutral defaults.
+    pub active_drive_modulation: Option<crate::drive_field::FieldModulation>,
 }
 
 /// P0-02: when true, skip System 2 deliberate cross-group reasoning for this turn.
@@ -737,6 +743,8 @@ impl LanguageService {
             #[cfg(feature = "categorical")]
             categorical_composer: None,
             agent_state: None,
+            drive_field: None,
+            active_drive_modulation: None,
         })
     }
 
@@ -810,6 +818,82 @@ impl LanguageService {
         let gen = loaded.generation_config();
         if gen.stochastic_retrieval {
             self.enable_stochastic_retrieval(gen.temperature);
+        }
+        if gen.drive_field {
+            if self.drive_field.is_none() {
+                let state = self.drive_state_from_agent_state();
+                let base_novelty = self.active_dm().group_gen_envs.values()
+                    .map(|e| e.lattice.novelty_factor)
+                    .fold(0.0f32, f32::max)
+                    .max(1.0);
+                let field = crate::drive_field::DriveField::new(state, true)
+                    .with_bases(gen.temperature, base_novelty);
+                infer_trace!(
+                    "  [drive-field] enabled; initial state {:?} base_temp={:.2} base_novelty={:.1}",
+                    field.state, field.base_temperature, field.base_novelty
+                );
+                self.drive_field = Some(field);
+            } else if let Some(f) = self.drive_field.as_mut() {
+                f.enabled = true;
+            }
+        } else if let Some(f) = self.drive_field.as_mut() {
+            f.enabled = false;
+        }
+    }
+
+    /// Run one homeostatic step for the in-flight turn and push the resulting
+    /// neuromodulator gains onto the live generation knobs. No-op when the drive
+    /// field is disabled, leaving behavior identical to the base system.
+    fn apply_drive_field_turn(&mut self, user_text: &str) {
+        let minutes_idle = self.agent_state.as_ref().map(|s| s.minutes_idle).unwrap_or(0.0);
+        let (modulation, temperature, novelty) = match self.drive_field.as_mut() {
+            Some(f) if f.enabled => {
+                // The incoming message can relax a drive (food, petting, rest) before
+                // we respond, then time advances the remaining deficits.
+                let satisfied = f.state.satisfy(user_text);
+                f.state.tick(minutes_idle);
+                let m = f.modulation();
+                let nm = f.state.map_neuromodulators();
+                infer_trace!(
+                    "  [drive-field] state {:?} | {} | satisfied={:?} | temp×{:.2} nov×{:.2} decay={:.2} state-blend×{:.2}",
+                    f.state, nm.summary(), satisfied,
+                    m.temperature_scale, m.novelty_scale, m.context_decay, m.state_blend_scale
+                );
+                (m, f.temperature(), f.novelty())
+            }
+            _ => return,
+        };
+
+        self.active_drive_modulation = Some(modulation);
+        self.conversation.context_decay = modulation.context_decay;
+
+        let dm = self.active_dm_mut();
+        for env in dm.group_gen_envs.values_mut() {
+            if env.stochastic_retrieval {
+                env.retrieval_temperature = temperature;
+            }
+            env.lattice.novelty_factor = novelty;
+            for sub in &mut env.topic_subindex {
+                sub.lattice.novelty_factor = novelty;
+            }
+        }
+    }
+
+    /// Seed a [`DriveState`] from the current `agent_state` dimensions (hunger/energy/
+    /// social), falling back to mild defaults derived from idle time.
+    fn drive_state_from_agent_state(&self) -> crate::drive_field::DriveState {
+        use crate::drive_field::DriveState;
+        match &self.agent_state {
+            Some(st) => {
+                let get = |k: &str| st.dimensions.get(k).copied();
+                DriveState::from_dimensions(
+                    get("hunger"),
+                    get("energy"),
+                    get("social").or_else(|| get("mood")),
+                    st.minutes_idle,
+                )
+            }
+            None => DriveState::default(),
         }
     }
 
@@ -1199,6 +1283,7 @@ impl LanguageService {
         let conv_ctx_snapshot = self.conversation.context_embedding.clone();
         let conversation_turn_count = self.conversation.turn_count();
         let agent_state_snapshot = self.agent_state.clone();
+        let drive_modulation_snapshot = self.active_drive_modulation;
 
         let inference_profile_cached = self
             .brain_package_header
@@ -1671,7 +1756,13 @@ impl LanguageService {
             if let Some(ref state) = agent_state_snapshot {
                 let dim = gen_conditioning.len();
                 if dim >= 16 && !state.dimensions.is_empty() {
-                    let state_blend = 0.20f32;
+                    // Norepinephrine (urgency) pushes harder toward state-appropriate
+                    // programs: a starving agent leans into food responses.
+                    let state_blend = (0.20f32
+                        * drive_modulation_snapshot
+                            .map(|m| m.state_blend_scale)
+                            .unwrap_or(1.0))
+                    .clamp(0.0, 0.6);
                     let slot_count = state.dimensions.len().min(16);
                     let base_offset = dim - 16;
                     for (i, (_, &val)) in state.dimensions.iter().enumerate().take(slot_count) {
@@ -2639,6 +2730,10 @@ impl LanguageService {
 
         self.conversation.push_user(user_text);
 
+        // Homeostatic drive field: relax/advance drives for this turn and push the
+        // resulting neuromodulator gains onto the live generation knobs.
+        self.apply_drive_field_turn(user_text);
+
         // Continuum: decay activation levels between conversation turns
         {
             let dm = self.active_dm_mut();
@@ -2853,6 +2948,15 @@ impl LanguageService {
         }
         for env in dm.group_code_envs.values_mut() {
             env.begin_session();
+        }
+
+        // Re-seed the homeostatic drive state for the new session.
+        self.active_drive_modulation = None;
+        if self.drive_field.is_some() {
+            let fresh = self.drive_state_from_agent_state();
+            if let Some(f) = self.drive_field.as_mut() {
+                f.state = fresh;
+            }
         }
     }
 

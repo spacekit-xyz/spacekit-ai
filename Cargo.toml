@@ -50,6 +50,10 @@ name = "categorical_sentiment_train"
 path = "examples/categorical_sentiment_train.rs"
 required-features = ["categorical"]
 
+[[example]]
+name = "drive_field_ab"
+path = "examples/drive_field_ab.rs"
+
 [features]
 default = ["native", "server", "parallel", "cli"]
 native = ["reqwest"]
