@@ -150,6 +150,11 @@ pub struct GenerationConfig {
     /// scattered blend constants). Off by default for a clean A/B.
     #[serde(default)]
     pub reflective_field: bool,
+    /// Enable the synthetic basal ganglia: value-weighted, neuromodulator-gated
+    /// action selection over retrieval candidates (consolidates the coherence /
+    /// anti-repeat / exploration heuristics). Off by default for a clean A/B.
+    #[serde(default)]
+    pub basal_ganglia: bool,
 }
 
 fn default_generation_temperature() -> f32 { 0.85 }
@@ -172,6 +177,7 @@ impl Default for GenerationConfig {
             stochastic_retrieval: default_stochastic_retrieval(),
             drive_field: false,
             reflective_field: false,
+            basal_ganglia: false,
         }
     }
 }

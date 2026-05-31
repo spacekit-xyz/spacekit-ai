@@ -58,6 +58,10 @@ path = "examples/drive_field_ab.rs"
 name = "reflective_field_ab"
 path = "examples/reflective_field_ab.rs"
 
+[[example]]
+name = "basal_ganglia_ab"
+path = "examples/basal_ganglia_ab.rs"
+
 [features]
 default = ["native", "server", "parallel", "cli"]
 native = ["reqwest"]

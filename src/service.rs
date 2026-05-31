@@ -653,6 +653,10 @@ pub struct LanguageService {
     /// Unified present-state composition policy (Identity ⊕ Activity ⊕ Drive).
     /// `None` until enabled via inference TOML (`[generation] reflective_field = true`).
     pub reflective_field: Option<crate::reflective_field::ReflectiveField>,
+    /// Synthetic basal ganglia action-selection policy. `None` until enabled via
+    /// inference TOML (`[generation] basal_ganglia = true`). Holds weights + the
+    /// enabled flag; per-turn context is filled in and pushed onto gen envs.
+    pub basal_ganglia: Option<crate::basal_ganglia::BasalGanglia>,
 }
 
 /// P0-02: when true, skip System 2 deliberate cross-group reasoning for this turn.
@@ -749,6 +753,7 @@ impl LanguageService {
             drive_field: None,
             active_drive_modulation: None,
             reflective_field: None,
+            basal_ganglia: None,
         })
     }
 
@@ -854,6 +859,17 @@ impl LanguageService {
             }
         } else if let Some(f) = self.reflective_field.as_mut() {
             f.enabled = false;
+        }
+
+        if gen.basal_ganglia {
+            if self.basal_ganglia.is_none() {
+                infer_trace!("  [basal-ganglia] enabled; value-weighted action selection");
+                self.basal_ganglia = Some(crate::basal_ganglia::BasalGanglia::new(true));
+            } else if let Some(b) = self.basal_ganglia.as_mut() {
+                b.enabled = true;
+            }
+        } else if let Some(b) = self.basal_ganglia.as_mut() {
+            b.enabled = false;
         }
     }
 
@@ -1392,6 +1408,23 @@ impl LanguageService {
             .filter(|f| f.enabled)
             .map(|f| f.state.map_neuromodulators());
         let ocean_snapshot = self.personality.as_vec();
+        // Basal ganglia: snapshot the policy and build this turn's action context
+        // (neuromodulators + identity + inferred user affect) so the selector can
+        // be pushed onto the gen envs before the mutable DimensionManager borrow.
+        let basal_ganglia_snapshot = self
+            .basal_ganglia
+            .as_ref()
+            .filter(|b| b.enabled)
+            .map(|b| {
+                let mut bg = b.clone();
+                bg.ctx = crate::basal_ganglia::ActionContext {
+                    neuromods: drive_nm_snapshot,
+                    user_affect: crate::basal_ganglia::UserAffect::from_prompt(intent_text),
+                    ocean: ocean_snapshot,
+                    target_chars: 160,
+                };
+                bg
+            });
 
         let inference_profile_cached = self
             .brain_package_header
@@ -1936,6 +1969,7 @@ impl LanguageService {
                 env.subject_keywords = subject_kw.clone();
                 env.retrieval_intent_text = intent_text.to_string();
                 env.intent_action = intent_act.clone();
+                env.basal_ganglia = basal_ganglia_snapshot.clone();
             }
 
             // --- Broad query detection: summarize across topic sub-lattices ---

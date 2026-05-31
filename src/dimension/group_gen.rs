@@ -2484,6 +2484,11 @@ pub struct IndexedGenEnv {
     /// time) — the selector skips a recent line when a viable alternative exists.
     #[serde(skip)]
     pub recent_responses: std::collections::VecDeque<String>,
+    /// Transient: synthetic basal ganglia for value-weighted action selection over
+    /// retrieval candidates. Set per-turn by the service when enabled; `None`
+    /// leaves the original selection heuristics in place (clean A/B).
+    #[serde(skip)]
+    pub basal_ganglia: Option<crate::basal_ganglia::BasalGanglia>,
     pub frozen: bool,
     pub output_dim: usize,
 }
@@ -2510,6 +2515,7 @@ impl IndexedGenEnv {
             stochastic_retrieval: false,
             session_call_counter: 0,
             recent_responses: std::collections::VecDeque::new(),
+            basal_ganglia: None,
             frozen: true,
             output_dim,
         }
@@ -2647,6 +2653,7 @@ impl IndexedGenEnv {
             stochastic_retrieval: false,
             session_call_counter: 0,
             recent_responses: std::collections::VecDeque::new(),
+            basal_ganglia: None,
             frozen: false,
             output_dim,
         }
@@ -2683,6 +2690,7 @@ impl IndexedGenEnv {
             stochastic_retrieval: false,
             session_call_counter: 0,
             recent_responses: std::collections::VecDeque::new(),
+            basal_ganglia: None,
             frozen: false,
             output_dim,
         }
@@ -2725,6 +2733,7 @@ impl IndexedGenEnv {
             stochastic_retrieval: false,
             session_call_counter: 0,
             recent_responses: std::collections::VecDeque::new(),
+            basal_ganglia: None,
             frozen: false,
             output_dim,
         };
@@ -3346,6 +3355,39 @@ impl IndexedGenEnv {
             return self.nearest_response(cond);
         }
         let recent: Vec<String> = self.recent_responses.iter().cloned().collect();
+
+        // Synthetic basal ganglia: value-weighted action selection over the
+        // candidate set. Subsumes the coherence/anti-repeat skip-walk with a
+        // neuromodulator-gated value function when enabled.
+        if let Some(bg) = self.basal_ganglia.as_ref().filter(|b| b.enabled) {
+            let cands: Vec<crate::basal_ganglia::Candidate> = ordered
+                .iter()
+                .filter(|(_, text, _)| text.len() > 5)
+                .map(|(idx, text, score)| crate::basal_ganglia::Candidate {
+                    idx: *idx,
+                    text: text.clone(),
+                    retrieval_score: *score,
+                })
+                .collect();
+            if !cands.is_empty() {
+                let seed = self
+                    .session_call_counter
+                    .wrapping_mul(0x9E3779B97F4A7C15)
+                    .wrapping_add(cands.len() as u64);
+                if let Some(pos) = bg.select(&cands, &recent, seed) {
+                    let c = &cands[pos];
+                    crate::infer_trace!(
+                        "  [basal-ganglia] selected cand {}/{} (score={:.3}): \"{}…\"",
+                        pos,
+                        cands.len(),
+                        c.retrieval_score,
+                        c.text.chars().take(40).collect::<String>()
+                    );
+                    return (c.text.clone(), c.idx, c.retrieval_score);
+                }
+            }
+        }
+
         let mut fallback: Option<(String, usize, f32)> = None;
         for (idx, text, score) in ordered {
             if text.len() <= 5 || Self::looks_fragmented(&text) {
@@ -4110,7 +4152,46 @@ impl IndexedGenEnv {
                     );
                 }
 
-                let try_order = self.stochastic_selection_order(&topic.lattice, &scored, 4);
+                let mut try_order = self.stochastic_selection_order(&topic.lattice, &scored, 4);
+
+                // Synthetic basal ganglia: value-weighted action selection over the
+                // top candidates. It only *reorders* try_order (moving its pick to
+                // the front), so the existing coherence / anti-repeat / hard-reject
+                // safety checks below still gate the final choice.
+                if let Some(bg) = self.basal_ganglia.as_ref().filter(|b| b.enabled) {
+                    let cands: Vec<crate::basal_ganglia::Candidate> = try_order
+                        .iter()
+                        .filter_map(|&idx| {
+                            let score = scored
+                                .iter()
+                                .find(|(i, _)| *i == idx)
+                                .map(|(_, s)| *s)
+                                .unwrap_or(0.0);
+                            let text = topic.lattice.programs[idx].display_text(&self.dictionary);
+                            (text.len() > 5).then_some(crate::basal_ganglia::Candidate {
+                                idx,
+                                text,
+                                retrieval_score: score,
+                            })
+                        })
+                        .collect();
+                    if !cands.is_empty() {
+                        let seed = self
+                            .session_call_counter
+                            .wrapping_mul(0x9E3779B97F4A7C15)
+                            .wrapping_add(forced_topic.len() as u64);
+                        if let Some(pos) = bg.select(&cands, &recent_snapshot, seed) {
+                            let chosen = cands[pos].idx;
+                            try_order.retain(|&i| i != chosen);
+                            try_order.insert(0, chosen);
+                            crate::infer_trace!(
+                                "    [basal-ganglia] forced-topic '{}' prefers prog {}",
+                                forced_topic,
+                                chosen
+                            );
+                        }
+                    }
+                }
 
                 // When a language hint is provided, try to find a program matching that language
                 if let Some(lang) = lang_hint {

@@ -43,6 +43,7 @@ pub mod gradient_memory;
 pub mod predictive_coder;
 pub mod drive_field;
 pub mod reflective_field;
+pub mod basal_ganglia;
 pub mod dimension;
 pub mod growformer_lang;
 pub mod text_keywords;
