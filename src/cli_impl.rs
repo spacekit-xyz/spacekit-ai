@@ -1066,6 +1066,8 @@ fn run_inference(
         InferMode::Single(prompt_text) => run_single_prompt(&mut rt, &prompt_text, false),
         InferMode::Batch(prompts) => {
             let trace = crate::infer_log::infer_trace_enabled();
+            // Reset generation diagnostics so the summary reflects only this run.
+            crate::dimension::group_gen::gen_stats::reset();
             for (i, prompt_text) in prompts.iter().enumerate() {
                 if trace {
                     println!("\n--- prompt {} / {} ---", i + 1, prompts.len());
@@ -1074,6 +1076,18 @@ fn run_inference(
                     println!("\n[{}] {}", i + 1, prompt_text);
                 }
                 run_single_prompt(&mut rt, prompt_text, true);
+            }
+            // Report how much of the batch was canned (verbatim nearest-neighbour)
+            // versus genuinely composed — the quantitative "canned response" signal.
+            let snap = crate::dimension::group_gen::gen_stats::snapshot();
+            if snap.total > 0 {
+                println!(
+                    "\n[gen-stats] continuous-gen attempts={} composed={} verbatim_fallbacks={} fallback_rate={:.1}%",
+                    snap.total,
+                    snap.composed,
+                    snap.verbatim_fallbacks,
+                    snap.fallback_rate() * 100.0,
+                );
             }
         }
     }
