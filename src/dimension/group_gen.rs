@@ -54,6 +54,159 @@ pub const MAX_TOKENS: usize = 128;
 pub const GEN_HIDDEN: usize = 256;
 pub const GEN_K: usize = 64;
 
+/// Diagnostics for the continuous-generation path.
+///
+/// These process-global counters let us confirm *how often* generation falls
+/// back to emitting a verbatim nearest-neighbour training response versus
+/// actually composing a novel trajectory. A high verbatim-fallback rate is the
+/// signature of "canned" output. Plus a conditioning-collapse metric: if the
+/// conditioning vectors for distinct prompts are near-parallel, retrieval keeps
+/// landing on the same program and output is canned regardless of the algebra.
+pub mod gen_stats {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TOTAL_GENERATIONS: AtomicU64 = AtomicU64::new(0);
+    static VERBATIM_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+    static COMPOSED_OUTPUTS: AtomicU64 = AtomicU64::new(0);
+
+    /// Record an attempt to generate via the continuous composition path.
+    pub fn record_generation_attempt() {
+        TOTAL_GENERATIONS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record that generation fell back to a verbatim nearest-neighbour program.
+    pub fn record_verbatim_fallback() {
+        VERBATIM_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record that generation returned a genuinely composed (blended) trajectory.
+    pub fn record_composed_output() {
+        COMPOSED_OUTPUTS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Immutable snapshot of the generation counters.
+    #[derive(Debug, Clone, Copy)]
+    pub struct GenStatsSnapshot {
+        pub total: u64,
+        pub verbatim_fallbacks: u64,
+        pub composed: u64,
+    }
+
+    impl GenStatsSnapshot {
+        /// Fraction of attempts that produced verbatim canned output (0.0..=1.0).
+        pub fn fallback_rate(&self) -> f32 {
+            if self.total == 0 {
+                0.0
+            } else {
+                self.verbatim_fallbacks as f32 / self.total as f32
+            }
+        }
+    }
+
+    /// Read the current counters.
+    pub fn snapshot() -> GenStatsSnapshot {
+        GenStatsSnapshot {
+            total: TOTAL_GENERATIONS.load(Ordering::Relaxed),
+            verbatim_fallbacks: VERBATIM_FALLBACKS.load(Ordering::Relaxed),
+            composed: COMPOSED_OUTPUTS.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Reset all counters (useful between evaluation runs).
+    pub fn reset() {
+        TOTAL_GENERATIONS.store(0, Ordering::Relaxed);
+        VERBATIM_FALLBACKS.store(0, Ordering::Relaxed);
+        COMPOSED_OUTPUTS.store(0, Ordering::Relaxed);
+    }
+
+    /// Summary of how collapsed a set of conditioning vectors is.
+    #[derive(Debug, Clone, Copy)]
+    pub struct CollapseStats {
+        pub n: usize,
+        pub mean_pairwise_cosine: f32,
+        pub max_pairwise_cosine: f32,
+    }
+
+    /// Measure conditioning collapse across a set of prompt conditioning vectors.
+    ///
+    /// Returns mean and max absolute pairwise cosine similarity. Values near 1.0
+    /// mean the conditioning carries little prompt-specific signal — distinct
+    /// prompts map to near-identical vectors — so retrieval lands on the same
+    /// program and generation is effectively canned.
+    pub fn conditioning_collapse(conds: &[Vec<f32>]) -> CollapseStats {
+        let n = conds.len();
+        if n < 2 {
+            return CollapseStats { n, mean_pairwise_cosine: 0.0, max_pairwise_cosine: 0.0 };
+        }
+        let norms: Vec<f32> = conds
+            .iter()
+            .map(|c| c.iter().map(|x| x * x).sum::<f32>().sqrt())
+            .collect();
+        let mut sum = 0.0f64;
+        let mut max = 0.0f32;
+        let mut pairs = 0u64;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let (na, nb) = (norms[i], norms[j]);
+                if na < 1e-12 || nb < 1e-12 {
+                    pairs += 1;
+                    continue;
+                }
+                let dot: f32 = conds[i]
+                    .iter()
+                    .zip(conds[j].iter())
+                    .map(|(a, b)| a * b)
+                    .sum();
+                let cos = (dot / (na * nb)).abs();
+                sum += cos as f64;
+                if cos > max {
+                    max = cos;
+                }
+                pairs += 1;
+            }
+        }
+        CollapseStats {
+            n,
+            mean_pairwise_cosine: if pairs == 0 { 0.0 } else { (sum / pairs as f64) as f32 },
+            max_pairwise_cosine: max,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn collapse_detects_parallel_conds() {
+            // Near-identical vectors → high mean cosine (collapsed).
+            let conds = vec![
+                vec![1.0, 0.0, 0.0],
+                vec![0.99, 0.01, 0.0],
+                vec![0.98, 0.0, 0.02],
+            ];
+            let s = conditioning_collapse(&conds);
+            assert!(s.mean_pairwise_cosine > 0.9, "expected collapse: {s:?}");
+        }
+
+        #[test]
+        fn collapse_low_for_orthogonal_conds() {
+            let conds = vec![
+                vec![1.0, 0.0, 0.0],
+                vec![0.0, 1.0, 0.0],
+                vec![0.0, 0.0, 1.0],
+            ];
+            let s = conditioning_collapse(&conds);
+            assert!(s.mean_pairwise_cosine < 0.1, "expected spread: {s:?}");
+        }
+
+        #[test]
+        fn fallback_rate_arithmetic() {
+            let snap = GenStatsSnapshot { total: 10, verbatim_fallbacks: 4, composed: 6 };
+            assert!((snap.fallback_rate() - 0.4).abs() < 1e-6);
+        }
+    }
+}
+
 /// Overrides for auto-configured training. When `None`, defaults are used.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct GenEnvOverrides {
@@ -2813,6 +2966,7 @@ impl IndexedGenEnv {
         topic_name: &str,
         max_tokens: usize,
     ) -> Option<(String, f32)> {
+        gen_stats::record_generation_attempt();
         let codec = self.chunk_codec.as_ref()?;
 
         let topic = self.topic_subindex.iter()
@@ -2942,6 +3096,7 @@ impl IndexedGenEnv {
             let primary_text = self.dictionary.decode(
                 &topic.lattice.programs[primary_idx].token_sequence);
             if primary_text.len() >= 5 && !Self::has_tokenization_artifacts(&primary_text) {
+                gen_stats::record_verbatim_fallback();
                 crate::infer_trace!(
                     "    [codec-fallback] algebraic composition garbled, using primary prog {}",
                     primary_idx
@@ -2954,6 +3109,7 @@ impl IndexedGenEnv {
             return None;
         }
 
+        gen_stats::record_composed_output();
         let confidence = scored[0].1.min(0.95);
         self.last_selected_archetype = None;
         self.last_generation_confidence = confidence;
@@ -2969,6 +3125,7 @@ impl IndexedGenEnv {
         cond: &[f32],
         max_tokens: usize,
     ) -> Option<(String, f32)> {
+        gen_stats::record_generation_attempt();
         let codec = self.chunk_codec.as_ref()?;
         if self.lattice.programs.len() < 2 { return None; }
 
@@ -3024,6 +3181,7 @@ impl IndexedGenEnv {
         let text = self.dictionary.decode(&all_tokens);
         if text.len() < 5 { return None; }
 
+        gen_stats::record_composed_output();
         let confidence = scored[0].1.min(0.95);
         self.last_selected_archetype = Some(scored[0].0);
         self.last_generation_confidence = confidence;

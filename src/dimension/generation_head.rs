@@ -14,6 +14,13 @@ pub const CHAR_EMBED_DIM: usize = 16;
 pub const CONTEXT_LEN: usize = 32;
 pub const EOS: u8 = 0; // null byte = end of sequence
 
+/// Temperatures at or below this are treated as deterministic greedy decoding.
+pub const GREEDY_TEMP_EPS: f32 = 0.05;
+/// Default top-k cutoff for nucleus sampling.
+pub const TOP_K: usize = 40;
+/// Default nucleus (top-p) cumulative-probability mass.
+pub const TOP_P: f32 = 0.95;
+
 /// Learned character embeddings: VOCAB_SIZE -> CHAR_EMBED_DIM
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CharEmbeddings {
@@ -210,27 +217,33 @@ impl GenerationHead {
     }
 
     /// Generate text autoregressively from a conditioning embedding.
+    ///
+    /// Decoding strategy:
+    ///   * `temperature <= GREEDY_TEMP_EPS` → deterministic greedy argmax.
+    ///   * otherwise → temperature scaling + top-k + nucleus (top-p) sampling.
+    ///
+    /// Sampling uses a deterministic RNG seeded from the conditioning vector,
+    /// so output is reproducible for a given `cond` but genuinely varies across
+    /// different prompts (the previous implementation took argmax regardless of
+    /// `temperature`, which is invariant to scaling and produced fixed,
+    /// "canned" output).
     pub fn generate(&self, cond: &[f32], max_len: usize, temperature: f32) -> String {
         let mut context: Vec<u8> = Vec::new();
         let mut output = Vec::new();
+        let mut rng_state = Self::seed_from_cond(cond);
 
         for _ in 0..max_len {
             let input = self.build_input(cond, &context);
             let (_, logits) = self.forward(&input);
 
-            let scaled: Vec<f32> = logits
-                .iter()
-                .map(|&l| l / temperature.max(0.01))
-                .collect();
-            let probs = Self::softmax(&scaled);
-
-            // Greedy: argmax (for deterministic output)
-            let idx = probs
-                .iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(i, _)| i)
-                .unwrap_or(0);
+            let idx = if temperature <= GREEDY_TEMP_EPS {
+                Self::argmax(&logits)
+            } else {
+                let scaled: Vec<f32> =
+                    logits.iter().map(|&l| l / temperature.max(0.01)).collect();
+                let probs = Self::softmax(&scaled);
+                Self::sample_top_k_p(&probs, TOP_K, TOP_P, &mut rng_state)
+            };
 
             if idx == EOS as usize || idx > 127 {
                 break;
@@ -242,6 +255,70 @@ impl GenerationHead {
         }
 
         String::from_utf8_lossy(&output).to_string()
+    }
+
+    /// Deterministic argmax over logits.
+    fn argmax(logits: &[f32]) -> usize {
+        logits
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    }
+
+    /// Seed a 64-bit RNG state from the conditioning vector so that sampling is
+    /// reproducible per `cond` yet differs across prompts.
+    fn seed_from_cond(cond: &[f32]) -> u64 {
+        let mut seed: u64 = 0x9e3779b97f4a7c15;
+        for (i, &c) in cond.iter().enumerate() {
+            seed ^= (c.to_bits() as u64).rotate_left((i % 64) as u32);
+            seed = seed.wrapping_mul(0x100000001b3).wrapping_add(i as u64);
+        }
+        seed | 1 // ensure non-zero
+    }
+
+    /// Advance an xorshift64 RNG and return a float in [0, 1).
+    fn next_uniform(state: &mut u64) -> f32 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        // top 24 bits → [0, 1)
+        ((x >> 40) as f32) / (1u64 << 24) as f32
+    }
+
+    /// Sample an index from `probs` after restricting to the top-k highest
+    /// probabilities and the smallest nucleus whose cumulative mass ≥ `top_p`.
+    fn sample_top_k_p(probs: &[f32], top_k: usize, top_p: f32, rng_state: &mut u64) -> usize {
+        let mut ranked: Vec<(usize, f32)> =
+            probs.iter().copied().enumerate().collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.truncate(top_k.max(1));
+
+        // Nucleus filter: keep the smallest prefix reaching cumulative top_p.
+        let mut cum = 0.0f32;
+        let mut cutoff = ranked.len();
+        for (i, &(_, p)) in ranked.iter().enumerate() {
+            cum += p;
+            if cum >= top_p {
+                cutoff = i + 1;
+                break;
+            }
+        }
+        ranked.truncate(cutoff.max(1));
+
+        let total: f32 = ranked.iter().map(|&(_, p)| p).sum::<f32>().max(1e-12);
+        let r = Self::next_uniform(rng_state) * total;
+        let mut acc = 0.0f32;
+        for &(idx, p) in &ranked {
+            acc += p;
+            if r <= acc {
+                return idx;
+            }
+        }
+        ranked.last().map(|&(idx, _)| idx).unwrap_or(0)
     }
 
     /// **Do not use for training.** Parameter averaging smooths out the weights and produces
@@ -297,6 +374,7 @@ impl GenerationHead {
         })
     }
 }
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -334,11 +412,37 @@ mod tests {
         for _ in 0..200 {
             head.train_step(&cond, target, 0.02);
         }
-        let out = head.generate(&cond, 10, 0.5);
+        // Greedy decoding (temp ≤ GREEDY_TEMP_EPS) for a deterministic memorization check.
+        let out = head.generate(&cond, 10, 0.0);
         assert!(
             out.starts_with("a"),
             "should learn to generate 'a' first, got: {:?}",
             out
+        );
+    }
+
+    #[test]
+    fn test_sampling_is_reproducible_per_cond() {
+        let cond = vec![0.3f32; 16];
+        let head = GenerationHead::new(16, 32);
+        // Same cond + same temperature must yield identical output (seeded RNG).
+        let a = head.generate(&cond, 24, 0.8);
+        let b = head.generate(&cond, 24, 0.8);
+        assert_eq!(a, b, "sampling should be reproducible for a fixed conditioning");
+    }
+
+    #[test]
+    fn test_sampling_varies_across_conditionings() {
+        let head = GenerationHead::new(16, 32);
+        let mut outputs = std::collections::HashSet::new();
+        for k in 0..8 {
+            let cond: Vec<f32> = (0..16).map(|i| ((i + k) as f32 * 0.37).sin()).collect();
+            outputs.insert(head.generate(&cond, 24, 0.9));
+        }
+        // Distinct conditionings should not all collapse to a single string.
+        assert!(
+            outputs.len() > 1,
+            "sampled generation collapsed to one output across distinct conds"
         );
     }
 }

@@ -2504,7 +2504,8 @@ fn train_brain(
     // prompts within the same domain. A tighter threshold over-merges intents that
     // need distinct programs for varied responses. Use a much lower threshold so
     // each intent cluster gets its own program.
-    let chat_spawn_threshold = 0.72;
+    let chat_spawn_threshold = 0.85; // 0.72
+    println!("chat_spawn_threshold: {}", chat_spawn_threshold);
     let min_code_for_index = 10usize;
     let mut index_jobs: u64 = 0;
     for gidx in 0..num_groups {
@@ -2830,7 +2831,9 @@ fn train_brain(
         let mut cloze_units: u64 = 0;
         for (_g, env) in &svc.dm.group_gen_envs {
             if env.codebook.as_ref().filter(|cb| !cb.archetypes.is_empty()).is_some() {
-                cloze_units += (env.lattice.programs.len() as u64).min(cap_u64) * (cloze_rounds as u64);
+                let corpus = gen_by_group.get(_g).map(|p| p.len()).unwrap_or(0);
+                let task_est = corpus.max(env.lattice.programs.len()) as u64;
+                cloze_units += task_est.min(cap_u64) * (cloze_rounds as u64);
             }
         }
         for (_g, env) in &svc.dm.group_code_envs {
@@ -2855,13 +2858,23 @@ fn train_brain(
                 gidx,
                 env.lattice.programs.len()
             );
-            // Build cloze tasks from the lattice programs (distilled training data).
-            let training_pairs: Vec<(Vec<f32>, String)> = env.lattice.programs.iter()
-                .map(|prog| {
-                    let text = prog.display_text(&env.dictionary);
-                    (prog.ema_centroid.clone(), text)
-                })
-                .collect();
+            // Build cloze tasks from the FULL per-group training corpus when available
+            // (every phrasing the brain was trained on), not only the handful of
+            // distilled lattice-program centroids. Cloze teaches slot inference, so
+            // more/varied (cond, text) pairs = far more games = sharper "infer the
+            // fill" instead of "replay the centroid" → less canned generation.
+            // `gen_by_group` conds are the same bridged space as program `ema_centroid`.
+            // Falls back to the distilled programs if the corpus is unavailable.
+            let training_pairs: Vec<(Vec<f32>, String)> = match gen_by_group.get(gidx) {
+                Some(pairs) if !pairs.is_empty() => pairs.clone(),
+                _ => env.lattice.programs.iter()
+                    .map(|prog| (prog.ema_centroid.clone(), prog.display_text(&env.dictionary)))
+                    .collect(),
+            };
+            println!(
+                "  cloze[g{}]: {} corpus pairs (was {} distilled programs)",
+                gidx, training_pairs.len(), env.lattice.programs.len()
+            );
             let mut tasks = cloze::generate_cloze_tasks(algebraic, &env.dictionary, &training_pairs);
             if tasks.is_empty() { continue; }
             if tasks.len() > cloze::DEFAULT_MAX_CLOZE_TASKS_PER_GROUP {

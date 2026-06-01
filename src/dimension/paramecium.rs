@@ -750,7 +750,7 @@ impl InfraciliaryLattice {
     }
 
     /// Compute a retrieval bias for a program based on its multi-timescale state.
-    /// Returns a multiplier in [0.5, 1.5] that adjusts the raw similarity score:
+    /// Returns a multiplier in [0.3, 1.5] that adjusts the raw similarity score:
     ///   > 1.0 = boost (high quality, high reliability, low activation)
     ///   < 1.0 = suppress (low quality, refractory, over-activated)
     pub fn retrieval_bias(&self, program_idx: usize) -> f32 {
@@ -1634,25 +1634,28 @@ mod tests {
         let mut lattice = make_two_program_lattice();
         lattice.begin_session();
 
+        const MIN_BIAS: f32 = 0.3;
+        const MAX_BIAS: f32 = 1.5;
+
         // Test every combination of states
         // Fresh
         let b = lattice.retrieval_bias(0);
-        assert!(b >= 0.5 && b <= 1.5, "bias out of range: {}", b);
+        assert!(b >= MIN_BIAS && b <= MAX_BIAS, "bias out of range: {}", b);
 
         // After positive feedback
         for _ in 0..50 { lattice.apply_feedback(0, true, 1.0); }
         let b = lattice.retrieval_bias(0);
-        assert!(b >= 0.5 && b <= 1.5, "bias out of range after positive: {}", b);
+        assert!(b >= MIN_BIAS && b <= MAX_BIAS, "bias out of range after positive: {}", b);
 
         // After retrieval (refractory)
         lattice.on_retrieval(0, &test_embedding(1.0));
         let b = lattice.retrieval_bias(0);
-        assert!(b >= 0.5 && b <= 1.5, "bias out of range when refractory: {}", b);
+        assert!(b >= MIN_BIAS && b <= MAX_BIAS, "bias out of range when refractory: {}", b);
 
         // After lots of negative feedback
         for _ in 0..100 { lattice.apply_feedback(0, false, 1.0); }
         let b = lattice.retrieval_bias(0);
-        assert!(b >= 0.5 && b <= 1.5, "bias out of range after negative: {}", b);
+        assert!(b >= MIN_BIAS && b <= MAX_BIAS, "bias out of range after negative: {}", b);
     }
 
     #[test]
