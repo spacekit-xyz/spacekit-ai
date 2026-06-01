@@ -1022,6 +1022,17 @@ fn run_inference(
     #[cfg(not(feature = "categorical"))]
     { let _ = (categorical_data, categorical_steps); }
 
+    // Optional: load a typed-fragment library for free-text chat composition.
+    // Set GROWFORMER_FRAGMENTS=/path/to/luna_fragments_v1.jsonl to enable.
+    if let Ok(frag_path) = std::env::var("GROWFORMER_FRAGMENTS") {
+        if !frag_path.trim().is_empty() {
+            match rt.svc.load_fragments_from_path(&frag_path) {
+                Ok(n) => println!("Fragment composer: loaded {} fragments from {}", n, frag_path),
+                Err(e) => eprintln!("Fragment composer: failed to load {}: {}", frag_path, e),
+            }
+        }
+    }
+
     let info = rt.brain_info();
     let trace = crate::infer_log::infer_trace_enabled();
     if trace {

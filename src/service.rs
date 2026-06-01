@@ -657,6 +657,10 @@ pub struct LanguageService {
     /// inference TOML (`[generation] basal_ganglia = true`). Holds weights + the
     /// enabled flag; per-turn context is filled in and pushed onto gen envs.
     pub basal_ganglia: Option<crate::basal_ganglia::BasalGanglia>,
+    /// Fragment composer: composes free-text chat responses from typed
+    /// identity/activity/drive fragments. `None` ⇒ disabled (lattice retrieval
+    /// only); load a library via [`Self::load_fragments_from_path`].
+    pub fragment_composer: Option<crate::fragment_composer::FragmentComposer>,
 }
 
 /// P0-02: when true, skip System 2 deliberate cross-group reasoning for this turn.
@@ -754,6 +758,105 @@ impl LanguageService {
             active_drive_modulation: None,
             reflective_field: None,
             basal_ganglia: None,
+            fragment_composer: None,
+        })
+    }
+
+    /// Install a fragment composer (typed identity/activity/drive fragments) used
+    /// to compose free-text chat responses ahead of lattice retrieval.
+    pub fn set_fragment_composer(&mut self, fc: crate::fragment_composer::FragmentComposer) {
+        self.fragment_composer = Some(fc);
+    }
+
+    /// Load a JSONL fragment library from disk and enable fragment composition.
+    /// Returns the number of fragments loaded.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_fragments_from_path<P: AsRef<std::path::Path>>(
+        &mut self,
+        path: P,
+    ) -> std::io::Result<usize> {
+        let (fc, skipped) = crate::fragment_composer::FragmentComposer::from_path(path)?;
+        let n = fc.fragments.len();
+        if skipped > 0 {
+            crate::infer_trace!("  [fragment-compose] loaded {n} fragments ({skipped} malformed lines skipped)");
+        }
+        self.fragment_composer = Some(fc);
+        Ok(n)
+    }
+
+    /// Attempt to compose a chat response from the fragment library. Returns
+    /// `None` (caller falls through to lattice retrieval) when no library is
+    /// loaded, no fragment is eligible, or the composition uses fewer than two
+    /// voices (too thin to beat retrieval).
+    fn try_fragment_compose(
+        &self,
+        intent_text: &str,
+        ocean: &[f32],
+        state: Option<&AgentRuntimeState>,
+        reflective: Option<&crate::reflective_field::ReflectiveField>,
+        nm: Option<crate::drive_field::Neuromodulators>,
+        turn_count: usize,
+    ) -> Option<GeneratedResponse> {
+        use crate::fragment_composer::ComposeContext;
+        use crate::reflective_field::ReflectiveWeights;
+
+        let fc = self.fragment_composer.as_ref()?;
+        if fc.is_empty() {
+            return None;
+        }
+
+        // Map the prompt onto a coarse semantic intent. (A learned intent head can
+        // replace this heuristic later.)
+        let intent_key = if Self::is_greeting(intent_text) {
+            "greeting_check_in"
+        } else {
+            "open_ended_chat"
+        };
+
+        let mut ocean5 = [0.5f32; 5];
+        for (i, slot) in ocean5.iter_mut().enumerate() {
+            if let Some(&v) = ocean.get(i) {
+                *slot = v;
+            }
+        }
+
+        let state_map = state.map(|s| s.dimensions.clone()).unwrap_or_default();
+        let archetype = state.and_then(|s| s.profile.clone());
+        let turn = state.map(|s| s.turn).unwrap_or(0);
+        let multi_turn = turn_count > 1;
+        let weights = reflective
+            .map(|r| r.weights(nm, multi_turn))
+            .unwrap_or_else(ReflectiveWeights::default);
+
+        // Deterministic per-turn seed (FNV-1a over the prompt, mixed with turn).
+        let mut seed = 0xcbf29ce484222325u64;
+        for b in intent_text.bytes() {
+            seed = (seed ^ b as u64).wrapping_mul(0x100000001b3);
+        }
+        seed = seed.wrapping_add((turn as u64).wrapping_mul(0x9e3779b97f4a7c15));
+
+        let ctx = ComposeContext {
+            intent: intent_key.to_string(),
+            graph_anchors: Vec::new(),
+            ocean: ocean5,
+            state: state_map,
+            weights,
+            archetype,
+            seed,
+        };
+
+        let composed = fc.compose(&ctx)?;
+        // Require a genuinely blended (≥2 voice) line; thinner output is left to
+        // the existing retrieval path which may have a better verbatim match.
+        if composed.voices_used < 2 {
+            return None;
+        }
+
+        Some(GeneratedResponse {
+            text: composed.text,
+            template_id: "fragment_composed_v1".to_string(),
+            traceable: true,
+            confidence: 0.9,
         })
     }
 
@@ -1438,8 +1541,28 @@ impl LanguageService {
         let inference_thresholds_ref = inference_thresholds_bundle.as_ref();
         let inference_harness = self.inference_harness.clone();
 
+        let action = self.active_dm_mut().route_text_to_action_stateless(intent_text)?;
+
+        // Fragment composition fast-path (chat passthrough only): compose a fresh
+        // response from typed identity/activity/drive fragments instead of
+        // retrieving a whole canned program. Gated on a loaded fragment library
+        // and a ≥2-voice composition; otherwise fall through to lattice retrieval.
+        if chat_passthrough && !Self::is_identity_query(intent_text) {
+            if let Some(resp) = self.try_fragment_compose(
+                intent_text,
+                &ocean_snapshot,
+                agent_state_snapshot.as_ref(),
+                reflective_field_snapshot.as_ref(),
+                drive_nm_snapshot,
+                conversation_turn_count,
+            ) {
+                infer_trace!("  [fragment-compose] composed response ({} chars)", resp.text.len());
+                self.record_latency(start);
+                return Ok((action, resp));
+            }
+        }
+
         let dm = self.active_dm_mut();
-        let action = dm.route_text_to_action_stateless(intent_text)?;
 
         // Routing encoding: from raw user message (clean signal for group selection).
         let encoded = dm.language_runtime.encode_and_bridge(intent_text).ok();
