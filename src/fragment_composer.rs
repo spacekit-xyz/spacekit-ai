@@ -114,11 +114,14 @@ impl Fragment {
                 }
             }
         }
-        // Runtime-state gates.
+        // Runtime-state gates. A gate *requires* knowledge of its dimension: if
+        // the current state doesn't provide it, the fragment is ineligible rather
+        // than assuming a (misleading) default. This prevents a stateless query
+        // from spuriously satisfying every low-range gate via an implicit 0.0.
         for (dim, &[lo, hi]) in &self.state_gate {
-            let v = ctx.state.get(dim).copied().unwrap_or(0.0);
-            if v < lo || v > hi {
-                return false;
+            match ctx.state.get(dim) {
+                Some(&v) if v >= lo && v <= hi => {}
+                _ => return false,
             }
         }
         true
@@ -446,6 +449,28 @@ mod tests {
         c.intent = "totally_unknown_intent".to_string();
         // Only the "*" coda is eligible; with no body, compose returns None.
         assert!(lib.compose(&c).is_none());
+    }
+
+    #[test]
+    fn gate_requires_known_dimension() {
+        // A fragment gating a dimension absent from ctx.state must be ineligible
+        // (not assumed satisfied via an implicit default).
+        let lib = FragmentComposer::new(vec![
+            frag("needs_social", Voice::Drive, SlotRole::Body, "lonely.",
+                 &["open_ended_chat"], &[("social", [0.5, 1.0])]),
+            frag("ungated", Voice::Identity, SlotRole::Body, "here.",
+                 &["open_ended_chat"], &[]),
+        ]);
+        for seed in 0..30u64 {
+            // ctx provides only "hunger" — never "social".
+            if let Some(o) = lib.compose(&ctx(&[("hunger", 0.5)], seed)) {
+                assert!(
+                    !o.fragment_ids.iter().any(|id| id == "needs_social"),
+                    "fragment gating an unknown dimension leaked: {:?}",
+                    o.fragment_ids
+                );
+            }
+        }
     }
 
     #[test]

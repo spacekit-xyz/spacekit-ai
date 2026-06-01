@@ -820,7 +820,19 @@ impl LanguageService {
             }
         }
 
-        let state_map = state.map(|s| s.dimensions.clone()).unwrap_or_default();
+        // When no runtime state is provided (e.g. a stateless CLI query), supply a
+        // neutral-content baseline so composition reads calm/rested rather than
+        // collapsing onto low-range (sleepy/hungry/aloof) fragments.
+        let state_map = match state {
+            Some(s) if !s.dimensions.is_empty() => s.dimensions.clone(),
+            _ => {
+                let mut m = std::collections::HashMap::new();
+                m.insert("hunger".to_string(), 0.4);
+                m.insert("energy".to_string(), 0.55);
+                m.insert("mood".to_string(), 0.65);
+                m
+            }
+        };
         let archetype = state.and_then(|s| s.profile.clone());
         let turn = state.map(|s| s.turn).unwrap_or(0);
         let multi_turn = turn_count > 1;
