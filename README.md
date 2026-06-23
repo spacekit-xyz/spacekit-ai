@@ -497,7 +497,7 @@ shared 64-d routing space.
   - Ensemble: `GROWFORMER_GLE_CHECKPOINTS=checkpoints/gle_student_base.json,checkpoints/gle_student_routing_tuned.json`
   - Optional ensemble weights: `GROWFORMER_GLE_WEIGHTS=0.3,0.7`
 
-Latest internal routing run with `gle_student_routing_tuned.json`:
+Latest internal routing run with `gle_student_routing_tuned.json` (**in-distribution status, not a certification**):
 
 - Intent accuracy: `100%`
 - Median routing margin: `1.828`
@@ -505,18 +505,64 @@ Latest internal routing run with `gle_student_routing_tuned.json`:
 - OOD AUROC: `1.000`
 - OOD FAR: `0.00%`
 
+> **Certification status: UNCERTIFIED.** These are in-distribution status numbers, not a
+> generalization certification. A 100% / AUROC-1.000 card reports none of the four things the
+> certifier-first contract requires, and each is where a perfect score goes to die:
+>
+> 1. **Feature-disjoint held-out?** A 100% on an eval that shares surface tokens with training is
+>    the 20.7% mirage at the easy end (see §14 of `docs/GROUNDING_LOOP_SPEC.md`).
+> 2. **Provenance-clean eval?** If the eval set is distilled/augmented from the same distribution
+>    the GLE trained on, the encoder certifies itself — the firewall's entire reason to exist (§4).
+> 3. **Shuffle floor?** If a label-permuted GLE also scores high, the task is trivial and 100%
+>    means nothing.
+> 4. **Positive control collapses?** If lexical CATA also scores well on the same eval, the eval
+>    is lexically separable and isn't testing semantics at all.
+>
+> The GLE is a drop-in encoder via the BYO-vectors hook and is judged by the **same**
+> certifier-first gate as every other encoder — no pass because it's ours and we want it to work.
+>
+> **It has now been run through the gate in two places.**
+>
+> *Cross-domain (`--certify-encoder gle`, eval = Luna companion traffic):* `BELOW_RESOLUTION`,
+> **pooled 1.1%**. This is a *correct* measurement of an irrelevant question — a support/coding
+> encoder asked to route pet-companion traffic it was never built for. Not a mirage; just the
+> wrong domain. It does **not** bear on the 100%.
+>
+> *In-domain (`--certify-gle-indomain`, the actual headline):* the gate now points at the 100% on
+> its own support/coding turf, two ways — (A) the literal 2-way `support`-vs-`coding` task that
+> *produced* the 100%, and (B) ~15-way `action_target` routing on the same home data. Both return
+> **`INVALID`**, with the decisive reason being a verdict about the *eval*, not the encoder:
+> *no feature-disjoint held-out phrases exist at any granularity* — every held-out phrase shares
+> features with its own class's training, so the eval cannot separate memorization from
+> generalization. Construction A reproduces **pooled 100%** faithfully and confirms it is a
+> **2-way, lexically-entangled** number (the distillation teacher is a *hashing* proxy — lexical at
+> the root); Construction B routes at **15.5%** (~2.3× chance) on 15 home-domain classes. The 100%
+> is not refuted — it is shown to be **uncertifiable on the eval that produced it**, which is the
+> sharper finding. To certify the in-domain claim at all, the data need is a *feature-disjoint*
+> support/coding held-out set (concept-preserving, surface-disjoint paraphrases).
+>
+> No encoder has emitted a `PASS` artifact with `disjoint_semantic_lift` clear of the shuffle floor
+> on provenance-clean, feature-disjoint held-out traffic, so "100% intent accuracy" still has the
+> standing the 20.7% pooled number had before §14 caught it: **you can run it, you cannot yet trust
+> it.** See `docs/GROUNDING_LOOP_SPEC.md` §15 / §15.1 and the certifier commands below.
+
 This makes the language stack practical for private, low-latency, CPU-friendly routing:
 
 `text -> GLE semantic vector -> bridge -> 64-d routing vector -> Growformer group dispatch`
 
-Current language milestone status:
+Current language milestone status (**"complete" = the code path runs and passes its
+in-distribution checks; it is not a held-out/disjoint generalization certification**):
 
 - M1 (Language Embedding Foundation): complete
 - M2 (Embedding-First Routing Validation): complete
 - M3 (Intent-to-Action Layer): complete
 - M4 (Controlled Language Generation, template-only): complete
-- M5 (Continual Language Learning Integration): complete
-- M6 (Production Agent Modes): complete
+- M5 (Continual Language Learning Integration): complete — *in-distribution only. The CMI work
+  shows routing/integration over frozen specialists does **not** yet generalize on held-out, so
+  "complete" here means the path runs and retains in-distribution, not that continual learning is
+  solved.*
+- M6 (Production Agent Modes): complete — *production status is not validation; running ≠
+  generalizing.*
 
 Gate commands (run via `growformer-demos`):
 
@@ -531,6 +577,16 @@ Operational commands (run via `growformer-demos`):
 - M3 starter action JSON: `cargo run --bin growformer-demos -- --language-action-text "help me reset password"`
 - M5 starter code generation: `cargo run --bin growformer-demos -- --language-code-text "implement binary search in rust"`
 - M6 acceptance report: `cargo run --bin growformer-demos -- --acceptance-report --acceptance-report-path reports/m6_acceptance.json`
+
+Encoder certification (the contract every encoder — GLE included — is judged by; see
+`docs/GROUNDING_LOOP_SPEC.md` §15):
+
+- Certify an encoder, emit verdict artifact: `cargo run --release --bin growformer-demos -- --certify-encoder supervised <companion_dir>`
+- Positive-control / lexical baseline: `cargo run --release --bin growformer-demos -- --certify-encoder cata <companion_dir>`
+- Certify the GLE on its **own** support/coding domain (the 100%): `cargo run --release --bin growformer-demos -- --certify-gle-indomain`
+- Re-read / compare a verdict: `cargo run --release --bin growformer-demos -- --certify-verdict certify_verdict_latest.json`
+- Go/no-go field: `disjoint_semantic_lift` (disjoint-bin accuracy − shuffle-floor 95th pct). No
+  encoder is promoted without a `PASS` artifact; pooled accuracy never gates.
 
 M5 datasets:
 

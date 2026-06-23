@@ -81,6 +81,50 @@ impl CaptureSplit {
     }
 }
 
+/// Where a phrase came from — the provenance contract behind the augmentation firewall (§4).
+/// `RealTraffic` is the only provenance allowed in the certify set; `Augmented` carries the
+/// lineage of the phrase(s) it was derived from so closed-loop self-certification is detectable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProvenanceKind {
+    RealTraffic,
+    Authored,
+    Augmented,
+}
+
+impl Default for ProvenanceKind {
+    fn default() -> Self {
+        ProvenanceKind::RealTraffic
+    }
+}
+
+impl ProvenanceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RealTraffic => "real_traffic",
+            Self::Authored => "authored",
+            Self::Augmented => "augmented",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PhraseProvenance {
+    pub kind: ProvenanceKind,
+    pub phrase_id: String,
+    /// For `Augmented` phrases: ids of the phrases this was generated from.
+    pub derived_from: Vec<String>,
+}
+
+impl PhraseProvenance {
+    pub fn real(phrase_id: impl Into<String>) -> Self {
+        Self {
+            kind: ProvenanceKind::RealTraffic,
+            phrase_id: phrase_id.into(),
+            derived_from: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FailureCapture {
     pub phrase: String,
@@ -94,6 +138,8 @@ pub struct FailureCapture {
     pub domain_context: String,
     pub inferred_concept_id: String,
     pub split: CaptureSplit,
+    #[serde(default)]
+    pub provenance: PhraseProvenance,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -357,7 +403,20 @@ pub fn wilson_interval(hits: usize, n: usize, z: f64) -> (f64, f64) {
 
 impl SupervisedEncoder {
     /// Train on `(text, label)` pairs. Returns `None` if there are fewer than 2 labels.
+    /// Uses a fixed default seed; for reproducible certifier runs use [`train_seeded`].
     pub fn train(samples: &[(String, String)], n_buckets: usize, epochs: usize) -> Option<Self> {
+        Self::train_seeded(samples, n_buckets, epochs, 0x243F6A8885A308D3)
+    }
+
+    /// Seeded training: the SGD shuffle RNG is seeded from `seed`, so the certifier pipeline
+    /// is deterministic given `(data, seed)` — the same inputs always produce the same weights,
+    /// which is what makes the verdict artifact reproducible across runs.
+    pub fn train_seeded(
+        samples: &[(String, String)],
+        n_buckets: usize,
+        epochs: usize,
+        seed: u64,
+    ) -> Option<Self> {
         let mut labels: Vec<String> = Vec::new();
         for (_, l) in samples {
             if !labels.contains(l) {
@@ -378,7 +437,7 @@ impl SupervisedEncoder {
         let mut w = vec![vec![0.0f32; n_buckets]; n_labels];
         let l2 = 1e-5f32;
         let mut order: Vec<usize> = (0..feats.len()).collect();
-        let mut rng: u64 = 0x243F6A8885A308D3;
+        let mut rng: u64 = if seed == 0 { 0x9E3779B97F4A7C15 } else { seed };
         for ep in 0..epochs {
             // Deterministic xorshift shuffle (no rand dependency).
             for i in (1..order.len()).rev() {
@@ -916,6 +975,7 @@ pub fn maybe_capture_grounding_failure(
         domain_context: domain_context.to_string(),
         inferred_concept_id: inferred_concept_id.to_string(),
         split,
+        provenance: PhraseProvenance::real(phrase),
     };
     append_capture(capture.clone());
     Some(capture)
@@ -951,6 +1011,7 @@ pub fn capture_lightweight(
         domain_context: domain_context.to_string(),
         inferred_concept_id: inferred_concept_id.to_string(),
         split: CaptureSplit::Propose,
+        provenance: PhraseProvenance::real(phrase),
     };
     append_capture(capture.clone());
     Some(capture)
@@ -1566,6 +1627,300 @@ pub fn format_certifier_report(
     )
 }
 
+// ===========================================================================
+// Certifier-First Pipeline (§§1–6 of the Certifier-First spec)
+//
+// The certifier is the *contract* every encoder is judged by: a deterministic
+// pipeline that emits one verdict artifact. The only field that gates promotion
+// is `disjoint_semantic_lift` (disjoint-bin(a) accuracy − shuffle-floor 95th pct);
+// pooled accuracy is recorded as evidence but never gates.
+// ===========================================================================
+
+/// Provenance-purity report for the augmentation-leak firewall (§4). This is *orthogonal*
+/// to the disjoint test's surface-overlap check: the disjoint test catches **feature**
+/// leakage; the firewall catches **pipeline** leakage (an augmented paraphrase of a training
+/// phrase reaching the certify set, which would let the encoder certify itself).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct FirewallReport {
+    pub clean: bool,
+    pub violations: Vec<String>,
+    pub train_real: usize,
+    pub train_authored: usize,
+    pub train_augmented: usize,
+    pub certify_real: usize,
+    pub certify_authored: usize,
+    pub certify_augmented: usize,
+}
+
+fn tally_provenance(kind: ProvenanceKind, real: &mut usize, authored: &mut usize, augmented: &mut usize) {
+    match kind {
+        ProvenanceKind::RealTraffic => *real += 1,
+        ProvenanceKind::Authored => *authored += 1,
+        ProvenanceKind::Augmented => *augmented += 1,
+    }
+}
+
+/// Enforce the firewall invariants over a capture set (propose = train, certify = held-out):
+/// 1. **Certify ⊆ `real_traffic`** — no `augmented`/`authored` phrase is ever in certify.
+/// 2. **No lineage crossing** — no certify phrase's id appears in any training `augmented`
+///    phrase's `derived_from` lineage.
+///
+/// Any violation ⇒ the run is `INVALID` (a pipeline/data problem), never a score.
+pub fn run_augmentation_firewall(captures: &[FailureCapture]) -> FirewallReport {
+    let mut r = FirewallReport { clean: true, ..Default::default() };
+    let mut train_lineage: HashSet<String> = HashSet::new();
+    let mut certify_ids: Vec<(String, String)> = Vec::new(); // (phrase_id, phrase)
+
+    for c in captures {
+        match c.split {
+            CaptureSplit::Propose => {
+                tally_provenance(
+                    c.provenance.kind,
+                    &mut r.train_real,
+                    &mut r.train_authored,
+                    &mut r.train_augmented,
+                );
+                if c.provenance.kind == ProvenanceKind::Augmented {
+                    for src in &c.provenance.derived_from {
+                        train_lineage.insert(src.clone());
+                    }
+                }
+            }
+            CaptureSplit::Certify => {
+                tally_provenance(
+                    c.provenance.kind,
+                    &mut r.certify_real,
+                    &mut r.certify_authored,
+                    &mut r.certify_augmented,
+                );
+                if c.provenance.kind != ProvenanceKind::RealTraffic {
+                    r.clean = false;
+                    r.violations.push(format!(
+                        "certify phrase '{}' has provenance {} (must be real_traffic)",
+                        c.phrase,
+                        c.provenance.kind.as_str()
+                    ));
+                }
+                let id = if c.provenance.phrase_id.is_empty() {
+                    c.phrase.clone()
+                } else {
+                    c.provenance.phrase_id.clone()
+                };
+                certify_ids.push((id, c.phrase.clone()));
+            }
+        }
+    }
+
+    for (id, phrase) in &certify_ids {
+        if train_lineage.contains(id) {
+            r.clean = false;
+            r.violations.push(format!(
+                "lineage crossing: certify phrase '{phrase}' (id '{id}') is the source of a training augmented phrase"
+            ));
+        }
+    }
+    r.violations.sort();
+    r.violations.dedup();
+    r
+}
+
+/// The terminal verdict of the certifier pipeline (§6). `INVALID` and `BELOW_RESOLUTION`
+/// are distinct from `FAIL_*`: they mean "not measured", never "measured and bad".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Verdict {
+    Invalid,
+    BelowResolution,
+    FailMemorization,
+    FailCollision,
+    Pass,
+}
+
+impl Verdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Invalid => "INVALID",
+            Self::BelowResolution => "BELOW_RESOLUTION",
+            Self::FailMemorization => "FAIL_MEMORIZATION",
+            Self::FailCollision => "FAIL_COLLISION",
+            Self::Pass => "PASS",
+        }
+    }
+}
+
+/// Minimum seen-elsewhere sample count for the disjoint bin to resolve lift vs floor.
+pub const DISJOINT_MIN_N: usize = 8;
+/// Maximum Wilson CI width on disjoint_gen_a before the bin is too noisy to read.
+pub const DISJOINT_MAX_CI_WIDTH: f32 = 0.30;
+/// Memorization gap above which a "pass" is rejected as a lookup table even with positive lift.
+pub const MEMORIZATION_GAP_MAX: f32 = 0.50;
+
+/// Pure inputs to the verdict state machine — everything the decision depends on, nothing else,
+/// so the rule (§6) is testable in isolation from the routing/embedding machinery.
+#[derive(Clone, Copy, Debug)]
+pub struct VerdictInputs {
+    pub positive_control_collapsed: bool,
+    pub firewall_clean: bool,
+    pub disjoint_gen_a_n: usize,
+    pub disjoint_gen_a_ci_width: f32,
+    pub disjoint_semantic_lift: f32,
+    pub lift_ci_lo: f32,
+    pub collision_delta: f32,
+    pub memorization_gap: f32,
+}
+
+/// `true` if the seen-elsewhere disjoint bin is too small/noisy to separate lift from 0.
+pub fn is_below_resolution(n: usize, ci_width: f32) -> bool {
+    n < DISJOINT_MIN_N || ci_width > DISJOINT_MAX_CI_WIDTH
+}
+
+/// The deterministic verdict state machine (§6). Order matters: validity gates (pipeline/data)
+/// precede resolution, which precedes the encoder judgment. An underpowered or invalid run is
+/// never readable as a pass.
+pub fn decide_encoder_verdict(inp: &VerdictInputs) -> Verdict {
+    if !inp.positive_control_collapsed || !inp.firewall_clean {
+        return Verdict::Invalid;
+    }
+    if is_below_resolution(inp.disjoint_gen_a_n, inp.disjoint_gen_a_ci_width) {
+        return Verdict::BelowResolution;
+    }
+    // Lift gate: generalizes iff lift > 0 AND the lift CI excludes 0 (lower bound > 0).
+    if inp.disjoint_semantic_lift <= 0.0 || inp.lift_ci_lo <= 0.0 {
+        return Verdict::FailMemorization;
+    }
+    if inp.collision_delta > 0.0 {
+        return Verdict::FailCollision;
+    }
+    if inp.memorization_gap > MEMORIZATION_GAP_MAX {
+        // Positive disjoint lift but the captured→held-out gap is blown: still a lookup table.
+        return Verdict::FailMemorization;
+    }
+    Verdict::Pass
+}
+
+/// Per-feature-family disjoint-0 accuracy: shows which granularity carries overlap inflation
+/// (e.g. trigrams much higher than words ⇒ subword leakage). Diagnostic, never gates.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct FeatureFamily {
+    pub word: f32,
+    pub bigram: f32,
+    pub trigram: f32,
+}
+
+/// The single verdict artifact (§1) — one deterministic source of truth per
+/// `(encoder_id, data_hash, seed)`. Any consumer reads `verdict` + `disjoint_semantic_lift`;
+/// every other field is evidence.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EncoderVerdict {
+    pub encoder_id: String,
+    pub data_hash: String,
+    pub seed: u64,
+    pub candidate_set_size: usize,
+
+    // --- GO/NO-GO ---
+    pub disjoint_semantic_lift: f32,
+    pub disjoint_lift_ci: [f32; 2],
+    pub verdict: String,
+
+    // --- semantic floor / lift decomposition ---
+    pub semantic_floor_mean: f32,
+    pub semantic_floor_95: f32,
+    pub disjoint_gen_a: f32,
+    pub disjoint_gen_a_n: usize,
+    pub pooled_heldout: f32,
+    pub memorization_gap: f32,
+
+    // --- diagnostics ---
+    pub overlap_curve: Vec<OverlapBin>,
+    pub feature_family: FeatureFamily,
+    pub plateau_flag: bool,
+    pub collision_delta: f32,
+    /// Feature granularity at which the disjoint lift was resolved: `"wbc"` (union, strictest),
+    /// or a looser `"wb"`/`"w"` fallback used when the union-disjoint bin is empty on dense
+    /// training. Looser ⇒ leakier; recorded so a reviewer knows the leakage risk of the verdict.
+    #[serde(default)]
+    pub disjoint_level: String,
+    /// When the verdict is INVALID, a human-readable reason distinguishing the failure modes:
+    /// empty disjoint bin (eval can't separate memorization from generalization) vs. positive
+    /// control not collapsing (eval is lexically separable / an easy task) vs. firewall/data.
+    #[serde(default)]
+    pub invalid_reason: String,
+
+    // --- validity gates ---
+    pub positive_control_collapsed: bool,
+    pub augmentation_firewall_clean: bool,
+    pub below_resolution: bool,
+
+    // --- provenance log (so a reviewer can confirm certify is real held-out traffic) ---
+    pub firewall: FirewallReport,
+    pub shuffle_b: usize,
+    /// Encoder-training provenance note (e.g. a frozen BYO encoder's training domain). For a
+    /// distilled encoder this records the distillation-disjointness basis: the firewall proves
+    /// the *certify set* is real traffic; this records whether the *encoder* was trained on it.
+    #[serde(default)]
+    pub encoder_provenance: String,
+}
+
+impl EncoderVerdict {
+    /// Deterministic artifact filename `verdict_<encoder>_<datahash>_<seed>.json`.
+    pub fn filename(&self) -> String {
+        format!("verdict_{}_{}_{}.json", self.encoder_id, self.data_hash, self.seed)
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
+    }
+
+    pub fn one_line(&self) -> String {
+        format!(
+            "{} | verdict={} lift={:+.3} ci=[{:+.3},{:+.3}] gen_a={:.3} (n={}) floor95={:.3} pooled={:.3} gap={:.3}",
+            self.encoder_id,
+            self.verdict,
+            self.disjoint_semantic_lift,
+            self.disjoint_lift_ci[0],
+            self.disjoint_lift_ci[1],
+            self.disjoint_gen_a,
+            self.disjoint_gen_a_n,
+            self.semantic_floor_95,
+            self.pooled_heldout,
+            self.memorization_gap,
+        )
+    }
+}
+
+/// A stable content fingerprint of the audited corpus + grounding graph (FNV-1a over a
+/// canonical, order-independent string). Same captures + nodes ⇒ same hash, so the artifact
+/// id is reproducible. Not cryptographic — a change-detector, not a security primitive.
+pub fn data_hash(captures: &[FailureCapture], node_ids: &[String]) -> String {
+    let mut rows: Vec<String> = captures
+        .iter()
+        .map(|c| {
+            format!(
+                "{}|{}|{}|{}",
+                c.phrase.trim().to_ascii_lowercase(),
+                c.inferred_concept_id,
+                c.domain_context,
+                match c.split {
+                    CaptureSplit::Propose => "p",
+                    CaptureSplit::Certify => "c",
+                }
+            )
+        })
+        .collect();
+    let mut nodes: Vec<String> = node_ids.to_vec();
+    rows.sort();
+    nodes.sort();
+    let mut h: u64 = 0xcbf29ce484222325;
+    for s in rows.iter().chain(std::iter::once(&"::".to_string())).chain(nodes.iter()) {
+        for b in s.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h ^= 0x2c;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{h:016x}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1629,6 +1984,7 @@ mod tests {
             domain_context: "runtime".into(),
             inferred_concept_id: concept.into(),
             split,
+            provenance: PhraseProvenance::real(phrase),
         }
     }
 
@@ -1766,5 +2122,169 @@ mod tests {
         let (a, _) = embed_phrase_mode(&rt, "bitcoin", RepresentationMode::RawCliffordE8).unwrap();
         let (b, _) = embed_phrase_mode(&rt, "bitcoin", RepresentationMode::RawCliffordE8).unwrap();
         assert_eq!(a.len(), b.len());
+    }
+
+    // ---------------------------------------------------------------------
+    // Certifier-first pipeline: pure logic (firewall, state machine, hash)
+    // ---------------------------------------------------------------------
+
+    fn cap_with(
+        phrase: &str,
+        concept: &str,
+        split: CaptureSplit,
+        prov: PhraseProvenance,
+    ) -> FailureCapture {
+        FailureCapture {
+            phrase: phrase.into(),
+            encoder_embedding: Vec::new(),
+            activated_nodes: Vec::new(),
+            max_confidence: 0.0,
+            entropy_bits: None,
+            trigger_reason: FailureTrigger::NoNodeActivated,
+            downstream_signal: None,
+            timestamp_unix: 0,
+            domain_context: "runtime".into(),
+            inferred_concept_id: concept.into(),
+            split,
+            provenance: prov,
+        }
+    }
+
+    #[test]
+    fn firewall_clean_when_certify_is_real_traffic_only() {
+        let caps = vec![
+            cap_with("p1", "c", CaptureSplit::Propose, PhraseProvenance::real("p1")),
+            cap_with("c1", "c", CaptureSplit::Certify, PhraseProvenance::real("c1")),
+        ];
+        let r = run_augmentation_firewall(&caps);
+        assert!(r.clean, "should be clean: {:?}", r.violations);
+        assert_eq!(r.certify_real, 1);
+    }
+
+    #[test]
+    fn firewall_rejects_augmented_in_certify() {
+        let caps = vec![
+            cap_with("p1", "c", CaptureSplit::Propose, PhraseProvenance::real("p1")),
+            cap_with(
+                "c1",
+                "c",
+                CaptureSplit::Certify,
+                PhraseProvenance {
+                    kind: ProvenanceKind::Augmented,
+                    phrase_id: "c1".into(),
+                    derived_from: vec!["p1".into()],
+                },
+            ),
+        ];
+        let r = run_augmentation_firewall(&caps);
+        assert!(!r.clean, "augmented certify must be dirty");
+    }
+
+    #[test]
+    fn firewall_rejects_lineage_crossing() {
+        // A training augmented phrase derived from certify phrase 'c1' ⇒ the encoder trained
+        // on a rephrasing of held-out traffic. Must be flagged even though provenance kinds
+        // are individually legal.
+        let caps = vec![
+            cap_with(
+                "augmented training phrase",
+                "c",
+                CaptureSplit::Propose,
+                PhraseProvenance {
+                    kind: ProvenanceKind::Augmented,
+                    phrase_id: "p_aug".into(),
+                    derived_from: vec!["c1".into()],
+                },
+            ),
+            cap_with("certify one", "c", CaptureSplit::Certify, PhraseProvenance::real("c1")),
+        ];
+        let r = run_augmentation_firewall(&caps);
+        assert!(!r.clean, "lineage crossing must be flagged");
+        assert!(r.violations.iter().any(|v| v.contains("lineage crossing")));
+    }
+
+    fn base_inputs() -> VerdictInputs {
+        VerdictInputs {
+            positive_control_collapsed: true,
+            firewall_clean: true,
+            disjoint_gen_a_n: 40,
+            disjoint_gen_a_ci_width: 0.15,
+            disjoint_semantic_lift: 0.10,
+            lift_ci_lo: 0.03,
+            collision_delta: 0.0,
+            memorization_gap: 0.10,
+        }
+    }
+
+    #[test]
+    fn verdict_invalid_when_positive_control_fails() {
+        let mut i = base_inputs();
+        i.positive_control_collapsed = false;
+        assert_eq!(decide_encoder_verdict(&i), Verdict::Invalid);
+    }
+
+    #[test]
+    fn verdict_invalid_when_firewall_dirty() {
+        let mut i = base_inputs();
+        i.firewall_clean = false;
+        assert_eq!(decide_encoder_verdict(&i), Verdict::Invalid);
+    }
+
+    #[test]
+    fn verdict_below_resolution_on_tiny_bin() {
+        let mut i = base_inputs();
+        i.disjoint_gen_a_n = 3; // < DISJOINT_MIN_N
+        assert_eq!(decide_encoder_verdict(&i), Verdict::BelowResolution);
+        // Wide CI also triggers it even with enough samples.
+        let mut j = base_inputs();
+        j.disjoint_gen_a_ci_width = 0.5;
+        assert_eq!(decide_encoder_verdict(&j), Verdict::BelowResolution);
+    }
+
+    #[test]
+    fn verdict_fail_memorization_when_lift_not_positive() {
+        // The 20.7% case: pooled high but disjoint lift at/under the floor.
+        let mut i = base_inputs();
+        i.disjoint_semantic_lift = 0.0;
+        i.lift_ci_lo = -0.05;
+        assert_eq!(decide_encoder_verdict(&i), Verdict::FailMemorization);
+        // Positive point estimate but CI includes 0 ⇒ still memorization.
+        let mut j = base_inputs();
+        j.disjoint_semantic_lift = 0.04;
+        j.lift_ci_lo = -0.01;
+        assert_eq!(decide_encoder_verdict(&j), Verdict::FailMemorization);
+    }
+
+    #[test]
+    fn verdict_fail_collision_when_lift_but_collides() {
+        let mut i = base_inputs();
+        i.collision_delta = 0.02;
+        assert_eq!(decide_encoder_verdict(&i), Verdict::FailCollision);
+    }
+
+    #[test]
+    fn verdict_fail_memorization_when_gap_blown() {
+        let mut i = base_inputs();
+        i.memorization_gap = 0.9; // lookup table even with positive lift
+        assert_eq!(decide_encoder_verdict(&i), Verdict::FailMemorization);
+    }
+
+    #[test]
+    fn verdict_pass_only_on_ci_clear_positive_lift() {
+        let i = base_inputs();
+        assert_eq!(decide_encoder_verdict(&i), Verdict::Pass);
+    }
+
+    #[test]
+    fn data_hash_is_order_independent_and_sensitive() {
+        let a = cap_with("alpha", "c1", CaptureSplit::Propose, PhraseProvenance::real("a"));
+        let b = cap_with("beta", "c2", CaptureSplit::Certify, PhraseProvenance::real("b"));
+        let nodes = vec!["c1".to_string(), "c2".to_string()];
+        let h1 = data_hash(&[a.clone(), b.clone()], &nodes);
+        let h2 = data_hash(&[b.clone(), a.clone()], &nodes); // reordered
+        assert_eq!(h1, h2, "hash must be order-independent");
+        let c = cap_with("beta", "c3", CaptureSplit::Certify, PhraseProvenance::real("b"));
+        let h3 = data_hash(&[a, c], &nodes);
+        assert_ne!(h1, h3, "different content must change the hash");
     }
 }

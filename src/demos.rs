@@ -22,6 +22,8 @@ use growformer::inference::grounding_loop::{
     install_phrase_embedder_from_corpus, install_supervised_embedder, install_vector_embedder,
     overlap0_substrata, pooled_accuracy, propose_for_phrase, synthetic_audit_fixture,
     wilson_interval, OverlapBin, SupervisedEncoder, PET_DOMAIN_FIXTURE_TOML,
+    EncoderVerdict, FeatureFamily, Verdict, VerdictInputs, decide_encoder_verdict,
+    is_below_resolution, run_augmentation_firewall, data_hash, routing_accuracy_for_captures,
 };
 use growformer::inference::world_grounding::{self, GroundingFleetDomain};
 use growformer::environment::NeuralEnvironment;
@@ -111,6 +113,18 @@ struct Args {
     /// Re-run the disjoint test from captured CSV + meta sidecar.
     #[arg(long)]
     grounding_disjoint_analyze: bool,
+    /// Certifier-first pipeline: judge an encoder by the contract and emit a verdict artifact.
+    /// Usage: --certify-encoder <encoder_id> [companion_dir] [seed]
+    /// encoder_id ∈ {supervised, cata}. Emits verdict_<encoder>_<datahash>_<seed>.json.
+    #[arg(long, num_args = 1..=3, value_names = ["ENCODER", "DIR", "SEED"])]
+    certify_encoder: Option<Vec<String>>,
+    /// Re-read / pretty-print a verdict artifact (go/no-go summary).
+    #[arg(long)]
+    certify_verdict: Option<String>,
+    /// Certify the GLE on its OWN (support/coding) home domain through the same gate:
+    /// (A) the literal 2-way 100% headline + (B) home-domain many-intent routing.
+    #[arg(long)]
+    certify_gle_indomain: bool,
     #[arg(long)]
     neurogenesis: bool,
     #[arg(long)]
@@ -320,6 +334,12 @@ fn main() {
         demo_grounding_disjoint_test(&dir);
     } else if args.grounding_disjoint_analyze {
         demo_grounding_disjoint_analyze();
+    } else if let Some(spec) = args.certify_encoder.clone() {
+        demo_certify_encoder(&spec);
+    } else if let Some(path) = args.certify_verdict.clone() {
+        demo_certify_verdict(&path);
+    } else if args.certify_gle_indomain {
+        demo_certify_gle_indomain();
     } else if args.grounding_loop_audit {
         demo_grounding_loop_audit();
     } else if args.cmi_analyze {
@@ -5150,6 +5170,7 @@ fn fixture_rows_to_captures(
                 domain_context: row.domain_context.clone(),
                 inferred_concept_id: row.concept_id.clone(),
                 split: row.split,
+                provenance: grounding_loop::PhraseProvenance::real(row.phrase.clone()),
             })
         })
         .collect()
@@ -5277,6 +5298,7 @@ fn load_grounding_captures_csv(path: &str) -> Vec<FailureCapture> {
             domain_context: parts[4].clone(),
             inferred_concept_id: parts[1].clone(),
             split,
+            provenance: grounding_loop::PhraseProvenance::real(parts[0].clone()),
         });
     }
     out
@@ -5455,6 +5477,7 @@ fn luna_build_captures(
         phrases.sort();
         for (i, phrase) in phrases.into_iter().enumerate() {
             let split = if i % 2 == 0 { CaptureSplit::Propose } else { CaptureSplit::Certify };
+            let prov = grounding_loop::PhraseProvenance::real(phrase.clone());
             captures.push(FailureCapture {
                 phrase,
                 encoder_embedding: Vec::new(),
@@ -5467,6 +5490,7 @@ fn luna_build_captures(
                 domain_context: "runtime".into(),
                 inferred_concept_id: intent.clone(),
                 split,
+                provenance: prov,
             });
         }
     }
@@ -6042,6 +6066,751 @@ fn run_disjoint_core(
     out
 }
 
+// ===========================================================================
+// Certifier-First Pipeline orchestrator (§2 of the spec) — the contract every
+// encoder is judged by. Deterministic given (encoder, data_hash, seed): same
+// inputs → same verdict artifact, always.
+// ===========================================================================
+
+const CERTIFY_SHUFFLE_B: usize = 200;
+const CERTIFY_N_BUCKETS: usize = 4096;
+const CERTIFY_EPOCHS: usize = 60;
+
+/// The encoder under audit. The pipeline is embedder-agnostic; an encoder is reduced to a
+/// thing that can be (re)installed as the active phrase embedder given training pairs — which
+/// is exactly what the shuffle control needs (retrain on permuted labels). A future drop-in
+/// (real semantic encoder) plugs in here via the BYO-vectors hook.
+#[derive(Clone, Debug)]
+enum AuditEncoder {
+    Supervised,
+    Cata,
+    /// A frozen bring-your-own encoder, reduced to precomputed vectors over every phrase/alias
+    /// the pipeline embeds (the BYO-vectors hook). This is how a real semantic encoder (e.g. the
+    /// GLE) plugs into the identical gate. The shuffle null for a frozen encoder reinstalls the
+    /// same map and permutes only the overlap definition — the correct null for a fixed encoder.
+    Vectors { id: String, map: HashMap<String, Vec<f32>> },
+}
+
+impl AuditEncoder {
+    fn from_id(id: &str) -> Option<Self> {
+        match id.trim().to_ascii_lowercase().as_str() {
+            "supervised" | "supervised_v1" | "sup" => Some(Self::Supervised),
+            "cata" | "lexical" | "lexical_cata" => Some(Self::Cata),
+            _ => None,
+        }
+    }
+
+    fn id(&self) -> &str {
+        match self {
+            Self::Supervised => "supervised",
+            Self::Cata => "cata",
+            Self::Vectors { id, .. } => id.as_str(),
+        }
+    }
+
+    /// Install this encoder as the active phrase embedder, trained on `train` pairs.
+    /// `node_corpus` is the node-id/alias text (used by CATA's dictionary, ignored by the
+    /// supervised projection). `seed` makes supervised training reproducible.
+    fn install(&self, train: &[(String, String)], node_corpus: &[String], seed: u64) -> Result<(), String> {
+        match self {
+            Self::Supervised => {
+                let enc = SupervisedEncoder::train_seeded(train, CERTIFY_N_BUCKETS, CERTIFY_EPOCHS, seed)
+                    .ok_or_else(|| "supervised: need >=2 labels".to_string())?;
+                install_supervised_embedder(enc);
+                Ok(())
+            }
+            Self::Cata => {
+                let mut corpus: Vec<String> = train.iter().map(|(p, _)| p.clone()).collect();
+                corpus.extend(node_corpus.iter().cloned());
+                let refs: Vec<&str> = corpus.iter().map(|s| s.as_str()).collect();
+                install_phrase_embedder_from_corpus(&refs, 8192);
+                Ok(())
+            }
+            // Frozen encoder: labels are irrelevant to the vectors; reinstall the same map.
+            Self::Vectors { map, .. } => {
+                install_vector_embedder(map.clone());
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Run the full certifier-first sequence (§2) and produce the single verdict artifact (§1).
+/// Deterministic given `(enc, captures, nodes, seed)`. The shuffle and positive controls run
+/// every time — they are not optional flags.
+fn certify_encoder_pipeline(
+    enc: &AuditEncoder,
+    rt: &growformer::dimension::LanguageRuntime,
+    nodes: &[(GroundingFleetDomain, String, Vec<String>)],
+    captures: &[FailureCapture],
+    seed: u64,
+    encoder_provenance: &str,
+) -> EncoderVerdict {
+    let params = GroundingLoopParams::default();
+    let node_ids: Vec<String> = nodes.iter().map(|(_, id, _)| id.clone()).collect();
+    let dh = data_hash(captures, &node_ids);
+
+    // Node-alias corpus text shared with CATA's dictionary.
+    let mut node_corpus: Vec<String> = Vec::new();
+    for (_, id, aliases) in nodes {
+        node_corpus.push(id.replace('_', " "));
+        node_corpus.extend(aliases.iter().cloned());
+    }
+
+    let propose: Vec<(String, String)> = captures
+        .iter()
+        .filter(|c| c.split == CaptureSplit::Propose)
+        .map(|c| (c.phrase.clone(), c.inferred_concept_id.clone()))
+        .collect();
+    let certify: Vec<FailureCapture> = captures
+        .iter()
+        .filter(|c| c.split == CaptureSplit::Certify)
+        .cloned()
+        .collect();
+    let (concept_train, global_train) = concept_train_features(&propose);
+
+    // --- §4 provenance check + augmentation firewall (orthogonal to surface overlap) ---
+    let firewall = run_augmentation_firewall(captures);
+
+    // Defaults for the artifact (filled as the sequence runs).
+    let mut verdict = EncoderVerdict {
+        encoder_id: enc.id().to_string(),
+        data_hash: dh,
+        seed,
+        candidate_set_size: nodes.len(),
+        disjoint_semantic_lift: 0.0,
+        disjoint_lift_ci: [0.0, 0.0],
+        verdict: Verdict::Invalid.as_str().to_string(),
+        semantic_floor_mean: 0.0,
+        semantic_floor_95: 0.0,
+        disjoint_gen_a: 0.0,
+        disjoint_gen_a_n: 0,
+        pooled_heldout: 0.0,
+        memorization_gap: 0.0,
+        overlap_curve: Vec::new(),
+        feature_family: FeatureFamily::default(),
+        plateau_flag: false,
+        collision_delta: 0.0,
+        disjoint_level: "wbc".to_string(),
+        invalid_reason: String::new(),
+        positive_control_collapsed: false,
+        augmentation_firewall_clean: firewall.clean,
+        below_resolution: true,
+        firewall,
+        shuffle_b: CERTIFY_SHUFFLE_B,
+        encoder_provenance: encoder_provenance.to_string(),
+    };
+
+    let n_labels = propose.iter().map(|(_, l)| l).collect::<std::collections::HashSet<_>>().len();
+    if n_labels < 2 || certify.is_empty() {
+        // Not enough structure to measure anything; INVALID (a data problem, not a fail).
+        verdict.verdict = Verdict::Invalid.as_str().to_string();
+        verdict.firewall.violations.push("insufficient data: need >=2 concepts and certify phrases".into());
+        verdict.augmentation_firewall_clean = false;
+        verdict.invalid_reason = "insufficient data: need >=2 concepts and certify phrases".into();
+        return verdict;
+    }
+
+    // --- Phase A: subject encoder (real labels) → disjoint curve, sub-bins, gap, plateau ---
+    if enc.install(&propose, &node_corpus, seed).is_err() {
+        verdict.verdict = Verdict::Invalid.as_str().to_string();
+        verdict.firewall.violations.push("encoder failed to train/install".into());
+        verdict.invalid_reason = "encoder failed to train/install".into();
+        return verdict;
+    }
+    let idx = build_grounding_index_from_nodes(rt, nodes, &params).expect("subject index");
+    let evals = evaluate_disjoint(rt, &idx, &certify, &concept_train, &global_train, "wbc")
+        .expect("subject eval wbc");
+    let curve = build_overlap_curve(&evals);
+    let pooled = pooled_accuracy(&evals);
+
+    // feature-family disjoint-0 accuracy (diagnostic: which granularity carries the routing).
+    let evals_w = evaluate_disjoint(rt, &idx, &certify, &concept_train, &global_train, "w")
+        .expect("subject eval w");
+    let evals_wb = evaluate_disjoint(rt, &idx, &certify, &concept_train, &global_train, "wb")
+        .expect("subject eval wb");
+    let curve_w = build_overlap_curve(&evals_w);
+    let curve_wb = build_overlap_curve(&evals_wb);
+    verdict.feature_family = FeatureFamily {
+        word: curve_w[0].accuracy,
+        bigram: curve_wb[0].accuracy,
+        trigram: curve[0].accuracy,
+    };
+
+    // Choose the disjoint granularity to resolve the gate at: strictest (union "wbc") preferred,
+    // but on dense training the union-disjoint bin is empty (n=0) — fall back to the finest level
+    // that actually has a seen-elsewhere sub-bin to read. Looser ⇒ leakier; the level is recorded.
+    let an_wbc = overlap0_substrata(&evals).1;
+    let an_wb = overlap0_substrata(&evals_wb).1;
+    let an_w = overlap0_substrata(&evals_w).1;
+    let level: &str = if an_wbc >= grounding_loop::DISJOINT_MIN_N {
+        "wbc"
+    } else if an_wb >= grounding_loop::DISJOINT_MIN_N {
+        "wb"
+    } else if an_w >= grounding_loop::DISJOINT_MIN_N {
+        "w"
+    } else {
+        // None resolvable; keep strictest so n is honestly reported as underpowered.
+        "wbc"
+    };
+    verdict.disjoint_level = level.to_string();
+    let evals_lvl: &[grounding_loop::DisjointEval] = match level {
+        "w" => &evals_w,
+        "wb" => &evals_wb,
+        _ => &evals,
+    };
+    let (ah, an, _bh, _bn) = overlap0_substrata(evals_lvl);
+
+    // memorization gap = captured (propose routing) − held-out pooled.
+    let captured = routing_accuracy_for_captures(captures, rt, &idx, CaptureSplit::Propose).unwrap_or(0.0);
+    verdict.memorization_gap = (captured - pooled).max(0.0);
+
+    // collision: this audit applies no graph edits, so the pre/post misroute delta is 0.
+    verdict.collision_delta = 0.0;
+
+    // plateau: does adding approved aliases stop lifting held-out accuracy?
+    verdict.plateau_flag = {
+        let mut caps_mut = captures.to_vec();
+        rehydrate_captures(rt, &idx, &mut caps_mut);
+        let proposals = build_proposals_for_captures(&caps_mut, &idx, &params, rt, &idx);
+        let additions: Vec<(GroundingFleetDomain, String, String)> = proposals
+            .iter()
+            .filter(|p| p.approved)
+            .filter_map(|p| match &p.kind {
+                ProposalKind::Alias { phrase, target_node, target_domain, .. } => Some((
+                    parse_fleet_domain(target_domain).unwrap_or(GroundingFleetDomain::Runtime),
+                    target_node.clone(),
+                    phrase.clone(),
+                )),
+                _ => None,
+            })
+            .collect();
+        match coverage_vs_additions_curve(&caps_mut, rt, &idx, &additions) {
+            Ok(c) => {
+                let (_gcap, gheld) = curve_lifts(&c);
+                gheld <= 0.0
+            }
+            Err(_) => false,
+        }
+    };
+
+    verdict.overlap_curve = build_overlap_curve(evals_lvl);
+    verdict.pooled_heldout = pooled;
+    verdict.disjoint_gen_a = if an > 0 { ah as f32 / an as f32 } else { 0.0 };
+    verdict.disjoint_gen_a_n = an;
+
+    // --- Phase B: positive control — lexical CATA must collapse to floor at overlap-0 ---
+    // Evaluated at the SAME granularity the gate resolves at, so the control is apples-to-apples.
+    let cata = AuditEncoder::Cata;
+    let _ = cata.install(&propose, &node_corpus, seed);
+    let idx_cata = build_grounding_index_from_nodes(rt, nodes, &params).expect("cata index");
+    let evals_cata = evaluate_disjoint(rt, &idx_cata, &certify, &concept_train, &global_train, level)
+        .expect("cata eval");
+    let curve_cata = build_overlap_curve(&evals_cata);
+    let cata_overlap0 = curve_cata[0].accuracy;
+    let cata_overlap0_n = curve_cata[0].n;
+
+    // --- Phase C: shuffle floor (B≥200, retrain subject on permuted labels) ---
+    let mut floor_a: Vec<f32> = Vec::new();
+    for b in 0..CERTIFY_SHUFFLE_B {
+        let permuted = disjoint_shuffle_labels(&propose, seed ^ (b as u64));
+        // Retrain the SUBJECT encoder class on permuted labels (the proper null).
+        if enc.install(&permuted, &node_corpus, seed ^ (0xA5A5 + b as u64)).is_err() {
+            continue;
+        }
+        let idx_s = build_grounding_index_from_nodes(rt, nodes, &params).expect("shuffle index");
+        let (ct, gl) = concept_train_features(&permuted);
+        let evals_s = evaluate_disjoint(rt, &idx_s, &certify, &ct, &gl, level).expect("shuffle eval");
+        let (ah_s, an_s, _, _) = overlap0_substrata(&evals_s);
+        if an_s > 0 {
+            floor_a.push(ah_s as f32 / an_s as f32);
+        }
+        if (b + 1) % 50 == 0 {
+            println!("  [certify] shuffle {}/{}", b + 1, CERTIFY_SHUFFLE_B);
+        }
+    }
+    clear_phrase_embedder();
+
+    let floor_mean = if floor_a.is_empty() { 0.0 } else { floor_a.iter().sum::<f32>() / floor_a.len() as f32 };
+    let floor95 = percentile_sorted(&mut floor_a.clone(), 0.95);
+    verdict.semantic_floor_mean = floor_mean;
+    verdict.semantic_floor_95 = floor95;
+    // The control is only meaningful with a non-empty disjoint bin; an empty bin can't validate
+    // the overlap measure, so it does not count as a collapse (⇒ INVALID, not a vacuous pass).
+    verdict.positive_control_collapsed = cata_overlap0_n > 0 && cata_overlap0 <= floor95 + 0.05;
+
+    // --- §3 lift = disjoint_gen_a − semantic_floor_95, with Wilson CI shifted by floor95 ---
+    let (g_lo, g_hi) = wilson_interval(ah, an, 1.96);
+    let ci_width = (g_hi - g_lo) as f32;
+    verdict.disjoint_semantic_lift = verdict.disjoint_gen_a - floor95;
+    verdict.disjoint_lift_ci = [(g_lo as f32) - floor95, (g_hi as f32) - floor95];
+    verdict.below_resolution = is_below_resolution(an, ci_width);
+
+    // --- §6 verdict state machine (deterministic) ---
+    let inputs = VerdictInputs {
+        positive_control_collapsed: verdict.positive_control_collapsed,
+        firewall_clean: verdict.augmentation_firewall_clean,
+        disjoint_gen_a_n: an,
+        disjoint_gen_a_ci_width: ci_width,
+        disjoint_semantic_lift: verdict.disjoint_semantic_lift,
+        lift_ci_lo: verdict.disjoint_lift_ci[0],
+        collision_delta: verdict.collision_delta,
+        memorization_gap: verdict.memorization_gap,
+    };
+    verdict.verdict = decide_encoder_verdict(&inputs).as_str().to_string();
+    if verdict.verdict == Verdict::Invalid.as_str() && verdict.invalid_reason.is_empty() {
+        verdict.invalid_reason = if !verdict.augmentation_firewall_clean {
+            format!("augmentation firewall tripped: {}", verdict.firewall.violations.join("; "))
+        } else if an == 0 {
+            format!(
+                "no feature-disjoint held-out phrases at any granularity (overlap-0 seen-elsewhere bin empty, level={level}): every held-out phrase shares features with its own class's training, so the eval cannot separate memorization from generalization"
+            )
+        } else if !verdict.positive_control_collapsed {
+            format!(
+                "positive control did not collapse: lexical CATA at overlap-0 (level={level}) = {:.3} vs floor95 {:.3} — eval is lexically separable (an easy task), so a high score does not evidence semantics",
+                cata_overlap0, floor95
+            )
+        } else {
+            "invalid (see gates)".into()
+        };
+    }
+    verdict
+}
+
+const CERTIFY_STORE_DIR: &str = "certify_artifacts";
+
+/// Map a GLE encoder alias to its checkpoint path + canonical artifact id.
+fn gle_checkpoint_for_id(id: &str) -> (&'static str, &'static str) {
+    match id.trim().to_ascii_lowercase().as_str() {
+        "gle_base" => ("checkpoints/gle_student_base.json", "gle_base"),
+        "gle_m5" | "gle_m5_routing_tuned" => ("checkpoints/gle_m5_routing_tuned.json", "gle_m5_routing_tuned"),
+        "gle_m5_base" => ("checkpoints/gle_m5_base.json", "gle_m5_base"),
+        // "gle" / "gle_routing_tuned" / anything else gle* → the routing-tuned student.
+        _ => ("checkpoints/gle_student_routing_tuned.json", "gle_routing_tuned"),
+    }
+}
+
+/// Reduce a frozen distilled GLE checkpoint to precomputed vectors over every phrase/alias the
+/// pipeline embeds, so it runs through the identical certifier gate via the BYO-vectors hook.
+/// Returns the audit encoder + an encoder-training provenance note (distillation-disjointness).
+fn build_gle_audit_encoder(
+    encoder_id: &str,
+    nodes: &[(GroundingFleetDomain, String, Vec<String>)],
+    captures: &[FailureCapture],
+) -> Result<(AuditEncoder, String), String> {
+    let (ckpt, canon) = gle_checkpoint_for_id(encoder_id);
+    build_gle_vector_encoder(ckpt, canon, nodes, captures)
+}
+
+/// Core: reduce a specific GLE checkpoint to a BYO-vectors audit encoder with a chosen
+/// artifact id, GLE-encoding every phrase/alias the pipeline will embed.
+fn build_gle_vector_encoder(
+    ckpt: &str,
+    artifact_id: &str,
+    nodes: &[(GroundingFleetDomain, String, Vec<String>)],
+    captures: &[FailureCapture],
+) -> Result<(AuditEncoder, String), String> {
+    if !std::path::Path::new(ckpt).exists() {
+        return Err(format!("checkpoint not found: {ckpt}"));
+    }
+    let canon = artifact_id;
+    let cfg = LanguageConfig {
+        encoder: EncoderPreset::BertClass,
+        gle_checkpoint: Some(ckpt.to_string()),
+        ..Default::default()
+    };
+    let gle_rt = growformer::dimension::LanguageRuntime::new(cfg);
+    // Sanity: the GLE must produce a non-degenerate vector (i.e. the student actually loaded,
+    // not the hashing fallback collapsing). A zero probe means the checkpoint did not load.
+    let probe = gle_rt
+        .encode_and_bridge("hello")
+        .map_err(|e| format!("gle encode failed: {e}"))?
+        .0;
+    if probe.iter().all(|x| x.abs() < 1e-9) {
+        return Err("gle produced a zero vector (checkpoint not loaded?)".into());
+    }
+    let dim = probe.len();
+
+    let mut map: HashMap<String, Vec<f32>> = HashMap::new();
+    {
+        let mut insert = |text: &str| {
+            if text.trim().is_empty() {
+                return;
+            }
+            if let Ok((v, _)) = gle_rt.encode_and_bridge(text) {
+                map.insert(text.to_string(), v);
+            }
+        };
+        for c in captures {
+            insert(&c.phrase);
+        }
+        for (_, id, aliases) in nodes {
+            insert(id);
+            insert(&id.replace('_', " "));
+            for a in aliases {
+                insert(a);
+            }
+        }
+    }
+
+    // Distillation provenance from the GLE meta sidecar (training domain).
+    let meta_path = format!("{ckpt}.meta.json");
+    let domain = std::fs::read_to_string(&meta_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| {
+            v.get("notes")
+                .and_then(|n| n.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("; "))
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "see meta".to_string());
+    let note = format!(
+        "frozen distilled GLE [{ckpt}]; GLE training domain: {domain}. Positive control = lexical CATA on the same eval, every run."
+    );
+
+    println!("  [gle] {canon}: {} vectors (dim {dim}) from {ckpt}", map.len());
+    Ok((AuditEncoder::Vectors { id: canon.to_string(), map }, note))
+}
+
+/// Push one split of `(text, class)` rows into a capture set with real-traffic provenance.
+fn push_indomain_captures(
+    captures: &mut Vec<FailureCapture>,
+    phrases: &[String],
+    class: &str,
+    split: CaptureSplit,
+) {
+    for (i, phrase) in phrases.iter().enumerate() {
+        let tag = if split == CaptureSplit::Propose { "p" } else { "c" };
+        captures.push(FailureCapture {
+            phrase: phrase.clone(),
+            encoder_embedding: Vec::new(),
+            activated_nodes: Vec::new(),
+            max_confidence: 0.0,
+            entropy_bits: None,
+            trigger_reason: FailureTrigger::NoNodeActivated,
+            downstream_signal: None,
+            timestamp_unix: 0,
+            domain_context: "runtime".into(),
+            inferred_concept_id: class.to_string(),
+            split,
+            provenance: grounding_loop::PhraseProvenance {
+                kind: grounding_loop::ProvenanceKind::RealTraffic,
+                phrase_id: format!("{class}-{tag}#{i}"),
+                derived_from: Vec::new(),
+            },
+        });
+    }
+}
+
+/// Construction B: per-`action_target` home-domain fixture. Node centroids are built from each
+/// class's propose-split phrases (prototypes from train), certify is the held-out half — the
+/// same shape as the Luna fixture, on the GLE's native domain.
+fn build_m5_action_target_fixture(
+    samples: &[LanguageSample],
+) -> (Vec<(GroundingFleetDomain, String, Vec<String>)>, Vec<FailureCapture>) {
+    let mut by_class: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    for s in samples {
+        let Some(t) = s.action_target.as_deref() else { continue };
+        let t = t.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let phrase = s.text.trim().to_string();
+        if phrase.is_empty() {
+            continue;
+        }
+        if seen.insert((t.to_string(), phrase.to_ascii_lowercase())) {
+            by_class.entry(t.to_string()).or_default().push(phrase);
+        }
+    }
+    let mut nodes = Vec::new();
+    let mut captures = Vec::new();
+    for (class, mut phrases) in by_class {
+        if phrases.len() < 4 {
+            continue; // need >=2 propose + 2 certify for a meaningful split
+        }
+        phrases.sort();
+        let propose: Vec<String> = phrases.iter().step_by(2).cloned().collect();
+        let certify: Vec<String> = phrases.iter().skip(1).step_by(2).cloned().collect();
+        push_indomain_captures(&mut captures, &propose, &class, CaptureSplit::Propose);
+        push_indomain_captures(&mut captures, &certify, &class, CaptureSplit::Certify);
+        nodes.push((GroundingFleetDomain::Runtime, class, propose));
+    }
+    (nodes, captures)
+}
+
+/// Construction A: the literal 2-way support/coding headline. certify = the fine-tune held-out
+/// split, so it is provenance-disjoint from the GLE's routing fine-tune train.
+fn build_support_coding_fixture(
+) -> (Vec<(GroundingFleetDomain, String, Vec<String>)>, Vec<FailureCapture>) {
+    let ((train_s, train_c), (valid_s, valid_c)) = build_routing_finetune_dataset();
+    let mut captures = Vec::new();
+    push_indomain_captures(&mut captures, &train_s, "support", CaptureSplit::Propose);
+    push_indomain_captures(&mut captures, &train_c, "coding", CaptureSplit::Propose);
+    push_indomain_captures(&mut captures, &valid_s, "support", CaptureSplit::Certify);
+    push_indomain_captures(&mut captures, &valid_c, "coding", CaptureSplit::Certify);
+    let nodes = vec![
+        (GroundingFleetDomain::Runtime, "support".to_string(), train_s),
+        (GroundingFleetDomain::Runtime, "coding".to_string(), train_c),
+    ];
+    (nodes, captures)
+}
+
+/// Run the certifier on a (GLE, in-domain fixture) pair and emit the verdict artifact.
+fn run_indomain_certification(
+    artifact_id: &str,
+    ckpt: &str,
+    nodes: &[(GroundingFleetDomain, String, Vec<String>)],
+    captures: &[FailureCapture],
+    provenance_extra: &str,
+) {
+    let n_propose = captures.iter().filter(|c| c.split == CaptureSplit::Propose).count();
+    let n_certify = captures.iter().filter(|c| c.split == CaptureSplit::Certify).count();
+    let n_concepts = nodes.len();
+    println!(
+        "\n=== {artifact_id}: {n_concepts} concepts | propose={n_propose} | certify={n_certify} ===",
+    );
+    if n_concepts < 2 || n_certify == 0 {
+        println!("  insufficient data for {artifact_id} (need >=2 concepts and certify phrases).");
+        return;
+    }
+    let (enc, gle_note) = match build_gle_vector_encoder(ckpt, artifact_id, nodes, captures) {
+        Ok(p) => p,
+        Err(e) => {
+            println!("  could not build GLE encoder: {e}");
+            return;
+        }
+    };
+    let provenance = format!("{gle_note} || {provenance_extra}");
+    let (dm, _, _, _) = build_language_demo_manager(0.0);
+    let artifact = certify_encoder_pipeline(&enc, &dm.language_runtime, nodes, captures, 42, &provenance);
+
+    let json = artifact.to_json();
+    std::fs::create_dir_all(CERTIFY_STORE_DIR).ok();
+    let store_path = std::path::Path::new(CERTIFY_STORE_DIR).join(artifact.filename());
+    std::fs::write(&store_path, &json).expect("write verdict artifact");
+    std::fs::write("certify_verdict_latest.json", &json).expect("write latest verdict");
+    println!("\n{}", render_verdict(&artifact));
+    println!("\nArtifact: {}", store_path.display());
+}
+
+/// `--certify-gle-indomain`: certify the GLE on its own (support/coding) home domain through the
+/// identical gate — (A) the literal 2-way 100% headline, then (B) home-domain action_target
+/// many-way routing. The CATA positive control runs on each eval; if it does not collapse, the
+/// eval is lexically separable (an easy task) and the verdict is INVALID by construction.
+fn demo_certify_gle_indomain() {
+    println!("--- In-domain GLE certification (the 100% on its own turf) ---\n");
+    let ckpt = "checkpoints/gle_student_routing_tuned.json";
+    if !std::path::Path::new(ckpt).exists() {
+        println!("GLE checkpoint not found: {ckpt}");
+        return;
+    }
+    let samples = match load_all_m5_training_data() {
+        Ok(s) if !s.is_empty() => s,
+        Ok(_) => {
+            println!("No M5 home-domain data found (data/language/m5 empty).");
+            return;
+        }
+        Err(e) => {
+            println!("Could not load M5 home-domain data: {e}");
+            return;
+        }
+    };
+    println!("Loaded {} home-domain labeled samples.\n", samples.len());
+
+    // Construction A: the literal 2-way support/coding headline (the actual 100%).
+    let (nodes_a, caps_a) = build_support_coding_fixture();
+    run_indomain_certification(
+        "gle_2way_support_coding",
+        ckpt,
+        &nodes_a,
+        &caps_a,
+        "Construction A: literal 2-way support/coding headline (the reported 100%). certify = fine-tune \
+         held-out split (disjoint from routing fine-tune train). Distillation target was a HASHING proxy \
+         (lexical). Expectation: lexical CATA also separates 2 buckets ⇒ positive control does NOT collapse \
+         ⇒ INVALID = the 100% measured a lexically-separable 2-way task, not semantic generalization.",
+    );
+
+    // Construction B: home-domain many-way routing at action_target granularity.
+    let (nodes_b, caps_b) = build_m5_action_target_fixture(&samples);
+    run_indomain_certification(
+        "gle_indomain_action_target",
+        ckpt,
+        &nodes_b,
+        &caps_b,
+        "Construction B: home-domain action_target many-way routing. DISTILLATION-LINEAGE CAVEAT: the GLE \
+         distillation stage consumed M5 texts (teacher-mimicry vs a hashing proxy, not label-supervised), so \
+         this eval is same-distribution held-out, NOT distillation-disjoint — i.e. generous to the GLE.",
+    );
+
+    println!("\nIn-domain certification complete. Artifacts in {CERTIFY_STORE_DIR}/.");
+}
+
+/// `--certify-encoder <encoder_id> [companion_dir] [seed]`: run the pipeline on a companion
+/// and emit the verdict artifact (append-only longitudinal store + a stable latest copy).
+fn demo_certify_encoder(spec: &[String]) {
+    println!("--- Certifier-first pipeline (the contract every encoder is judged by) ---\n");
+    let encoder_id = spec.first().cloned().unwrap_or_default();
+    let is_gle = encoder_id.trim().to_ascii_lowercase().starts_with("gle");
+    if !is_gle && AuditEncoder::from_id(&encoder_id).is_none() {
+        println!("Unknown encoder '{encoder_id}'. Supported: supervised, cata, gle[_base|_m5].");
+        return;
+    }
+    let dir = spec
+        .get(1)
+        .filter(|s| !s.trim().is_empty() && s.trim() != "default")
+        .cloned()
+        .unwrap_or_else(|| LUNA_DEFAULT_DIR.to_string());
+    let seed: u64 = spec.get(2).and_then(|s| s.trim().parse().ok()).unwrap_or(42);
+
+    let data_dir = std::path::Path::new(&dir).join("data");
+    let grounding_path = data_dir.join("pet_world_grounding.toml");
+    let toml = match std::fs::read_to_string(&grounding_path) {
+        Ok(t) => t,
+        Err(e) => {
+            println!("Could not read {}: {}", grounding_path.display(), e);
+            return;
+        }
+    };
+    if let Err(e) = world_grounding::load_grounding_graph_from_str(&toml) {
+        println!("Failed to parse grounding graph: {}", e);
+        return;
+    }
+    let mut samples: Vec<LanguageSample> = Vec::new();
+    if let Err(e) = append_language_samples_from_training_jsonl_dir(&mut samples, &data_dir) {
+        println!("Failed to load JSONL corpus: {}", e);
+        return;
+    }
+    let nodes = luna_runtime_nodes();
+    let valid_ids: std::collections::HashSet<String> =
+        nodes.iter().map(|(_, id, _)| id.clone()).collect();
+    let captures = luna_build_captures(&samples, &valid_ids);
+    if captures.is_empty() {
+        println!("No usable captures.");
+        return;
+    }
+
+    // Resolve the encoder under audit. For the GLE we reduce a frozen distilled encoder to
+    // precomputed vectors over every phrase/alias the pipeline embeds (BYO-vectors hook).
+    let (enc, provenance) = if is_gle {
+        match build_gle_audit_encoder(&encoder_id, &nodes, &captures) {
+            Ok((enc, note)) => {
+                let prov = format!(
+                    "{note} || eval = companion ({dir}) real traffic; domain-disjoint from the GLE's \
+                     training domain (phrase-level manifest unavailable — distillation-disjointness asserted by domain)."
+                );
+                (enc, prov)
+            }
+            Err(e) => {
+                println!("Could not build GLE audit encoder: {e}");
+                return;
+            }
+        }
+    } else {
+        (AuditEncoder::from_id(&encoder_id).unwrap(), String::new())
+    };
+
+    println!(
+        "encoder={} seed={} | nodes={} | captures={} | grounding={}\n",
+        enc.id(),
+        seed,
+        nodes.len(),
+        captures.len(),
+        grounding_path.display()
+    );
+    if !provenance.is_empty() {
+        println!("  encoder provenance: {provenance}\n");
+    }
+
+    let (dm, _, _, _) = build_language_demo_manager(0.0);
+    let artifact = certify_encoder_pipeline(&enc, &dm.language_runtime, &nodes, &captures, seed, &provenance);
+
+    let json = artifact.to_json();
+    std::fs::create_dir_all(CERTIFY_STORE_DIR).ok();
+    let store_path = std::path::Path::new(CERTIFY_STORE_DIR).join(artifact.filename());
+    std::fs::write(&store_path, &json).expect("write verdict artifact");
+    std::fs::write("certify_verdict_latest.json", &json).expect("write latest verdict");
+
+    println!("\n{}", render_verdict(&artifact));
+    println!("\nArtifact: {}", store_path.display());
+    println!("Latest:   certify_verdict_latest.json");
+}
+
+/// `--certify-verdict <artifact.json>`: re-read and pretty-print a stored verdict.
+fn demo_certify_verdict(path: &str) {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            println!("Could not read {path}: {e}");
+            return;
+        }
+    };
+    match serde_json::from_str::<EncoderVerdict>(&raw) {
+        Ok(v) => println!("{}", render_verdict(&v)),
+        Err(e) => println!("Not a valid verdict artifact ({e})"),
+    }
+}
+
+fn render_verdict(v: &EncoderVerdict) -> String {
+    let mut s = String::new();
+    s.push_str("Verdict artifact (go/no-go = disjoint_semantic_lift)\n");
+    s.push_str("====================================================\n");
+    s.push_str(&format!("  encoder={}  data_hash={}  seed={}\n", v.encoder_id, v.data_hash, v.seed));
+    s.push_str(&format!("  candidate set (honest, all nodes): {}\n\n", v.candidate_set_size));
+    s.push_str(&format!("  >>> VERDICT: {} <<<\n", v.verdict));
+    if !v.invalid_reason.is_empty() {
+        s.push_str(&format!("  reason: {}\n", v.invalid_reason));
+    }
+    s.push_str(&format!(
+        "  disjoint_semantic_lift = {:+.3}  CI=[{:+.3}, {:+.3}]   (gate: lift>0 AND CI excludes 0)\n\n",
+        v.disjoint_semantic_lift, v.disjoint_lift_ci[0], v.disjoint_lift_ci[1]
+    ));
+    s.push_str("  lift decomposition\n");
+    s.push_str(&format!(
+        "    disjoint_gen_a (seen-elsewhere)   = {:.3}  (n={})\n",
+        v.disjoint_gen_a, v.disjoint_gen_a_n
+    ));
+    s.push_str(&format!("    semantic_floor_95 (shuffle null)  = {:.3}\n", v.semantic_floor_95));
+    s.push_str(&format!("    semantic_floor_mean               = {:.3}\n", v.semantic_floor_mean));
+    s.push_str(&format!("    pooled_heldout (evidence, NOT gate) = {:.3}\n", v.pooled_heldout));
+    s.push_str(&format!("    memorization_gap (captured−heldout) = {:.3}\n\n", v.memorization_gap));
+    s.push_str("  diagnostics\n");
+    s.push_str(&format!(
+        "    feature_family disjoint-0 acc: word={:.3} bigram={:.3} trigram(union)={:.3}\n",
+        v.feature_family.word, v.feature_family.bigram, v.feature_family.trigram
+    ));
+    s.push_str(&format!(
+        "    disjoint_level={} (granularity lift resolved at; looser=leakier)  plateau_flag={}  collision_delta={:+.3}\n\n",
+        v.disjoint_level, v.plateau_flag, v.collision_delta
+    ));
+    s.push_str("  validity gates (all must hold, else INVALID)\n");
+    s.push_str(&format!("    positive_control_collapsed (CATA floors) = {}\n", v.positive_control_collapsed));
+    s.push_str(&format!("    augmentation_firewall_clean              = {}\n", v.augmentation_firewall_clean));
+    s.push_str(&format!("    below_resolution                         = {}\n", v.below_resolution));
+    s.push_str(&format!(
+        "    provenance: train(real={}, authored={}, augmented={}) certify(real={}, authored={}, augmented={})\n",
+        v.firewall.train_real,
+        v.firewall.train_authored,
+        v.firewall.train_augmented,
+        v.firewall.certify_real,
+        v.firewall.certify_authored,
+        v.firewall.certify_augmented,
+    ));
+    if !v.firewall.violations.is_empty() {
+        s.push_str("    firewall violations:\n");
+        for x in &v.firewall.violations {
+            s.push_str(&format!("      - {x}\n"));
+        }
+    }
+    if !v.encoder_provenance.is_empty() {
+        s.push_str(&format!("    encoder provenance: {}\n", v.encoder_provenance));
+    }
+    s.push_str(&format!("\n  one-line: {}\n", v.one_line()));
+    s
+}
+
 /// Positive control: install a synthetic semantic embedder (bring-your-own vectors),
 /// build a 3-concept space where one approved alias per concept moves the centroid past
 /// the held-out boundary, and certify. Returns a report fragment. Clears the embedder on
@@ -6085,6 +6854,7 @@ fn positive_control_section(rt: &growformer::dimension::language::LanguageRuntim
         domain_context: "runtime".into(),
         inferred_concept_id: concept.into(),
         split,
+        provenance: grounding_loop::PhraseProvenance::real(phrase),
     };
     let captures = vec![
         mk("alpha proposal phrase", "concept_a", CaptureSplit::Propose),
