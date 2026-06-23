@@ -636,6 +636,144 @@ pub fn sentiment_bearing_from_intent(intent_text: &str) -> f32 {
     (num / den).clamp(-1.0, 1.0)
 }
 
+/// Fleet slice for cross-domain collision checks (graphs are not merged for audit).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum GroundingFleetDomain {
+    Base,
+    Crypto,
+    Fintech,
+    Runtime,
+}
+
+impl GroundingFleetDomain {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Base => "base",
+            Self::Crypto => "crypto",
+            Self::Fintech => "fintech",
+            Self::Runtime => "runtime",
+        }
+    }
+}
+
+/// One grounding node and its alias keys (audit / assisted-maintenance loop).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct GroundingNodeInfo {
+    pub domain: GroundingFleetDomain,
+    pub node_id: String,
+    pub aliases: Vec<String>,
+}
+
+fn nodes_with_aliases_from_graph(g: &WorldGraph, domain: GroundingFleetDomain) -> Vec<GroundingNodeInfo> {
+    let mut aliases_per_node: Vec<Vec<String>> = vec![Vec::new(); g.nodes.len()];
+    for (alias, &idx) in &g.lookup {
+        let node_id = &g.nodes[idx].id;
+        if alias != node_id {
+            aliases_per_node[idx].push(alias.clone());
+        }
+    }
+    g.nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| GroundingNodeInfo {
+            domain,
+            node_id: n.id.clone(),
+            aliases: aliases_per_node[i].clone(),
+        })
+        .collect()
+}
+
+fn load_base_graph_only() -> WorldGraph {
+    let raw = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/data/inference/world_grounding.toml"
+    ));
+    parse_grounding_toml(raw).expect("parse base world_grounding.toml")
+}
+
+fn load_crypto_graph_only() -> WorldGraph {
+    let raw = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/data/crypto/world_grounding_crypto.toml"
+    ));
+    parse_grounding_toml(raw).expect("parse crypto world_grounding.toml")
+}
+
+fn load_fintech_graph_only() -> WorldGraph {
+    let raw = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/data/fintech/world_grounding_fintech.toml"
+    ));
+    parse_grounding_toml(raw).expect("parse fintech world_grounding.toml")
+}
+
+fn domain_graph_clone() -> Option<WorldGraph> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        DOMAIN_GRAPH.with(|cell| cell.borrow().clone())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        DOMAIN_GRAPH_NATIVE
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().cloned())
+    }
+}
+
+/// Activated root node ids on the merged fleet graph (token lookup).
+pub fn activated_root_ids(intent_text: &str) -> Vec<String> {
+    activated_roots(intent_text)
+        .iter()
+        .filter_map(|&i| graph().nodes.get(i).map(|n| n.id.clone()))
+        .collect()
+}
+
+/// Activated root node ids on the optional runtime domain graph only.
+pub fn activated_root_ids_in_domain_graph(intent_text: &str) -> Vec<String> {
+    let Some(dg) = domain_graph_clone() else {
+        return Vec::new();
+    };
+    let mut roots = Vec::new();
+    let mut seen_idx = HashSet::new();
+    for tok in tokenize(intent_text) {
+        let k = normalize_key(&tok);
+        if k.len() < 2 {
+            continue;
+        }
+        if let Some(&ix) = dg.lookup.get(&k) {
+            if seen_idx.insert(ix) {
+                if let Some(n) = dg.nodes.get(ix) {
+                    roots.push(n.id.clone());
+                }
+            }
+        }
+    }
+    roots
+}
+
+/// Inventory of all loaded grounding graphs (per-domain slices, not merged).
+pub fn fleet_node_inventory() -> Vec<GroundingNodeInfo> {
+    let mut out = nodes_with_aliases_from_graph(&load_base_graph_only(), GroundingFleetDomain::Base);
+    out.extend(nodes_with_aliases_from_graph(
+        &load_crypto_graph_only(),
+        GroundingFleetDomain::Crypto,
+    ));
+    out.extend(nodes_with_aliases_from_graph(
+        &load_fintech_graph_only(),
+        GroundingFleetDomain::Fintech,
+    ));
+    if let Some(dg) = domain_graph_clone() {
+        out.extend(nodes_with_aliases_from_graph(&dg, GroundingFleetDomain::Runtime));
+    }
+    out
+}
+
+/// True when any fleet or runtime-domain graph is loaded.
+pub fn has_runtime_domain_graph() -> bool {
+    has_domain_graph()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

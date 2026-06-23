@@ -1819,6 +1819,27 @@ impl LanguageService {
 
         let action = self.active_dm_mut().route_text_to_action_stateless(intent_text)?;
 
+        // Assisted-maintenance capture (lightweight; certifier runs offline via --grounding-loop-audit).
+        {
+            use crate::inference::grounding_loop::{capture_lightweight, GroundingLoopParams};
+            use crate::inference::world_grounding::activated_root_ids;
+            let roots = activated_root_ids(intent_text);
+            let concept = roots
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "unassigned".to_string());
+            let _ = capture_lightweight(
+                intent_text,
+                action.confidence,
+                false,
+                None,
+                None,
+                "live",
+                &concept,
+                &GroundingLoopParams::default(),
+            );
+        }
+
         // Fragment composition fast-path (chat passthrough only): compose a fresh
         // response from typed identity/activity/drive fragments instead of
         // retrieving a whole canned program. Gated on a loaded fragment library

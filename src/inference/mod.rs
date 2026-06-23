@@ -9,6 +9,7 @@
 pub mod causal_hints;
 pub mod causal_relation;
 pub mod grounding_expand;
+pub mod grounding_loop;
 pub mod world_grounding;
 pub mod harness;
 pub mod inference_guardrails;

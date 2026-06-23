@@ -12,6 +12,18 @@
 
 use growformer::cmi::{CmiPointRecord, format_cmi_report, estimate_cmi_seed};
 use growformer::cmi_spiral::{format_spiral_resolve_report, resolve_spiral_region_mi, SpiralResolveResult};
+use growformer::inference::grounding_loop::{
+    self, BatchVerdict, CaptureSplit, CoverageCurvePoint, EditProposal, FailureCapture,
+    FailureTrigger, FixtureRow, GroundingLoopParams, ProposalKind,
+    build_grounding_index, build_grounding_index_from_nodes, build_overlap_curve,
+    calibrate_alias_threshold, certify_batch, clear_phrase_embedder, collision_check,
+    concept_train_features, coverage_vs_additions_curve, curve_lifts, decide_batch_verdict,
+    embed_phrase, evaluate_disjoint, format_certifier_report, format_coverage_curve,
+    install_phrase_embedder_from_corpus, install_supervised_embedder, install_vector_embedder,
+    overlap0_substrata, pooled_accuracy, propose_for_phrase, synthetic_audit_fixture,
+    wilson_interval, OverlapBin, SupervisedEncoder, PET_DOMAIN_FIXTURE_TOML,
+};
+use growformer::inference::world_grounding::{self, GroundingFleetDomain};
 use growformer::environment::NeuralEnvironment;
 use growformer::types::NeuronId;
 use growformer::dimension::{
@@ -84,6 +96,21 @@ struct Args {
     cmi_spiral_resolve: bool,
     #[arg(long)]
     cmi_spiral_analyze: bool,
+    /// Self-revising grounding loop audit (assisted maintenance; §GROUNDING_LOOP_SPEC).
+    #[arg(long)]
+    grounding_loop_audit: bool,
+    #[arg(long)]
+    grounding_loop_analyze: bool,
+    /// Run the grounding-loop certifier on a real companion (lexical vs supervised encoder).
+    /// Pass the companion dir; defaults to the Luna companion.
+    #[arg(long)]
+    grounding_loop_luna: Option<String>,
+    /// Token-disjoint generalization test for the supervised encoder on a companion.
+    #[arg(long)]
+    grounding_disjoint_test: Option<String>,
+    /// Re-run the disjoint test from captured CSV + meta sidecar.
+    #[arg(long)]
+    grounding_disjoint_analyze: bool,
     #[arg(long)]
     neurogenesis: bool,
     #[arg(long)]
@@ -285,6 +312,16 @@ fn main() {
         demo_cmi_spiral_analyze();
     } else if args.cmi_spiral_resolve {
         demo_cmi_spiral_resolve();
+    } else if args.grounding_loop_analyze {
+        demo_grounding_loop_analyze();
+    } else if let Some(dir) = args.grounding_loop_luna.clone() {
+        demo_grounding_loop_luna(&dir);
+    } else if let Some(dir) = args.grounding_disjoint_test.clone() {
+        demo_grounding_disjoint_test(&dir);
+    } else if args.grounding_disjoint_analyze {
+        demo_grounding_disjoint_analyze();
+    } else if args.grounding_loop_audit {
+        demo_grounding_loop_audit();
     } else if args.cmi_analyze {
         demo_cmi_analyze_csv();
     } else if args.cmi {
@@ -5040,6 +5077,1347 @@ fn demo_cmi_spiral_analyze() {
         .unwrap_or_else(|e| panic!("read {}: {}", OUT_PATH, e));
     let result: SpiralResolveResult = serde_json::from_str(&text).expect("parse spiral resolve");
     println!("{}", format_spiral_resolve_report(&result));
+}
+
+// =============================================================================
+// Grounding loop audit (assisted maintenance — §GROUNDING_LOOP_SPEC)
+// =============================================================================
+
+const GROUNDING_CAPTURES_CSV: &str = "grounding_loop_captures.csv";
+const GROUNDING_PROPOSALS_CSV: &str = "grounding_loop_proposals.csv";
+const GROUNDING_CURVE_CSV: &str = "grounding_loop_curve.csv";
+const GROUNDING_RESULTS_TXT: &str = "grounding_loop_results.txt";
+
+fn write_grounding_curve_csv(path: &str, sweep: &str, curve: &[CoverageCurvePoint]) {
+    use std::io::Write as _;
+    // Append so the memorization and genuine sweeps share one file (distinguished by `sweep`).
+    let exists = std::path::Path::new(path).exists();
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .expect("open curve csv");
+    if !exists {
+        writeln!(
+            f,
+            "sweep,additions,captured_accuracy,held_out_accuracy,generalization_gap,cross_domain_misroute_rate"
+        )
+        .expect("curve header");
+    }
+    for p in curve {
+        writeln!(
+            f,
+            "{},{},{:.4},{:.4},{:.4},{:.4}",
+            sweep,
+            p.additions,
+            p.captured_accuracy,
+            p.held_out_accuracy,
+            p.generalization_gap,
+            p.cross_domain_misroute_rate,
+        )
+        .expect("curve row");
+    }
+}
+
+fn parse_fleet_domain(s: &str) -> Option<GroundingFleetDomain> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "base" => Some(GroundingFleetDomain::Base),
+        "crypto" => Some(GroundingFleetDomain::Crypto),
+        "fintech" => Some(GroundingFleetDomain::Fintech),
+        "runtime" => Some(GroundingFleetDomain::Runtime),
+        _ => None,
+    }
+}
+
+fn fixture_rows_to_captures(
+    rt: &growformer::dimension::LanguageRuntime,
+    index: &grounding_loop::GroundingNodeIndex,
+    fixture: &[FixtureRow],
+) -> Vec<FailureCapture> {
+    fixture
+        .iter()
+        .filter_map(|row| {
+            let (emb, conf) = embed_phrase(rt, &row.phrase).ok()?;
+            Some(FailureCapture {
+                phrase: row.phrase.clone(),
+                encoder_embedding: emb.clone(),
+                activated_nodes: index.activated_node_scores(&emb),
+                max_confidence: conf,
+                entropy_bits: None,
+                trigger_reason: FailureTrigger::NoNodeActivated,
+                downstream_signal: None,
+                timestamp_unix: 0,
+                domain_context: row.domain_context.clone(),
+                inferred_concept_id: row.concept_id.clone(),
+                split: row.split,
+            })
+        })
+        .collect()
+}
+
+fn write_grounding_captures_csv(path: &str, captures: &[FailureCapture]) {
+    let mut f = std::fs::File::create(path).expect("create captures csv");
+    writeln!(
+        f,
+        "phrase,concept_id,split,trigger,domain_context,max_confidence,activated_count"
+    )
+    .expect("header");
+    for c in captures {
+        writeln!(
+            f,
+            "{},{},{},{},{},{:.4},{}",
+            csv_escape(&c.phrase),
+            csv_escape(&c.inferred_concept_id),
+            c.split.as_str(),
+            c.trigger_reason.as_str(),
+            csv_escape(&c.domain_context),
+            c.max_confidence,
+            c.activated_nodes.len(),
+        )
+        .expect("row");
+    }
+}
+
+fn write_grounding_proposals_csv(path: &str, proposals: &[EditProposal]) {
+    let mut f = std::fs::File::create(path).expect("create proposals csv");
+    writeln!(
+        f,
+        "kind,phrase,target_node,target_domain,similarity,margin,collision_score,conflicts,pre_certify_held_out,approved,integrated"
+    )
+    .expect("header");
+    for p in proposals {
+        let (kind, phrase, target, domain, sim, margin) = match &p.kind {
+            ProposalKind::Alias {
+                phrase,
+                target_node,
+                target_domain,
+                similarity,
+                margin,
+                ..
+            } => (
+                "alias".to_string(),
+                phrase.clone(),
+                target_node.clone(),
+                target_domain.clone(),
+                *similarity,
+                *margin,
+            ),
+            ProposalKind::NewNode { phrases, domain, .. } => (
+                "new_node".to_string(),
+                phrases.join("|"),
+                String::new(),
+                domain.clone(),
+                0.0,
+                0.0,
+            ),
+        };
+        let conflicts = p
+            .collision_conflicts
+            .iter()
+            .map(|(d, n, s)| format!("{}:{}:{:.3}", d, n, s))
+            .collect::<Vec<_>>()
+            .join(";");
+        writeln!(
+            f,
+            "{},{},{},{},{:.4},{:.4},{:.4},{},{:.4},{},{}",
+            kind,
+            csv_escape(&phrase),
+            csv_escape(&target),
+            csv_escape(&domain),
+            sim,
+            margin,
+            p.collision_score,
+            csv_escape(&conflicts),
+            p.pre_certify_held_out_estimate,
+            p.approved,
+            p.integrated,
+        )
+        .expect("row");
+    }
+}
+
+fn csv_escape(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+fn load_grounding_captures_csv(path: &str) -> Vec<FailureCapture> {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {}", path, e));
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if i == 0 || line.trim().is_empty() {
+            continue;
+        }
+        let parts = parse_csv_line(line);
+        if parts.len() < 7 {
+            continue;
+        }
+        let split = match parts[2].as_str() {
+            "certify" => CaptureSplit::Certify,
+            _ => CaptureSplit::Propose,
+        };
+        let trigger = match parts[3].as_str() {
+            "entropy_guard" => FailureTrigger::EntropyGuard,
+            "low_confidence" => FailureTrigger::LowConfidence,
+            "dissatisfaction" => FailureTrigger::Dissatisfaction,
+            _ => FailureTrigger::NoNodeActivated,
+        };
+        out.push(FailureCapture {
+            phrase: parts[0].clone(),
+            encoder_embedding: Vec::new(),
+            activated_nodes: Vec::new(),
+            max_confidence: parts[5].parse().unwrap_or(0.0),
+            entropy_bits: None,
+            trigger_reason: trigger,
+            downstream_signal: None,
+            timestamp_unix: 0,
+            domain_context: parts[4].clone(),
+            inferred_concept_id: parts[1].clone(),
+            split,
+        });
+    }
+    out
+}
+
+fn parse_csv_line(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if in_quotes => {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    cur.push('"');
+                } else {
+                    in_quotes = false;
+                }
+            }
+            '"' => in_quotes = true,
+            ',' if !in_quotes => {
+                fields.push(cur.clone());
+                cur.clear();
+            }
+            _ => cur.push(c),
+        }
+    }
+    fields.push(cur);
+    fields
+}
+
+fn rehydrate_captures(
+    rt: &growformer::dimension::LanguageRuntime,
+    index: &grounding_loop::GroundingNodeIndex,
+    captures: &mut [FailureCapture],
+) {
+    for c in captures.iter_mut() {
+        if let Ok((emb, _)) = embed_phrase(rt, &c.phrase) {
+            c.encoder_embedding = emb.clone();
+            c.activated_nodes = index.activated_node_scores(&emb);
+        }
+    }
+}
+
+fn build_proposals_for_captures(
+    captures: &[FailureCapture],
+    index: &grounding_loop::GroundingNodeIndex,
+    params: &GroundingLoopParams,
+    rt: &growformer::dimension::LanguageRuntime,
+    before_index: &grounding_loop::GroundingNodeIndex,
+) -> Vec<EditProposal> {
+    let held_out_before =
+        grounding_loop::routing_accuracy_for_captures(captures, rt, before_index, CaptureSplit::Certify)
+            .unwrap_or(0.0);
+
+    let mut proposals = Vec::new();
+    for cap in captures.iter().filter(|c| c.split == CaptureSplit::Propose) {
+        let domain_hint = parse_fleet_domain(&cap.domain_context);
+        let Some(kind) = propose_for_phrase(
+            &cap.phrase,
+            &cap.encoder_embedding,
+            index,
+            params,
+            domain_hint,
+        ) else {
+            continue;
+        };
+        let (target_domain, target_node) = match &kind {
+            ProposalKind::Alias {
+                target_domain,
+                target_node,
+                ..
+            } => (target_domain.clone(), target_node.clone()),
+            ProposalKind::NewNode { domain, .. } => (domain.clone(), String::new()),
+        };
+        let domain = parse_fleet_domain(&target_domain).unwrap_or(GroundingFleetDomain::Crypto);
+        let (collision_score, conflicts) = if let ProposalKind::Alias { target_node, .. } = &kind {
+            collision_check(
+                &cap.encoder_embedding,
+                domain,
+                target_node,
+                index,
+                params,
+            )
+        } else {
+            (0.0, Vec::new())
+        };
+        proposals.push(EditProposal {
+            kind,
+            collision_score,
+            collision_conflicts: conflicts,
+            pre_certify_held_out_estimate: held_out_before,
+            approved: collision_score < params.collision_threshold
+                && target_node == cap.inferred_concept_id,
+            integrated: false,
+        });
+    }
+    proposals
+}
+
+/// Domain corpus that grounds the CliffordE8 encoder vocabulary (option 2 fix).
+/// Natural domain sentences — deliberately NOT the held-out certify phrases, so the
+/// certifier's held-out generalization test stays honest (no phrase-level leakage).
+fn grounding_audit_corpus() -> Vec<&'static str> {
+    vec![
+        // crypto
+        "bitcoin and btc holders stack sats onchain",
+        "long term btc investors hold their coins for years",
+        "sats accumulate onchain as bitcoin moves between wallets",
+        "ethereum is an ether network where gas fees apply",
+        "gas fees on the ethereum network rise when blocks fill",
+        "ether transactions on ethereum cost gas",
+        "a dex is a decentralized exchange where users swap tokens",
+        "swaps on a dex can fail when routing through liquidity breaks",
+        "decentralized exchange routing depends on liquidity pools",
+        // pet
+        "a puppy enjoys a snack as a treat during training",
+        "dog treats are a reward for good training behavior",
+        "walking the dog on a leash is daily exercise",
+        "a stroll in the park keeps the dog active",
+    ]
+}
+
+fn install_grounding_audit_dictionary(_dm: &mut DimensionManager) -> bool {
+    let corpus = grounding_audit_corpus();
+    let n = grounding_loop::install_phrase_embedder_from_corpus(&corpus, 1024);
+    println!(
+        "  [cata] grounding-audit phrase embedder: {} tokens from {} domain sentences",
+        n,
+        corpus.len()
+    );
+    true
+}
+
+const LUNA_DEFAULT_DIR: &str =
+    "/Users/astor/Projects/2026/spacekit/spacekit-projects/companions/luna";
+
+/// Runtime-domain grounding nodes (the loaded companion graph) as `(domain, id, aliases)`.
+fn luna_runtime_nodes() -> Vec<(GroundingFleetDomain, String, Vec<String>)> {
+    world_grounding::fleet_node_inventory()
+        .into_iter()
+        .filter(|n| n.domain == GroundingFleetDomain::Runtime)
+        .map(|n| (GroundingFleetDomain::Runtime, n.node_id, n.aliases))
+        .collect()
+}
+
+/// Build per-intent propose/certify captures from labeled companion utterances.
+/// Only rows whose `semantic_intent` is a real loaded node id are kept. Within each
+/// intent, utterances are split deterministically (even index → propose, odd → certify),
+/// so the certify set is genuinely held out from both the proposals and the encoder.
+fn luna_build_captures(
+    samples: &[LanguageSample],
+    valid_ids: &std::collections::HashSet<String>,
+) -> Vec<FailureCapture> {
+    let mut by_intent: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    for s in samples {
+        if !valid_ids.contains(&s.semantic_intent) {
+            continue;
+        }
+        let phrase = s.text.trim().to_string();
+        if phrase.is_empty() {
+            continue;
+        }
+        if seen.insert((s.semantic_intent.clone(), phrase.to_ascii_lowercase())) {
+            by_intent.entry(s.semantic_intent.clone()).or_default().push(phrase);
+        }
+    }
+    let mut captures = Vec::new();
+    for (intent, mut phrases) in by_intent {
+        if phrases.len() < 4 {
+            continue; // need at least 2 propose + 2 certify for a meaningful split
+        }
+        phrases.sort();
+        for (i, phrase) in phrases.into_iter().enumerate() {
+            let split = if i % 2 == 0 { CaptureSplit::Propose } else { CaptureSplit::Certify };
+            captures.push(FailureCapture {
+                phrase,
+                encoder_embedding: Vec::new(),
+                activated_nodes: Vec::new(),
+                max_confidence: 0.0,
+                entropy_bits: None,
+                trigger_reason: FailureTrigger::NoNodeActivated,
+                downstream_signal: None,
+                timestamp_unix: 0,
+                domain_context: "runtime".into(),
+                inferred_concept_id: intent.clone(),
+                split,
+            });
+        }
+    }
+    captures
+}
+
+/// One full certifier pass for a given (already-installed) encoder: build the index from
+/// the companion nodes, rehydrate captures, build proposals, certify the genuine and
+/// memorization batches, sweep the coverage curve, and format a compact report.
+fn luna_certifier_pass(
+    label: &str,
+    rt: &growformer::dimension::LanguageRuntime,
+    captures: &mut Vec<FailureCapture>,
+    nodes: &[(GroundingFleetDomain, String, Vec<String>)],
+    params: &GroundingLoopParams,
+) -> String {
+    let before_index = build_grounding_index_from_nodes(rt, nodes, params).expect("luna index");
+    rehydrate_captures(rt, &before_index, captures);
+
+    let proposals = build_proposals_for_captures(captures, &before_index, params, rt, &before_index);
+
+    // Genuine batch: integrate only approved propose-set aliases (held-out untouched).
+    let mut after_genuine = before_index.clone();
+    let mut had_collisions = false;
+    let mut approved = 0usize;
+    for p in &proposals {
+        if p.collision_score >= params.collision_threshold {
+            had_collisions = true;
+        }
+        if !p.approved {
+            continue;
+        }
+        if let ProposalKind::Alias { phrase, target_node, target_domain, .. } = &p.kind {
+            let d = parse_fleet_domain(target_domain).unwrap_or(GroundingFleetDomain::Runtime);
+            if let Ok((emb, _)) = embed_phrase(rt, phrase) {
+                after_genuine.add_alias_to_node(d, target_node, phrase, emb);
+                approved += 1;
+            }
+        }
+    }
+
+    // Memorization contrast: add exact captured propose phrases as aliases.
+    let mut after_memo = before_index.clone();
+    for cap in captures.iter().filter(|c| c.split == CaptureSplit::Propose) {
+        if let Ok((emb, _)) = embed_phrase(rt, &cap.phrase) {
+            let d = parse_fleet_domain(&cap.domain_context).unwrap_or(GroundingFleetDomain::Runtime);
+            after_memo.add_alias_to_node(d, &cap.inferred_concept_id, &cap.phrase, emb);
+        }
+    }
+
+    let home = GroundingFleetDomain::Runtime;
+    let (before_m, gen_m) =
+        certify_batch(captures, rt, &before_index, &after_genuine, home).expect("certify genuine");
+    let (_, memo_m) =
+        certify_batch(captures, rt, &before_index, &after_memo, home).expect("certify memo");
+    let gen_verdict = decide_batch_verdict(&before_m, &gen_m, params, had_collisions);
+    let memo_verdict = decide_batch_verdict(&before_m, &memo_m, params, false);
+
+    let genuine_additions: Vec<(GroundingFleetDomain, String, String)> = proposals
+        .iter()
+        .filter(|p| p.approved)
+        .filter_map(|p| match &p.kind {
+            ProposalKind::Alias { phrase, target_node, target_domain, .. } => Some((
+                parse_fleet_domain(target_domain).unwrap_or(GroundingFleetDomain::Runtime),
+                target_node.clone(),
+                phrase.clone(),
+            )),
+            _ => None,
+        })
+        .collect();
+    let genuine_curve =
+        coverage_vs_additions_curve(captures, rt, &before_index, &genuine_additions)
+            .expect("genuine curve");
+    let (gcap, gheld) = curve_lifts(&genuine_curve);
+
+    let n_propose = captures.iter().filter(|c| c.split == CaptureSplit::Propose).count();
+    let n_certify = captures.iter().filter(|c| c.split == CaptureSplit::Certify).count();
+    let cal = calibrate_alias_threshold(captures, rt, &before_index).ok();
+
+    let mut s = String::new();
+    s.push_str(&format!("=== Encoder: {label} ===\n"));
+    s.push_str(&format!(
+        "  propose={n_propose}  certify(held-out)={n_certify}  proposals={}  approved={approved}\n",
+        proposals.len()
+    ));
+    if let Some(c) = &cal {
+        s.push_str(&format!(
+            "  τ_alias calibration: same={:.3} cross={:.3} suggested={:.3} (default {:.2})\n",
+            c.same_concept_mean, c.cross_concept_mean, c.suggested_tau_alias, params.tau_alias
+        ));
+    }
+    s.push_str(&format_certifier_report(
+        "  genuine batch (approved aliases only)",
+        &before_m,
+        &gen_m,
+        gen_verdict,
+    ));
+    s.push('\n');
+    s.push_str(&format_certifier_report(
+        "  memorization contrast (exact phrases)",
+        &before_m,
+        &memo_m,
+        memo_verdict,
+    ));
+    s.push_str(&format!(
+        "\n  genuine sweep lifts: captured {:+.1}pp, held-out {:+.1}pp\n",
+        gcap * 100.0,
+        gheld * 100.0,
+    ));
+    s
+}
+
+fn demo_grounding_loop_luna(dir_arg: &str) {
+    println!("--- Grounding loop on a real companion (Luna) ---\n");
+    let dir = if dir_arg.trim().is_empty() || dir_arg.trim() == "default" {
+        LUNA_DEFAULT_DIR.to_string()
+    } else {
+        dir_arg.trim().to_string()
+    };
+    let data_dir = std::path::Path::new(&dir).join("data");
+    let grounding_path = data_dir.join("pet_world_grounding.toml");
+
+    let toml = match std::fs::read_to_string(&grounding_path) {
+        Ok(t) => t,
+        Err(e) => {
+            println!("Could not read {}: {}", grounding_path.display(), e);
+            return;
+        }
+    };
+    if let Err(e) = world_grounding::load_grounding_graph_from_str(&toml) {
+        println!("Failed to parse grounding graph: {}", e);
+        return;
+    }
+
+    let mut samples: Vec<LanguageSample> = Vec::new();
+    if let Err(e) = append_language_samples_from_training_jsonl_dir(&mut samples, &data_dir) {
+        println!("Failed to load JSONL corpus: {}", e);
+        return;
+    }
+    println!("Loaded {} labeled utterances from {}\n", samples.len(), data_dir.display());
+
+    let nodes = luna_runtime_nodes();
+    let valid_ids: std::collections::HashSet<String> =
+        nodes.iter().map(|(_, id, _)| id.clone()).collect();
+    println!("Companion grounding graph: {} runtime nodes\n", nodes.len());
+
+    let mut captures = luna_build_captures(&samples, &valid_ids);
+    if captures.is_empty() {
+        println!("No usable captures (need intents that are graph nodes with >=4 utterances).");
+        return;
+    }
+    let n_intents: std::collections::BTreeSet<&str> =
+        captures.iter().map(|c| c.inferred_concept_id.as_str()).collect();
+    println!(
+        "Captures: {} across {} intents (propose/certify split)\n",
+        captures.len(),
+        n_intents.len()
+    );
+
+    let (dm, _, _, _) = build_language_demo_manager(0.0);
+    let rt = &dm.language_runtime;
+
+    let params = GroundingLoopParams::default();
+    let mut report = String::new();
+    report.push_str("Grounding loop — real companion (Luna) certifier\n");
+    report.push_str("================================================\n\n");
+    report.push_str(&format!(
+        "Runtime nodes: {} | intents tested: {} | propose+certify: {}\n\n",
+        nodes.len(),
+        n_intents.len(),
+        captures.len()
+    ));
+
+    // Pass 1: lexical CATA encoder, dictionary built from the companion's own propose-set
+    // utterances + node aliases (best case for the lexical regime).
+    let mut corpus: Vec<String> = captures
+        .iter()
+        .filter(|c| c.split == CaptureSplit::Propose)
+        .map(|c| c.phrase.clone())
+        .collect();
+    for (_, id, aliases) in &nodes {
+        corpus.push(id.replace('_', " "));
+        corpus.extend(aliases.iter().cloned());
+    }
+    let corpus_refs: Vec<&str> = corpus.iter().map(|s| s.as_str()).collect();
+    let dict_n = install_phrase_embedder_from_corpus(&corpus_refs, 8192);
+    println!("  [lexical] CATA dictionary: {dict_n} tokens");
+    report.push_str(&luna_certifier_pass("lexical CATA centroid", rt, &mut captures, &nodes, &params));
+    report.push_str("\n\n");
+
+    // Pass 2: supervised encoder trained ONLY on propose-set labels (certify held out).
+    let train_pairs: Vec<(String, String)> = captures
+        .iter()
+        .filter(|c| c.split == CaptureSplit::Propose)
+        .map(|c| (c.phrase.clone(), c.inferred_concept_id.clone()))
+        .collect();
+    match SupervisedEncoder::train(&train_pairs, 4096, 60) {
+        Some(enc) => {
+            let k = install_supervised_embedder(enc);
+            println!("  [supervised] trained on {} propose phrases, {k} concepts", train_pairs.len());
+            report.push_str(&luna_certifier_pass(
+                "supervised projection (trained on propose-set only)",
+                rt,
+                &mut captures,
+                &nodes,
+                &params,
+            ));
+        }
+        None => report.push_str("supervised encoder: insufficient labels (need >=2)\n"),
+    }
+    clear_phrase_embedder();
+
+    println!("\n{}", report);
+    std::fs::write(GROUNDING_RESULTS_TXT, &report).expect("write results");
+    println!("Wrote {}.", GROUNDING_RESULTS_TXT);
+}
+
+const DISJOINT_CURVE_CSV: &str = "grounding_disjoint_curve.csv";
+const DISJOINT_META_TXT: &str = "grounding_disjoint_meta.txt";
+
+fn disjoint_shuffle_labels(pairs: &[(String, String)], seed: u64) -> Vec<(String, String)> {
+    let mut labels: Vec<String> = pairs.iter().map(|(_, l)| l.clone()).collect();
+    let mut rng = seed ^ 0x9E3779B97F4A7C15;
+    for i in (1..labels.len()).rev() {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        let j = (rng % (i as u64 + 1)) as usize;
+        labels.swap(i, j);
+    }
+    pairs
+        .iter()
+        .enumerate()
+        .map(|(i, (p, _))| (p.clone(), labels[i].clone()))
+        .collect()
+}
+
+fn percentile_sorted(v: &mut [f32], p: f32) -> f32 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((p * (v.len() as f32 - 1.0)).round() as usize).min(v.len() - 1);
+    v[idx]
+}
+
+fn format_overlap_curve(label: &str, curve: &[OverlapBin]) -> String {
+    let mut s = format!("{label}\n  overlap bin | n | accuracy [95% Wilson CI]\n");
+    for b in curve {
+        if b.n == 0 {
+            s.push_str(&format!("  {:>10} | 0 | (empty)\n", b.label));
+        } else {
+            s.push_str(&format!(
+                "  {:>10} | {:>3} | {:>5.1}% [{:>5.1}%, {:>5.1}%]\n",
+                b.label,
+                b.n,
+                b.accuracy * 100.0,
+                b.ci_lo * 100.0,
+                b.ci_hi * 100.0,
+            ));
+        }
+    }
+    s
+}
+
+fn write_disjoint_curve_csv(path: &str, encoder: &str, level: &str, curve: &[OverlapBin]) {
+    use std::io::Write as _;
+    let exists = std::path::Path::new(path).exists();
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .expect("open disjoint csv");
+    if !exists {
+        writeln!(f, "encoder,feature_level,overlap_bin,n,hits,accuracy,ci_lo,ci_hi").expect("hdr");
+    }
+    for b in curve {
+        writeln!(
+            f,
+            "{},{},{},{},{},{:.4},{:.4},{:.4}",
+            encoder, level, b.label, b.n, b.hits, b.accuracy, b.ci_lo, b.ci_hi
+        )
+        .expect("row");
+    }
+}
+
+fn demo_grounding_disjoint_test(dir_arg: &str) {
+    println!("--- Token-disjoint generalization test (supervised grounding encoder) ---\n");
+    let dir = if dir_arg.trim().is_empty() || dir_arg.trim() == "default" {
+        LUNA_DEFAULT_DIR.to_string()
+    } else {
+        dir_arg.trim().to_string()
+    };
+    let data_dir = std::path::Path::new(&dir).join("data");
+    let grounding_path = data_dir.join("pet_world_grounding.toml");
+    let toml = match std::fs::read_to_string(&grounding_path) {
+        Ok(t) => t,
+        Err(e) => {
+            println!("Could not read {}: {}", grounding_path.display(), e);
+            return;
+        }
+    };
+    if let Err(e) = world_grounding::load_grounding_graph_from_str(&toml) {
+        println!("Failed to parse grounding graph: {}", e);
+        return;
+    }
+    let mut samples: Vec<LanguageSample> = Vec::new();
+    if let Err(e) = append_language_samples_from_training_jsonl_dir(&mut samples, &data_dir) {
+        println!("Failed to load JSONL corpus: {}", e);
+        return;
+    }
+    let nodes = luna_runtime_nodes();
+    let valid_ids: std::collections::HashSet<String> =
+        nodes.iter().map(|(_, id, _)| id.clone()).collect();
+    let captures = luna_build_captures(&samples, &valid_ids);
+    if captures.is_empty() {
+        println!("No usable captures.");
+        return;
+    }
+    write_grounding_captures_csv(GROUNDING_CAPTURES_CSV, &captures);
+    std::fs::write(DISJOINT_META_TXT, grounding_path.to_string_lossy().as_bytes())
+        .expect("write meta");
+
+    let (dm, _, _, _) = build_language_demo_manager(0.0);
+    let report = run_disjoint_core(&dm.language_runtime, &nodes, &captures);
+    println!("\n{}", report);
+    std::fs::write(GROUNDING_RESULTS_TXT, &report).expect("write results");
+    println!(
+        "Wrote {}, {}, {}, {}.",
+        GROUNDING_RESULTS_TXT, DISJOINT_CURVE_CSV, GROUNDING_CAPTURES_CSV, DISJOINT_META_TXT
+    );
+}
+
+fn demo_grounding_disjoint_analyze() {
+    println!("--- Token-disjoint test (re-run from captured CSV) ---\n");
+    let grounding_path = match std::fs::read_to_string(DISJOINT_META_TXT) {
+        Ok(p) => p.trim().to_string(),
+        Err(_) => {
+            println!("No {} found. Run --grounding-disjoint-test first.", DISJOINT_META_TXT);
+            return;
+        }
+    };
+    let toml = match std::fs::read_to_string(&grounding_path) {
+        Ok(t) => t,
+        Err(e) => {
+            println!("Could not read grounding graph {}: {}", grounding_path, e);
+            return;
+        }
+    };
+    if let Err(e) = world_grounding::load_grounding_graph_from_str(&toml) {
+        println!("Failed to parse grounding graph: {}", e);
+        return;
+    }
+    let nodes = luna_runtime_nodes();
+    let captures = load_grounding_captures_csv(GROUNDING_CAPTURES_CSV);
+    if captures.is_empty() {
+        println!("No captures in {}.", GROUNDING_CAPTURES_CSV);
+        return;
+    }
+    let (dm, _, _, _) = build_language_demo_manager(0.0);
+    let report = run_disjoint_core(&dm.language_runtime, &nodes, &captures);
+    println!("\n{}", report);
+}
+
+/// The full token-disjoint test (§§1–6): positive control (CATA) first, then the shuffle
+/// floor, then the real supervised curve, then the pre-registered decision rule.
+fn run_disjoint_core(
+    rt: &growformer::dimension::LanguageRuntime,
+    nodes: &[(GroundingFleetDomain, String, Vec<String>)],
+    captures: &[FailureCapture],
+) -> String {
+    let params = GroundingLoopParams::default();
+    let propose: Vec<(String, String)> = captures
+        .iter()
+        .filter(|c| c.split == CaptureSplit::Propose)
+        .map(|c| (c.phrase.clone(), c.inferred_concept_id.clone()))
+        .collect();
+    let certify: Vec<FailureCapture> = captures
+        .iter()
+        .filter(|c| c.split == CaptureSplit::Certify)
+        .cloned()
+        .collect();
+    let n_labels = propose.iter().map(|(_, l)| l).collect::<std::collections::HashSet<_>>().len();
+    if n_labels < 2 || certify.is_empty() {
+        return "insufficient data (need >=2 concepts and certify phrases)".into();
+    }
+    let (concept_train, global_train) = concept_train_features(&propose);
+    let _ = std::fs::remove_file(DISJOINT_CURVE_CSV);
+
+    let mut out = String::new();
+    out.push_str("Token-disjoint generalization test\n");
+    out.push_str("==================================\n\n");
+    out.push_str(&format!(
+        "concepts={} | propose={} | certify(held-out)={}\n\n",
+        n_labels,
+        propose.len(),
+        certify.len()
+    ));
+
+    // ---- §5 Positive control FIRST: lexical CATA must collapse to floor at overlap-0. ----
+    let mut corpus: Vec<String> = propose.iter().map(|(p, _)| p.clone()).collect();
+    for (_, id, aliases) in nodes {
+        corpus.push(id.replace('_', " "));
+        corpus.extend(aliases.iter().cloned());
+    }
+    let corpus_refs: Vec<&str> = corpus.iter().map(|s| s.as_str()).collect();
+    install_phrase_embedder_from_corpus(&corpus_refs, 8192);
+    let idx_cata = build_grounding_index_from_nodes(rt, nodes, &params).expect("cata index");
+    let evals_cata = evaluate_disjoint(rt, &idx_cata, &certify, &concept_train, &global_train, "wbc")
+        .expect("cata eval");
+    let curve_cata = build_overlap_curve(&evals_cata);
+    let pooled_cata = pooled_accuracy(&evals_cata);
+    write_disjoint_curve_csv(DISJOINT_CURVE_CSV, "lexical_cata", "wbc", &curve_cata);
+    let cata_overlap0 = curve_cata[0].accuracy;
+    let cata_top = curve_cata.iter().rev().find(|b| b.n > 0).cloned();
+
+    // ---- §4 Shuffle floor: permute labels, retrain, collect overlap-0(a) accuracy. ----
+    let b_total = 200usize;
+    let mut floor_a: Vec<f32> = Vec::new();
+    let mut floor_contrib = 0usize;
+    for b in 0..b_total {
+        let permuted = disjoint_shuffle_labels(&propose, b as u64);
+        let Some(enc) = SupervisedEncoder::train(&permuted, 4096, 60) else { continue };
+        install_supervised_embedder(enc);
+        let idx = build_grounding_index_from_nodes(rt, nodes, &params).expect("shuffle index");
+        let (ct, gl) = concept_train_features(&permuted);
+        let evals = evaluate_disjoint(rt, &idx, &certify, &ct, &gl, "wbc").expect("shuffle eval");
+        let (ah, an, _, _) = overlap0_substrata(&evals);
+        if an > 0 {
+            floor_a.push(ah as f32 / an as f32);
+            floor_contrib += 1;
+        }
+        if (b + 1) % 50 == 0 {
+            println!("  shuffle {}/{} (overlap-0(a) contributing: {})", b + 1, b_total, floor_contrib);
+        }
+    }
+    let floor_mean = if floor_a.is_empty() { 0.0 } else { floor_a.iter().sum::<f32>() / floor_a.len() as f32 };
+    let floor95 = percentile_sorted(&mut floor_a.clone(), 0.95);
+
+    // ---- §2–3 Real supervised curve + overlap-0 sub-stratification. ----
+    let enc = SupervisedEncoder::train(&propose, 4096, 60).expect("train supervised");
+    install_supervised_embedder(enc);
+    let idx = build_grounding_index_from_nodes(rt, nodes, &params).expect("sup index");
+    let evals = evaluate_disjoint(rt, &idx, &certify, &concept_train, &global_train, "wbc")
+        .expect("sup eval");
+    let curve = build_overlap_curve(&evals);
+    let pooled = pooled_accuracy(&evals);
+    let (ah, an, bh, bn) = overlap0_substrata(&evals);
+    write_disjoint_curve_csv(DISJOINT_CURVE_CSV, "supervised", "wbc", &curve);
+
+    // Secondary, looser word+bigram-disjoint view (more leakage-prone; for when union-0 sparse).
+    let evals_wb = evaluate_disjoint(rt, &idx, &certify, &concept_train, &global_train, "wb")
+        .expect("sup eval wb");
+    let curve_wb = build_overlap_curve(&evals_wb);
+    write_disjoint_curve_csv(DISJOINT_CURVE_CSV, "supervised", "wb", &curve_wb);
+
+    clear_phrase_embedder();
+
+    // ---- §5 positive-control / overlap-measurement validity ----
+    // The self-validation is precisely: a PURE-lexical method (CATA) cannot route
+    // feature-disjoint phrases above the manufactured floor. If it does, the overlap-0 bin
+    // is contaminated (overlap mis-measured) and nothing downstream is trustworthy. CATA's
+    // high-overlap slope is reported as context but does NOT gate validity — on a large
+    // graph CATA can be near-chance everywhere, which leaves no slope yet still floors.
+    let overlap_measure_valid = cata_overlap0 <= floor95 + 0.05;
+    let cata_slope = cata_top.as_ref().map(|t| t.accuracy - cata_overlap0).unwrap_or(0.0);
+
+    // Corroborating lexical signature on the supervised curve: accuracy rises monotonically
+    // with overlap and collapses toward floor at disjoint.
+    let sup_top = curve.iter().rev().find(|b| b.n > 0).map(|b| b.accuracy).unwrap_or(0.0);
+    let monotone_lexical = sup_top > cata_overlap0 + 0.20 && curve[0].accuracy <= floor95 + 0.05;
+    let wb0 = curve_wb[0].accuracy;
+    let wb0_n = curve_wb[0].n;
+
+    // ---- §6 decision rule ----
+    let g = if an > 0 { ah as f32 / an as f32 } else { f32::NAN };
+    let (g_lo, g_hi) = wilson_interval(ah, an, 1.96);
+    let resolution_ok = an >= 8 && (g_hi - g_lo) <= 0.30;
+
+    let verdict: &str;
+    let mut headline: String;
+    if !overlap_measure_valid {
+        verdict = "TEST INVALID — lexical CATA routed disjoint phrases above floor (overlap mis-measured)";
+        headline = "fix overlap measurement before reading any supervised number".into();
+    } else if !resolution_ok {
+        verdict = "BELOW RESOLUTION — union-disjoint seen-elsewhere bin too small for a tight claim";
+        headline = format!(
+            "union-disjoint(a) n={} (CI [{:.0}%,{:.0}%]); pooled {:.1}% is NOT established as generalization",
+            an, g_lo * 100.0, g_hi * 100.0, pooled * 100.0
+        );
+        // Surface the corroborating evidence even when the strict bin is underpowered.
+        if monotone_lexical && wb0 <= floor95 + 0.05 {
+            headline.push_str(&format!(
+                "\n  → corroborating: supervised curve is monotone in overlap (top {:.0}% vs disjoint {:.0}%) and the\n    word+bigram-disjoint bin (n={}) is {:.1}% ≤ floor {:.1}% — the pooled number is overlap-driven (lexical-in-disguise)",
+                sup_top * 100.0, curve[0].accuracy * 100.0, wb0_n, wb0 * 100.0, floor95 * 100.0
+            ));
+        }
+    } else if g <= floor95 {
+        verdict = "LEXICAL-IN-DISGUISE — disjoint accuracy at/under shuffle floor";
+        headline = format!(
+            "honest held-out ≈ floor {:.1}%; pooled {:.1}% was surface-overlap artifact",
+            floor95 * 100.0,
+            pooled * 100.0
+        );
+    } else if g >= 0.8 * pooled {
+        verdict = "REAL GENERALIZATION — flat curve, disjoint bin holds";
+        headline = format!("headline stays {:.1}% (disjoint-bin {:.1}%)", pooled * 100.0, g * 100.0);
+    } else {
+        verdict = "PARTIAL — generalization real but weaker than pooled headline";
+        headline = format!("headline DROPS to disjoint-bin {:.1}% (pooled {:.1}% is coverage)", g * 100.0, pooled * 100.0);
+    }
+
+    // ---- report ----
+    out.push_str("§5 POSITIVE CONTROL — lexical CATA (must floor at overlap-0)\n");
+    out.push_str(&format_overlap_curve("  CATA accuracy-vs-overlap (union features)", &curve_cata));
+    out.push_str(&format!(
+        "  CATA pooled={:.1}%  overlap-0={:.1}%  shuffle-floor95={:.1}%  (slope to top bin: {:+.1}pp)\n",
+        pooled_cata * 100.0,
+        cata_overlap0 * 100.0,
+        floor95 * 100.0,
+        cata_slope * 100.0,
+    ));
+    out.push_str(&format!(
+        "  overlap measure {}: pure-lexical CATA scores {:.1}% on disjoint phrases (≤ floor {:.1}% ⇒ overlap-0 bin is clean)\n\n",
+        if overlap_measure_valid { "VALID" } else { "INVALID" },
+        cata_overlap0 * 100.0,
+        floor95 * 100.0
+    ));
+
+    out.push_str("§4 SHUFFLE FLOOR (B=200 retrains on permuted labels)\n");
+    out.push_str(&format!(
+        "  overlap-0(seen-elsewhere) accuracy: mean={:.1}%  95th-pct={:.1}%  (contributing shuffles: {}/{})\n\n",
+        floor_mean * 100.0,
+        floor95 * 100.0,
+        floor_contrib,
+        b_total
+    ));
+
+    out.push_str("§2 SUPERVISED accuracy-vs-overlap curve\n");
+    out.push_str(&format_overlap_curve("  union (w∪b∪c) — the encoder's true input", &curve));
+    out.push_str(&format_overlap_curve("  word+bigram (looser, leakage-prone secondary)", &curve_wb));
+    let (s_lo, s_hi) = wilson_interval(ah, an, 1.96);
+    let (n_lo, n_hi) = wilson_interval(bh, bn, 1.96);
+    out.push_str("\n§3 OVERLAP-0 sub-stratification\n");
+    out.push_str(&format!(
+        "  (a) seen-elsewhere [GENERALIZATION HEADLINE]: {}/{} = {:.1}% [{:.1}%, {:.1}%]\n",
+        ah, an,
+        if an > 0 { ah as f32 / an as f32 * 100.0 } else { 0.0 },
+        s_lo * 100.0, s_hi * 100.0
+    ));
+    out.push_str(&format!(
+        "  (b) novel-features [routes by prior, not learning]: {}/{} = {:.1}% [{:.1}%, {:.1}%]\n\n",
+        bh, bn,
+        if bn > 0 { bh as f32 / bn as f32 * 100.0 } else { 0.0 },
+        n_lo * 100.0, n_hi * 100.0
+    ));
+
+    out.push_str("§6 DECISION\n");
+    out.push_str(&format!("  pooled held-out: {:.1}%\n", pooled * 100.0));
+    out.push_str(&format!(
+        "  disjoint-bin(a) g = {}  shuffle floor95 = {:.1}%\n",
+        if g.is_nan() { "n/a".to_string() } else { format!("{:.1}%", g * 100.0) },
+        floor95 * 100.0
+    ));
+    out.push_str(&format!("  VERDICT: {}\n", verdict));
+    out.push_str(&format!("  → {}\n\n", headline));
+    out.push_str(&format!(
+        "  honest restatement: held-out = pooled {:.1}% (disjoint-bin(a) {}, shuffle floor {:.1}%)\n",
+        pooled * 100.0,
+        if g.is_nan() { "n/a".to_string() } else { format!("{:.1}%", g * 100.0) },
+        floor95 * 100.0
+    ));
+    out
+}
+
+/// Positive control: install a synthetic semantic embedder (bring-your-own vectors),
+/// build a 3-concept space where one approved alias per concept moves the centroid past
+/// the held-out boundary, and certify. Returns a report fragment. Clears the embedder on
+/// exit so it does not leak into other demos.
+fn positive_control_section(rt: &growformer::dimension::language::LanguageRuntime, params: &GroundingLoopParams) -> String {
+    let mut map: HashMap<String, Vec<f32>> = HashMap::new();
+    map.insert("concept_a".into(), vec![1.0, 0.0, 0.0]);
+    map.insert("concept_b".into(), vec![0.0, 1.0, 0.0]);
+    map.insert("concept_c".into(), vec![0.0, 0.0, 1.0]);
+    map.insert("alpha proposal phrase".into(), vec![0.8, 0.6, 0.0]);
+    map.insert("beta proposal phrase".into(), vec![0.0, 0.8, 0.6]);
+    map.insert("gamma proposal phrase".into(), vec![0.6, 0.0, 0.8]);
+    map.insert("alpha certify phrase".into(), vec![0.6, 0.8, 0.0]);
+    map.insert("beta certify phrase".into(), vec![0.0, 0.6, 0.8]);
+    map.insert("gamma certify phrase".into(), vec![0.8, 0.0, 0.6]);
+    install_vector_embedder(map);
+
+    let d = GroundingFleetDomain::Runtime;
+    let nodes_before = vec![
+        (d, "concept_a".to_string(), vec![]),
+        (d, "concept_b".to_string(), vec![]),
+        (d, "concept_c".to_string(), vec![]),
+    ];
+    let nodes_after = vec![
+        (d, "concept_a".to_string(), vec!["alpha proposal phrase".to_string()]),
+        (d, "concept_b".to_string(), vec!["beta proposal phrase".to_string()]),
+        (d, "concept_c".to_string(), vec!["gamma proposal phrase".to_string()]),
+    ];
+    let before = build_grounding_index_from_nodes(rt, &nodes_before, params).expect("ctrl before");
+    let after = build_grounding_index_from_nodes(rt, &nodes_after, params).expect("ctrl after");
+
+    let mk = |phrase: &str, concept: &str, split: CaptureSplit| FailureCapture {
+        phrase: phrase.into(),
+        encoder_embedding: Vec::new(),
+        activated_nodes: Vec::new(),
+        max_confidence: 0.0,
+        entropy_bits: None,
+        trigger_reason: FailureTrigger::NoNodeActivated,
+        downstream_signal: None,
+        timestamp_unix: 0,
+        domain_context: "runtime".into(),
+        inferred_concept_id: concept.into(),
+        split,
+    };
+    let captures = vec![
+        mk("alpha proposal phrase", "concept_a", CaptureSplit::Propose),
+        mk("beta proposal phrase", "concept_b", CaptureSplit::Propose),
+        mk("gamma proposal phrase", "concept_c", CaptureSplit::Propose),
+        mk("alpha certify phrase", "concept_a", CaptureSplit::Certify),
+        mk("beta certify phrase", "concept_b", CaptureSplit::Certify),
+        mk("gamma certify phrase", "concept_c", CaptureSplit::Certify),
+    ];
+
+    let (before_m, after_m) = certify_batch(&captures, rt, &before, &after, d).expect("ctrl certify");
+    let verdict = decide_batch_verdict(&before_m, &after_m, params, false);
+
+    let additions: Vec<(GroundingFleetDomain, String, String)> = vec![
+        (d, "concept_a".to_string(), "alpha proposal phrase".to_string()),
+        (d, "concept_b".to_string(), "beta proposal phrase".to_string()),
+        (d, "concept_c".to_string(), "gamma proposal phrase".to_string()),
+    ];
+    let curve = coverage_vs_additions_curve(&captures, rt, &before, &additions).expect("ctrl curve");
+
+    let mut s = String::new();
+    s.push_str("POSITIVE CONTROL — synthetic semantic geometry (bring-your-own vectors)\n");
+    s.push_str("----------------------------------------------------------------------\n");
+    s.push_str("Each concept's held-out paraphrase sits just past the baseline boundary; one\n");
+    s.push_str("approved alias pulls the centroid over. A real semantic encoder should look\n");
+    s.push_str("like THIS, not like the lexical CATA result above.\n\n");
+    s.push_str(&format_certifier_report(
+        "Semantic control batch (one approved alias per concept)",
+        &before_m,
+        &after_m,
+        verdict,
+    ));
+    s.push_str("\n\n");
+    s.push_str(&format_coverage_curve(
+        "Coverage-vs-additions curve — semantic control sweep",
+        &curve,
+    ));
+    s.push_str(&format!(
+        "\n  → certifier verdict under semantic geometry: {} (expected GenuineCoverageImprovement)\n",
+        verdict.as_str(),
+    ));
+    s.push_str("\nBring-your-own-encoder workflow: run any sentence encoder offline over every\n");
+    s.push_str("captured phrase + node alias, install via `install_vector_embedder(map)`, then\n");
+    s.push_str("re-run this audit. If the genuine sweep inverts (held-out rises with additions),\n");
+    s.push_str("the encoder passes the acceptance gate; if it looks like the lexical result, it\n");
+    s.push_str("does not.\n");
+
+    clear_phrase_embedder();
+    s
+}
+
+fn demo_grounding_loop_audit() {
+    println!("--- Grounding loop audit (assisted maintenance) ---\n");
+    println!("Loads pet runtime fixture + synthetic propose/certify splits.\n");
+
+    let params = GroundingLoopParams::default();
+    world_grounding::load_grounding_graph_from_str(PET_DOMAIN_FIXTURE_TOML)
+        .expect("load pet domain fixture");
+
+    let (mut dm, _, _, _) = build_language_demo_manager(0.0);
+    // Option 2: back the CliffordE8 codec path with a domain dictionary so the encoder
+    // is non-degenerate. Option 1 (bridge-routed fallback) activates automatically inside
+    // `embed_phrase` if the raw vector still collapses.
+    install_grounding_audit_dictionary(&mut dm);
+    let rt = &dm.language_runtime;
+    println!(
+        "  representation: CATA centroid (pre-quantization, lexical), bridge-routed fallback\n"
+    );
+
+    let before_index =
+        build_grounding_index(rt, &HashMap::new(), &params).expect("build grounding index");
+
+    let fixture = synthetic_audit_fixture();
+    let captures = fixture_rows_to_captures(rt, &before_index, &fixture);
+    write_grounding_captures_csv(GROUNDING_CAPTURES_CSV, &captures);
+
+    let proposals = build_proposals_for_captures(
+        &captures,
+        &before_index,
+        &params,
+        rt,
+        &before_index,
+    );
+    write_grounding_proposals_csv(GROUNDING_PROPOSALS_CSV, &proposals);
+
+    println!("Proposal mechanism (nearest-in-domain, τ_alias={}):", params.tau_alias);
+    for cap in captures.iter().filter(|c| c.split == CaptureSplit::Propose) {
+        let domain = parse_fleet_domain(&cap.domain_context).unwrap_or(GroundingFleetDomain::Crypto);
+        if let Some(m) = before_index.nearest_in_domain(&cap.encoder_embedding, domain) {
+            println!(
+                "  {:?} → {}:{} sim={:.3} margin={:.3} (want {})",
+                cap.phrase,
+                m.domain.as_str(),
+                m.node_id,
+                m.similarity,
+                m.similarity - m.second_similarity,
+                cap.inferred_concept_id,
+            );
+        }
+    }
+    println!();
+    // Genuine batch: integrate ONLY approved propose-set aliases. Held-out certify
+    // phrases are NEVER added here — the whole point is to test whether the
+    // proposal-set edits generalize to phrasings the mechanism never saw.
+    let mut after_genuine = before_index.clone();
+    let mut had_collisions = false;
+    let mut genuine_added = 0usize;
+    for p in &proposals {
+        if p.collision_score >= params.collision_threshold {
+            had_collisions = true;
+        }
+        if !p.approved {
+            continue;
+        }
+        if let ProposalKind::Alias {
+            phrase,
+            target_node,
+            target_domain,
+            ..
+        } = &p.kind
+        {
+            let domain = parse_fleet_domain(target_domain).unwrap_or(GroundingFleetDomain::Runtime);
+            if let Ok((emb, _)) = embed_phrase(rt, phrase) {
+                after_genuine.add_alias_to_node(domain, target_node, phrase, emb);
+                genuine_added += 1;
+            }
+        }
+    }
+
+    let home = GroundingFleetDomain::Crypto;
+    let (before_m, after_genuine_m) =
+        certify_batch(&captures, rt, &before_index, &after_genuine, home).expect("certify genuine");
+    let genuine_verdict = decide_batch_verdict(&before_m, &after_genuine_m, &params, had_collisions);
+
+    // Memorization contrast: add only exact propose phrases as aliases (lookup-table growth).
+    let mut after_memo = before_index.clone();
+    for cap in captures.iter().filter(|c| c.split == CaptureSplit::Propose) {
+        if let Ok((emb, _)) = embed_phrase(rt, &cap.phrase) {
+            let domain = parse_fleet_domain(&cap.domain_context)
+                .unwrap_or(GroundingFleetDomain::Runtime);
+            after_memo.add_alias_to_node(domain, &cap.inferred_concept_id, &cap.phrase, emb);
+        }
+    }
+    let (_, after_memo_m) =
+        certify_batch(&captures, rt, &before_index, &after_memo, home).expect("certify memo");
+
+    let mut report = String::new();
+    report.push_str("Grounding loop audit — assisted maintenance certifier\n");
+    report.push_str("=====================================================\n\n");
+    report.push_str(&format!(
+        "Fixture rows: {} (propose/certify per concept)\n",
+        fixture.len()
+    ));
+    report.push_str(&format!(
+        "Proposals: {} (approved: {}, integrated into genuine batch: {})\n\n",
+        proposals.len(),
+        proposals.iter().filter(|p| p.approved).count(),
+        genuine_added,
+    ));
+    report.push_str(&format_certifier_report(
+        "Genuine batch (approved propose-set aliases only)",
+        &before_m,
+        &after_genuine_m,
+        genuine_verdict,
+    ));
+    report.push_str("\n\n");
+    let memo_verdict = decide_batch_verdict(&before_m, &after_memo_m, &params, false);
+    report.push_str(&format_certifier_report(
+        "Memorization contrast (exact captured phrases only)",
+        &before_m,
+        &after_memo_m,
+        memo_verdict,
+    ));
+    // Coverage-vs-additions curve (§6 n-sweep analog). Memorization sweep: add the
+    // exact captured propose phrases one at a time as aliases of their concept, and
+    // watch held-out paraphrase accuracy vs captured-set coverage.
+    let memo_additions: Vec<(GroundingFleetDomain, String, String)> = captures
+        .iter()
+        .filter(|c| c.split == CaptureSplit::Propose)
+        .map(|c| {
+            (
+                parse_fleet_domain(&c.domain_context).unwrap_or(GroundingFleetDomain::Runtime),
+                c.inferred_concept_id.clone(),
+                c.phrase.clone(),
+            )
+        })
+        .collect();
+    let _ = std::fs::remove_file(GROUNDING_CURVE_CSV);
+    let memo_curve = coverage_vs_additions_curve(&captures, rt, &before_index, &memo_additions)
+        .expect("memorization curve");
+    write_grounding_curve_csv(GROUNDING_CURVE_CSV, "memorization", &memo_curve);
+
+    // Genuine sweep: only approved propose-set aliases (held-out must be untouched).
+    let genuine_additions: Vec<(GroundingFleetDomain, String, String)> = proposals
+        .iter()
+        .filter(|p| p.approved)
+        .filter_map(|p| match &p.kind {
+            ProposalKind::Alias {
+                phrase,
+                target_node,
+                target_domain,
+                ..
+            } => Some((
+                parse_fleet_domain(target_domain).unwrap_or(GroundingFleetDomain::Runtime),
+                target_node.clone(),
+                phrase.clone(),
+            )),
+            _ => None,
+        })
+        .collect();
+    let genuine_curve =
+        coverage_vs_additions_curve(&captures, rt, &before_index, &genuine_additions)
+            .expect("genuine curve");
+    write_grounding_curve_csv(GROUNDING_CURVE_CSV, "genuine", &genuine_curve);
+
+    report.push_str("\n\n");
+    report.push_str(&format_coverage_curve(
+        "Coverage-vs-additions curve — memorization sweep (exact phrases)",
+        &memo_curve,
+    ));
+    report.push_str("\n\n");
+    report.push_str(&format_coverage_curve(
+        "Coverage-vs-additions curve — genuine sweep (approved aliases)",
+        &genuine_curve,
+    ));
+
+    let (memo_cap_lift, memo_held_lift) = curve_lifts(&memo_curve);
+    let overfit = memo_cap_lift > 0.05 && memo_held_lift < params.min_held_out_lift;
+    report.push_str("\n\nDecision rule (§7):\n");
+    report.push_str(&format!(
+        "  integrate genuine batch: {}\n",
+        genuine_verdict == BatchVerdict::GenuineCoverageImprovement
+    ));
+    report.push_str(&format!(
+        "  reject memorization batch: {}\n",
+        memo_verdict == BatchVerdict::LexiconMemorization
+            || after_memo_m.generalization_gap > params.max_generalization_gap
+    ));
+    report.push_str(&format!(
+        "  n-sweep overfitting signature (captured rises, held-out plateaus): {}\n",
+        overfit
+    ));
+
+    // Data-driven τ_alias: midpoint of same-concept vs cross-concept similarity under
+    // the current encoder. Recommendation #4 — re-derive thresholds per encoder rather
+    // than trusting the hand-picked default.
+    if let Ok(cal) = calibrate_alias_threshold(&captures, rt, &before_index) {
+        report.push_str("\nThreshold calibration (current encoder):\n");
+        report.push_str(&format!(
+            "  same-concept sim mean: {:.3}  cross-concept sim mean: {:.3}\n  suggested τ_alias: {:.3} (default in use: {:.3}; samples: {})\n",
+            cal.same_concept_mean,
+            cal.cross_concept_mean,
+            cal.suggested_tau_alias,
+            params.tau_alias,
+            cal.samples,
+        ));
+        if cal.same_concept_mean - cal.cross_concept_mean < 0.05 {
+            report.push_str(
+                "  WARNING: same/cross separation < 0.05 — this encoder cannot discriminate concepts; proposals are tie-break artifacts (see lexical result above).\n",
+            );
+        }
+    }
+
+    // POSITIVE CONTROL: a synthetic *semantic* geometry where a single approved alias
+    // genuinely extends held-out coverage. This is the mirror of the lexical negative
+    // result above — it proves the certifier reports GenuineCoverageImprovement when the
+    // representation actually generalizes, i.e. the gate is not rigged to always reject.
+    // It also documents the bring-your-own-vectors path: install precomputed embeddings
+    // from any real/semantic encoder (run offline over your phrases + node aliases) and
+    // the loop runs unchanged.
+    report.push_str("\n\n");
+    report.push_str(&positive_control_section(rt, &params));
+
+    println!("{}", report);
+    std::fs::write(GROUNDING_RESULTS_TXT, &report).expect("write results");
+    println!(
+        "\nWrote {}, {}, {}, {}. Re-run with --grounding-loop-analyze.",
+        GROUNDING_CAPTURES_CSV, GROUNDING_PROPOSALS_CSV, GROUNDING_CURVE_CSV, GROUNDING_RESULTS_TXT
+    );
+}
+
+fn demo_grounding_loop_analyze() {
+    println!("--- Grounding loop analyze (from captured CSV) ---\n");
+    let params = GroundingLoopParams::default();
+    world_grounding::load_grounding_graph_from_str(PET_DOMAIN_FIXTURE_TOML)
+        .expect("load pet domain fixture");
+
+    let (mut dm, _, _, _) = build_language_demo_manager(0.0);
+    install_grounding_audit_dictionary(&mut dm);
+    let rt = &dm.language_runtime;
+
+    let mut captures = load_grounding_captures_csv(GROUNDING_CAPTURES_CSV);
+    if captures.is_empty() {
+        println!("No captures in {}. Run --grounding-loop-audit first.", GROUNDING_CAPTURES_CSV);
+        return;
+    }
+
+    let before_index =
+        build_grounding_index(rt, &HashMap::new(), &params).expect("build grounding index");
+    rehydrate_captures(rt, &before_index, &mut captures);
+
+    let proposals = build_proposals_for_captures(
+        &captures,
+        &before_index,
+        &params,
+        rt,
+        &before_index,
+    );
+
+    let mut after = before_index.clone();
+    for p in proposals.iter().filter(|p| p.approved) {
+        if let ProposalKind::Alias {
+            phrase,
+            target_node,
+            target_domain,
+            ..
+        } = &p.kind
+        {
+            let domain = parse_fleet_domain(target_domain).unwrap_or(GroundingFleetDomain::Runtime);
+            if let Ok((emb, _)) = embed_phrase(rt, phrase) {
+                after.add_alias_to_node(domain, target_node, phrase, emb);
+            }
+        }
+    }
+
+    let home = GroundingFleetDomain::Crypto;
+    let (before_m, after_m) =
+        certify_batch(&captures, rt, &before_index, &after, home).expect("certify");
+    let verdict = decide_batch_verdict(&before_m, &after_m, &params, false);
+    println!(
+        "{}",
+        format_certifier_report("Re-analyzed batch", &before_m, &after_m, verdict)
+    );
 }
 
 fn accuracy_learned_router_xy(
