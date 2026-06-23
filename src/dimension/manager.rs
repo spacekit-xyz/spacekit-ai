@@ -706,26 +706,8 @@ impl DimensionManager {
         });
 
         if use_router {
-            let router = self.observer.learned_router.as_mut().unwrap();
-            let logits = router.predict_logits(vec);
-            if logits.len() == self.main.group_order.len() {
-                let mut indexed: Vec<(usize, f32)> =
-                    logits.iter().copied().enumerate().collect();
-                indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                let (best_idx, best_logit) = indexed.first().copied().unwrap_or((0, -1e9));
-                let second_logit = indexed.get(1).map(|x| x.1).unwrap_or(-1e9);
-                let margin = best_logit - second_logit;
-                let chosen_group_id = self.main.group_order.get(best_idx).copied();
-                // Router logits are not on cosine scale; only reject when we have no valid group.
-                let rejected_as_ood = chosen_group_id.is_none();
-                return Ok(LanguageRoutingDecision {
-                    chosen_group_id: if rejected_as_ood { None } else { chosen_group_id },
-                    best_similarity: best_logit,
-                    second_similarity: second_logit,
-                    margin,
-                    confidence,
-                    rejected_as_ood,
-                });
+            if let Some(decision) = self.try_learned_router_route(vec, confidence, ood_threshold) {
+                return Ok(decision);
             }
         }
 
@@ -743,31 +725,15 @@ impl DimensionManager {
         let bridged = self.language_runtime.bridge_text_stateless(text)?;
         let vec = &bridged.routed_vector;
         let confidence = bridged.confidence;
+        let ood_threshold = self.language_runtime.config.ood_similarity_threshold;
 
         let use_router = self.observer.learned_router.as_ref().map_or(false, |r| {
             r.input_dim == vec.len() && r.num_groups == self.main.group_order.len()
         });
 
         if use_router {
-            let router = self.observer.learned_router.as_mut().unwrap();
-            let logits = router.predict_logits(vec);
-            if logits.len() == self.main.group_order.len() {
-                let mut indexed: Vec<(usize, f32)> =
-                    logits.iter().copied().enumerate().collect();
-                indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                let (best_idx, best_logit) = indexed.first().copied().unwrap_or((0, -1e9));
-                let second_logit = indexed.get(1).map(|x| x.1).unwrap_or(-1e9);
-                let margin = best_logit - second_logit;
-                let chosen_group_id = self.main.group_order.get(best_idx).copied();
-                let rejected_as_ood = chosen_group_id.is_none();
-                return Ok(LanguageRoutingDecision {
-                    chosen_group_id: if rejected_as_ood { None } else { chosen_group_id },
-                    best_similarity: best_logit,
-                    second_similarity: second_logit,
-                    margin,
-                    confidence,
-                    rejected_as_ood,
-                });
+            if let Some(decision) = self.try_learned_router_route(vec, confidence, ood_threshold) {
+                return Ok(decision);
             }
         }
 
@@ -775,8 +741,49 @@ impl DimensionManager {
             &self.main.embedding_library,
             vec,
             confidence,
-            self.language_runtime.config.ood_similarity_threshold,
+            ood_threshold,
         ))
+    }
+
+    fn try_learned_router_route(
+        &mut self,
+        vec: &[f32],
+        confidence: f32,
+        ood_threshold: f32,
+    ) -> Option<LanguageRoutingDecision> {
+        let router = self.observer.learned_router.as_mut()?;
+        let logits = router.predict_logits(vec);
+        if logits.len() != self.main.group_order.len() {
+            return None;
+        }
+        let mut indexed: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let (best_idx, best_logit) = indexed.first().copied().unwrap_or((0, -1e9));
+        let second_logit = indexed.get(1).map(|x| x.1).unwrap_or(-1e9);
+        let margin = best_logit - second_logit;
+
+        if self.observer.routing_entropy_guard.observe(best_idx) {
+            let mut fallback = route_language_embedding(
+                &self.main.embedding_library,
+                vec,
+                confidence,
+                ood_threshold,
+            );
+            fallback.routing_entropy_guard_triggered = true;
+            return Some(fallback);
+        }
+
+        let chosen_group_id = self.main.group_order.get(best_idx).copied();
+        let rejected_as_ood = chosen_group_id.is_none();
+        Some(LanguageRoutingDecision {
+            chosen_group_id: if rejected_as_ood { None } else { chosen_group_id },
+            best_similarity: best_logit,
+            second_similarity: second_logit,
+            margin,
+            confidence,
+            rejected_as_ood,
+            routing_entropy_guard_triggered: false,
+        })
     }
 
     /// M3 deterministic path: text -> routing -> structured action JSON.

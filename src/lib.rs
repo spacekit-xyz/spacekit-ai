@@ -67,6 +67,8 @@ pub mod arc_dsl;
 pub mod neuron;
 pub mod systems;
 pub mod brain;
+pub mod cmi;
+pub mod cmi_spiral;
 pub mod types;
 pub mod metacognition;
 /// Active Inference spine: belief, Markov blanket I/O, episode loop (Phases 0–3).

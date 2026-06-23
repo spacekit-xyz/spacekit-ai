@@ -10,6 +10,8 @@
 //!   cargo run --bin growformer-demos -- --language-pipeline
 //!   ... etc
 
+use growformer::cmi::{CmiPointRecord, format_cmi_report, estimate_cmi_seed};
+use growformer::cmi_spiral::{format_spiral_resolve_report, resolve_spiral_region_mi, SpiralResolveResult};
 use growformer::environment::NeuralEnvironment;
 use growformer::types::NeuronId;
 use growformer::dimension::{
@@ -72,6 +74,16 @@ struct Args {
     phase3f_competence: bool,
     #[arg(long)]
     phase3f_analyze: bool,
+    /// Conditional MI measurement: present-but-inaccessible formalization (Task E).
+    #[arg(long)]
+    cmi: bool,
+    #[arg(long)]
+    cmi_analyze: bool,
+    /// Resolve I(R;A_spiral): bottleneck vs below-resolution (permutation null + linear probe).
+    #[arg(long)]
+    cmi_spiral_resolve: bool,
+    #[arg(long)]
+    cmi_spiral_analyze: bool,
     #[arg(long)]
     neurogenesis: bool,
     #[arg(long)]
@@ -269,6 +281,14 @@ fn main() {
         demo_fractal_continual_learning();
     } else if args.phase3c {
         demo_phase3c_composition();
+    } else if args.cmi_spiral_analyze {
+        demo_cmi_spiral_analyze();
+    } else if args.cmi_spiral_resolve {
+        demo_cmi_spiral_resolve();
+    } else if args.cmi_analyze {
+        demo_cmi_analyze_csv();
+    } else if args.cmi {
+        demo_cmi_measurement();
     } else if args.phase3f_analyze {
         demo_phase3f_analyze_csv();
     } else if args.phase3f_competence {
@@ -4790,6 +4810,236 @@ fn demo_phase3f_analyze_csv() {
     if degenerate >= 4 {
         println!("\nPRE-REGISTERED FAIL: ≥4/20 degenerate seeds (§5.2 control 2).");
     }
+}
+
+// =============================================================================
+// CMI measurement — formalize "present but inaccessible" (see CMI spec)
+// =============================================================================
+
+fn collect_cmi_records_for_seed(seed: u64) -> Vec<CmiPointRecord> {
+    const INNER_RADIUS: f32 = 0.4;
+    const N_SAMPLES: usize = 400;
+    const TRAIN_N: usize = 30;
+
+    let mut dm = DimensionManager::new(phase3_composition_config());
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut data_rng = StdRng::seed_from_u64(seed.wrapping_mul(97).wrapping_add(99));
+
+    let spiral_data = generate_spiral_data(400, &mut data_rng);
+    let circles_data = generate_concentric_circles_data(400, &mut data_rng);
+    let calibration_spiral: Vec<_> = spiral_data.iter().take(100).cloned().collect();
+    let calibration_circles: Vec<_> = circles_data.iter().take(100).cloned().collect();
+
+    let spiral_group = train_promoted_mirror(
+        &mut dm, "spiral", seed, &spiral_data, &calibration_spiral, &mut rng, false,
+    );
+    let circles_group = train_promoted_mirror(
+        &mut dm, "circles", seed.wrapping_add(1), &circles_data, &calibration_circles, &mut rng, false,
+    );
+
+    let task_e_data = generate_balanced_spiral_gated_circles_data(
+        &mut dm.main, spiral_group, circles_group, INNER_RADIUS, N_SAMPLES, &mut data_rng,
+    );
+    let (_train, heldout) =
+        stratified_composite_split(&task_e_data, INNER_RADIUS, TRAIN_N, &mut data_rng);
+
+    let mut records = Vec::with_capacity(heldout.len());
+    for (input, target) in &heldout {
+        let r = sample_radius(input);
+        let region = if r < INNER_RADIUS { 1u8 } else { 0u8 };
+        let y_spiral = specialist_scalar(&mut dm.main, spiral_group, input);
+        let y_circles = specialist_scalar(&mut dm.main, circles_group, input);
+        let a_spiral = specialist_penultimate_hidden(&mut dm.main, spiral_group, input);
+        let a_circles = specialist_penultimate_hidden(&mut dm.main, circles_group, input);
+        let c_spiral = if scalar_matches_target(y_spiral, target[0]) {
+            1
+        } else {
+            0
+        };
+        let c_circles = if scalar_matches_target(y_circles, target[0]) {
+            1
+        } else {
+            0
+        };
+        records.push(CmiPointRecord {
+            seed,
+            x: input[0],
+            y_coord: input[1],
+            r,
+            region,
+            c_spiral,
+            c_circles,
+            y_spiral,
+            y_circles,
+            a_spiral,
+            a_circles,
+        });
+    }
+    records
+}
+
+fn write_cmi_csv(path: &str, records: &[CmiPointRecord]) {
+    let mut csv = std::fs::File::create(path).expect("create cmi csv");
+    writeln!(
+        csv,
+        "seed,x,y,r,region,c_spiral,c_circles,y_spiral,y_circles,a_spiral_0,a_spiral_1,a_spiral_2,a_spiral_3,a_spiral_4,a_spiral_5,a_spiral_6,a_spiral_7,a_spiral_8,a_spiral_9,a_spiral_10,a_spiral_11,a_spiral_12,a_spiral_13,a_spiral_14,a_spiral_15,a_circles_0,a_circles_1,a_circles_2,a_circles_3,a_circles_4,a_circles_5,a_circles_6,a_circles_7,a_circles_8,a_circles_9,a_circles_10,a_circles_11,a_circles_12,a_circles_13,a_circles_14,a_circles_15"
+    )
+    .expect("cmi header");
+    for rec in records {
+        let mut row = format!(
+            "{},{:.5},{:.5},{:.5},{},{},{},{:.5},{:.5}",
+            rec.seed,
+            rec.x,
+            rec.y_coord,
+            rec.r,
+            rec.region,
+            rec.c_spiral,
+            rec.c_circles,
+            rec.y_spiral,
+            rec.y_circles,
+        );
+        for v in &rec.a_spiral {
+            row.push_str(&format!(",{:.5}", v));
+        }
+        for v in &rec.a_circles {
+            row.push_str(&format!(",{:.5}", v));
+        }
+        writeln!(csv, "{}", row).expect("cmi row");
+    }
+}
+
+fn load_cmi_csv(path: &str) -> Vec<CmiPointRecord> {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {}", path, e));
+    let mut records = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if i == 0 || line.trim().is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split(',').collect();
+        if parts.len() < 41 {
+            continue;
+        }
+        let parse_a = |start: usize| -> Vec<f32> {
+            (0..16)
+                .map(|j| parts.get(start + j).and_then(|s| s.parse().ok()).unwrap_or(0.0))
+                .collect()
+        };
+        records.push(CmiPointRecord {
+            seed: parts[0].parse().unwrap_or(0),
+            x: parts[1].parse().unwrap_or(0.0),
+            y_coord: parts[2].parse().unwrap_or(0.0),
+            r: parts[3].parse().unwrap_or(0.0),
+            region: parts[4].parse().unwrap_or(0),
+            c_spiral: parts[5].parse().unwrap_or(0),
+            c_circles: parts[6].parse().unwrap_or(0),
+            y_spiral: parts[7].parse().unwrap_or(0.0),
+            y_circles: parts[8].parse().unwrap_or(0.0),
+            a_spiral: parse_a(9),
+            a_circles: parse_a(25),
+        });
+    }
+    records
+}
+
+fn demo_cmi_measurement() {
+    println!("--- CMI measurement: present-but-inaccessible formalization ---\n");
+    println!("Task E held-out points, 20 seeds. No projection — raw penultimate activations.\n");
+
+    const SEEDS: [u64; 20] = [
+        42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
+    ];
+    const CSV_PATH: &str = "cmi_diagnostic.csv";
+
+    let mut all_records = Vec::new();
+    for &seed in &SEEDS {
+        print!("  seed {} ... ", seed);
+        let records = collect_cmi_records_for_seed(seed);
+        println!("{} points", records.len());
+        all_records.extend(records);
+    }
+    write_cmi_csv(CSV_PATH, &all_records);
+
+    let mut estimates = Vec::new();
+    for &seed in &SEEDS {
+        estimates.push(estimate_cmi_seed(&all_records, seed));
+    }
+
+    let report = format_cmi_report(&estimates);
+    println!("\n{}", report);
+    println!("\nWrote {} ({} points). Re-run with --cmi-analyze.", CSV_PATH, all_records.len());
+}
+
+fn demo_cmi_analyze_csv() {
+    const CSV_PATH: &str = "cmi_diagnostic.csv";
+    println!("--- CMI analysis (from {}) ---\n", CSV_PATH);
+    let records = load_cmi_csv(CSV_PATH);
+    if records.is_empty() {
+        println!("No records. Run --cmi first.");
+        return;
+    }
+    let seeds: Vec<u64> = records
+        .iter()
+        .map(|r| r.seed)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let mut estimates = Vec::new();
+    for &seed in &seeds {
+        estimates.push(estimate_cmi_seed(&records, seed));
+    }
+    println!("{}", format_cmi_report(&estimates));
+}
+
+fn extract_spiral_output_weights_for_seed(seed: u64) -> (u64, Vec<f32>) {
+    const INNER_RADIUS: f32 = 0.4;
+    let mut dm = DimensionManager::new(phase3_composition_config());
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut data_rng = StdRng::seed_from_u64(seed.wrapping_mul(97).wrapping_add(99));
+    let spiral_data = generate_spiral_data(400, &mut data_rng);
+    let calibration_spiral: Vec<_> = spiral_data.iter().take(100).cloned().collect();
+    let spiral_group = train_promoted_mirror(
+        &mut dm, "spiral", seed, &spiral_data, &calibration_spiral, &mut rng, false,
+    );
+    let _ = INNER_RADIUS;
+    (seed, dm.main.penultimate_to_output_weights(spiral_group))
+}
+
+fn demo_cmi_spiral_resolve() {
+    const CSV_PATH: &str = "cmi_diagnostic.csv";
+    const OUT_PATH: &str = "cmi_spiral_resolve.json";
+    println!("--- CMI spiral resolve: output bottleneck or below resolution? ---\n");
+    let records = load_cmi_csv(CSV_PATH);
+    if records.is_empty() {
+        println!("No records in {}. Run --cmi first.", CSV_PATH);
+        return;
+    }
+    println!("Loaded {} points. Extracting output-head weights per seed ...\n", records.len());
+    const SEEDS: [u64; 20] = [
+        42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
+    ];
+    let mut weights = Vec::new();
+    for &seed in &SEEDS {
+        print!("  weights seed {} ... ", seed);
+        let w = extract_spiral_output_weights_for_seed(seed);
+        println!("dim={}", w.1.len());
+        weights.push(w);
+    }
+    println!("\nRunning permutation null (B=500), linear probe, PCA-kNN ...\n");
+    let result = resolve_spiral_region_mi(&records, &weights, 500);
+    let report = format_spiral_resolve_report(&result);
+    println!("{}", report);
+    let json = serde_json::to_string_pretty(&result).expect("serialize spiral resolve");
+    std::fs::write(OUT_PATH, json).expect("write spiral resolve json");
+    println!("\nWrote {}. Re-run with --cmi-spiral-analyze.", OUT_PATH);
+}
+
+fn demo_cmi_spiral_analyze() {
+    const OUT_PATH: &str = "cmi_spiral_resolve.json";
+    println!("--- CMI spiral resolve analysis (from {}) ---\n", OUT_PATH);
+    let text = std::fs::read_to_string(OUT_PATH)
+        .unwrap_or_else(|e| panic!("read {}: {}", OUT_PATH, e));
+    let result: SpiralResolveResult = serde_json::from_str(&text).expect("parse spiral resolve");
+    println!("{}", format_spiral_resolve_report(&result));
 }
 
 fn accuracy_learned_router_xy(

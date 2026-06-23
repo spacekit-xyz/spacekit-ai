@@ -103,6 +103,14 @@ impl MainDimension {
         })
     }
 
+    /// Output-head effective weights from penultimate layer (for linear-bottleneck diagnostics).
+    pub fn penultimate_to_output_weights(&self, group_id: GroupId) -> Vec<f32> {
+        self.groups
+            .get(&group_id)
+            .map(|fg| fg.env.penultimate_to_output_weights())
+            .unwrap_or_default()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.groups.is_empty()
     }

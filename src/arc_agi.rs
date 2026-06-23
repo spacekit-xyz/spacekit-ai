@@ -2628,7 +2628,7 @@ fn detect_separated_tile(grid: &Grid, oh: usize, ow: usize) -> Option<Grid> {
             for tile in &tiles {
                 counts[tile[r][c] as usize] += 1;
             }
-            if counts[consensus[r][c] as usize] <= threshold.try_into().unwrap() && n_tiles > 2 {
+            if counts[consensus[r][c] as usize] <= threshold.try_into().unwrap_or(0) && n_tiles > 2 {
                 return None;
             }
         }

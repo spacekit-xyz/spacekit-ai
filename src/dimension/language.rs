@@ -1056,6 +1056,9 @@ pub struct LanguageRoutingDecision {
     pub margin: f32,
     pub confidence: f32,
     pub rejected_as_ood: bool,
+    /// True when RoutingEntropyGuard fired and we fell back from learned-router argmax.
+    #[serde(default)]
+    pub routing_entropy_guard_triggered: bool,
 }
 
 pub fn route_language_embedding(
@@ -1082,6 +1085,7 @@ pub fn route_language_embedding(
         margin,
         confidence,
         rejected_as_ood: reject,
+        routing_entropy_guard_triggered: false,
     }
 }
 

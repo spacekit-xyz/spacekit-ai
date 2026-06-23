@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::embedding::{build_tag_vector, cosine_similarity, hidden_activation_vector, GroupEmbedding, TAG_VECTOR_DIM};
 use super::main_dim::MainDimension;
+use super::composition::RoutingEntropyGuard;
 use super::router::{apply_stickiness, LearnedRouter};
 use super::mirror_dim::MirrorDimension;
 use super::promotion::{evaluate_promotion, promote, PromotionDecision, PromotionGateConfig};
@@ -23,6 +24,10 @@ impl Default for RoutingConfig {
     }
 }
 
+fn default_routing_entropy_guard() -> RoutingEntropyGuard {
+    RoutingEntropyGuard::new(64, 0.3)
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct GlobalObserver {
     pub embedding_library: Vec<GroupEmbedding>,
@@ -32,6 +37,9 @@ pub struct GlobalObserver {
     pub coherence: f32,
     pub routing_config: RoutingConfig,
     pub learned_router: Option<LearnedRouter>,
+    /// Detects constant-specialist collapse on discrete argmax routes (phase3f §8).
+    #[serde(default = "default_routing_entropy_guard")]
+    pub routing_entropy_guard: RoutingEntropyGuard,
     /// Set each infer(); used for logging which group was routed.
     #[serde(skip)]
     pub last_chosen_group_id: Option<GroupId>,
@@ -52,6 +60,7 @@ impl Default for GlobalObserver {
             last_chosen_group_id: None,
             last_routing_scores: None,
             learned_router: None,
+            routing_entropy_guard: default_routing_entropy_guard(),
         }
     }
 }
@@ -108,6 +117,7 @@ impl GlobalObserver {
             let use_router = self.learned_router.as_ref().map_or(false, |r| {
                 r.num_groups == main.group_order.len() && input.len() == r.input_dim
             });
+            let mut router_route_idx: Option<usize> = None;
             if use_router {
                 let router = self.learned_router.as_mut().unwrap();
                 let logits = router.predict_logits(input);
@@ -117,25 +127,57 @@ impl GlobalObserver {
                         routing_scores.push((gid, s, 0.0, s, s));
                         scores.push((gid, s));
                     }
+                    router_route_idx = scores
+                        .iter()
+                        .enumerate()
+                        .max_by(|(_, a), (_, b)| {
+                            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map(|(i, _)| i);
                 }
             }
             if scores.is_empty() {
-            for (gid, hidden, _out) in &group_hidden_out {
-            let self_sim: f32 = main.embedding_library.iter()
-                .find(|e| e.group_id == *gid)
-                .map(|e| cosine_similarity(hidden, &e.vector))
-                .unwrap_or(-1.0);
-            let cross_sim: f32 = main.embedding_library.iter()
-                .filter(|e| e.group_id != *gid)
-                .map(|e| cosine_similarity(hidden, &e.vector))
-                .fold(-1.0, |a, b| a.max(b));
-            let margin = self_sim - cross_sim;
-            let score = self_sim;
-            routing_scores.push((*gid, self_sim, cross_sim, margin, score));
-            scores.push((*gid, score));
+                for (gid, hidden, _out) in &group_hidden_out {
+                    let self_sim: f32 = main
+                        .embedding_library
+                        .iter()
+                        .find(|e| e.group_id == *gid)
+                        .map(|e| cosine_similarity(hidden, &e.vector))
+                        .unwrap_or(-1.0);
+                    let cross_sim: f32 = main
+                        .embedding_library
+                        .iter()
+                        .filter(|e| e.group_id != *gid)
+                        .map(|e| cosine_similarity(hidden, &e.vector))
+                        .fold(-1.0, |a, b| a.max(b));
+                    let margin = self_sim - cross_sim;
+                    routing_scores.push((*gid, self_sim, cross_sim, margin, self_sim));
+                    scores.push((*gid, self_sim));
+                }
+            } else if let Some(idx) = router_route_idx {
+                if self.routing_entropy_guard.observe(idx) {
+                    scores.clear();
+                    routing_scores.clear();
+                    for (gid, hidden, _out) in &group_hidden_out {
+                        let self_sim: f32 = main
+                            .embedding_library
+                            .iter()
+                            .find(|e| e.group_id == *gid)
+                            .map(|e| cosine_similarity(hidden, &e.vector))
+                            .unwrap_or(-1.0);
+                        let cross_sim: f32 = main
+                            .embedding_library
+                            .iter()
+                            .filter(|e| e.group_id != *gid)
+                            .map(|e| cosine_similarity(hidden, &e.vector))
+                            .fold(-1.0, |a, b| a.max(b));
+                        let margin = self_sim - cross_sim;
+                        routing_scores.push((*gid, self_sim, cross_sim, margin, self_sim));
+                        scores.push((*gid, self_sim));
+                    }
+                }
             }
         }
-            }
         self.last_routing_scores = Some(routing_scores);
 
         apply_stickiness(&mut scores, self.last_chosen_group_id, self.routing_config.stickiness);

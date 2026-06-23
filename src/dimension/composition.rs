@@ -236,11 +236,13 @@ pub fn routing_entropy_degenerate(route_choices: &[usize], min_bits: f32) -> boo
 }
 
 /// Rolling window over recent discrete route indices; triggers fallback when collapsed.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RoutingEntropyGuard {
+    #[serde(default)]
     window: std::collections::VecDeque<usize>,
     capacity: usize,
     min_bits: f32,
+    #[serde(default)]
     triggered: bool,
 }
 

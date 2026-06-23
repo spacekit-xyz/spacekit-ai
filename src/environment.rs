@@ -682,6 +682,33 @@ impl NeuralEnvironment {
         (output, hidden)
     }
 
+    /// Effective weights from penultimate layer neurons to output neuron(s), in layer order.
+    pub fn penultimate_to_output_weights(&self) -> Vec<f32> {
+        let penult_idx = self.layers.len().saturating_sub(2);
+        let out_idx = self.layers.len().saturating_sub(1);
+        if penult_idx == 0 || out_idx <= penult_idx {
+            return Vec::new();
+        }
+        let penult = self.layers[penult_idx].clone();
+        let output_ids: std::collections::HashSet<NeuronId> =
+            self.layers[out_idx].iter().copied().collect();
+        penult
+            .iter()
+            .map(|&src_id| {
+                self.neurons
+                    .get(&src_id)
+                    .map(|n| {
+                        n.synapses
+                            .iter()
+                            .filter(|s| output_ids.contains(&s.target))
+                            .map(|s| s.effective_strength())
+                            .sum::<f32>()
+                    })
+                    .unwrap_or(0.0)
+            })
+            .collect()
+    }
+
     // -------------------------------------------------------------------------
     // Backprop
     // -------------------------------------------------------------------------

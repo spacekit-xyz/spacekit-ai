@@ -379,6 +379,7 @@ mod tests {
             margin: 0.0,
             confidence: 0.2,
             rejected_as_ood: true,
+            routing_entropy_guard_triggered: false,
         };
         let a = action_from_routing(&main, &routing, "calculate 2 + 2");
         assert_eq!(a.action_type, ActionType::ToolCall);
@@ -395,6 +396,7 @@ mod tests {
             margin: 0.0,
             confidence: 0.2,
             rejected_as_ood: true,
+            routing_entropy_guard_triggered: false,
         };
         let a = action_from_routing(&main, &routing, "what is weather");
         assert_eq!(a.action_type, ActionType::Fallback);
@@ -427,6 +429,7 @@ mod tests {
             margin: 0.8,
             confidence: 0.9,
             rejected_as_ood: false,
+            routing_entropy_guard_triggered: false,
         };
         let a = action_from_routing(&main, &routing, "help with password reset");
         assert_eq!(a.action_type, ActionType::SupportTicket);
