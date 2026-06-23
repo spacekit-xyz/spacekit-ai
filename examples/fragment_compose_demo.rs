@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use growformer::fragment_composer::{ComposeContext, FragmentComposer};
+use growformer::fragment_composer::{ComposeContext, FragmentComposer, ComposeExcludes};
 use growformer::reflective_field::ReflectiveWeights;
 
 fn state(pairs: &[(&str, f32)]) -> HashMap<String, f32> {
@@ -65,6 +65,12 @@ fn main() {
                 weights: ReflectiveWeights::default(),
                 archetype: Some("cheerful_companion".to_string()),
                 seed: seed.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(1),
+                body_slots: Some(vec![]).into(),
+                excludes:ComposeExcludes::default(),
+                force_second_body: false,
+                use_opener: false,
+                min_bodies: 0,
+                require_distinct_voices: false,
             };
             match lib.compose(&ctx) {
                 Some(r) => println!(
