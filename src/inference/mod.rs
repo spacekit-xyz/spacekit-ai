@@ -24,8 +24,9 @@ pub use harness::{
 };
 pub use inference_guardrails::{set_inference_guardrails_jsonl_path, GuardrailsDiskSummary};
 pub use inference_toml::{
-    inference_rules_runtime, inference_toml_loaded, print_train_inference_disk_summary,
-    set_inference_toml_cli_paths, LoadedInferenceToml,
+    inference_rules_runtime, inference_toml_directory, inference_toml_loaded,
+    print_train_inference_disk_summary, set_inference_toml_cli_paths, FragmentComposeConfig,
+    FragmentDecomposeConfig, FragmentIntentHint, LoadedInferenceToml,
 };
 pub use manifest::{
     inference_thresholds_disk, parse_plugins_manifest_bytes, serialize_plugins_manifest,

@@ -52,6 +52,12 @@ pub struct TrainSection {
 pub struct InferenceSection {
     pub toml: Option<String>,
     pub defaults_toml: Option<String>,
+    /// Topic routing graph (e.g. `data/knowledge_graph_pet_overlay.toml`). Loaded alone when no base `knowledge_graph.toml` exists.
+    pub topic_graph: Option<String>,
+    /// World grounding graph (e.g. `data/pet_world_grounding.toml`) for BM25 concept expansion.
+    pub grounding_toml: Option<String>,
+    /// Fragment library JSONL (e.g. `data/kitsu_fragments_v2.jsonl`). Overrides `[fragment_compose].library` when set.
+    pub fragments_jsonl: Option<String>,
     /// Optional JSONL of extra `lexical_topic` / `lattice_misfire` guardrails (merged after TOML).
     pub guardrails_jsonl: Option<String>,
 }
@@ -108,6 +114,12 @@ brain_plugins_toml = "data/plugins/example-brain-plugins.toml"
 [inference]
 # Shortcut rules + numeric gates (equivalent to --inference-toml).
 toml = "data/sentiment/inference_sentiment_core.toml"
+# Topic routing (pet companions: usually knowledge_graph_pet_overlay.toml).
+# topic_graph = "data/knowledge_graph_pet_overlay.toml"
+# Concept grounding graph (pet companions: pet_world_grounding.toml).
+# grounding_toml = "data/pet_world_grounding.toml"
+# Fragment library JSONL (when [fragment_compose] is enabled in inference TOML).
+# fragments_jsonl = "data/my_fragments_v1.jsonl"
 # Optional baseline for merging empty [rules] arrays (equivalent to --inference-defaults-toml).
 # defaults_toml = "data/sentiment/inference_sentiment_core.toml"
 # Optional guardrails JSONL (equivalent to --inference-guardrails-jsonl); merged after TOML rules.

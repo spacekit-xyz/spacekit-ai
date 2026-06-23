@@ -217,6 +217,47 @@ struct GfOverlay {
     brain_epochs: Option<u32>,
     brain_gen_epochs: Option<u32>,
     brain_gen_replicas: Option<u32>,
+    /// Resolved `[inference].topic_graph` from *.gf.toml
+    topic_graph: Option<std::path::PathBuf>,
+    /// Resolved `[inference].grounding_toml` from *.gf.toml
+    grounding_toml: Option<std::path::PathBuf>,
+    /// Resolved `[inference].fragments_jsonl` from *.gf.toml
+    fragments_jsonl: Option<std::path::PathBuf>,
+}
+
+/// Resolve `[fragment_compose].library` from an inference TOML next to the project manifest.
+fn resolve_fragment_library_from_inference_toml(
+    inf_toml: &std::path::Path,
+    manifest_base: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    #[derive(serde::Deserialize)]
+    struct FragComposeSection {
+        library: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct InferenceFragLookup {
+        fragment_compose: Option<FragComposeSection>,
+    }
+    let raw = std::fs::read_to_string(inf_toml).ok()?;
+    let doc: InferenceFragLookup = toml::from_str(&raw).ok()?;
+    let lib = doc.fragment_compose?.library?.trim().to_string();
+    if lib.is_empty() {
+        return None;
+    }
+    let rel = std::path::PathBuf::from(&lib);
+    for cand in [
+        inf_toml.parent().map(|d| d.join(&rel)),
+        Some(manifest_base.join("data").join(&rel)),
+        Some(manifest_base.join(&rel)),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    None
 }
 
 fn apply_gf_project(args: &mut Args, project_path: &Path) -> Result<GfOverlay, String> {
@@ -298,6 +339,34 @@ fn apply_gf_project(args: &mut Args, project_path: &Path) -> Result<GfOverlay, S
             if let Some(p) = inf.guardrails_jsonl.as_deref() {
                 args.inference_guardrails_jsonl =
                     Some(crate::project_gf::resolve_against(&base, p));
+            }
+        }
+        if overlay.topic_graph.is_none() {
+            if let Some(t) = inf.topic_graph.as_deref() {
+                overlay.topic_graph = Some(crate::project_gf::resolve_against(&base, t));
+            } else {
+                let default = base.join("data/knowledge_graph_pet_overlay.toml");
+                if default.is_file() {
+                    overlay.topic_graph = Some(default);
+                }
+            }
+        }
+        if overlay.grounding_toml.is_none() {
+            if let Some(t) = inf.grounding_toml.as_deref() {
+                overlay.grounding_toml = Some(crate::project_gf::resolve_against(&base, t));
+            } else {
+                let default = base.join("data/pet_world_grounding.toml");
+                if default.is_file() {
+                    overlay.grounding_toml = Some(default);
+                }
+            }
+        }
+        if overlay.fragments_jsonl.is_none() {
+            if let Some(t) = inf.fragments_jsonl.as_deref() {
+                overlay.fragments_jsonl = Some(crate::project_gf::resolve_against(&base, t));
+            } else if let Some(ref inf_toml) = args.inference_toml {
+                overlay.fragments_jsonl =
+                    resolve_fragment_library_from_inference_toml(inf_toml, &base);
             }
         }
     }
@@ -404,7 +473,7 @@ fn resolve_infer_mode(args: &Args) -> Result<InferMode, String> {
     }
 }
 
-fn pet_topic_overlay_paths(args: &Args) -> Vec<std::path::PathBuf> {
+fn pet_topic_overlay_paths(args: &Args, gf_overlay: Option<&GfOverlay>) -> Vec<std::path::PathBuf> {
     use std::path::Path;
     let mut out: Vec<std::path::PathBuf> = Vec::new();
     let mut push = |p: std::path::PathBuf| {
@@ -412,6 +481,11 @@ fn pet_topic_overlay_paths(args: &Args) -> Vec<std::path::PathBuf> {
             out.push(p);
         }
     };
+    if let Some(ov) = gf_overlay {
+        if let Some(ref p) = ov.topic_graph {
+            push(p.clone());
+        }
+    }
     if let Some(ref proj) = args.project {
         if let Some(dir) = proj.parent() {
             push(dir.join("data/knowledge_graph_pet_overlay.toml"));
@@ -498,31 +572,56 @@ where
     let infer_quiet = args.infer && !args.verbose;
     crate::infer_log::set_infer_trace_quiet(infer_quiet);
 
-    // Initialize topic knowledge graph + optional sentiment NL overlay (same directory),
-    // plus optional pets overlay when --project/--brain points at a pets workspace.
-    // When `--project` is set, prefer `<manifest-dir>/data/knowledge_graph.toml` so embedders
-    // (e.g. SpaceKit) and `growformer --infer` work regardless of process cwd.
+    // When `--project` is set, resolve paths under the manifest directory (not process cwd).
     let kg_path: String = if let Some(ref proj) = args.project {
         let base = crate::project_gf::manifest_base_dir(proj.as_path());
-        let candidate = base.join("data/knowledge_graph.toml");
-        if candidate.is_file() {
-            candidate.to_string_lossy().into_owned()
-        } else {
-            "data/knowledge_graph.toml".to_string()
-        }
+        base.join("data/knowledge_graph.toml")
+            .to_string_lossy()
+            .into_owned()
     } else {
         "data/knowledge_graph.toml".to_string()
     };
-    let pet_overlays = pet_topic_overlay_paths(&args);
+    let pet_overlays = pet_topic_overlay_paths(&args, gf_overlay.as_ref());
     if let Err(e) =
         crate::growformer_lang::try_init_topic_graph_bundle_with_extras(&kg_path, &pet_overlays)
     {
         eprintln!("Warning: failed to load topic graph: {}", e);
     } else if args.infer && !crate::growformer_lang::topic_graph_loaded() {
         eprintln!(
-            "Warning: topic graph not loaded (missing `{}` and no `knowledge_graph_sentiment_overlay.toml` in the same directory). Operation-topic routing uses legacy rules; add the graph for production inference.",
-            kg_path
+            "Warning: topic graph not loaded. Set [inference].topic_graph in your *.gf.toml \
+             (e.g. data/knowledge_graph_pet_overlay.toml) or add data/knowledge_graph.toml \
+             beside your project manifest."
         );
+    }
+
+    if let Some(ref ov) = gf_overlay {
+        if let Some(ref gpath) = ov.grounding_toml {
+            if gpath.is_file() {
+                match std::fs::read_to_string(gpath) {
+                    Ok(s) => {
+                        if let Err(e) =
+                            crate::inference::world_grounding::load_grounding_graph_from_str(&s)
+                        {
+                            eprintln!(
+                                "Warning: failed to load grounding graph {}: {}",
+                                gpath.display(),
+                                e
+                            );
+                        } else if args.infer && args.verbose {
+                            println!(
+                                "Grounding graph: loaded from {}",
+                                gpath.display()
+                            );
+                        }
+                    }
+                    Err(e) => eprintln!(
+                        "Warning: failed to read grounding graph {}: {}",
+                        gpath.display(),
+                        e
+                    ),
+                }
+            }
+        }
     }
 
     if args.train_brain || args.validate_brain_training {
@@ -635,6 +734,9 @@ where
             args.categorical_data.as_deref(),
             args.categorical_steps,
             args.project.is_some() || args.inference_toml.is_some(),
+            gf_overlay
+                .as_ref()
+                .and_then(|o| o.fragments_jsonl.as_deref()),
         ).map_err(|e| format!("Inference failed: {}", e))?;
     } else {
         return Err(
@@ -1006,6 +1108,7 @@ fn run_inference(
     categorical_data: Option<&std::path::Path>,
     categorical_steps: usize,
     reload_disk_inference_after_brain: bool,
+    fragments_override: Option<&std::path::Path>,
 ) -> Result<(), String> {
     let data = std::fs::read(brain_path)
         .map_err(|e| format!("Failed to read {}: {}", brain_path, e))?;
@@ -1022,13 +1125,64 @@ fn run_inference(
     #[cfg(not(feature = "categorical"))]
     { let _ = (categorical_data, categorical_steps); }
 
-    // Optional: load a typed-fragment library for free-text chat composition.
-    // Set GROWFORMER_FRAGMENTS=/path/to/luna_fragments_v1.jsonl to enable.
-    if let Ok(frag_path) = std::env::var("GROWFORMER_FRAGMENTS") {
-        if !frag_path.trim().is_empty() {
-            match rt.svc.load_fragments_from_path(&frag_path) {
-                Ok(n) => println!("Fragment composer: loaded {} fragments from {}", n, frag_path),
-                Err(e) => eprintln!("Fragment composer: failed to load {}: {}", frag_path, e),
+    // Load typed-fragment library when enabled in inference TOML (or GROWFORMER_FRAGMENTS).
+    let frag_loaded = if let Some(explicit) = fragments_override {
+        if explicit.is_file() {
+            match rt.svc.load_fragments_from_path(explicit) {
+                Ok(n) => {
+                    println!(
+                        "Fragment composer: loaded {} fragments from {}",
+                        n,
+                        explicit.display()
+                    );
+                    true
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Fragment composer: failed to load {}: {}",
+                        explicit.display(),
+                        e
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        }
+    } else if let Ok(explicit) = std::env::var("GROWFORMER_FRAGMENTS") {
+        if !explicit.trim().is_empty() {
+            match rt.svc.load_fragments_from_path(&explicit) {
+                Ok(n) => {
+                    println!("Fragment composer: loaded {} fragments from {}", n, explicit);
+                    true
+                }
+                Err(e) => {
+                    eprintln!("Fragment composer: failed to load {}: {}", explicit, e);
+                    false
+                }
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if !frag_loaded {
+        let fc_cfg = crate::inference::inference_toml::inference_toml_loaded();
+        if fc_cfg.fragment_compose().enabled {
+            if let Some(path) = crate::service::LanguageService::resolve_fragments_library(brain_path) {
+                match rt.svc.load_fragments_from_path(&path) {
+                    Ok(n) => println!(
+                        "Fragment composer: loaded {} fragments from {}",
+                        n,
+                        path.display()
+                    ),
+                    Err(e) => eprintln!(
+                        "Fragment composer: failed to load {}: {}",
+                        path.display(),
+                        e
+                    ),
+                }
             }
         }
     }

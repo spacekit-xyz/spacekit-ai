@@ -241,6 +241,38 @@ impl MirrorDimension {
         EpochResult { loss, accuracy, correct, total: n }
     }
 
+    /// Fast epoch: gradient-only ticks (no STDP/prune/grow/geometry). Demo default for 2D mirrors.
+    #[cfg(feature = "training")]
+    pub fn train_epoch_gradient(
+        &mut self,
+        data: &[crate::types::Sample],
+        rng: &mut impl Rng,
+    ) -> EpochResult {
+        let mut total_loss = 0.0f32;
+        let mut correct = 0usize;
+        let n = data.len();
+        for (input, target) in data {
+            let input_slice = input.as_slice();
+            let out = self.env.predict(input_slice);
+            let target_arr = [target[0]];
+            let loss = self
+                .env
+                .train_tick_gradient_only(input_slice, &target_arr, rng);
+            total_loss += loss;
+            if out.len() >= 1 && (out[0] - target[0]).abs() < 0.5 {
+                correct += 1;
+            }
+        }
+        let loss = if n > 0 { total_loss / n as f32 } else { 0.0 };
+        let accuracy = if n > 0 { correct as f32 / n as f32 } else { 0.0 };
+        self.epochs_trained += 1;
+        self.current_accuracy = accuracy;
+        if accuracy > self.best_accuracy {
+            self.best_accuracy = accuracy;
+        }
+        EpochResult { loss, accuracy, correct, total: n }
+    }
+
     /// True if at least `window` epochs have been trained (used by promotion gate).
     /// Note: this is epoch count only, not accuracy plateau; we don't track per-epoch history here.
     pub fn is_stable(&self, window: u32) -> bool {

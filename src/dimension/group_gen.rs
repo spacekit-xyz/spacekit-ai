@@ -4807,22 +4807,28 @@ impl IndexedGenEnv {
             }
         }
 
-        // Signal 3: ≥5 consecutive function words.
+        // Signal 3: ≥5 consecutive function words within a single sentence.
         const FUNC: &[&str] = &[
             "i", "a", "an", "the", "and", "or", "but", "is", "am", "are", "was", "were", "be",
             "been", "do", "does", "did", "to", "of", "in", "on", "at", "it", "you", "my", "your",
             "then", "that", "this", "so", "as", "if", "for", "with", "by", "we", "he", "she",
             "they",
         ];
-        let mut run = 0;
-        for w in &words {
-            if FUNC.contains(w) {
-                run += 1;
-                if run >= 5 {
-                    return true;
+        for sentence in t.split(|c| c == '.' || c == '!' || c == '?') {
+            let words: Vec<&str> = sentence
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .collect();
+            let mut run = 0;
+            for w in &words {
+                if FUNC.contains(w) {
+                    run += 1;
+                    if run >= 5 {
+                        return true;
+                    }
+                } else {
+                    run = 0;
                 }
-            } else {
-                run = 0;
             }
         }
 
@@ -5808,6 +5814,9 @@ mod tests {
         ));
         assert!(!IndexedGenEnv::looks_fragmented(
             "The bowl is empty and has been empty for ages. I sit next to it. Mrrp."
+        ));
+        assert!(!IndexedGenEnv::looks_fragmented(
+            "There you are. This is the most attention I give anyone. Purr."
         ));
     }
 

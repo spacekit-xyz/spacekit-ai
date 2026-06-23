@@ -15,7 +15,8 @@ use growformer::types::NeuronId;
 use growformer::dimension::{
     append_language_samples_from_training_jsonl_dir, CalibrationDataset, CalibrationReport,
     CalibrationRequirements, EncoderPreset, LanguageConfig, LanguageSample, DimensionManager,
-    DimensionManagerConfig, HashingLanguageEncoder, LanguageEncoder, MainDimension, VirtualGroup,
+    DimensionManagerConfig, HashingLanguageEncoder, LanguageEncoder, LearnedRouter, MainDimension,
+    VirtualGroup, RoutingEntropyGuard, routing_entropy_bits, routing_entropy_degenerate,
     load_language_samples_jsonl, render_action_template, generate_code_from_action,
     route_language_embedding,
 };
@@ -32,6 +33,7 @@ use growformer::systems::mirror::mirror_symmetry_score;
 use growformer::systems::whorls::print_whorl_summary;
 use growformer::service::LanguageService;
 use growformer::types::{EnvironmentConfig, Sample};
+use rand::Rng;
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rand::rngs::StdRng;
@@ -57,6 +59,19 @@ struct Args {
     fractal: bool,
     #[arg(long)]
     phase3c: bool,
+    #[arg(long)]
+    phase3e: bool,
+    /// Expert-router boundary alignment: scatter CSV + leak diagnostics (run before interpreting 81%).
+    #[arg(long)]
+    phase3e_boundary: bool,
+    /// Annulus misroute analysis from existing phase3e_boundary_diagnostic.csv (fast).
+    #[arg(long)]
+    phase3e_boundary_analyze: bool,
+    /// Per-specialist competence routing on Task E (falsifiable gate; §COMPETENCE_ROUTING_SPEC).
+    #[arg(long)]
+    phase3f_competence: bool,
+    #[arg(long)]
+    phase3f_analyze: bool,
     #[arg(long)]
     neurogenesis: bool,
     #[arg(long)]
@@ -254,6 +269,16 @@ fn main() {
         demo_fractal_continual_learning();
     } else if args.phase3c {
         demo_phase3c_composition();
+    } else if args.phase3f_analyze {
+        demo_phase3f_analyze_csv();
+    } else if args.phase3f_competence {
+        demo_phase3f_competence_routing();
+    } else if args.phase3e_boundary_analyze {
+        demo_phase3e_boundary_analyze_csv();
+    } else if args.phase3e_boundary {
+        demo_phase3e_boundary_diagnostic();
+    } else if args.phase3e {
+        demo_phase3e_balanced_composite();
     } else if args.neurogenesis {
         demo_neurogenesis();
     } else if args.mnist {
@@ -2668,18 +2693,2217 @@ fn demo_arc_agi() {
 // Task C = spiral-gated circles: inner → spiral rule, outer → circles rule.
 // =============================================================================
 
-fn demo_phase3c_composition() {
-    println!("--- Phase 3c: Composition + Episodic ---\n");
-    // Reuse Demo 6 setup: two promoted groups + router
-    let config = DimensionManagerConfig {
+/// Parallel minibatch size for mirror training when the `parallel` feature is on.
+#[allow(dead_code)]
+fn demo_mirror_batch_size() -> Option<usize> {
+    #[cfg(feature = "parallel")]
+    {
+        std::thread::available_parallelism()
+            .ok()
+            .map(|p| p.get().min(32).max(2))
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        None
+    }
+}
+
+const DEMO_MIRROR_TARGET_ACC: f32 = 0.93;
+const DEMO_MIRROR_MAX_EPOCHS: usize = 2500;
+const DEMO_MIRROR_LOG_INTERVAL: usize = 250;
+const DEMO_MIRROR_PROMOTE_CHECK: usize = 50;
+
+fn phase3_composition_config() -> DimensionManagerConfig {
+    DimensionManagerConfig {
         mirror_config: phase2_base_config(),
         mirror_layer_sizes: vec![2, 16, 16, 1],
         promotion_check_interval: 500,
         max_concurrent_mirrors: 2,
         calibration_samples: 100,
         reserve_pool_size: 0,
+    }
+}
+
+/// Train a mirror with gradient-only SGD, early stopping, then promote to Main.
+fn train_promoted_mirror(
+    dm: &mut DimensionManager,
+    task_name: &str,
+    seed: u64,
+    data: &[Sample],
+    calibration: &[Sample],
+    rng: &mut StdRng,
+    verbose: bool,
+) -> GroupId {
+    dm.spawn_mirror(task_name, seed).expect(task_name);
+    if verbose {
+        println!(
+            "=== Training mirror: {} (gradient-only, target={:.0}%) ===\n",
+            task_name,
+            DEMO_MIRROR_TARGET_ACC * 100.0
+        );
+    }
+
+    for epoch in 0..DEMO_MIRROR_MAX_EPOCHS {
+        let Some(result) = dm.train_mirror_epoch_gradient(task_name, data, rng) else {
+            break;
+        };
+        if epoch % DEMO_MIRROR_PROMOTE_CHECK == 0 {
+            dm.evaluate_promotions(calibration);
+            if !dm.mirrors.contains_key(task_name) {
+                if verbose {
+                    println!("  [{}] auto-promoted at epoch {}", task_name, epoch);
+                }
+                break;
+            }
+        }
+        if verbose && epoch % DEMO_MIRROR_LOG_INTERVAL == 0 {
+            println!(
+                "  [{}] epoch {:>4} | loss={:.4} | acc={:.1}%",
+                task_name,
+                epoch,
+                result.loss,
+                result.accuracy * 100.0
+            );
+        }
+        if result.accuracy >= DEMO_MIRROR_TARGET_ACC {
+            if verbose {
+                println!(
+                    "  [{}] reached {:.0}% at epoch {}",
+                    task_name,
+                    DEMO_MIRROR_TARGET_ACC * 100.0,
+                    epoch
+                );
+            }
+            break;
+        }
+    }
+
+    if dm.mirrors.contains_key(task_name) {
+        dm.force_promote(task_name, calibration)
+            .unwrap_or_else(|| *dm.main.group_order.last().unwrap())
+    } else {
+        *dm.main.group_order.last().unwrap()
+    }
+}
+
+fn evaluate_mirror_accuracy(
+    dm: &mut DimensionManager,
+    task_name: &str,
+    data: &[Sample],
+) -> f32 {
+    let Some(mirror) = dm.mirrors.get_mut(task_name) else {
+        return 0.0;
     };
-    let mut dm = DimensionManager::new(config);
+    let mut correct = 0usize;
+    for (input, target) in data {
+        let out = mirror.env.predict(input.as_slice());
+        if out.len() >= 1 && (out[0] - target[0]).abs() < 0.5 {
+            correct += 1;
+        }
+    }
+    if data.is_empty() {
+        0.0
+    } else {
+        correct as f32 / data.len() as f32
+    }
+}
+
+/// Train a mirror on `train` only; return held-out accuracy. Mirror is discarded (not promoted).
+fn train_direct_composite_mirror(
+    dm: &mut DimensionManager,
+    train: &[Sample],
+    heldout: &[Sample],
+    seed: u64,
+    rng: &mut StdRng,
+) -> f32 {
+    const TASK: &str = "composite_direct";
+    dm.spawn_mirror(TASK, seed).expect("spawn composite_direct");
+    for epoch in 0..DEMO_MIRROR_MAX_EPOCHS {
+        let Some(result) = dm.train_mirror_epoch_gradient(TASK, train, rng) else {
+            break;
+        };
+        if result.accuracy >= DEMO_MIRROR_TARGET_ACC {
+            break;
+        }
+    }
+    let acc = evaluate_mirror_accuracy(dm, TASK, heldout);
+    dm.mirrors.remove(TASK);
+    acc
+}
+
+fn accuracy_virtual_group(
+    dm: &mut DimensionManager,
+    vg: &VirtualGroup,
+    data: &[Sample],
+) -> f32 {
+    let mut correct = 0usize;
+    for (input, target) in data {
+        let out = dm.predict_with_composition(input, vg);
+        if out.len() >= 1 && (out[0] - target[0]).abs() < 0.5 {
+            correct += 1;
+        }
+    }
+    if data.is_empty() {
+        0.0
+    } else {
+        correct as f32 / data.len() as f32
+    }
+}
+
+fn stratified_composite_split(
+    data: &[Sample],
+    inner_radius: f32,
+    train_n: usize,
+    rng: &mut StdRng,
+) -> (Vec<Sample>, Vec<Sample>) {
+    let mut inner = Vec::new();
+    let mut outer = Vec::new();
+    for sample in data {
+        let r = (sample.0[0] * sample.0[0] + sample.0[1] * sample.0[1]).sqrt();
+        if r < inner_radius {
+            inner.push(sample.clone());
+        } else {
+            outer.push(sample.clone());
+        }
+    }
+    inner.shuffle(rng);
+    outer.shuffle(rng);
+    let train_inner = train_n / 2;
+    let train_outer = train_n.saturating_sub(train_inner);
+    let mut train = Vec::with_capacity(train_n);
+    train.extend(inner.iter().take(train_inner).cloned());
+    train.extend(outer.iter().take(train_outer).cloned());
+    let mut heldout = Vec::with_capacity(inner.len() + outer.len() - train.len());
+    heldout.extend(inner.iter().skip(train_inner).cloned());
+    heldout.extend(outer.iter().skip(train_outer).cloned());
+    (train, heldout)
+}
+
+fn inner_region_fraction(data: &[Sample], inner_radius: f32) -> f32 {
+    if data.is_empty() {
+        return 0.0;
+    }
+    let inner = data
+        .iter()
+        .filter(|(input, _)| {
+            let r = (input[0] * input[0] + input[1] * input[1]).sqrt();
+            r < inner_radius
+        })
+        .count();
+    inner as f32 / data.len() as f32
+}
+
+fn sample_radius(input: &[f32]) -> f32 {
+    (input[0] * input[0] + input[1] * input[1]).sqrt()
+}
+
+fn specialist_scalar(
+    main: &mut MainDimension,
+    group_id: GroupId,
+    input: &[f32],
+) -> f32 {
+    main.query(input, &[group_id])
+        .first()
+        .and_then(|(_, o)| o.first().copied())
+        .unwrap_or(0.5)
+}
+
+fn scalar_matches_target(scalar: f32, target: f32) -> bool {
+    (scalar - target).abs() < 0.5
+}
+
+/// Per-point hard switch: use spiral output if r < threshold, else circles.
+fn accuracy_radius_gated(
+    main: &mut MainDimension,
+    spiral_gid: GroupId,
+    circles_gid: GroupId,
+    data: &[Sample],
+    threshold: f32,
+) -> f32 {
+    let mut correct = 0usize;
+    for (input, target) in data {
+        let r = sample_radius(input);
+        let scalar = if r < threshold {
+            specialist_scalar(main, spiral_gid, input)
+        } else {
+            specialist_scalar(main, circles_gid, input)
+        };
+        if scalar_matches_target(scalar, target[0]) {
+            correct += 1;
+        }
+    }
+    if data.is_empty() {
+        0.0
+    } else {
+        correct as f32 / data.len() as f32
+    }
+}
+
+/// Learn radius threshold on train by grid search over midpoints between sorted train radii.
+fn learn_radius_threshold(
+    main: &mut MainDimension,
+    spiral_gid: GroupId,
+    circles_gid: GroupId,
+    train: &[Sample],
+    default: f32,
+) -> f32 {
+    let mut radii: Vec<f32> = train.iter().map(|(input, _)| sample_radius(input)).collect();
+    if radii.is_empty() {
+        return default;
+    }
+    radii.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut candidates = vec![default, 0.2, 0.35, 0.4, 0.5, 0.65];
+    for pair in radii.windows(2) {
+        candidates.push((pair[0] + pair[1]) * 0.5);
+    }
+    let mut best_t = default;
+    let mut best_acc = 0.0f32;
+    for t in candidates {
+        let acc = accuracy_radius_gated(main, spiral_gid, circles_gid, train, t);
+        if acc > best_acc {
+            best_acc = acc;
+            best_t = t;
+        }
+    }
+    best_t
+}
+
+/// Per-point: pick the specialist with more decisive (extreme) scalar output.
+fn accuracy_confidence_argmax(
+    main: &mut MainDimension,
+    spiral_gid: GroupId,
+    circles_gid: GroupId,
+    data: &[Sample],
+) -> f32 {
+    let mut correct = 0usize;
+    for (input, target) in data {
+        let o_spiral = specialist_scalar(main, spiral_gid, input);
+        let o_circles = specialist_scalar(main, circles_gid, input);
+        let scalar = if (o_spiral - 0.5).abs() >= (o_circles - 0.5).abs() {
+            o_spiral
+        } else {
+            o_circles
+        };
+        if scalar_matches_target(scalar, target[0]) {
+            correct += 1;
+        }
+    }
+    if data.is_empty() {
+        0.0
+    } else {
+        correct as f32 / data.len() as f32
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RadiusLogisticGate {
+    w: f32,
+    b: f32,
+}
+
+fn sigmoid(z: f32) -> f32 {
+    1.0 / (1.0 + (-z).exp())
+}
+
+/// Train logistic P(use spiral) = σ(w·r + b) from which specialist is closer to label on train.
+fn train_radius_logistic_gate(
+    main: &mut MainDimension,
+    spiral_gid: GroupId,
+    circles_gid: GroupId,
+    train: &[Sample],
+) -> RadiusLogisticGate {
+    let mut gate = RadiusLogisticGate { w: 0.0, b: 0.0 };
+    let lr = 0.15;
+    for _ in 0..300 {
+        for (input, target) in train {
+            let r = sample_radius(input);
+            let o_spiral = specialist_scalar(main, spiral_gid, input);
+            let o_circles = specialist_scalar(main, circles_gid, input);
+            let y = if (o_spiral - target[0]).abs() < (o_circles - target[0]).abs() {
+                1.0
+            } else {
+                0.0
+            };
+            let z = gate.w * r + gate.b;
+            let p = sigmoid(z);
+            let err = p - y;
+            gate.w -= lr * err * r;
+            gate.b -= lr * err;
+        }
+    }
+    gate
+}
+
+/// Which specialist index (0 = spiral, 1 = circles) to route to, from composite labels only.
+fn routing_teacher_index(
+    main: &mut MainDimension,
+    spiral_gid: GroupId,
+    circles_gid: GroupId,
+    input: &[f32],
+    target: f32,
+) -> usize {
+    let o_spiral = specialist_scalar(main, spiral_gid, input);
+    let o_circles = specialist_scalar(main, circles_gid, input);
+    let spiral_ok = scalar_matches_target(o_spiral, target);
+    let circles_ok = scalar_matches_target(o_circles, target);
+    if spiral_ok && !circles_ok {
+        return 0;
+    }
+    if circles_ok && !spiral_ok {
+        return 1;
+    }
+    if (o_spiral - target).abs() <= (o_circles - target).abs() {
+        0
+    } else {
+        1
+    }
+}
+
+fn specialist_feature_pair(
+    main: &mut MainDimension,
+    spiral_gid: GroupId,
+    circles_gid: GroupId,
+    input: &[f32],
+) -> Vec<f32> {
+    vec![
+        specialist_scalar(main, spiral_gid, input),
+        specialist_scalar(main, circles_gid, input),
+    ]
+}
+
+/// Fraction of train points with radius within `margin` of the region boundary.
+fn train_boundary_near_fraction(train: &[Sample], inner_radius: f32, margin: f32) -> f32 {
+    if train.is_empty() {
+        return 0.0;
+    }
+    let near = train
+        .iter()
+        .filter(|(input, _)| (sample_radius(input) - inner_radius).abs() < margin)
+        .count();
+    near as f32 / train.len() as f32
+}
+
+fn train_task_e_learned_router_xy(
+    main: &mut MainDimension,
+    spiral_gid: GroupId,
+    circles_gid: GroupId,
+    train: &[Sample],
+) -> LearnedRouter {
+    let samples: Vec<(Vec<f32>, GroupId)> = train
+        .iter()
+        .map(|(input, target)| {
+            let idx = routing_teacher_index(main, spiral_gid, circles_gid, input, target[0]);
+            (input.clone(), idx as GroupId)
+        })
+        .collect();
+    LearnedRouter::build(2, 2, &samples)
+}
+
+/// Router features are specialist scalars only — position never enters the lattice.
+fn train_task_e_learned_router_expert(
+    main: &mut MainDimension,
+    spiral_gid: GroupId,
+    circles_gid: GroupId,
+    train: &[Sample],
+) -> LearnedRouter {
+    let samples: Vec<(Vec<f32>, GroupId)> = train
+        .iter()
+        .map(|(input, target)| {
+            let idx = routing_teacher_index(main, spiral_gid, circles_gid, input, target[0]);
+            let features = specialist_feature_pair(main, spiral_gid, circles_gid, input);
+            (features, idx as GroupId)
+        })
+        .collect();
+    LearnedRouter::build(2, 2, &samples)
+}
+
+/// Deployment-stack router: task-identity labels from original calibration data, not Task E.
+fn train_calibration_learned_router_xy(
+    calibration_spiral: &[Sample],
+    calibration_circles: &[Sample],
+) -> LearnedRouter {
+    let mut samples: Vec<(Vec<f32>, GroupId)> = Vec::with_capacity(
+        calibration_spiral.len() + calibration_circles.len(),
+    );
+    for (input, _) in calibration_spiral {
+        samples.push((input.clone(), 0));
+    }
+    for (input, _) in calibration_circles {
+        samples.push((input.clone(), 1));
+    }
+    LearnedRouter::build(2, 2, &samples)
+}
+
+/// Deployment router on expert outputs only — no position in features.
+fn train_calibration_learned_router_expert(
+    main: &mut MainDimension,
+    spiral_gid: GroupId,
+    circles_gid: GroupId,
+    calibration_spiral: &[Sample],
+    calibration_circles: &[Sample],
+) -> LearnedRouter {
+    let mut samples: Vec<(Vec<f32>, GroupId)> = Vec::with_capacity(
+        calibration_spiral.len() + calibration_circles.len(),
+    );
+    for (input, _) in calibration_spiral {
+        let features = specialist_feature_pair(main, spiral_gid, circles_gid, input);
+        samples.push((features, 0));
+    }
+    for (input, _) in calibration_circles {
+        let features = specialist_feature_pair(main, spiral_gid, circles_gid, input);
+        samples.push((features, 1));
+    }
+    LearnedRouter::build(2, 2, &samples)
+}
+
+/// Soft-leak control: route on specialist disagreement scalar only.
+fn train_task_e_router_disagreement(
+    main: &mut MainDimension,
+    spiral_gid: GroupId,
+    circles_gid: GroupId,
+    train: &[Sample],
+) -> LearnedRouter {
+    let samples: Vec<(Vec<f32>, GroupId)> = train
+        .iter()
+        .map(|(input, target)| {
+            let idx = routing_teacher_index(main, spiral_gid, circles_gid, input, target[0]);
+            let f0 = specialist_scalar(main, spiral_gid, input);
+            let f1 = specialist_scalar(main, circles_gid, input);
+            (vec![f0 - f1], idx as GroupId)
+        })
+        .collect();
+    LearnedRouter::build(1, 2, &samples)
+}
+
+fn pearson_correlation(xs: &[f32], ys: &[f32]) -> f32 {
+    if xs.len() != ys.len() || xs.len() < 2 {
+        return 0.0;
+    }
+    let n = xs.len() as f32;
+    let mx = xs.iter().sum::<f32>() / n;
+    let my = ys.iter().sum::<f32>() / n;
+    let mut num = 0.0f32;
+    let mut dx2 = 0.0f32;
+    let mut dy2 = 0.0f32;
+    for (&x, &y) in xs.iter().zip(ys.iter()) {
+        let dx = x - mx;
+        let dy = y - my;
+        num += dx * dy;
+        dx2 += dx * dx;
+        dy2 += dy * dy;
+    }
+    let denom = (dx2 * dy2).sqrt();
+    if denom < 1e-12 {
+        0.0
+    } else {
+        num / denom
+    }
+}
+
+fn router_route_index(router: &mut LearnedRouter, features: &[f32]) -> usize {
+    router
+        .predict_logits(features)
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
+/// Does the router's region choice match the generative oracle (spiral if r < threshold)?
+fn router_region_agreement_oracle(
+    router: &mut LearnedRouter,
+    data: &[Sample],
+    inner_radius: f32,
+    features_for: &mut dyn FnMut(&[f32]) -> Vec<f32>,
+) -> f32 {
+    if data.is_empty() {
+        return 0.0;
+    }
+    let mut agree = 0usize;
+    for (input, _) in data {
+        let r = sample_radius(input);
+        let oracle_idx = if r < inner_radius { 0usize } else { 1usize };
+        let features = features_for(input);
+        if router_route_index(router, &features) == oracle_idx {
+            agree += 1;
+        }
+    }
+    agree as f32 / data.len() as f32
+}
+
+/// Pearson correlation between router margin (logit_spiral − logit_circles) and (inner_radius − r).
+/// Strong positive correlation ⇒ decision boundary tracks the radius circle.
+fn router_margin_radius_correlation(
+    router: &mut LearnedRouter,
+    data: &[Sample],
+    inner_radius: f32,
+    features_for: &mut dyn FnMut(&[f32]) -> Vec<f32>,
+) -> f32 {
+    if data.len() < 2 {
+        return 0.0;
+    }
+    let mut margins = Vec::with_capacity(data.len());
+    let mut radius_signals = Vec::with_capacity(data.len());
+    for (input, _) in data {
+        let features = features_for(input);
+        let logits = router.predict_logits(&features);
+        let margin = if logits.len() >= 2 {
+            logits[0] - logits[1]
+        } else {
+            0.0
+        };
+        margins.push(margin);
+        radius_signals.push(inner_radius - sample_radius(input));
+    }
+    pearson_correlation(&margins, &radius_signals)
+}
+
+#[derive(Clone, Debug)]
+struct BoundaryPointRecord {
+    seed: u64,
+    x: f32,
+    y: f32,
+    r: f32,
+    f_spiral: f32,
+    f_circles: f32,
+    margin: f32,
+    router_spiral: bool,
+    oracle_spiral: bool,
+    composite_correct: bool,
+    region_match: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BoundarySeedSummary {
+    seed: u64,
+    composite_acc: f32,
+    region_agreement: f32,
+    margin_radius_corr: f32,
+    misroute_mean_dr: f32,
+    f_spiral_r_corr: f32,
+    f_circles_r_corr: f32,
+    train_near_boundary_frac: f32,
+}
+
+/// Fit P(spiral route) = σ(w·x₁ + …) by batch gradient descent on train labels.
+fn fit_logistic_router(
+    train_x: &[Vec<f32>],
+    train_y: &[f32],
+    lr: f32,
+    epochs: usize,
+) -> Vec<f32> {
+    let dim = train_x.first().map(|v| v.len()).unwrap_or(0);
+    let mut w = vec![0.0f32; dim];
+    let mut b = 0.0f32;
+    if dim == 0 || train_x.is_empty() {
+        return w;
+    }
+    for _ in 0..epochs {
+        for (x, &y) in train_x.iter().zip(train_y.iter()) {
+            let z: f32 = x.iter().zip(w.iter()).map(|(a, wi)| a * wi).sum::<f32>() + b;
+            let p = sigmoid(z);
+            let err = p - y;
+            for (wi, xi) in w.iter_mut().zip(x.iter()) {
+                *wi -= lr * err * xi;
+            }
+            b -= lr * err;
+        }
+    }
+    let mut params = w;
+    params.push(b);
+    params
+}
+
+fn logistic_predict(params: &[f32], x: &[f32]) -> f32 {
+    if params.is_empty() || x.is_empty() {
+        return 0.5;
+    }
+    let b = *params.last().unwrap_or(&0.0);
+    let w = &params[..params.len() - 1];
+    let z: f32 = x.iter().zip(w.iter()).map(|(a, wi)| a * wi).sum::<f32>() + b;
+    sigmoid(z)
+}
+
+fn collect_expert_boundary_records(seed: u64) -> (Vec<BoundaryPointRecord>, BoundarySeedSummary) {
+    const INNER_RADIUS: f32 = 0.4;
+    const N_SAMPLES: usize = 400;
+    const TRAIN_N: usize = 30;
+
+    let mut dm = DimensionManager::new(phase3_composition_config());
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut data_rng = StdRng::seed_from_u64(seed.wrapping_mul(97).wrapping_add(99));
+
+    let spiral_data = generate_spiral_data(400, &mut data_rng);
+    let circles_data = generate_concentric_circles_data(400, &mut data_rng);
+    let calibration_spiral: Vec<_> = spiral_data.iter().take(100).cloned().collect();
+    let calibration_circles: Vec<_> = circles_data.iter().take(100).cloned().collect();
+
+    let spiral_group = train_promoted_mirror(
+        &mut dm, "spiral", seed, &spiral_data, &calibration_spiral, &mut rng, false,
+    );
+    let circles_group = train_promoted_mirror(
+        &mut dm, "circles", seed.wrapping_add(1), &circles_data, &calibration_circles, &mut rng, false,
+    );
+
+    let task_e_data = generate_balanced_spiral_gated_circles_data(
+        &mut dm.main, spiral_group, circles_group, INNER_RADIUS, N_SAMPLES, &mut data_rng,
+    );
+    let (train, heldout) =
+        stratified_composite_split(&task_e_data, INNER_RADIUS, TRAIN_N, &mut data_rng);
+
+    let mut router = train_task_e_learned_router_expert(
+        &mut dm.main, spiral_group, circles_group, &train,
+    );
+
+    let gids = [spiral_group, circles_group];
+    let mut records = Vec::with_capacity(heldout.len());
+    let mut margins = Vec::new();
+    let mut radius_signals = Vec::new();
+    let mut f_spiral_vals = Vec::new();
+    let mut f_circles_vals = Vec::new();
+    let mut radii = Vec::new();
+    let mut correct = 0usize;
+    let mut region_agree = 0usize;
+    let mut misroute_dr_sum = 0.0f32;
+    let mut misroute_n = 0usize;
+
+    for (input, target) in &heldout {
+        let r = sample_radius(input);
+        let f_spiral = specialist_scalar(&mut dm.main, spiral_group, input);
+        let f_circles = specialist_scalar(&mut dm.main, circles_group, input);
+        let features = vec![f_spiral, f_circles];
+        let logits = router.predict_logits(&features);
+        let margin = if logits.len() >= 2 { logits[0] - logits[1] } else { 0.0 };
+        let idx = router_route_index(&mut router, &features);
+        let router_spiral = idx == 0;
+        let oracle_spiral = r < INNER_RADIUS;
+        let gid = gids[idx.min(1)];
+        let scalar = specialist_scalar(&mut dm.main, gid, input);
+        let composite_correct = scalar_matches_target(scalar, target[0]);
+        let region_match = router_spiral == oracle_spiral;
+
+        if composite_correct {
+            correct += 1;
+        }
+        if region_match {
+            region_agree += 1;
+        } else {
+            misroute_dr_sum += (r - INNER_RADIUS).abs();
+            misroute_n += 1;
+        }
+
+        margins.push(margin);
+        radius_signals.push(INNER_RADIUS - r);
+        f_spiral_vals.push(f_spiral);
+        f_circles_vals.push(f_circles);
+        radii.push(r);
+
+        records.push(BoundaryPointRecord {
+            seed,
+            x: input[0],
+            y: input[1],
+            r,
+            f_spiral,
+            f_circles,
+            margin,
+            router_spiral,
+            oracle_spiral,
+            composite_correct,
+            region_match,
+        });
+    }
+
+    let n = heldout.len().max(1) as f32;
+    let summary = BoundarySeedSummary {
+        seed,
+        composite_acc: correct as f32 / n,
+        region_agreement: region_agree as f32 / n,
+        margin_radius_corr: pearson_correlation(&margins, &radius_signals),
+        misroute_mean_dr: if misroute_n > 0 {
+            misroute_dr_sum / misroute_n as f32
+        } else {
+            0.0
+        },
+        f_spiral_r_corr: pearson_correlation(&f_spiral_vals, &radii),
+        f_circles_r_corr: pearson_correlation(&f_circles_vals, &radii),
+        train_near_boundary_frac: train_boundary_near_fraction(&train, INNER_RADIUS, 0.08),
+    };
+    (records, summary)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RadiusZone {
+    Interior,
+    Annulus,
+    Outer,
+}
+
+fn radius_zone(r: f32, inner_radius: f32, eps: f32) -> RadiusZone {
+    if r < inner_radius - eps {
+        RadiusZone::Interior
+    } else if r > inner_radius + eps {
+        RadiusZone::Outer
+    } else {
+        RadiusZone::Annulus
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ZoneMisrouteStats {
+    interior_misroute_rate: f32,
+    annulus_misroute_rate: f32,
+    outer_misroute_rate: f32,
+    n_interior: usize,
+    n_annulus: usize,
+    n_outer: usize,
+}
+
+fn zone_misroute_stats(records: &[BoundaryPointRecord], inner_radius: f32, eps: f32) -> ZoneMisrouteStats {
+    let mut interior_mis = 0usize;
+    let mut annulus_mis = 0usize;
+    let mut outer_mis = 0usize;
+    let mut n_interior = 0usize;
+    let mut n_annulus = 0usize;
+    let mut n_outer = 0usize;
+
+    for rec in records {
+        let mis = !rec.region_match;
+        match radius_zone(rec.r, inner_radius, eps) {
+            RadiusZone::Interior => {
+                n_interior += 1;
+                if mis {
+                    interior_mis += 1;
+                }
+            }
+            RadiusZone::Annulus => {
+                n_annulus += 1;
+                if mis {
+                    annulus_mis += 1;
+                }
+            }
+            RadiusZone::Outer => {
+                n_outer += 1;
+                if mis {
+                    outer_mis += 1;
+                }
+            }
+        }
+    }
+
+    let rate = |mis: usize, n: usize| {
+        if n == 0 {
+            0.0
+        } else {
+            mis as f32 / n as f32
+        }
+    };
+
+    ZoneMisrouteStats {
+        interior_misroute_rate: rate(interior_mis, n_interior),
+        annulus_misroute_rate: rate(annulus_mis, n_annulus),
+        outer_misroute_rate: rate(outer_mis, n_outer),
+        n_interior,
+        n_annulus,
+        n_outer,
+    }
+}
+
+fn seed_cluster_label(summary: &BoundarySeedSummary) -> &'static str {
+    if (summary.region_agreement - 0.5).abs() < 0.01 {
+        "degenerate"
+    } else if summary.composite_acc >= 0.85 {
+        "ceiling"
+    } else if summary.composite_acc < 0.75 {
+        "floor"
+    } else {
+        "mid"
+    }
+}
+
+fn summarize_boundary_records(records: &[BoundaryPointRecord]) -> Vec<BoundarySeedSummary> {
+    use std::collections::HashMap;
+    let mut by_seed: HashMap<u64, Vec<&BoundaryPointRecord>> = HashMap::new();
+    for rec in records {
+        by_seed.entry(rec.seed).or_default().push(rec);
+    }
+    let mut out: Vec<BoundarySeedSummary> = by_seed
+        .into_iter()
+        .map(|(seed, pts)| {
+            let n = pts.len().max(1) as f32;
+            let composite_acc =
+                pts.iter().filter(|p| p.composite_correct).count() as f32 / n;
+            let region_agreement = pts.iter().filter(|p| p.region_match).count() as f32 / n;
+            let margins: Vec<f32> = pts.iter().map(|p| p.margin).collect();
+            let radii: Vec<f32> = pts.iter().map(|p| p.r).collect();
+            let radius_signals: Vec<f32> = pts.iter().map(|p| 0.4 - p.r).collect();
+            let f_spiral: Vec<f32> = pts.iter().map(|p| p.f_spiral).collect();
+            let f_circles: Vec<f32> = pts.iter().map(|p| p.f_circles).collect();
+            let misroute_dr: Vec<f32> = pts
+                .iter()
+                .filter(|p| !p.region_match)
+                .map(|p| (p.r - 0.4).abs())
+                .collect();
+            BoundarySeedSummary {
+                seed,
+                composite_acc,
+                region_agreement,
+                margin_radius_corr: pearson_correlation(&margins, &radius_signals),
+                misroute_mean_dr: if misroute_dr.is_empty() {
+                    0.0
+                } else {
+                    misroute_dr.iter().sum::<f32>() / misroute_dr.len() as f32
+                },
+                f_spiral_r_corr: pearson_correlation(&f_spiral, &radii),
+                f_circles_r_corr: pearson_correlation(&f_circles, &radii),
+                train_near_boundary_frac: 0.0,
+            }
+        })
+        .collect();
+    out.sort_by_key(|s| s.seed);
+    out
+}
+
+fn print_annulus_misroute_analysis(
+    records: &[BoundaryPointRecord],
+    summaries: &[BoundarySeedSummary],
+    inner_radius: f32,
+    eps: f32,
+) {
+    println!(
+        "\n=== Annulus misroute analysis (ε = {:.2} around r = {:.1}) ===\n",
+        eps, inner_radius
+    );
+    println!("Interior: r < {:.2}  |  Annulus: |r−{:.1}| < {:.2}  |  Outer: r > {:.2}",
+        inner_radius - eps, inner_radius, eps, inner_radius + eps);
+    println!();
+    println!("| Cluster | Seeds | Pts | Misroute interior | Misroute annulus | Misroute outer | Annulus / interior |");
+    println!("| ------- | ----- | --- | ----------------- | ---------------- | -------------- | ------------------ |");
+
+    let clusters = ["degenerate", "ceiling", "floor", "mid", "all"];
+    for &cluster in &clusters {
+        let seed_set: Vec<u64> = if cluster == "all" {
+            summaries.iter().map(|s| s.seed).collect()
+        } else {
+            summaries
+                .iter()
+                .filter(|s| seed_cluster_label(s) == cluster)
+                .map(|s| s.seed)
+                .collect()
+        };
+        if seed_set.is_empty() {
+            continue;
+        }
+        let subset: Vec<BoundaryPointRecord> = records
+            .iter()
+            .filter(|r| seed_set.contains(&r.seed))
+            .cloned()
+            .collect();
+        let stats = zone_misroute_stats(&subset, inner_radius, eps);
+        let ratio = if stats.interior_misroute_rate < 1e-6 {
+            if stats.annulus_misroute_rate < 1e-6 {
+                0.0
+            } else {
+                f32::INFINITY
+            }
+        } else {
+            stats.annulus_misroute_rate / stats.interior_misroute_rate
+        };
+        let ratio_s = if ratio.is_finite() {
+            format!("{:.2}×", ratio)
+        } else {
+            "∞".to_string()
+        };
+        let seeds_s: String = seed_set
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        println!(
+            "| {} | {} | {} | {:.1}% (n={}) | {:.1}% (n={}) | {:.1}% (n={}) | {} |",
+            cluster,
+            seeds_s,
+            subset.len(),
+            stats.interior_misroute_rate * 100.0,
+            stats.n_interior,
+            stats.annulus_misroute_rate * 100.0,
+            stats.n_annulus,
+            stats.outer_misroute_rate * 100.0,
+            stats.n_outer,
+            ratio_s,
+        );
+    }
+
+    println!();
+    println!("Interpretation:");
+    println!("  • Degenerate (~50% region agree): 0% interior + 100% outer misroute ⇒ constant specialist (always spiral).");
+    println!("  • Ceiling seeds: annulus/interior ratio > 1 ⇒ partial boundary routing when train covers boundary.");
+    println!("  • Uniform ~50% misroute in all zones ⇒ random routing (not observed in degenerate cluster).");
+}
+
+fn annulus_interior_ratio_for_seed(
+    records: &[BoundaryPointRecord],
+    seed: u64,
+    inner_radius: f32,
+    eps: f32,
+) -> f32 {
+    let subset: Vec<BoundaryPointRecord> = records
+        .iter()
+        .filter(|r| r.seed == seed)
+        .cloned()
+        .collect();
+    let stats = zone_misroute_stats(&subset, inner_radius, eps);
+    if stats.interior_misroute_rate < 1e-6 {
+        f32::INFINITY
+    } else {
+        stats.annulus_misroute_rate / stats.interior_misroute_rate
+    }
+}
+
+/// Ceiling-cluster cross-tab: does high composite accuracy co-occur with margin↔r correlation?
+fn print_ceiling_margin_cross_tab(
+    records: &[BoundaryPointRecord],
+    summaries: &[BoundarySeedSummary],
+    inner_radius: f32,
+    eps: f32,
+) {
+    let ceiling: Vec<&BoundarySeedSummary> = summaries
+        .iter()
+        .filter(|s| seed_cluster_label(s) == "ceiling")
+        .collect();
+    if ceiling.is_empty() {
+        println!("\n(No ceiling seeds for margin cross-tab.)");
+        return;
+    }
+
+    println!("\n=== Ceiling cluster cross-tab (composite acc vs margin↔(0.4−r)) ===\n");
+    println!("| Seed | Composite acc | Region agree | Margin↔r | Annulus/interior |");
+    println!("| ---- | ------------- | ------------ | -------- | ---------------- |");
+
+    let mut accs = Vec::with_capacity(ceiling.len());
+    let mut corrs = Vec::with_capacity(ceiling.len());
+    for s in &ceiling {
+        let ratio = annulus_interior_ratio_for_seed(records, s.seed, inner_radius, eps);
+        let ratio_s = if ratio.is_finite() {
+            format!("{:.2}×", ratio)
+        } else {
+            "∞".to_string()
+        };
+        println!(
+            "| {} | {:.1}% | {:.1}% | {:.3} | {} |",
+            s.seed,
+            s.composite_acc * 100.0,
+            s.region_agreement * 100.0,
+            s.margin_radius_corr,
+            ratio_s,
+        );
+        accs.push(s.composite_acc);
+        corrs.push(s.margin_radius_corr);
+    }
+
+    let acc_corr = pearson_correlation(&accs, &corrs);
+    println!(
+        "\nPearson(composite acc, margin↔r) across {} ceiling seeds: {:.3}",
+        ceiling.len(),
+        acc_corr,
+    );
+
+    let low_margin_high_acc = ceiling
+        .iter()
+        .filter(|s| s.composite_acc >= 0.85 && s.margin_radius_corr < 0.30)
+        .count();
+    let high_margin_high_acc = ceiling
+        .iter()
+        .filter(|s| s.composite_acc >= 0.85 && s.margin_radius_corr >= 0.30)
+        .count();
+
+    println!(
+        "Ceiling seeds with acc≥85% and margin↔r≥0.30: {} / {}",
+        high_margin_high_acc,
+        ceiling.len(),
+    );
+    println!(
+        "Ceiling seeds with acc≥85% and margin↔r<0.30:  {} / {} (non-radius route to high acc)",
+        low_margin_high_acc,
+        ceiling.len(),
+    );
+
+    if low_margin_high_acc == 0 && high_margin_high_acc == ceiling.len() {
+        println!("\nCEILING VERDICT: All high-accuracy seeds show elevated margin↔r — partial radius");
+        println!("               exploitation under favorable boundary coverage is confirmed.");
+        println!("               No ceiling seed reaches 85%+ via a non-radius route.");
+    } else if low_margin_high_acc > 0 {
+        println!("\nCEILING VERDICT: Some high-accuracy seeds have low margin↔r — non-radius route");
+        println!("               to good accuracy exists; partial-radius story is incomplete.");
+    } else {
+        println!("\nCEILING VERDICT: Mixed — inspect per-seed table.");
+    }
+}
+
+fn load_boundary_csv(path: &str) -> Vec<BoundaryPointRecord> {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {}", path, e));
+    let mut records = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if i == 0 || line.trim().is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split(',').collect();
+        if parts.len() < 11 {
+            continue;
+        }
+        records.push(BoundaryPointRecord {
+            seed: parts[0].parse().unwrap_or(0),
+            x: parts[1].parse().unwrap_or(0.0),
+            y: parts[2].parse().unwrap_or(0.0),
+            r: parts[3].parse().unwrap_or(0.0),
+            f_spiral: parts[4].parse().unwrap_or(0.0),
+            f_circles: parts[5].parse().unwrap_or(0.0),
+            margin: parts[6].parse().unwrap_or(0.0),
+            router_spiral: parts[7] != "0",
+            oracle_spiral: parts[8] != "0",
+            composite_correct: parts[9] != "0",
+            region_match: parts[10] != "0",
+        });
+    }
+    records
+}
+
+fn demo_phase3e_boundary_analyze_csv() {
+    const CSV_PATH: &str = "phase3e_boundary_diagnostic.csv";
+    const INNER_RADIUS: f32 = 0.4;
+    const EPS: f32 = 0.08;
+
+    println!("--- Phase 3e annulus analysis (from {}) ---\n", CSV_PATH);
+    let records = load_boundary_csv(CSV_PATH);
+    if records.is_empty() {
+        println!("No records found. Run --phase3e-boundary first.");
+        return;
+    }
+    let summaries = summarize_boundary_records(&records);
+    println!("Loaded {} points across {} seeds.\n", records.len(), summaries.len());
+    print_annulus_misroute_analysis(&records, &summaries, INNER_RADIUS, EPS);
+    print_ceiling_margin_cross_tab(&records, &summaries, INNER_RADIUS, EPS);
+}
+
+fn demo_phase3e_boundary_diagnostic() {
+    println!("--- Phase 3e boundary diagnostic (expert router × composite labels) ---\n");
+    println!("Authenticates whether 81% means discovery or positional leak via specialists.\n");
+
+    const SEEDS: [u64; 20] = [
+        42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
+    ];
+
+    let csv_path = "phase3e_boundary_diagnostic.csv";
+    let mut csv = std::fs::File::create(csv_path).expect("create boundary CSV");
+    writeln!(
+        csv,
+        "seed,x,y,r,f_spiral,f_circles,margin,router_spiral,oracle_spiral,composite_correct,region_match"
+    )
+    .expect("csv header");
+
+    let mut all_records = Vec::new();
+    let mut summaries = Vec::new();
+    let mut per_seed_acc = Vec::new();
+
+    for &seed in &SEEDS {
+        println!("  seed {} ...", seed);
+        let (records, summary) = collect_expert_boundary_records(seed);
+        println!(
+            "    acc={:.1}% region_agree={:.1}% margin↔r corr={:.3} |f₁|↔r={:.3} misroute Δr={:.3} near_bnd={:.0}%",
+            summary.composite_acc * 100.0,
+            summary.region_agreement * 100.0,
+            summary.margin_radius_corr,
+            summary.f_spiral_r_corr,
+            summary.misroute_mean_dr,
+            summary.train_near_boundary_frac * 100.0,
+        );
+        per_seed_acc.push(summary.composite_acc);
+        for rec in &records {
+            writeln!(
+                csv,
+                "{},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{},{},{},{}",
+                rec.seed,
+                rec.x,
+                rec.y,
+                rec.r,
+                rec.f_spiral,
+                rec.f_circles,
+                rec.margin,
+                rec.router_spiral as u8,
+                rec.oracle_spiral as u8,
+                rec.composite_correct as u8,
+                rec.region_match as u8,
+            )
+            .expect("csv row");
+        }
+        all_records.extend(records);
+        summaries.push(summary);
+    }
+
+    let n_pts = all_records.len().max(1) as f32;
+    let pooled_region_agree =
+        all_records.iter().filter(|r| r.region_match).count() as f32 / n_pts;
+    let pooled_margin_r: Vec<f32> = all_records.iter().map(|r| r.margin).collect();
+    let pooled_radius_sig: Vec<f32> = all_records.iter().map(|r| 0.4 - r.r).collect();
+    let pooled_margin_corr = pearson_correlation(&pooled_margin_r, &pooled_radius_sig);
+    let pooled_f_spiral_r = pearson_correlation(
+        &all_records.iter().map(|r| r.f_spiral).collect::<Vec<_>>(),
+        &all_records.iter().map(|r| r.r).collect::<Vec<_>>(),
+    );
+    let pooled_f_circles_r = pearson_correlation(
+        &all_records.iter().map(|r| r.f_circles).collect::<Vec<_>>(),
+        &all_records.iter().map(|r| r.r).collect::<Vec<_>>(),
+    );
+
+    let misroute_dr: Vec<f32> = all_records
+        .iter()
+        .filter(|r| !r.region_match)
+        .map(|r| (r.r - 0.4).abs())
+        .collect();
+    let correct_dr: Vec<f32> = all_records
+        .iter()
+        .filter(|r| r.region_match)
+        .map(|r| (r.r - 0.4).abs())
+        .collect();
+    let mean_misroute_dr = if misroute_dr.is_empty() {
+        0.0
+    } else {
+        misroute_dr.iter().sum::<f32>() / misroute_dr.len() as f32
+    };
+    let mean_correct_dr = if correct_dr.is_empty() {
+        0.0
+    } else {
+        correct_dr.iter().sum::<f32>() / correct_dr.len() as f32
+    };
+
+    // Circular vs free boundary: compare region agreement to linear-in-(x,y) agreement with router.
+    let mut linear_xy_agree = 0usize;
+    for rec in &all_records {
+        // Best linear separator for r=0.4 in (x,y) is x²+y²=0.16; proxy: oracle_spiral label.
+        if rec.router_spiral == rec.oracle_spiral {
+            linear_xy_agree += 1;
+        }
+    }
+    let circular_agreement = pooled_region_agree;
+    // Linear in (x,y) without radius: fit w·x+b·y+c to teacher on one seed's train — use pooled oracle as ceiling.
+    // Report ratio: circular agreement / agreement of margin sign with (0.4-r).
+    let margin_sign_agree = all_records
+        .iter()
+        .filter(|r| (r.margin >= 0.0) == r.oracle_spiral)
+        .count() as f32
+        / n_pts;
+
+    let floor_bucket = per_seed_acc.iter().filter(|&&a| a < 0.75).count();
+    let mid_bucket = per_seed_acc.iter().filter(|&&a| a >= 0.75 && a < 0.85).count();
+    let ceil_bucket = per_seed_acc.iter().filter(|&&a| a >= 0.85).count();
+
+    let (acc_mean, acc_std) = mean_std(&per_seed_acc);
+    let (reg_mean, reg_std) = mean_std(&summaries.iter().map(|s| s.region_agreement).collect::<Vec<_>>());
+    let (corr_mean, corr_std) =
+        mean_std(&summaries.iter().map(|s| s.margin_radius_corr).collect::<Vec<_>>());
+
+    println!("\n=== Pooled held-out ({} seeds × ~370 pts = {} points) ===\n", SEEDS.len(), all_records.len());
+    println!("| Metric | Value | Interpretation |");
+    println!("| ------ | ----- | -------------- |");
+    println!(
+        "| Composite accuracy (per-seed mean) | {:.1}% ± {:.1}% | Uninterpretable until boundary check |",
+        acc_mean * 100.0,
+        acc_std * 100.0
+    );
+    println!(
+        "| Per-seed histogram | floor<75%: {}  mid: {}  ceil≥85%: {} | Shape matters more than mean |",
+        floor_bucket, mid_bucket, ceil_bucket
+    );
+    println!(
+        "| Region agreement (router vs r<0.4) | {:.1}% | High ⇒ circular boundary / soft leak |",
+        pooled_region_agree * 100.0
+    );
+    println!(
+        "| Margin ↔ (0.4−r) correlation | {:.3} | Strong positive ⇒ tracks radius circle |",
+        pooled_margin_corr
+    );
+    println!(
+        "| Margin-sign ↔ oracle agreement | {:.1}% | Should match region agreement |",
+        margin_sign_agree * 100.0
+    );
+    println!(
+        "| f_spiral ↔ r correlation | {:.3} | Expert scalar encodes position? |",
+        pooled_f_spiral_r
+    );
+    println!(
+        "| f_circles ↔ r correlation | {:.3} | Expert scalar encodes position? |",
+        pooled_f_circles_r
+    );
+    println!(
+        "| Mean |r−0.4| when region wrong | {:.4} | vs {:.4} when right — boundary concentration |",
+        mean_misroute_dr, mean_correct_dr
+    );
+    println!(
+        "| Per-seed region agreement | {:.1}% ± {:.1}% | |",
+        reg_mean * 100.0, reg_std * 100.0
+    );
+    println!(
+        "| Per-seed margin↔r corr | {:.3} ± {:.3} | |",
+        corr_mean, corr_std
+    );
+
+    println!("\nPer-seed composite accuracy: ");
+    for s in &summaries {
+        print!("  {}={:.0}%", s.seed, s.composite_acc * 100.0);
+    }
+    println!("\n");
+
+    println!("Wrote per-point scatter data to {} (plot margin vs r, color by region_match).\n", csv_path);
+
+    print_annulus_misroute_analysis(&all_records, &summaries, 0.4, 0.08);
+    print_ceiling_margin_cross_tab(&all_records, &summaries, 0.4, 0.08);
+
+    if pooled_region_agree > 0.90 && pooled_margin_corr > 0.7 {
+        println!("VERDICT: Router boundary tracks r=0.4 — expert outputs are a positional proxy (soft leak).");
+        println!("         Middle rung EMPTY. Do not claim discovery without position.");
+    } else if pooled_region_agree < 0.65 && acc_mean > 0.75 {
+        println!("VERDICT: High composite accuracy WITHOUT aligning to r<0.4 (region agree {:.1}%).",
+            pooled_region_agree * 100.0);
+        println!("         Not circular discovery — check for degenerate routing (many seeds at ~50% region agree");
+        println!("         suggest constant specialist choice). f_circles↔r={:.3} flags positional encoding",
+            pooled_f_circles_r);
+        println!("         in specialist outputs even when router does not recover the generative boundary.");
+    } else if pooled_region_agree >= 0.65 && pooled_margin_corr > 0.5 {
+        println!("VERDICT: Partial radius alignment — mixed seeds; inspect histogram before any claim.");
+    } else {
+        println!("VERDICT: Ambiguous — inspect scatter and per-seed histogram before any paper claim.");
+    }
+}
+
+// =============================================================================
+// Phase 3f — Per-specialist competence routing (falsifiable gate; see COMPETENCE_ROUTING_SPEC.md)
+// =============================================================================
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompetenceLabelMode {
+    Correctness,
+    Decisiveness,
+}
+
+struct CompetenceHead {
+    input_dim: usize,
+    w1: Vec<Vec<f32>>,
+    b1: Vec<f32>,
+    w2: Vec<f32>,
+    b2: f32,
+    temperature: f32,
+}
+
+impl CompetenceHead {
+    fn random(input_dim: usize, rng: &mut StdRng) -> Self {
+        let hidden = 16usize;
+        let scale1 = (2.0 / (input_dim + hidden) as f32).sqrt();
+        let scale2 = (2.0 / (hidden + 1) as f32).sqrt();
+        let mut w1 = Vec::with_capacity(input_dim);
+        for _ in 0..input_dim {
+            w1.push((0..hidden).map(|_| (rng.gen::<f32>() - 0.5) * 2.0 * scale1).collect());
+        }
+        let b1 = (0..hidden).map(|_| 0.0f32).collect();
+        let w2 = (0..hidden).map(|_| (rng.gen::<f32>() - 0.5) * 2.0 * scale2).collect();
+        Self {
+            input_dim,
+            w1,
+            b1,
+            w2,
+            b2: 0.0,
+            temperature: 1.0,
+        }
+    }
+
+    fn forward_hidden(&self, x: &[f32]) -> Vec<f32> {
+        let hidden = self.b1.len();
+        let mut h = vec![0.0f32; hidden];
+        for j in 0..hidden {
+            let mut z = self.b1[j];
+            for i in 0..self.input_dim.min(x.len()) {
+                z += self.w1[i][j] * x[i];
+            }
+            h[j] = z.max(0.0);
+        }
+        h
+    }
+
+    fn forward_logit(&self, x: &[f32]) -> f32 {
+        let h = self.forward_hidden(x);
+        let mut logit = self.b2;
+        for (j, hj) in h.iter().enumerate() {
+            logit += self.w2[j] * hj;
+        }
+        logit / self.temperature.max(1e-4)
+    }
+
+    fn predict(&self, x: &[f32]) -> f32 {
+        sigmoid(self.forward_logit(x))
+    }
+
+    fn train_sgd(&mut self, features: &[Vec<f32>], labels: &[f32], lr: f32, epochs: usize) {
+        if features.is_empty() {
+            return;
+        }
+        for _ in 0..epochs {
+            for (x, &y) in features.iter().zip(labels.iter()) {
+                let h = self.forward_hidden(x);
+                let logit = {
+                    let mut z = self.b2;
+                    for (j, hj) in h.iter().enumerate() {
+                        z += self.w2[j] * hj;
+                    }
+                    z / self.temperature.max(1e-4)
+                };
+                let p = sigmoid(logit);
+                let err = p - y;
+                for j in 0..h.len() {
+                    let dh = if h[j] > 0.0 { err * self.w2[j] } else { 0.0 };
+                    self.w2[j] -= lr * err * h[j];
+                    for i in 0..self.input_dim.min(x.len()) {
+                        self.w1[i][j] -= lr * dh * x[i];
+                    }
+                    self.b1[j] -= lr * dh;
+                }
+                self.b2 -= lr * err;
+            }
+        }
+    }
+
+    fn fit_temperature(&mut self, features: &[Vec<f32>], labels: &[f32]) {
+        if features.is_empty() {
+            return;
+        }
+        let mut best_t = 1.0f32;
+        let mut best_nll = f32::INFINITY;
+        for t_idx in 0..40 {
+            let t = 0.25 + (t_idx as f32) * 0.125;
+            let mut nll = 0.0f32;
+            for (x, &y) in features.iter().zip(labels.iter()) {
+                let h = self.forward_hidden(x);
+                let mut logit = self.b2;
+                for (j, hj) in h.iter().enumerate() {
+                    logit += self.w2[j] * hj;
+                }
+                logit /= t;
+                let p = sigmoid(logit).clamp(1e-6, 1.0 - 1e-6);
+                nll -= y * p.ln() + (1.0 - y) * (1.0 - p).ln();
+            }
+            nll /= features.len() as f32;
+            if nll < best_nll {
+                best_nll = nll;
+                best_t = t;
+            }
+        }
+        self.temperature = best_t;
+    }
+}
+
+fn specialist_penultimate_hidden(
+    main: &mut MainDimension,
+    group_id: GroupId,
+    input: &[f32],
+) -> Vec<f32> {
+    main.query_penultimate_hidden(input, group_id)
+        .map(|(_, hidden)| hidden)
+        .unwrap_or_default()
+}
+
+fn stratified_take(
+    data: &[Sample],
+    n: usize,
+    inner_radius: f32,
+    rng: &mut StdRng,
+) -> Vec<Sample> {
+    let mut inner = Vec::new();
+    let mut outer = Vec::new();
+    for sample in data {
+        if sample_radius(&sample.0) < inner_radius {
+            inner.push(sample.clone());
+        } else {
+            outer.push(sample.clone());
+        }
+    }
+    inner.shuffle(rng);
+    outer.shuffle(rng);
+    let n_inner = n / 2;
+    let n_outer = n.saturating_sub(n_inner);
+    let mut out = Vec::with_capacity(n);
+    out.extend(inner.into_iter().take(n_inner));
+    out.extend(outer.into_iter().take(n_outer));
+    out
+}
+
+fn competence_label_for_specialist(
+    main: &mut MainDimension,
+    group_id: GroupId,
+    input: &[f32],
+    target: f32,
+    mode: CompetenceLabelMode,
+) -> f32 {
+    let scalar = specialist_scalar(main, group_id, input);
+    match mode {
+        CompetenceLabelMode::Correctness => {
+            if scalar_matches_target(scalar, target) {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        CompetenceLabelMode::Decisiveness => {
+            if (scalar - 0.5).abs() > 0.4 {
+                1.0
+            } else {
+                0.0
+            }
+        }
+    }
+}
+
+fn collect_competence_training_data(
+    main: &mut MainDimension,
+    group_id: GroupId,
+    router_cal: &[Sample],
+    mode: CompetenceLabelMode,
+) -> (Vec<Vec<f32>>, Vec<f32>) {
+    let mut features = Vec::with_capacity(router_cal.len());
+    let mut labels = Vec::with_capacity(router_cal.len());
+    for (input, target) in router_cal {
+        features.push(specialist_penultimate_hidden(main, group_id, input));
+        labels.push(competence_label_for_specialist(
+            main, group_id, input, target[0], mode,
+        ));
+    }
+    (features, labels)
+}
+
+fn train_competence_heads(
+    main: &mut MainDimension,
+    spiral_gid: GroupId,
+    circles_gid: GroupId,
+    router_train: &[Sample],
+    router_cal: &[Sample],
+    mode: CompetenceLabelMode,
+    rng: &mut StdRng,
+) -> [CompetenceHead; 2] {
+    let (feat_s, lab_s) =
+        collect_competence_training_data(main, spiral_gid, router_train, mode);
+    let (feat_c, lab_c) =
+        collect_competence_training_data(main, circles_gid, router_train, mode);
+    let input_dim = feat_s.first().map(|v| v.len()).unwrap_or(16).max(1);
+    let mut head_spiral = CompetenceHead::random(input_dim, rng);
+    let mut head_circles = CompetenceHead::random(input_dim, rng);
+    head_spiral.train_sgd(&feat_s, &lab_s, 0.05, 80);
+    head_circles.train_sgd(&feat_c, &lab_c, 0.05, 80);
+
+    let (cal_feat_s, cal_lab_s) =
+        collect_competence_training_data(main, spiral_gid, router_cal, mode);
+    let (cal_feat_c, cal_lab_c) =
+        collect_competence_training_data(main, circles_gid, router_cal, mode);
+    head_spiral.fit_temperature(&cal_feat_s, &cal_lab_s);
+    head_circles.fit_temperature(&cal_feat_c, &cal_lab_c);
+    [head_spiral, head_circles]
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CompetenceDispatch {
+    Route(usize),
+    EnsembleTop2,
+}
+
+fn competence_scores(
+    main: &mut MainDimension,
+    spiral_gid: GroupId,
+    circles_gid: GroupId,
+    input: &[f32],
+    heads: &[CompetenceHead; 2],
+) -> (f32, f32) {
+    let h_s = specialist_penultimate_hidden(main, spiral_gid, input);
+    let h_c = specialist_penultimate_hidden(main, circles_gid, input);
+    (heads[0].predict(&h_s), heads[1].predict(&h_c))
+}
+
+fn dispatch_competence(
+    c0: f32,
+    c1: f32,
+    tau_abstain: f32,
+    tau_margin: f32,
+) -> (CompetenceDispatch, usize, f32) {
+    let scores = [c0, c1];
+    let route_k = if c0 >= c1 { 0 } else { 1 };
+    let max = scores[0].max(scores[1]);
+    let min = scores[0].min(scores[1]);
+    let margin = max - min;
+    if max < tau_abstain || margin < tau_margin {
+        (CompetenceDispatch::EnsembleTop2, route_k, margin)
+    } else {
+        (CompetenceDispatch::Route(route_k), route_k, margin)
+    }
+}
+
+fn composite_from_dispatch(
+    main: &mut MainDimension,
+    spiral_gid: GroupId,
+    circles_gid: GroupId,
+    input: &[f32],
+    dispatch: CompetenceDispatch,
+) -> f32 {
+    match dispatch {
+        CompetenceDispatch::Route(0) => specialist_scalar(main, spiral_gid, input),
+        CompetenceDispatch::Route(_) => specialist_scalar(main, circles_gid, input),
+        CompetenceDispatch::EnsembleTop2 => {
+            let f0 = specialist_scalar(main, spiral_gid, input);
+            let f1 = specialist_scalar(main, circles_gid, input);
+            (f0 + f1) * 0.5
+        }
+    }
+}
+
+fn tune_competence_thresholds(
+    main: &mut MainDimension,
+    spiral_gid: GroupId,
+    circles_gid: GroupId,
+    heads: &[CompetenceHead; 2],
+    tune_data: &[Sample],
+) -> (f32, f32) {
+    let mut best_abstain = 0.5f32;
+    let mut best_margin = 0.1f32;
+    let mut best_acc = -1.0f32;
+    let mut abstain = 0.35f32;
+    while abstain <= 0.65 {
+        let mut margin = 0.05f32;
+        while margin <= 0.20 {
+            let mut correct = 0usize;
+            for (input, target) in tune_data {
+                let (c0, c1) = competence_scores(main, spiral_gid, circles_gid, input, heads);
+                let (dispatch, _, _) = dispatch_competence(c0, c1, abstain, margin);
+                let pred = composite_from_dispatch(main, spiral_gid, circles_gid, input, dispatch);
+                if scalar_matches_target(pred, target[0]) {
+                    correct += 1;
+                }
+            }
+            let acc = correct as f32 / tune_data.len().max(1) as f32;
+            if acc > best_acc {
+                best_acc = acc;
+                best_abstain = abstain;
+                best_margin = margin;
+            }
+            margin += 0.05;
+        }
+        abstain += 0.05;
+    }
+    (best_abstain, best_margin)
+}
+
+#[derive(Clone, Debug)]
+struct CompetencePointRecord {
+    seed: u64,
+    x: f32,
+    y_coord: f32,
+    r: f32,
+    region_true: bool,
+    route_k: usize,
+    c1: f32,
+    c2: f32,
+    correct: bool,
+    margin_top2: f32,
+    y_target: f32,
+    f_spiral: f32,
+    f_circles: f32,
+    spiral_correct: bool,
+    circles_correct: bool,
+    ensemble_fallback: bool,
+}
+
+#[derive(Clone, Debug)]
+struct Phase3fSeedResult {
+    seed: u64,
+    n_router: usize,
+    label_mode: CompetenceLabelMode,
+    composite_acc: f32,
+    region_agreement: f32,
+    routing_entropy: f32,
+    margin_radius_corr: f32,
+    interior_misroute_rate: f32,
+    annulus_interior_ratio: f32,
+    confident_wrong_c_mean: f32,
+    confident_wrong_n: usize,
+    ensemble_frac: f32,
+    tau_abstain: f32,
+    tau_margin: f32,
+}
+
+fn run_phase3f_competence_seed(
+    seed: u64,
+    n_router: usize,
+    label_mode: CompetenceLabelMode,
+) -> (Vec<CompetencePointRecord>, Phase3fSeedResult) {
+    const INNER_RADIUS: f32 = 0.4;
+    const N_SAMPLES: usize = 400;
+    const TRAIN_N: usize = 30;
+    const EPS: f32 = 0.08;
+
+    let mut dm = DimensionManager::new(phase3_composition_config());
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut data_rng = StdRng::seed_from_u64(seed.wrapping_mul(97).wrapping_add(99));
+
+    let spiral_data = generate_spiral_data(400, &mut data_rng);
+    let circles_data = generate_concentric_circles_data(400, &mut data_rng);
+    let calibration_spiral: Vec<_> = spiral_data.iter().take(100).cloned().collect();
+    let calibration_circles: Vec<_> = circles_data.iter().take(100).cloned().collect();
+
+    let spiral_group = train_promoted_mirror(
+        &mut dm, "spiral", seed, &spiral_data, &calibration_spiral, &mut rng, false,
+    );
+    let circles_group = train_promoted_mirror(
+        &mut dm, "circles", seed.wrapping_add(1), &circles_data, &calibration_circles, &mut rng, false,
+    );
+
+    let task_e_data = generate_balanced_spiral_gated_circles_data(
+        &mut dm.main, spiral_group, circles_group, INNER_RADIUS, N_SAMPLES, &mut data_rng,
+    );
+    let (train, heldout) =
+        stratified_composite_split(&task_e_data, INNER_RADIUS, TRAIN_N, &mut data_rng);
+    let _ = train;
+
+    let extra_pool = generate_balanced_spiral_gated_circles_data(
+        &mut dm.main,
+        spiral_group,
+        circles_group,
+        INNER_RADIUS,
+        n_router.saturating_add(80),
+        &mut data_rng,
+    );
+    let router_all = stratified_take(&extra_pool, n_router, INNER_RADIUS, &mut data_rng);
+    let cal_split = (router_all.len() * 4) / 5;
+    let router_train = router_all[..cal_split.min(router_all.len())].to_vec();
+    let router_cal = router_all[cal_split.min(router_all.len())..].to_vec();
+
+    let mut head_rng = StdRng::seed_from_u64(seed.wrapping_add(9001));
+    let heads = train_competence_heads(
+        &mut dm.main,
+        spiral_group,
+        circles_group,
+        &router_train,
+        &router_cal,
+        label_mode,
+        &mut head_rng,
+    );
+    let (tau_abstain, tau_margin) = tune_competence_thresholds(
+        &mut dm.main,
+        spiral_group,
+        circles_group,
+        &heads,
+        &router_cal,
+    );
+
+    let mut records = Vec::with_capacity(heldout.len());
+    let mut route_ks = Vec::new();
+    let mut margins = Vec::new();
+    let mut radius_signals = Vec::new();
+    let mut correct_n = 0usize;
+    let mut region_agree = 0usize;
+    let mut ensemble_n = 0usize;
+    let mut confident_wrong_c_sum = 0.0f32;
+    let mut confident_wrong_n = 0usize;
+
+    for (input, target) in &heldout {
+        let r = sample_radius(input);
+        let region_true = r < INNER_RADIUS;
+        let f_spiral = specialist_scalar(&mut dm.main, spiral_group, input);
+        let f_circles = specialist_scalar(&mut dm.main, circles_group, input);
+        let spiral_correct = scalar_matches_target(f_spiral, target[0]);
+        let circles_correct = scalar_matches_target(f_circles, target[0]);
+        let (c_spiral, c_circles) =
+            competence_scores(&mut dm.main, spiral_group, circles_group, input, &heads);
+        let (dispatch, route_k, margin) =
+            dispatch_competence(c_spiral, c_circles, tau_abstain, tau_margin);
+        let ensemble_fallback = matches!(dispatch, CompetenceDispatch::EnsembleTop2);
+        if ensemble_fallback {
+            ensemble_n += 1;
+        }
+        let pred = composite_from_dispatch(
+            &mut dm.main, spiral_group, circles_group, input, dispatch,
+        );
+        let correct = scalar_matches_target(pred, target[0]);
+        if correct {
+            correct_n += 1;
+        }
+        let routed_spiral = route_k == 0;
+        if routed_spiral == region_true {
+            region_agree += 1;
+        }
+        route_ks.push(route_k);
+        margins.push(margin);
+        radius_signals.push(INNER_RADIUS - r);
+
+        for (k, (fk, ck, spec_correct)) in [(f_spiral, c_spiral, spiral_correct), (f_circles, c_circles, circles_correct)]
+            .iter()
+            .enumerate()
+        {
+            if (*fk - 0.5).abs() > 0.4 && !spec_correct {
+                confident_wrong_c_sum += *ck;
+                confident_wrong_n += 1;
+            }
+            let _ = k;
+        }
+
+        records.push(CompetencePointRecord {
+            seed,
+            x: input[0],
+            y_coord: input[1],
+            r,
+            region_true,
+            route_k,
+            c1: c_spiral,
+            c2: c_circles,
+            correct,
+            margin_top2: margin,
+            y_target: target[0],
+            f_spiral,
+            f_circles,
+            spiral_correct,
+            circles_correct,
+            ensemble_fallback,
+        });
+    }
+
+    let n = heldout.len().max(1) as f32;
+    let boundary_like: Vec<BoundaryPointRecord> = records
+        .iter()
+        .map(|rec| BoundaryPointRecord {
+            seed: rec.seed,
+            x: rec.x,
+            y: rec.y_coord,
+            r: rec.r,
+            f_spiral: rec.f_spiral,
+            f_circles: rec.f_circles,
+            margin: rec.margin_top2,
+            router_spiral: rec.route_k == 0,
+            oracle_spiral: rec.region_true,
+            composite_correct: rec.correct,
+            region_match: (rec.route_k == 0) == rec.region_true,
+        })
+        .collect();
+    let zone = zone_misroute_stats(&boundary_like, INNER_RADIUS, EPS);
+    let annulus_ratio = annulus_interior_ratio_for_seed(&boundary_like, seed, INNER_RADIUS, EPS);
+
+    let summary = Phase3fSeedResult {
+        seed,
+        n_router,
+        label_mode,
+        composite_acc: correct_n as f32 / n,
+        region_agreement: region_agree as f32 / n,
+        routing_entropy: routing_entropy_bits(&route_ks),
+        margin_radius_corr: pearson_correlation(&margins, &radius_signals),
+        interior_misroute_rate: zone.interior_misroute_rate,
+        annulus_interior_ratio: annulus_ratio,
+        confident_wrong_c_mean: if confident_wrong_n > 0 {
+            confident_wrong_c_sum / confident_wrong_n as f32
+        } else {
+            f32::NAN
+        },
+        confident_wrong_n,
+        ensemble_frac: ensemble_n as f32 / n,
+        tau_abstain,
+        tau_margin,
+    };
+    (records, summary)
+}
+
+fn demo_phase3f_competence_routing() {
+    println!("--- Phase 3f: Per-specialist competence routing (falsifiable gate) ---\n");
+    println!("See docs/COMPETENCE_ROUTING_SPEC.md. Pre-registered pass/fail — fill §6 after run.\n");
+
+    const SEEDS: [u64; 20] = [
+        42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
+    ];
+    const N_ROUTER_SWEEP: [usize; 3] = [30, 100, 300];
+
+    let csv_path = "competence_routing_diagnostic.csv";
+    let mut csv = std::fs::File::create(csv_path).expect("create competence CSV");
+    writeln!(
+        csv,
+        "seed,x,y,region_true,route_k,c_1,c_2,correct,margin_top2,r,y_target,f_spiral,f_circles,ensemble_fallback,label_mode,n_router"
+    )
+    .expect("csv header");
+
+    for &n_router in &N_ROUTER_SWEEP {
+        println!("\n=== n_router = {} (correctness labels) ===\n", n_router);
+        let mut summaries = Vec::new();
+        for &seed in &SEEDS {
+            print!("  seed {} ... ", seed);
+            let (records, summary) =
+                run_phase3f_competence_seed(seed, n_router, CompetenceLabelMode::Correctness);
+            println!(
+                "acc={:.1}% region={:.1}% H={:.2} margin↔r={:.2} cw_c={:.2} (n={})",
+                summary.composite_acc * 100.0,
+                summary.region_agreement * 100.0,
+                summary.routing_entropy,
+                summary.margin_radius_corr,
+                summary.confident_wrong_c_mean,
+                summary.confident_wrong_n,
+            );
+            summaries.push(summary);
+            if n_router == 300 {
+                for rec in &records {
+                    writeln!(
+                        csv,
+                        "{},{:.5},{:.5},{},{},{:.5},{:.5},{},{:.5},{:.5},{:.5},{:.5},{:.5},{},correctness,{}",
+                        rec.seed,
+                        rec.x,
+                        rec.y_coord,
+                        if rec.region_true { 1 } else { 0 },
+                        rec.route_k,
+                        rec.c1,
+                        rec.c2,
+                        if rec.correct { 1 } else { 0 },
+                        rec.margin_top2,
+                        rec.r,
+                        rec.y_target,
+                        rec.f_spiral,
+                        rec.f_circles,
+                        if rec.ensemble_fallback { 1 } else { 0 },
+                        n_router,
+                    )
+                    .expect("csv row");
+                }
+            }
+        }
+
+        let accs: Vec<f32> = summaries.iter().map(|s| s.composite_acc).collect();
+        let regions: Vec<f32> = summaries.iter().map(|s| s.region_agreement).collect();
+        let entropies: Vec<f32> = summaries.iter().map(|s| s.routing_entropy).collect();
+        let corrs: Vec<f32> = summaries.iter().map(|s| s.margin_radius_corr).collect();
+        let cw: Vec<f32> = summaries
+            .iter()
+            .filter_map(|s| if s.confident_wrong_n > 0 { Some(s.confident_wrong_c_mean) } else { None })
+            .collect();
+        let degenerate = entropies.iter().filter(|&&h| h < 0.3).count();
+
+        let (acc_m, acc_s) = mean_std(&accs);
+        let (reg_m, reg_s) = mean_std(&regions);
+        let (ent_m, ent_s) = mean_std(&entropies);
+        let (corr_m, corr_s) = mean_std(&corrs);
+        let (cw_m, cw_s) = mean_std(&cw);
+
+        println!("\n| Metric | Mean ± std | Pass? |");
+        println!("| ------ | ---------- | ----- |");
+        println!(
+            "| Composite accuracy | {:.1}% ± {:.1}% | (vs 77% singles, 69.5% conf) |",
+            acc_m * 100.0,
+            acc_s * 100.0
+        );
+        println!(
+            "| Region agreement | {:.1}% ± {:.1}% | target ≥80% |",
+            reg_m * 100.0,
+            reg_s * 100.0
+        );
+        println!(
+            "| Routing entropy | {:.2} ± {:.2} bits | degenerate seeds: {} |",
+            ent_m, ent_s, degenerate
+        );
+        println!(
+            "| margin↔(0.4−r) | {:.2} ± {:.2} | target ≥0.5 |",
+            corr_m, corr_s
+        );
+        println!(
+            "| Confident-wrong mean c_k | {:.3} ± {:.3} | want LOW |",
+            cw_m, cw_s
+        );
+    }
+
+    println!("\n=== Decisiveness ablation (n_router=300) ===\n");
+    let mut decis_summaries = Vec::new();
+    for &seed in &SEEDS {
+        let (_, summary) =
+            run_phase3f_competence_seed(seed, 300, CompetenceLabelMode::Decisiveness);
+        decis_summaries.push(summary);
+    }
+    let decis_acc = mean_std(&decis_summaries.iter().map(|s| s.composite_acc).collect::<Vec<_>>());
+    let decis_reg = mean_std(&decis_summaries.iter().map(|s| s.region_agreement).collect::<Vec<_>>());
+    let decis_cw = mean_std(
+        &decis_summaries
+            .iter()
+            .filter_map(|s| if s.confident_wrong_n > 0 { Some(s.confident_wrong_c_mean) } else { None })
+            .collect::<Vec<_>>(),
+    );
+    println!(
+        "Decisiveness-trained head: acc={:.1}%±{:.1}% region={:.1}%±{:.1}% cw_c={:.3}±{:.3}",
+        decis_acc.0 * 100.0,
+        decis_acc.1 * 100.0,
+        decis_reg.0 * 100.0,
+        decis_reg.1 * 100.0,
+        decis_cw.0,
+        decis_cw.1,
+    );
+
+    println!("\n=== Baselines (reference — re-run from --phase3e for full table) ===\n");
+    println!("| Baseline | Expected (Task E, 20 seeds) |");
+    println!("| -------- | ----------------------------- |");
+    println!("| Oracle-best-single | ~77% |");
+    println!("| VirtualGroup blend | ~69.9% |");
+    println!("| Confidence argmax | ~69.5% |");
+    println!("| Logistic gate on r | ~91.5% |");
+    println!("| Expert-output router | ~81% (55% region agree — rejected) |");
+
+    println!("\nWrote {} (n_router=300 correctness only).", csv_path);
+    println!("Run --phase3f-analyze for annulus / confident-wrong breakdown.");
+    println!("\n§6 decision table: fill manually from metrics above — do not narrate before table.");
+}
+
+fn load_competence_csv(path: &str) -> Vec<CompetencePointRecord> {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {}", path, e));
+    let mut records = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if i == 0 || line.trim().is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split(',').collect();
+        if parts.len() < 10 {
+            continue;
+        }
+        records.push(CompetencePointRecord {
+            seed: parts[0].parse().unwrap_or(0),
+            x: parts[1].parse().unwrap_or(0.0),
+            y_coord: parts[2].parse().unwrap_or(0.0),
+            region_true: parts[3] != "0",
+            route_k: parts[4].parse().unwrap_or(0),
+            c1: parts[5].parse().unwrap_or(0.0),
+            c2: parts[6].parse().unwrap_or(0.0),
+            correct: parts[7] != "0",
+            margin_top2: parts[8].parse().unwrap_or(0.0),
+            r: parts[9].parse().unwrap_or(0.0),
+            y_target: parts.get(10).and_then(|s| s.parse().ok()).unwrap_or(0.0),
+            f_spiral: parts.get(11).and_then(|s| s.parse().ok()).unwrap_or(0.0),
+            f_circles: parts.get(12).and_then(|s| s.parse().ok()).unwrap_or(0.0),
+            spiral_correct: false,
+            circles_correct: false,
+            ensemble_fallback: parts.get(13).map(|s| *s != "0").unwrap_or(false),
+        });
+    }
+    records
+}
+
+fn demo_phase3f_analyze_csv() {
+    const CSV_PATH: &str = "competence_routing_diagnostic.csv";
+    const INNER_RADIUS: f32 = 0.4;
+    const EPS: f32 = 0.08;
+
+    println!("--- Phase 3f competence routing analysis (from {}) ---\n", CSV_PATH);
+    let records = load_competence_csv(CSV_PATH);
+    if records.is_empty() {
+        println!("No records found. Run --phase3f-competence first.");
+        return;
+    }
+
+    let seeds: Vec<u64> = records.iter().map(|r| r.seed).collect::<std::collections::HashSet<_>>().into_iter().collect();
+    println!("Loaded {} points across {} seeds.\n", records.len(), seeds.len());
+
+    let boundary_like: Vec<BoundaryPointRecord> = records
+        .iter()
+        .map(|rec| BoundaryPointRecord {
+            seed: rec.seed,
+            x: rec.x,
+            y: rec.y_coord,
+            r: rec.r,
+            f_spiral: rec.f_spiral,
+            f_circles: rec.f_circles,
+            margin: rec.margin_top2,
+            router_spiral: rec.route_k == 0,
+            oracle_spiral: rec.region_true,
+            composite_correct: rec.correct,
+            region_match: (rec.route_k == 0) == rec.region_true,
+        })
+        .collect();
+
+    let mut per_seed = Vec::new();
+    for &seed in &seeds {
+        let seed_recs: Vec<_> = records.iter().filter(|r| r.seed == seed).collect();
+        let route_ks: Vec<usize> = seed_recs.iter().map(|r| r.route_k).collect();
+        let ent = routing_entropy_bits(&route_ks);
+        let region_agree = seed_recs
+            .iter()
+            .filter(|r| (r.route_k == 0) == r.region_true)
+            .count() as f32
+            / seed_recs.len().max(1) as f32;
+        let acc = seed_recs.iter().filter(|r| r.correct).count() as f32 / seed_recs.len().max(1) as f32;
+        let margins: Vec<f32> = seed_recs.iter().map(|r| r.margin_top2).collect();
+        let radius_sig: Vec<f32> = seed_recs.iter().map(|r| INNER_RADIUS - r.r).collect();
+        let corr = pearson_correlation(&margins, &radius_sig);
+
+        let mut cw_sum = 0.0f32;
+        let mut cw_n = 0usize;
+        for rec in &seed_recs {
+            for (fk, ck) in [(rec.f_spiral, rec.c1), (rec.f_circles, rec.c2)] {
+                let spec_correct = scalar_matches_target(fk, rec.y_target);
+                if (fk - 0.5).abs() > 0.4 && !spec_correct {
+                    cw_sum += ck;
+                    cw_n += 1;
+                }
+            }
+        }
+
+        per_seed.push((seed, acc, region_agree, ent, corr, cw_sum / cw_n.max(1) as f32, cw_n));
+    }
+
+    println!("| seed | acc | region | H(bits) | margin↔r | cw_mean c_k | cw_n |");
+    println!("| ---- | --- | ------ | ------- | -------- | ----------- | ---- |");
+    for (seed, acc, reg, ent, corr, cw, cw_n) in &per_seed {
+        println!(
+            "| {} | {:.1}% | {:.1}% | {:.2} | {:.3} | {:.3} | {} |",
+            seed,
+            acc * 100.0,
+            reg * 100.0,
+            ent,
+            corr,
+            cw,
+            cw_n,
+        );
+    }
+
+    let degenerate = per_seed.iter().filter(|(_, _, _, ent, _, _, _)| *ent < 0.3).count();
+    println!("\nDegenerate seeds (H < 0.3 bits): {} / {}", degenerate, per_seed.len());
+
+    let summaries: Vec<BoundarySeedSummary> = seeds
+        .iter()
+        .map(|&seed| {
+            let seed_recs: Vec<_> = boundary_like.iter().filter(|r| r.seed == seed).collect();
+            let n = seed_recs.len().max(1) as f32;
+            BoundarySeedSummary {
+                seed,
+                composite_acc: seed_recs.iter().filter(|r| r.composite_correct).count() as f32 / n,
+                region_agreement: seed_recs.iter().filter(|r| r.region_match).count() as f32 / n,
+                margin_radius_corr: pearson_correlation(
+                    &seed_recs.iter().map(|r| r.margin).collect::<Vec<_>>(),
+                    &seed_recs.iter().map(|r| INNER_RADIUS - r.r).collect::<Vec<_>>(),
+                ),
+                misroute_mean_dr: 0.0,
+                f_spiral_r_corr: 0.0,
+                f_circles_r_corr: 0.0,
+                train_near_boundary_frac: 0.0,
+            }
+        })
+        .collect();
+    print_annulus_misroute_analysis(&boundary_like, &summaries, INNER_RADIUS, EPS);
+
+    if degenerate >= 4 {
+        println!("\nPRE-REGISTERED FAIL: ≥4/20 degenerate seeds (§5.2 control 2).");
+    }
+}
+
+fn accuracy_learned_router_xy(
+    main: &mut MainDimension,
+    router: &mut LearnedRouter,
+    spiral_gid: GroupId,
+    circles_gid: GroupId,
+    data: &[Sample],
+) -> f32 {
+    let gids = [spiral_gid, circles_gid];
+    let mut correct = 0usize;
+    for (input, target) in data {
+        let logits = router.predict_logits(input);
+        let idx = logits
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let gid = gids[idx.min(1)];
+        let scalar = specialist_scalar(main, gid, input);
+        if scalar_matches_target(scalar, target[0]) {
+            correct += 1;
+        }
+    }
+    if data.is_empty() {
+        0.0
+    } else {
+        correct as f32 / data.len() as f32
+    }
+}
+
+fn accuracy_learned_router_expert(
+    main: &mut MainDimension,
+    router: &mut LearnedRouter,
+    spiral_gid: GroupId,
+    circles_gid: GroupId,
+    data: &[Sample],
+) -> f32 {
+    let gids = [spiral_gid, circles_gid];
+    let mut correct = 0usize;
+    for (input, target) in data {
+        let features = specialist_feature_pair(main, spiral_gid, circles_gid, input);
+        let idx = router_route_index(router, &features);
+        let gid = gids[idx.min(1)];
+        let scalar = specialist_scalar(main, gid, input);
+        if scalar_matches_target(scalar, target[0]) {
+            correct += 1;
+        }
+    }
+    if data.is_empty() {
+        0.0
+    } else {
+        correct as f32 / data.len() as f32
+    }
+}
+
+fn accuracy_learned_router_disagreement(
+    main: &mut MainDimension,
+    router: &mut LearnedRouter,
+    spiral_gid: GroupId,
+    circles_gid: GroupId,
+    data: &[Sample],
+) -> f32 {
+    let gids = [spiral_gid, circles_gid];
+    let mut correct = 0usize;
+    for (input, target) in data {
+        let f0 = specialist_scalar(main, spiral_gid, input);
+        let f1 = specialist_scalar(main, circles_gid, input);
+        let idx = router_route_index(router, &[f0 - f1]);
+        let gid = gids[idx.min(1)];
+        let scalar = specialist_scalar(main, gid, input);
+        if scalar_matches_target(scalar, target[0]) {
+            correct += 1;
+        }
+    }
+    if data.is_empty() {
+        0.0
+    } else {
+        correct as f32 / data.len() as f32
+    }
+}
+
+fn accuracy_logistic_radius_gate(
+    main: &mut MainDimension,
+    spiral_gid: GroupId,
+    circles_gid: GroupId,
+    data: &[Sample],
+    gate: RadiusLogisticGate,
+) -> f32 {
+    let mut correct = 0usize;
+    for (input, target) in data {
+        let r = sample_radius(input);
+        let o_spiral = specialist_scalar(main, spiral_gid, input);
+        let o_circles = specialist_scalar(main, circles_gid, input);
+        let scalar = if sigmoid(gate.w * r + gate.b) >= 0.5 {
+            o_spiral
+        } else {
+            o_circles
+        };
+        if scalar_matches_target(scalar, target[0]) {
+            correct += 1;
+        }
+    }
+    if data.is_empty() {
+        0.0
+    } else {
+        correct as f32 / data.len() as f32
+    }
+}
+
+fn demo_phase3c_composition() {
+    println!("--- Phase 3c: Composition + Episodic ---\n");
+    let mut dm = DimensionManager::new(phase3_composition_config());
     let mut rng = StdRng::seed_from_u64(42);
     let mut data_rng = StdRng::seed_from_u64(99);
 
@@ -2688,24 +4912,24 @@ fn demo_phase3c_composition() {
     let calibration_spiral: Vec<_> = spiral_data.iter().take(100).cloned().collect();
     let calibration_circles: Vec<_> = circles_data.iter().take(100).cloned().collect();
 
-    dm.spawn_mirror("spiral", 42).expect("spiral");
-    for epoch in 0..4000 {
-        let Some(_) = dm.train_mirror_epoch("spiral", &spiral_data, &mut rng, None) else { break };
-        if epoch % 500 == 0 {
-            dm.evaluate_promotions(&calibration_spiral);
-            if !dm.mirrors.contains_key("spiral") { break; }
-        }
-    }
-    let spiral_group = dm.force_promote("spiral", &calibration_spiral).unwrap_or_else(|| *dm.main.group_order.last().unwrap());
-    dm.spawn_mirror("circles", 43).expect("circles");
-    for epoch in 0..4000 {
-        let Some(_) = dm.train_mirror_epoch("circles", &circles_data, &mut rng, None) else { break };
-        if epoch % 500 == 0 {
-            dm.evaluate_promotions(&calibration_circles);
-            if !dm.mirrors.contains_key("circles") { break; }
-        }
-    }
-    let circles_group = dm.force_promote("circles", &calibration_circles).unwrap_or_else(|| *dm.main.group_order.last().unwrap());
+    let spiral_group = train_promoted_mirror(
+        &mut dm,
+        "spiral",
+        42,
+        &spiral_data,
+        &calibration_spiral,
+        &mut rng,
+        true,
+    );
+    let circles_group = train_promoted_mirror(
+        &mut dm,
+        "circles",
+        43,
+        &circles_data,
+        &calibration_circles,
+        &mut rng,
+        true,
+    );
     dm.train_and_set_router(
         &[(&calibration_spiral[..], 0), (&calibration_circles[..], 1)],
         &mut rng,
@@ -2732,14 +4956,15 @@ fn demo_phase3c_composition() {
     let residual = 1.0 - acc_spiral_only.max(acc_circles_only);
     println!("  Residual (1 - best single): {:.2}\n", residual);
 
-    let (virtual_group, comp_acc) = dm.train_composition(
+    let (virtual_group, comp_acc) = dm.train_composition_one_pass(
         &[spiral_group, circles_group],
         &task_c_train,
-        0.1,
-        300,
     );
-    println!("  Composition (VirtualGroup) on {} samples, 300 epochs: {:.1}%",
-        task_c_train.len(), comp_acc * 100.0);
+    println!(
+        "  Composition (VirtualGroup) on {} samples, one-pass solve: {:.1}%",
+        task_c_train.len(),
+        comp_acc * 100.0
+    );
     println!("  Blend weights: [{:.3}, {:.3}]\n", virtual_group.blend_weights[0], virtual_group.blend_weights[1]);
 
     if comp_acc >= 0.80 {
@@ -2796,15 +5021,15 @@ fn demo_phase3c_composition() {
     println!("\n=== Task D (3-way: spiral / circles / moons) ===\n");
     let moons_data = generate_moons_data(400, &mut data_rng);
     let calibration_moons: Vec<_> = moons_data.iter().take(100).cloned().collect();
-    dm.spawn_mirror("moons", 44).expect("moons");
-    for epoch in 0..4000 {
-        let Some(_) = dm.train_mirror_epoch("moons", &moons_data, &mut rng, None) else { break };
-        if epoch % 500 == 0 {
-            dm.evaluate_promotions(&calibration_moons);
-            if !dm.mirrors.contains_key("moons") { break; }
-        }
-    }
-    let _moons_group = dm.force_promote("moons", &calibration_moons).unwrap_or_else(|| *dm.main.group_order.last().unwrap());
+    let _moons_group = train_promoted_mirror(
+        &mut dm,
+        "moons",
+        44,
+        &moons_data,
+        &calibration_moons,
+        &mut rng,
+        true,
+    );
     let all_three: Vec<GroupId> = dm.main.group_order.iter().copied().collect();
     if all_three.len() < 3 {
         println!("  (Need 3 groups; got {}.)", all_three.len());
@@ -2824,9 +5049,12 @@ fn demo_phase3c_composition() {
     let acc_g2 = dm.evaluate_main_group(all_three[2], &task_d_data);
     println!("  Single-group on Task D: g0={:.1}%  g1={:.1}%  g2={:.1}%",
         acc_g0 * 100.0, acc_g1 * 100.0, acc_g2 * 100.0);
-    let (vg_d, comp_d_acc) = dm.train_composition(&all_three, &task_d_train, 0.1, 400);
-    println!("  3-group composition ({} samples, 400 epochs): {:.1}%",
-        task_d_train.len(), comp_d_acc * 100.0);
+    let (vg_d, comp_d_acc) = dm.train_composition_one_pass(&all_three, &task_d_train);
+    println!(
+        "  3-group composition ({} samples, one-pass solve): {:.1}%",
+        task_d_train.len(),
+        comp_d_acc * 100.0
+    );
     println!("  Blend weights: [{:.3}, {:.3}, {:.3}]\n",
         vg_d.blend_weights[0], vg_d.blend_weights[1], vg_d.blend_weights[2]);
     if comp_d_acc >= 0.75 {
@@ -2887,6 +5115,392 @@ fn demo_phase3c_composition() {
         let secs = elapsed.as_secs_f64();
         println!("\n  New task solved in <1 second via memory recall. (measured: {:.4}s) Output: {:?}", secs, out_recall);
     }
+}
+
+// =============================================================================
+// Demo: Phase 3e — Balanced composite (decisive VirtualGroup evaluation)
+// Task E = 50/50 inner/outer spiral-gated circles; four baselines + recall ablation.
+// =============================================================================
+
+#[derive(Clone, Copy, Debug)]
+struct Phase3eSeedResult {
+    spiral_heldout: f32,
+    circles_heldout: f32,
+    oracle_best_heldout: f32,
+    vg_fixed_heldout: f32,
+    vg_recall_heldout: f32,
+    direct_mirror_heldout: f32,
+    confidence_argmax_heldout: f32,
+    learned_router_xy_heldout: f32,
+    learned_router_expert_heldout: f32,
+    calibration_router_xy_heldout: f32,
+    calibration_router_expert_heldout: f32,
+    disagreement_router_heldout: f32,
+    expert_region_agreement: f32,
+    expert_margin_radius_corr: f32,
+    calib_expert_region_agreement: f32,
+    calib_expert_margin_radius_corr: f32,
+    radius_gate_heldout: f32,
+    logistic_gate_heldout: f32,
+    oracle_region_heldout: f32,
+    train_inner_frac: f32,
+    heldout_inner_frac: f32,
+    train_near_boundary_frac: f32,
+}
+
+fn mean_std(values: &[f32]) -> (f32, f32) {
+    if values.is_empty() {
+        return (0.0, 0.0);
+    }
+    let mean = values.iter().sum::<f32>() / values.len() as f32;
+    if values.len() == 1 {
+        return (mean, 0.0);
+    }
+    let var = values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / (values.len() - 1) as f32;
+    (mean, var.sqrt())
+}
+
+fn run_phase3e_seed(seed: u64) -> Phase3eSeedResult {
+    const INNER_RADIUS: f32 = 0.4;
+    const N_SAMPLES: usize = 400;
+    const TRAIN_N: usize = 30;
+
+    let mut dm = DimensionManager::new(phase3_composition_config());
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut data_rng = StdRng::seed_from_u64(seed.wrapping_mul(97).wrapping_add(99));
+
+    let spiral_data = generate_spiral_data(400, &mut data_rng);
+    let circles_data = generate_concentric_circles_data(400, &mut data_rng);
+    let calibration_spiral: Vec<_> = spiral_data.iter().take(100).cloned().collect();
+    let calibration_circles: Vec<_> = circles_data.iter().take(100).cloned().collect();
+
+    let spiral_group = train_promoted_mirror(
+        &mut dm,
+        "spiral",
+        seed,
+        &spiral_data,
+        &calibration_spiral,
+        &mut rng,
+        false,
+    );
+    let circles_group = train_promoted_mirror(
+        &mut dm,
+        "circles",
+        seed.wrapping_add(1),
+        &circles_data,
+        &calibration_circles,
+        &mut rng,
+        false,
+    );
+
+    let task_e_data = generate_balanced_spiral_gated_circles_data(
+        &mut dm.main,
+        spiral_group,
+        circles_group,
+        INNER_RADIUS,
+        N_SAMPLES,
+        &mut data_rng,
+    );
+    let (train, heldout) =
+        stratified_composite_split(&task_e_data, INNER_RADIUS, TRAIN_N, &mut data_rng);
+
+    let spiral_heldout = dm.evaluate_main_group(spiral_group, &heldout);
+    let circles_heldout = dm.evaluate_main_group(circles_group, &heldout);
+    let oracle_best_heldout = spiral_heldout.max(circles_heldout);
+
+    let (vg, _train_acc) = dm.train_composition_one_pass(&[spiral_group, circles_group], &train);
+    let vg_fixed_heldout = accuracy_virtual_group(&mut dm, &vg, &heldout);
+
+    let residual = 1.0 - oracle_best_heldout;
+    dm.store_composition_episode(&vg, &train, _train_acc, residual);
+    let mut sig_train = [0.0f32; 2];
+    for (input, _) in &train {
+        sig_train[0] += input[0];
+        sig_train[1] += input[1];
+    }
+    sig_train[0] /= train.len() as f32;
+    sig_train[1] /= train.len() as f32;
+    let vg_recall_heldout = if let Some(ep) = dm
+        .episodic_retrieve(&sig_train, 0.99)
+        .filter(|e| e.group_ids.len() == 2)
+    {
+        let vg_recall = VirtualGroup {
+            group_ids: ep.group_ids.clone(),
+            blend_weights: ep.blend_weights.clone(),
+        };
+        accuracy_virtual_group(&mut dm, &vg_recall, &heldout)
+    } else {
+        vg_fixed_heldout
+    };
+
+    let direct_mirror_heldout = train_direct_composite_mirror(
+        &mut dm,
+        &train,
+        &heldout,
+        seed.wrapping_add(2),
+        &mut rng,
+    );
+
+    let confidence_argmax_heldout =
+        accuracy_confidence_argmax(&mut dm.main, spiral_group, circles_group, &heldout);
+    let mut learned_router_xy = train_task_e_learned_router_xy(
+        &mut dm.main,
+        spiral_group,
+        circles_group,
+        &train,
+    );
+    let learned_router_xy_heldout = accuracy_learned_router_xy(
+        &mut dm.main,
+        &mut learned_router_xy,
+        spiral_group,
+        circles_group,
+        &heldout,
+    );
+    let mut learned_router_expert = train_task_e_learned_router_expert(
+        &mut dm.main,
+        spiral_group,
+        circles_group,
+        &train,
+    );
+    let learned_router_expert_heldout = accuracy_learned_router_expert(
+        &mut dm.main,
+        &mut learned_router_expert,
+        spiral_group,
+        circles_group,
+        &heldout,
+    );
+    let mut calibration_router_xy = train_calibration_learned_router_xy(
+        &calibration_spiral,
+        &calibration_circles,
+    );
+    let calibration_router_xy_heldout = accuracy_learned_router_xy(
+        &mut dm.main,
+        &mut calibration_router_xy,
+        spiral_group,
+        circles_group,
+        &heldout,
+    );
+    let mut calibration_router_expert = train_calibration_learned_router_expert(
+        &mut dm.main,
+        spiral_group,
+        circles_group,
+        &calibration_spiral,
+        &calibration_circles,
+    );
+    let calibration_router_expert_heldout = accuracy_learned_router_expert(
+        &mut dm.main,
+        &mut calibration_router_expert,
+        spiral_group,
+        circles_group,
+        &heldout,
+    );
+    let mut disagreement_router = train_task_e_router_disagreement(
+        &mut dm.main,
+        spiral_group,
+        circles_group,
+        &train,
+    );
+    let disagreement_router_heldout = accuracy_learned_router_disagreement(
+        &mut dm.main,
+        &mut disagreement_router,
+        spiral_group,
+        circles_group,
+        &heldout,
+    );
+
+    let mut expert_features = |input: &[f32]| {
+        specialist_feature_pair(&mut dm.main, spiral_group, circles_group, input)
+    };
+    let expert_region_agreement = router_region_agreement_oracle(
+        &mut learned_router_expert,
+        &heldout,
+        INNER_RADIUS,
+        &mut expert_features,
+    );
+    let expert_margin_radius_corr = router_margin_radius_correlation(
+        &mut learned_router_expert,
+        &heldout,
+        INNER_RADIUS,
+        &mut expert_features,
+    );
+    let mut calib_expert_features = |input: &[f32]| {
+        specialist_feature_pair(&mut dm.main, spiral_group, circles_group, input)
+    };
+    let calib_expert_region_agreement = router_region_agreement_oracle(
+        &mut calibration_router_expert,
+        &heldout,
+        INNER_RADIUS,
+        &mut calib_expert_features,
+    );
+    let calib_expert_margin_radius_corr = router_margin_radius_correlation(
+        &mut calibration_router_expert,
+        &heldout,
+        INNER_RADIUS,
+        &mut calib_expert_features,
+    );
+
+    let threshold = learn_radius_threshold(
+        &mut dm.main,
+        spiral_group,
+        circles_group,
+        &train,
+        INNER_RADIUS,
+    );
+    let radius_gate_heldout =
+        accuracy_radius_gated(&mut dm.main, spiral_group, circles_group, &heldout, threshold);
+    let logistic_gate = train_radius_logistic_gate(
+        &mut dm.main,
+        spiral_group,
+        circles_group,
+        &train,
+    );
+    let logistic_gate_heldout = accuracy_logistic_radius_gate(
+        &mut dm.main,
+        spiral_group,
+        circles_group,
+        &heldout,
+        logistic_gate,
+    );
+    let oracle_region_heldout = accuracy_radius_gated(
+        &mut dm.main,
+        spiral_group,
+        circles_group,
+        &heldout,
+        INNER_RADIUS,
+    );
+
+    Phase3eSeedResult {
+        spiral_heldout,
+        circles_heldout,
+        oracle_best_heldout,
+        vg_fixed_heldout,
+        vg_recall_heldout,
+        direct_mirror_heldout,
+        confidence_argmax_heldout,
+        learned_router_xy_heldout,
+        learned_router_expert_heldout,
+        calibration_router_xy_heldout,
+        calibration_router_expert_heldout,
+        disagreement_router_heldout,
+        expert_region_agreement,
+        expert_margin_radius_corr,
+        calib_expert_region_agreement,
+        calib_expert_margin_radius_corr,
+        radius_gate_heldout,
+        logistic_gate_heldout,
+        oracle_region_heldout,
+        train_inner_frac: inner_region_fraction(&train, INNER_RADIUS),
+        heldout_inner_frac: inner_region_fraction(&heldout, INNER_RADIUS),
+        train_near_boundary_frac: train_boundary_near_fraction(&train, INNER_RADIUS, 0.08),
+    }
+}
+
+fn demo_phase3e_balanced_composite() {
+    println!("--- Phase 3e: Balanced Composite (decisive evaluation) ---\n");
+    println!("Task E: 50/50 inner/outer spiral-gated circles, stratified train n=30, held-out rest.\n");
+
+    const SEEDS: [u64; 20] = [
+        42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
+    ];
+    let mut results = Vec::with_capacity(SEEDS.len());
+
+    for &seed in &SEEDS {
+        println!("  seed {} ...", seed);
+        let r = run_phase3e_seed(seed);
+        println!(
+            "    held-out: oracle={:.1}% VG={:.1}% | xy={:.1}% expert={:.1}% cal_expert={:.1}% disagree={:.1}% | r_agree={:.0}% r_corr={:.2}",
+            r.oracle_best_heldout * 100.0,
+            r.vg_fixed_heldout * 100.0,
+            r.learned_router_xy_heldout * 100.0,
+            r.learned_router_expert_heldout * 100.0,
+            r.calibration_router_expert_heldout * 100.0,
+            r.disagreement_router_heldout * 100.0,
+            r.expert_region_agreement * 100.0,
+            r.expert_margin_radius_corr,
+        );
+        results.push(r);
+    }
+
+    let fmt = |getter: fn(&Phase3eSeedResult) -> f32| -> String {
+        let vals: Vec<f32> = results.iter().map(|r| getter(r)).collect();
+        let (m, s) = mean_std(&vals);
+        format!("{:.1}% ± {:.1}%", m * 100.0, s * 100.0)
+    };
+
+    let fmt_range = |getter: fn(&Phase3eSeedResult) -> f32| -> String {
+        let vals: Vec<f32> = results.iter().map(|r| getter(r)).collect();
+        let min = vals.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max = vals.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        format!("{:.1}% – {:.1}%", min * 100.0, max * 100.0)
+    };
+
+    println!("\n=== Task E summary ({} seeds, stratified held-out) ===\n", SEEDS.len());
+    println!("| Baseline | Held-out accuracy |");
+    println!("| -------- | ----------------- |");
+    println!("| Spiral specialist only | {} |", fmt(|r| r.spiral_heldout));
+    println!("| Circles specialist only | {} |", fmt(|r| r.circles_heldout));
+    println!("| Oracle-best-single (global) | {} |", fmt(|r| r.oracle_best_heldout));
+    println!("| **VirtualGroup (global scalar blend)** | **{}** |", fmt(|r| r.vg_fixed_heldout));
+    println!("| Direct composite Mirror | {} |", fmt(|r| r.direct_mirror_heldout));
+    println!("| Confidence argmax (unsupervised proxy) | {} |", fmt(|r| r.confidence_argmax_heldout));
+    println!("| Disagreement router (f₁−f₂ only, Task E labels) | {} |", fmt(|r| r.disagreement_router_heldout));
+    println!("| Learned radius gate (input-dependent) | {} |", fmt(|r| r.radius_gate_heldout));
+    println!("| Logistic gate on r (input-dependent) | {} |", fmt(|r| r.logistic_gate_heldout));
+    println!("| Oracle region switch (r < 0.4, diagnostic ceiling) | {} |", fmt(|r| r.oracle_region_heldout));
+
+    println!("\n=== LearnedRouter 4-cell grid (held-out composite accuracy) ===\n");
+    println!("| Features | Composite labels | Calibration identity |");
+    println!("| -------- | ---------------- | ------------------ |");
+    println!(
+        "| `(x,y)` coordinates | {} | {} |",
+        fmt(|r| r.learned_router_xy_heldout),
+        fmt(|r| r.calibration_router_xy_heldout),
+    );
+    println!(
+        "| Expert outputs `(f₁, f₂)` | {} | {} |",
+        fmt(|r| r.learned_router_expert_heldout),
+        fmt(|r| r.calibration_router_expert_heldout),
+    );
+
+    println!("\n=== Boundary alignment (expert routers vs generative r < 0.4) ===\n");
+    println!(
+        "| Router | Region agreement with oracle | Margin–radius correlation |",
+    );
+    println!("| ------ | -------------------------- | ------------------------- |");
+    println!(
+        "| Expert × composite labels | {} | {} |",
+        fmt(|r| r.expert_region_agreement),
+        fmt(|r| r.expert_margin_radius_corr),
+    );
+    println!(
+        "| Expert × calibration identity | {} | {} |",
+        fmt(|r| r.calib_expert_region_agreement),
+        fmt(|r| r.calib_expert_margin_radius_corr),
+    );
+    println!(
+        "\nHigh region agreement + strong positive margin–radius correlation ⇒ boundary tracks the generative circle (soft positional leak via expert outputs)."
+    );
+
+    let (train_inner_m, _) = mean_std(&results.iter().map(|r| r.train_inner_frac).collect::<Vec<_>>());
+    let (held_inner_m, _) = mean_std(&results.iter().map(|r| r.heldout_inner_frac).collect::<Vec<_>>());
+    let (near_bnd_m, near_bnd_s) =
+        mean_std(&results.iter().map(|r| r.train_near_boundary_frac).collect::<Vec<_>>());
+    println!(
+        "\nRegion balance: train inner frac {:.1}%, held-out inner frac {:.1}% (target 50/50).",
+        train_inner_m * 100.0,
+        held_inner_m * 100.0
+    );
+    println!(
+        "Router seed spread: expert×composite {} | expert×calibration {} | disagreement {}",
+        fmt_range(|r| r.learned_router_expert_heldout),
+        fmt_range(|r| r.calibration_router_expert_heldout),
+        fmt_range(|r| r.disagreement_router_heldout),
+    );
+    println!(
+        "Train boundary coverage (|r − 0.4| < 0.08): {:.1}% ± {:.1}% of n=30 — low coverage predicts unstable (x,y) routing.",
+        near_bnd_m * 100.0,
+        near_bnd_s * 100.0
+    );
 }
 
 /// Print chosen group, output, top groups by score, and winner−runner-up gap (scales to 1..N groups).
@@ -3303,6 +5917,54 @@ fn generate_spiral_gated_circles_data(
         };
         let target = if out >= 0.5 { 1.0 } else { 0.0 };
         data.push((vec![x, y], [target]));
+    }
+    data
+}
+
+/// Task E: balanced 50/50 inner/outer spiral-gated circles (rejection sampling per region).
+fn generate_balanced_spiral_gated_circles_data(
+    main: &mut MainDimension,
+    group_inner: GroupId,
+    group_outer: GroupId,
+    inner_radius: f32,
+    n_samples: usize,
+    rng: &mut impl rand::Rng,
+) -> Vec<Sample> {
+    let n_inner = n_samples / 2;
+    let n_outer = n_samples - n_inner;
+    let mut data = Vec::with_capacity(n_samples);
+    let mut inner_count = 0usize;
+    let mut outer_count = 0usize;
+    let mut attempts = 0usize;
+    let max_attempts = n_samples.saturating_mul(200);
+    while (inner_count < n_inner || outer_count < n_outer) && attempts < max_attempts {
+        attempts += 1;
+        let x = rng.gen_range(-1.0..1.0_f32);
+        let y = rng.gen_range(-1.0..1.0_f32);
+        let r = (x * x + y * y).sqrt();
+        let is_inner = r < inner_radius;
+        if is_inner && inner_count >= n_inner {
+            continue;
+        }
+        if !is_inner && outer_count >= n_outer {
+            continue;
+        }
+        let outputs = main.query(&[x, y], &[group_inner, group_outer]);
+        if outputs.len() < 2 {
+            continue;
+        }
+        let out = if is_inner {
+            outputs[0].1.get(0).copied().unwrap_or(0.5)
+        } else {
+            outputs[1].1.get(0).copied().unwrap_or(0.5)
+        };
+        let target = if out >= 0.5 { 1.0 } else { 0.0 };
+        data.push((vec![x, y], [target]));
+        if is_inner {
+            inner_count += 1;
+        } else {
+            outer_count += 1;
+        }
     }
     data
 }

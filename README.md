@@ -1,23 +1,42 @@
-# **Growformer — A Multidimensional Neural Training Environment**
+# **Growformer: A Multidimensional Neural Training Environment**
+
+## **Documentation map**
+
+| Doc | What it's for |
+|-----|---------------|
+| **This file** (`README.md`) | Overview, architecture, training/inference CLI, WASM, GLE milestones, latest results |
+| [`docs/GROWFORMER_WHITEPAPER.md`](docs/GROWFORMER_WHITEPAPER.md) | Preprint: parameter-isolated specialists, VirtualGroup composition, retention invariant; appendices for deployment stack & speculative algebra |
+| [`USE_CASES.md`](USE_CASES.md) | Where the substrate wins, emergent architectures, continual learning, edge deployment, explainability (uses “Neuro” naming for the same system) |
+| [`DOCKER.md`](DOCKER.md) | Linux amd64 builds (`build-linux.sh`), Docker image, cloud VM deployment |
+| [`src/category/README.md`](src/category/README.md) | Categorical DAG + Pythagoras trainer (`--features categorical`) |
+| [`pkg/README.md`](pkg/README.md) | `wasm-pack` output, browser/WASM consumer notes |
+
+**In-repo guides (no separate doc):**
+
+- **Project manifests** — [`scripts/*.gf.toml`](scripts/) (sentiment, fintech, crypto, code, causal); parser in `src/project_gf.rs`
+- **Runnable examples** — [`examples/`](examples/) (fragment compose/decompose, reflective/drive/basal A/B, categorical sentiment train)
+- **Benchmark scripts** — [`scripts/benchmark_language.sh`](scripts/benchmark_language.sh), [`scripts/benchmark_core_tasks.sh`](scripts/benchmark_core_tasks.sh)
+
+---
 
 ## **What Growformer Is**
 
 Growformer is not “just another neural network implementation.”  
 It’s something much rarer: a **multidimensional computational medium** where learning emerges from the interaction of geometry, metabolism, sparsity, timing, energy flow, and spatial constraints, not from a fixed algebraic recipe.
 
-Growformer is a self-organizing neural substrate where **learned connectivity and geometry** co-evolve with synaptic weights — the graph is not fixed up front.
+Growformer is a self-organizing neural substrate where **learned connectivity and geometry** co-evolve with synaptic weights, the graph is not fixed up front.
 
-Traditional neural networks are fixed graphs where training adjusts edge values. Growformer is a physical system where neurons have mass, position, and velocity. Synapses form and dissolve based on co-activation. The topology itself is a major part of the learned representation. **What freezing guarantees:** once a consolidated group is frozen, its internal weights and synapses receive no further gradient-driven updates — that connectivity is preserved exactly under later training elsewhere. **What that does *not* imply by itself:** stable weights on one subgraph are not sufficient for unchanged *behavior* if inference still routes signals through plastic regions that keep learning; behavior depends on the full path. In this codebase, continual-learning demos that show stable old-task accuracy rely on **task-isolated promoted subgraphs** (each task’s network is trained in a dedicated mirror substrate, then promoted to Main and fully frozen) plus routing that sends each task’s inputs through the corresponding frozen graph — so later plasticity does not rewrite the old task’s parameters.
+Traditional neural networks are fixed graphs where training adjusts edge values. Growformer is a physical system where neurons have mass, position, and velocity. Synapses form and dissolve based on co-activation. The topology itself is a major part of the learned representation. **What freezing guarantees:** once a consolidated group is frozen, its internal weights and synapses receive no further gradient-driven updates, that connectivity is preserved exactly under later training elsewhere. **What that does *not* imply by itself:** stable weights on one subgraph are not sufficient for unchanged *behavior* if inference still routes signals through plastic regions that keep learning; behavior depends on the full path. In this codebase, continual-learning demos that show stable old-task accuracy rely on **task-isolated promoted subgraphs** (each task’s network is trained in a dedicated mirror substrate, then promoted to Main and fully frozen) plus routing that sends each task’s inputs through the corresponding frozen graph, so later plasticity does not rewrite the old task’s parameters.
 
 What makes it distinct from everything else in the field:
 
-**It's not a model. It's a medium.** A transformer is an architecture you train on data to produce a model. Growformer is a substrate you expose to experience and it self-organizes. The same substrate handles classification (Split MNIST), routing (learned router), and generation (binary token prediction) — not because it has different heads for each, but because the underlying physics supports all of them. You don't redesign the architecture for a new task. You **spawn a new Mirror** (a fresh mirror *dimension*: a scratch neural environment for that task), train it, then **promote** it into Main and **freeze** it so later tasks train in new mirrors without overwriting the consolidated weights. That workflow is separate from **mirror group coupling** (System 6): geometric pairing of two `NeuronGroup`s so complementary structure develops — see **System 6** below.
+**It's not a model. It's a medium.** A transformer is an architecture you train on data to produce a model. Growformer is a substrate you expose to experience and it self-organizes. The same substrate handles classification (Split MNIST), routing (learned router), and generation (binary token prediction) — not because it has different heads for each, but because the underlying physics supports all of them. You don't redesign the architecture for a new task. You **spawn a new Mirror** (a fresh mirror *dimension*: a scratch neural environment for that task), train it, then **promote** it into Main and **freeze** it so later tasks train in new mirrors without overwriting the consolidated weights. That workflow is separate from **mirror group coupling** (System 6): geometric pairing of two `NeuronGroup`s so complementary structure develops, see **System 6** below.
 
-**Learning is structural, not parametric.** When Growformer learns the observer pattern, it doesn't store "Observer" as a weight matrix. It forms a specific constellation of neurons with specific synaptic connectivity — an engram — where the physical arrangement encodes the concept. Stronger memories have denser, heavier synaptic connections between co-activated neurons, exactly like biological engram cells in the hippocampus.
+**Learning is structural, not parametric.** When Growformer learns the observer pattern, it doesn't store "Observer" as a weight matrix. It forms a specific constellation of neurons with specific synaptic connectivity, an engram, where the physical arrangement encodes the concept. Stronger memories have denser, heavier synaptic connections between co-activated neurons, exactly like biological engram cells in the hippocampus.
 
-**Generation is a different *kind* of computation, not “non-computation.”** Activations still spread through a learned graph, integrate at nodes, and are read out as an output state — that is computation. What differs from autoregressive LLM sampling is the **mechanism**: here the model targets a **whole fixed-length binary token layout in one forward pass** (parallel decode of all token slots from one spatial activation pattern), instead of sampling one token at a time conditioned on prior tokens. **Throughput vs. a naive character-level autoregressive baseline:** the generation stack is documented (see `group_gen.rs`) as **one forward pass per example** versus on the order of **~200 forward passes** for a naive scheme that does one pass per character for a ~200-character target — i.e. an order-of-magnitude **serial-depth** advantage for comparable output length, not a universal claim against every transformer implementation. A fair headline number still needs an explicit table: reference model, sequence length, batch size, and hardware.
+**Generation is a different *kind* of computation, not “non-computation.”** Activations still spread through a learned graph, integrate at nodes, and are read out as an output state, that is computation. What differs from autoregressive LLM sampling is the **mechanism**: here the model targets a **whole fixed-length binary token layout in one forward pass** (parallel decode of all token slots from one spatial activation pattern), instead of sampling one token at a time conditioned on prior tokens. **Throughput vs. a naive character-level autoregressive baseline:** the generation stack is documented (see `group_gen.rs`) as **one forward pass per example** versus on the order of **~200 forward passes** for a naive scheme that does one pass per character for a ~200-character target, i.e. an order-of-magnitude **serial-depth** advantage for comparable output length, not a universal claim against every transformer implementation. A fair headline number still needs an explicit table: reference model, sequence length, batch size, and hardware.
 
-If I had to place it in one sentence: Growformer is a continual learning substrate where knowledge is encoded as physical neural structure, grown, pruned, consolidated, and frozen — rather than as optimized parameters in a fixed graph.
+If I had to place it in one sentence: Growformer is a continual learning substrate where knowledge is encoded as physical neural structure, grown, pruned, consolidated, and frozen, rather than as optimized parameters in a fixed graph.
 
 The closest analog isn't in machine learning. It's in developmental neuroscience: experience-dependent synaptogenesis followed by activity-dependent pruning followed by synaptic consolidation. The code is implementing, in silicon, the same lifecycle that biological brains use to go from plastic learning to stable long-term memory.
 
@@ -35,7 +54,7 @@ Growformer is a **dynamic graph with dynamic structure**, where:
 - structure is an *output* of training, not an input  
 
 Instead of forcing intelligence into a rigid architecture, Growformer simulates an **ecosystem** of interacting forces.  
-Learning is not a single update rule — it is the emergent behavior of six coupled systems:
+Learning is not a single update rule, it is the emergent behavior of six coupled systems:
 
 1. **Weight dynamics** (local error-driven plasticity)  
 2. **Geometry** (neurons drift toward correlated partners)  
@@ -44,7 +63,7 @@ Learning is not a single update rule — it is the emergent behavior of six coup
 5. **Connectivity** (growth and dissolution of synapses)  
 6. **Structural symmetry** (mirror group coupling)
 
-The result is a system that behaves less like a classical MLP and more like a **living computational organism** — one that adapts, collapses, recovers, specializes, and self‑organizes.
+The result is a system that behaves less like a classical MLP and more like a **living computational organism**, one that adapts, collapses, recovers, specializes, and self‑organizes.
 
 Growformer is a platform for exploring a different paradigm of learning:  
 one where intelligence is not engineered, but **grown**.
@@ -116,15 +135,15 @@ Unlike conventional neural systems where a trained model is an opaque weight mat
 - **Composition** is traceable: when fragments from multiple patterns are combined, each selection and its scoring is recorded.
 - **Knowledge is frozen and deterministic**: the same input produces the same output on every invocation, indefinitely, across deployments.
 
-The boundary of interpretability is within each specialist's neural substrate — individual synaptic weights are not human-readable, as with any neural network. But the decision path around those weights is fully decomposable: which specialist, which structural pattern, which variable values, at what confidence, through what composition path. See Whitepaper §5.6 (Structural Interpretability).
+The boundary of interpretability is within each specialist's neural substrate, individual synaptic weights are not human-readable, as with any neural network. But the decision path around those weights is fully decomposable: which specialist, which structural pattern, which variable values, at what confidence, through what composition path. See Whitepaper §5.6 (Structural Interpretability).
 
 ### AI Safety by Structure
 
 Growformer's safety properties are not bolted on — they are consequences of the same architectural decisions that provide continual learning and interpretability.
 
-- **Alignment by structure, not by training.** Conventional AI safety relies on training incentives (RLHF, constitutional AI) — soft constraints on opaque systems that can be jailbroken by adversarial inputs. The Growformer's output space is bounded by each specialist's codebook: a finite, enumerable set of structural patterns with finite variable vocabularies. Harmful content that does not exist in the codebook cannot be generated, regardless of the input. This is a structural constraint, not a learned preference.
-- **Bounded output space eliminates prompt injection surface.** Prompt injection and jailbreaking exploit unbounded output spaces — sufficiently adversarial inputs can steer a conventional model into any region. In the Growformer, adversarial prompts may cause misrouting or poor archetype selection, but cannot produce content outside the codebook. The attack surface is reduced from "all possible text" to "misselection among known patterns."
-- **Frozen determinism enables certification.** Consolidated groups produce the same output for the same input on every invocation, across time and hardware. A brain certified at audit is the same brain that runs in production — a prerequisite for safety-critical environments (medical, financial, autonomous systems).
+- **Alignment by structure, not by training.** Conventional AI safety relies on training incentives (RLHF, constitutional AI), soft constraints on opaque systems that can be jailbroken by adversarial inputs. The Growformer's output space is bounded by each specialist's codebook: a finite, enumerable set of structural patterns with finite variable vocabularies. Harmful content that does not exist in the codebook cannot be generated, regardless of the input. This is a structural constraint, not a learned preference.
+- **Bounded output space eliminates prompt injection surface.** Prompt injection and jailbreaking exploit unbounded output spaces, sufficiently adversarial inputs can steer a conventional model into any region. In the Growformer, adversarial prompts may cause misrouting or poor archetype selection, but cannot produce content outside the codebook. The attack surface is reduced from "all possible text" to "misselection among known patterns."
+- **Frozen determinism enables certification.** Consolidated groups produce the same output for the same input on every invocation, across time and hardware. A brain certified at audit is the same brain that runs in production, a prerequisite for safety-critical environments (medical, financial, autonomous systems).
 - **Auditable decision trails.** Every inference is decomposable: which specialist was selected (and at what confidence), which structural pattern was chosen, which variable values were filled, through what composition path. The full decision trail is available for post-hoc audit without special tooling.
 
 These properties directly address regulatory requirements for AI safety in medical, financial, legal, and autonomous system deployments. See Whitepaper §5.6 for the formal treatment.
@@ -152,12 +171,12 @@ Improvements to how sentiment signal flows from input text through encoding, con
 | **Encoder anchors** | Positive/negative sentiment keyword buckets (`v[8]`, `v[9]`) in `HashingLanguageEncoder`, sourced from TOML (single source of truth via `inference_sentiment_core.toml`) | `dimension/language.rs` |
 | **Polarity probe** | Extracts 16-D feature vector (pos mass, neg mass, net, magnitude, mixed) from raw encoder output | `dimension/polarity_probe.rs` |
 | **Clifford conditioning** | Polarity features appended to the 192-D conditioning vector (indices 176–191) via `adapt_for_group_clifford` | `dimension/manager.rs` |
-| **Spawn threshold** | Sentiment lattice groups use a lower spawn threshold (0.92 vs 0.97) to preserve finer polarity distinctions | `main.rs` |
+| **Spawn threshold** | Sentiment lattice groups use a lower spawn threshold (0.92 vs 0.97) to preserve finer polarity distinctions | `cli_impl.rs` (train path) |
 | **Context guardrails** | Lexical polarity rules for domain-ambiguous words (`disgusting` in gaming vs theater, crypto promotional register → neutral), garble rejection via TOML `hard_reject_substrings` | `inference_sentiment_core.toml`, `sentiment_generation_lexicon.toml` |
 
-### Causal AI (see `GROWFORMER_CAUSAL_AI.md`)
+### Causal AI
 
-Causality as a first-class field on training data, with connector-aware retrieval and a path toward Brain B (relationship-only lattice):
+Causality as a first-class field on training data, with connector-aware retrieval and a path toward Brain B (relationship-only lattice). Implementation: `dimension/language.rs` (`CausalAnnotation`), `inference/causal_hints.rs`, `inference/causal_relation.rs`, `inference/world_grounding.rs`, `inference/grounding_expand.rs`; project scaffold [`scripts/causal-relationship.gf.toml`](scripts/causal-relationship.gf.toml).
 
 - **`CausalAnnotation`** on JSONL rows: `causal_type`, `connector`, `cause_span`, `effect_span`, optional `causal_subtype`
 - **`gfcausal_t_*_c_*`** index tokens injected before the BM25 witness, aligning training and inference
@@ -181,7 +200,7 @@ A mathematically optimal quantization hierarchy using the two provably densest s
 - Context-aware generation: nearest-neighbor queries condition the brain on related codebase entities
 - Native error correction: Extended Golay [24,12,8] — 3-bit correction, 4-bit detection
 
-REPL: `/index <path>` to index a project (auto-loads git history when `.git` found), `/project [file]` to query related entities. See Whitepaper §5.5 and ARCHITECTURE.md for details.
+REPL: `/index <path>` to index a project (auto-loads git history when `.git` found), `/project [file]` to query related entities. Implementation: `spectral.rs` (`E8Lattice`, `LeechLattice`, `ProjectModel`, `CodeAnalyzer`, `GitHistory`).
 
 ### Semantic Token Dictionary (Implemented)
 
@@ -214,6 +233,61 @@ The micro-brain at **18 MB** is small enough for browser (WASM), mobile, IoT, an
 2. **Users train domain groups** on their own data — when new capacity is added as **separate consolidated groups** and the base is **frozen**, user updates do not rewrite base weights (same “new subgraph + freeze” idea as Split MNIST, not a blanket theorem about all possible wiring)
 3. **Retention of base behavior** depends on routing and whether inference paths stay on frozen parameters; the intended deployment story matches the continual-learning demos (isolated frozen regions)
 4. **Export the augmented brain** — compact because only new structure is added
+
+### Fragment Composition
+
+Free-text generation by composing typed sentence fragments instead of emitting whole training sentences verbatim. Three reflective voices — **Identity** (persona/OCEAN), **Activity** (action content), **Drive** (state-gated needs) — are assembled from `[opener?] body+ [coda?]` slots with intent affinity, OCEAN scoring, and runtime state gates.
+
+| Piece | Where |
+|-------|-------|
+| Composer | `fragment_composer.rs` |
+| TOML policy | `[fragment_compose]` in inference TOML (`inference/inference_toml.rs`) |
+| Service hook | `LanguageService::try_fragment_compose` (`service.rs`) |
+| Examples | `examples/decompose_fragments.rs`, `examples/fragment_compose_demo.rs` |
+
+### Reflective Field Stack
+
+Conditioning-space composition that pairs with fragment composition:
+
+| Module | Role |
+|--------|------|
+| `reflective_field.rs` | Per-voice blend weights (`ReflectiveWeights`) from OCEAN + runtime state |
+| `drive_field.rs` | State-gated needs (hunger/energy/mood) that bias Drive-voice selection |
+| `basal_ganglia.rs` | Action selection / gating layer between routing and generation |
+
+A/B harnesses: `examples/reflective_field_ab.rs`, `examples/drive_field_ab.rs`, `examples/basal_ganglia_ab.rs`.
+
+### Brain Package + Portable Runtime
+
+Brains ship as versioned binary packages (`brain.rs`):
+
+- Magic `GWFBRPKG`, format v1 (header + checkpoint + personality) or v2 (+ UTF-8 TOML plugins blob)
+- Parsed on `LanguageService::load_brain`; plugins manifest → `InferenceHarness`
+
+Lean inference without the full training CLI:
+
+| Piece | Command / API |
+|-------|---------------|
+| `runtime.rs` | `Runtime::from_brain_bytes` — prompt, converse, codegen; native + wasm32 |
+| `growformer-runtime` | `cargo build --release --bin growformer-runtime --no-default-features` then `growformer-runtime brain.bin "prompt"` |
+
+### Categorical Training (optional)
+
+Category-theory scaffolding for compositional generalization (Pythagoras nodes, bifunctor forward, sentiment functor). Behind Cargo feature **`categorical`** (not in default features). See [`src/category/README.md`](src/category/README.md); example: `cargo run --example categorical_sentiment_train --features categorical`.
+
+### ARC-AGI (experimental)
+
+Clifford-encoded grid reasoning solvers for ARC-style tasks:
+
+| Binary | Purpose |
+|--------|---------|
+| `growformer-arc` | Full ARC brain pipeline (`arc_brain.rs`, `arc_dsl.rs`) |
+| `growformer-arc-agi-2x2` | 2×2 (and optional 3×3) benchmark runner (`arc_agi.rs`) |
+| `growformer-demos --arc-agi` | Demo entry point |
+
+### Distribution (SpaceKit)
+
+Production deployments embed Growformer via the library API (`growformer::run_cli_with_entitlement`) with capability gating in `entitlement.rs` (train / infer / merge). The standalone `growformer` binary is for crate development; end users typically invoke training and inference through SpaceKit.
 
 ---
 
@@ -248,57 +322,52 @@ Standard artificial neurons are defined by a single scalar — a weight, updated
 ```
 growformer/
 ├── Cargo.toml
+├── examples/                — Fragment compose/decompose, reflective/drive/basal A/B, categorical train
+├── scripts/*.gf.toml        — Project manifests (sentiment, fintech, crypto, code, causal)
 └── src/
     ├── lib.rs               — Library crate (shared by all binaries + WASM)
-    ├── main.rs              — Training pipeline: all stages, cloze, brain export
-    ├── demos.rs             — Demos & benchmarks binary (XOR, spiral, MNIST, evals)
-    ├── server.rs            — HTTP server (growformer-node)
-    ├── service.rs           — LanguageService: generation, codegen, meta-routing
-    ├── types.rs             — Vec3, Synapse, NeuronGroup, EnvironmentConfig
-    ├── neuron.rs            — Neuron struct with all 6 dimensions
-    ├── environment.rs       — NeuralEnvironment (legacy, used for demos)
-    ├── spectral.rs          — TokenDictionary (semantic ordering + Gray coding)
-    ├── clifford.rs          — Cl(1,7) SpaceTime Algebra: rotors, fingerprints
-    ├── growformer_lang.rs   — GrowformerLang: MetaConcept, MetaCodebook, LanguageProjector
-    ├── reasoning.rs         — CognitiveMap, ReasoningEngine (System 1.5), System 2 (WorkingMemory, StepOperator)
-    ├── metacognition.rs     — MetaCognition: Reflection Brain, quality gate, graceful degradation
-    ├── coherence.rs         — Neural Coherence: band-decomposed STA synchrony, ensemble selection
-    ├── understanding.rs     — UnderstandingLayer: topic/verb classifiers, goal_magnitude
-    ├── meta_brain.rs        — MetaBrain: CentroidCoordinator, ArchetypeBrain
-    ├── cloze.rs             — Cloze learning: contrastive fill-in-the-blank
-    ├── active_inference/
-    │   ├── mod.rs           — Active Inference module: re-exports, unit tests
-    │   ├── state.rs         — BeliefState: step counter, quality tracker, retry budget
-    │   ├── blanket.rs       — Markov Blanket boundary: Observation, Action, EnvironmentPort
-    │   ├── spine.rs         — ActiveInferenceSpine: EpisodePolicy, PolicyTurn loop
-    │   ├── integration.rs   — MetaCognition ↔ belief-state bridge
-    │   └── harness.rs       — QueuedEnvironment: in-memory replay log for offline analysis
+    ├── main.rs              — Dev CLI entry → `run_cli` (no entitlement gate)
+    ├── cli_impl.rs          — Full train / infer / merge / init CLI (`run_from_argv`)
+    ├── runtime_main.rs      — `growformer-runtime` binary entry
+    ├── demos.rs             — Demos & benchmarks binary
+    ├── server.rs            — HTTP server (`growformer-node`)
+    ├── service.rs           — LanguageService: routing, generation, OCEAN, fragment compose
+    ├── runtime.rs           — Portable inference API (`Runtime::from_brain_bytes`)
+    ├── brain.rs             — Brain package envelope (GWFBRPKG v1/v2 + plugins blob)
+    ├── project_gf.rs        — `*.gf.toml` project manifest parser
+    ├── entitlement.rs       — SpaceKit capability gate (train / infer / merge)
+    ├── tools_builtin.rs     — calculator, file_reader, code_runner, web_search executors
+    ├── fragment_composer.rs — Typed fragment assembly (Identity / Activity / Drive voices)
+    ├── reflective_field.rs  — Per-voice conditioning weights from OCEAN + state
+    ├── drive_field.rs       — State-gated needs biasing Drive voice
+    ├── basal_ganglia.rs     — Action selection / gating
+    ├── micro_brain.rs       — MetaBrain + Paramecium micro-brains (centroid coordinator)
+    ├── predictive_coder.rs  — Predictive coding scaffold
+    ├── topic_graph.rs       — Topic relationship graph
+    ├── text_autoencoder.rs  — Text autoencoder experiments
+    ├── types.rs, neuron.rs, environment.rs
+    ├── spectral.rs          — TokenDictionary, E8/Leech, ProjectModel, CodeAnalyzer, GitHistory
+    ├── clifford.rs          — Cl(1,7) SpaceTime Algebra
+    ├── growformer_lang.rs   — MetaConcept, MetaCodebook, LanguageProjector
+    ├── reasoning.rs         — CognitiveMap, System 1.5, deliberate System 2 (WorkingMemory)
+    ├── metacognition.rs, coherence.rs, understanding.rs, cloze.rs
+    ├── arc_agi.rs, arc_brain.rs, arc_dsl.rs  — ARC-AGI solvers (cli feature)
+    ├── category/            — Categorical DAG trainer (`--features categorical`; see README inside)
+    ├── active_inference/    — BeliefState, Markov blanket, episode spine, replay harness
     ├── inference/
-    │   ├── harness.rs       — InferenceHarness, BrainInferencePlugin (orchestration hooks)
-    │   ├── inference_toml.rs — Merged load: thresholds + `[rules]` (CLI / disk / env; wasm embed)
-    │   ├── causal_hints.rs  — Connector → gfcausal_* BM25 tokens (retrieval prior)
-    │   ├── world_grounding.rs — Layer 0 concept graph: token-hit BFS, subject keyword enrichment
-    │   ├── grounding_expand.rs — Sparse query expansion (loss+game → gambling lexicon, etc.)
-    │   ├── manifest.rs      — BrainPluginsManifest, InferenceThresholds (`[sentiment]` serde key)
-    │   ├── project_gf.rs    — *.gf.toml project manifest (paths relative to manifest file)
-    │   └── plugins/         — LatticeShortcutsPlugin + default_inference_harness()
+    │   ├── harness.rs, inference_toml.rs, manifest.rs, inference_guardrails.rs
+    │   ├── causal_hints.rs, causal_relation.rs, world_grounding.rs, grounding_expand.rs
+    │   ├── retrieval_rescore.rs, retrieval_lexicon.rs, sentiment_generation_lexicon.rs
+    │   └── plugins/         — LatticeShortcutsPlugin + `default_inference_harness()`
     ├── dimension/
-    │   ├── group_gen.rs     — IndexedGenEnv: topic sub-lattices, forced routing
-    │   ├── manager.rs       — DimensionManager: conditioning pipeline, Clifford rotors
-    │   ├── polarity_probe.rs — Sentiment polarity features from raw encoder output
-    │   ├── router.rs        — LearnedRouter (InfraciliaryLattice, K-NN + gradient)
-    │   ├── paramecium.rs    — InfraciliaryLattice (Paramecium): one-pass learning
-    │   ├── language.rs      — Language encoder bridge + CausalAnnotation + sentiment anchors
-    │   ├── action.rs        — Intent-to-action mapping
-    │   └── tool.rs          — Tool use: schema, registry, external invocation
+    │   ├── manager.rs       — DimensionManager: Main/Mirror dims, conditioning, promotion
+    │   ├── main_dim.rs, mirror_dim.rs, promotion.rs, observer.rs
+    │   ├── router.rs, action_classifier.rs, paramecium.rs, group_gen.rs, generation_head.rs
+    │   ├── generation.rs, codegen.rs, composition.rs, embedding.rs, policy.rs
+    │   ├── language.rs, polarity_probe.rs, action.rs, tool.rs
     └── systems/
-        ├── metabolic.rs     — System 1: Cost-driven synapse pruning
-        ├── growth.rs        — System 2: Proximity-based synapse formation
-        ├── stdp.rs          — System 3: Spike-timing-dependent plasticity
-        ├── geometry.rs      — System 4: Spatial drift of neuron positions
-        ├── whorls.rs        — System 5: Cycle detection and whorl reporting
-        ├── mirror.rs        — System 6: Mirror group coupling
-        └── checkpoint.rs    — Brain serialization/deserialization
+        ├── metabolic.rs, growth.rs, stdp.rs, geometry.rs, whorls.rs, mirror.rs
+        └── checkpoint.rs    — Legacy neural-env serialization (demos)
 ```
 
 ### Inference plugins (`src/inference/`)
@@ -312,10 +381,11 @@ Shortcut **lists** load at **runtime** from disk. Resolution order (native): **`
 Versioned TOML (currently **`schema_version = 1`**) so one file can drive train paths, **`[inference]`** rule files, and default **`--brain`** for **`--infer`**. Paths are resolved **relative to the manifest’s directory** unless absolute.
 
 - **Scaffold:** `cargo run --release -- init [PATH] [--name MyBrain]` writes a starter file (default output `Growformer.gf.toml`).
-- **Example:** [`scripts/sentiment-analysis.gf.toml`](scripts/sentiment-analysis.gf.toml) — train with  
+- **Examples:** [`scripts/sentiment-analysis.gf.toml`](scripts/sentiment-analysis.gf.toml), [`scripts/fintech-sentiment-analysis.gf.toml`](scripts/fintech-sentiment-analysis.gf.toml), [`scripts/crypto-sentiment-analysis.gf.toml`](scripts/crypto-sentiment-analysis.gf.toml), [`scripts/causal-relationship.gf.toml`](scripts/causal-relationship.gf.toml) — train with  
   `cargo run --release -- --train-brain --project scripts/sentiment-analysis.gf.toml`  
   (run from the `growformer` crate root so `../data/...` resolves).
 - **Code-only brain:** [`scripts/code.gf.toml`](scripts/code.gf.toml) sets **`[train].code_brain = true`**, which enables **GrowformerLang MetaCodebook (training Stage 2b)** and **per-group code lattices** from **`expected_code`** in JSONL. Default training leaves these **off** so support/sentiment brains are not pulled into code-generation plumbing. Same opt-in via **`--train-code-lattice`** without a project file.
+- **Brain merge:** `--merge-brain --overlay-brain <path>` composes an overlay checkpoint onto a base brain (entitlement-gated when embedded).
 - **CLI flags** still override merged values when you pass them explicitly (e.g. **`--inference-toml`** wins over **`[inference].toml`** in the project file).
 
 Parser: **`src/project_gf.rs`**.
@@ -324,15 +394,19 @@ Parser: **`src/project_gf.rs`**.
 - **Borrowing:** Inside the main generation path, code clones **`inference_harness`** before **`active_dm_mut()`** (same pattern as hoisted plugin config) so the harness can run while the active **`DimensionManager`** is mutably borrowed.
 - **Extending:** Implement **`BrainInferencePlugin`** in `src/inference/plugins/`, override only the hooks you need (defaults are no-ops), and append **`Box::new(YourPlugin)`** in **`plugins/mod.rs`** **`default_inference_harness()`**, or replace **`svc.inference_harness`** with **`InferenceHarness::new(vec![...])`** for a custom registry.
 
-Three binaries, one shared library:
+Binaries share one library (`LanguageService` / `Runtime`):
 
 | Binary | Command | Purpose |
 |--------|---------|---------|
-| `growformer` | `cargo run --release` | Train brains + run inference |
-| `growformer-demos` | `cargo run --bin growformer-demos` | Demos, benchmarks, evaluations |
+| `growformer` | `cargo run --release` | Dev CLI: train, infer, merge, init (no entitlement gate) |
+| `growformer-cli` | `cargo run --bin growformer-cli` | Same CLI surface as `growformer` (internal alias) |
+| `growformer-demos` | `cargo run --bin growformer-demos` | Demos, benchmarks, M3–M6 gate commands |
 | `growformer-node` | `cargo run --bin growformer-node` | HTTP API server |
+| `growformer-runtime` | `cargo build --release --bin growformer-runtime --no-default-features` | Lean inference-only REPL / single-shot |
+| `growformer-arc` | `cargo run --bin growformer-arc` | ARC brain pipeline |
+| `growformer-arc-agi-2x2` | `cargo run --bin growformer-arc-agi-2x2` | ARC 2×2 benchmark runner |
 
-All binaries use the same in-process `LanguageService` API. The library compiles to `wasm32-unknown-unknown` with `--no-default-features`.
+The library compiles to `wasm32-unknown-unknown` with `--no-default-features` (optionally `--features wasm-bindgen` for JS bindings in `wasm.rs`).
 
 ---
 
@@ -347,15 +421,21 @@ The Growformer library compiles to WebAssembly. Only the **lib crate** targets W
 | `native` | yes | `reqwest` HTTP encoder, filesystem checkpoint loading |
 | `server` | yes | `axum`/`tokio` HTTP server (`growformer-node` binary) |
 | `parallel` | yes | `rayon` parallel iterators in compute path |
-| `cli` | yes | `clap`, `indicatif`, `mnist`, `kiddo` for the CLI binary |
+| `cli` | yes | `clap`, `indicatif`, `mnist`, `kiddo`, `cli_impl`, `project_gf`, ARC modules |
+| `standalone_cli` | no | `growformer-cli` binary (same as `growformer` entry) |
+| `categorical` | no | `category/` DAG trainer + `categorical_sentiment_train` example |
+| `training` | no | `gradient_memory`, `training_objectives` (training-only helpers) |
+| `wasm-bindgen` | no | `wasm.rs` JS bindings (`growformer_acceptance_report`, etc.) |
 
-WASM builds disable all of these:
+WASM / lean builds disable default features:
 
 ```bash
 cargo check --lib --no-default-features --target wasm32-unknown-unknown
 ```
 
 ### WASM API usage
+
+**Low-level** (`LanguageService`):
 
 ```rust
 use growformer::dimension::LanguageConfig;
@@ -371,6 +451,17 @@ let action = svc.action("implement a rust web server")?;
 let (_action, response) = svc.generation("help me reset my password")?;
 let (_action, code) = svc.codegen("implement a rust web server")?;
 ```
+
+**Portable** (`Runtime` — preferred for embeds):
+
+```rust
+use growformer::runtime::Runtime;
+
+let mut rt = Runtime::from_brain_bytes(&brain_bytes)?;
+let response = rt.prompt("help me reset my password")?;
+```
+
+With `--features wasm-bindgen`, `wasm.rs` exposes JS-callable wrappers.
 
 ### What is gated behind `#[cfg(not(target_arch = "wasm32"))]`
 
@@ -479,7 +570,7 @@ M5 coding datasets (original):
   - `data/language/m5/retention_patterns_eval_splits.json`
   - Current size: train `48 + 48`, holdout `24 + 24`
   - Expanded benchmark run:
-    `cargo run -- --m5-retention-eval --m5-retention-plan data/language/m5/retention_patterns_eval_splits.json --m5-epochs 100 --m5-lr 0.12 --m5-feature-dim 1024 --m5-replay-per-epoch 64 --m5-replay-prior-ratio 0.9 --m5-retention-report reports/m5_retention_patterns_report_v9.json`
+    `cargo run --bin growformer-demos -- --m5-retention-eval --m5-retention-plan data/language/m5/retention_patterns_eval_splits.json --m5-epochs 100 --m5-lr 0.12 --m5-feature-dim 1024 --m5-replay-per-epoch 64 --m5-replay-prior-ratio 0.9 --m5-retention-report reports/m5_retention_patterns_report_v9.json`
 
 Benchmarks:
 
@@ -541,7 +632,7 @@ M6 Agent Modes:
   - Latency P95 tracked per inference call (configurable via `SloConfig`)
   - Checkpoint domain count tracked
   - Acceptance report includes pass/fail against SLO targets
-- CLI: `cargo run -- --acceptance-report --acceptance-report-path reports/m6_acceptance.json`
+- CLI: `cargo run --bin growformer-demos -- --acceptance-report --acceptance-report-path reports/m6_acceptance.json`
 
 ---
 
@@ -718,15 +809,19 @@ pub struct EnvironmentConfig {
 
 ## **Dependencies**
 
-```toml
-[dependencies]
-clap = { version = "4", features = ["derive"] }
-kiddo = "5.2.4"
-rand = "0.8"
-rayon = "1.8"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-```
+Core (always on): `rand`, `serde`, `serde_json`, `toml`, `aho-corasick`, `instant`.
+
+Optional by feature:
+
+| Feature | Crates |
+|---------|--------|
+| `cli` | `clap`, `indicatif`, `mnist`, `kiddo` |
+| `parallel` | `rayon` |
+| `native` | `reqwest` (blocking JSON, rustls) |
+| `server` | `axum`, `tokio`, `tower-http`, `async-stream`, `futures-core`, `uuid` |
+| `wasm-bindgen` | `wasm-bindgen`, `serde-wasm-bindgen`, `console_error_panic_hook` |
+
+See `Cargo.toml` for pinned versions. Docker/Linux builds: [`DOCKER.md`](DOCKER.md).
 
 ---
 
@@ -791,11 +886,11 @@ This remains a research hypothesis. The experimental evidence for quantum effect
 
 Simulation theory (Bostrom's formulation) claims our reality is itself a computation running inside some external substrate. This project doesn't claim that.
 
-What this project actually is: **substrate-independent emergence**. It demonstrates that the behaviors we associate with life — specialization, competition, death, territory, growth — emerge from any sufficiently rich set of local rules, regardless of whether the substrate is carbon or Rust running on silicon. The spiral network isn't simulating biology. It is biology, instantiated differently.
+What this project actually is: **substrate-independent emergence**. It demonstrates that the behaviors we associate with life, specialization, competition, death, territory, growth, emerge from any sufficiently rich set of local rules, regardless of whether the substrate is carbon or Rust running on silicon. The spiral network isn't simulating biology. It is biology, instantiated differently.
 
-The philosophically sharper framing is **computational equivalence** — the Wolfram/Turing claim that a system exhibiting the same functional dynamics as another system *is* that system at the relevant level of description. The neurons here aren't pretending to have mass and territory. They have mass and territory, defined entirely by the rules governing their interactions.
+The philosophically sharper framing is **computational equivalence**, the Wolfram/Turing claim that a system exhibiting the same functional dynamics as another system *is* that system at the relevant level of description. The neurons here aren't pretending to have mass and territory. They have mass and territory, defined entirely by the rules governing their interactions.
 
-Where it gets genuinely strange: thermal noise in this system isn't *analogous* to electron agitation — it plays the identical functional role: mandatory irreducible randomness that prevents the system from freezing into a low-entropy locked state. The physics doesn't care whether the charge carriers are electrons or activation values. The thermodynamic necessity is the same.
+Where it gets genuinely strange: thermal noise in this system isn't *analogous* to electron agitation, it plays the identical functional role: mandatory irreducible randomness that prevents the system from freezing into a low-entropy locked state. The physics doesn't care whether the charge carriers are electrons or activation values. The thermodynamic necessity is the same.
 
-The more provocative question this project raises isn't "is reality a simulation" — it's **at what point does a self-organizing system with birth, death, specialization, and competitive dynamics become alive**. By the project's own framing, it's already past the bacterium stage. The answer to that question matters a lot more than Bostrom's, and this project is closer to actually probing it.
+The more provocative question this project raises isn't "is reality a simulation", it's **at what point does a self-organizing system with birth, death, specialization, and competitive dynamics become alive**. By the project's own framing, it's already past the bacterium stage. The answer to that question matters a lot more than Bostrom's, and this project is closer to actually probing it.
 

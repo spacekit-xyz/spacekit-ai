@@ -12,11 +12,19 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Once, OnceLock};
+use std::sync::{Once, RwLock};
 
 use crate::topic_graph::TopicGraph;
 
-static TOPIC_GRAPH: OnceLock<TopicGraph> = OnceLock::new();
+static TOPIC_GRAPH: RwLock<Option<TopicGraph>> = RwLock::new(None);
+
+fn install_topic_graph(graph: TopicGraph) -> Result<(), String> {
+    let mut guard = TOPIC_GRAPH
+        .write()
+        .map_err(|e| format!("TopicGraph lock poisoned: {}", e))?;
+    *guard = Some(graph);
+    Ok(())
+}
 
 static LEGACY_OPERATION_TOPIC_WARN: Once = Once::new();
 
@@ -28,7 +36,7 @@ const SENTIMENT_OVERLAY_FILENAME: &str = "knowledge_graph_sentiment_overlay.toml
 /// legacy keyword rules and emits a one-time `eprintln` diagnostic.
 pub fn init_topic_graph(toml_path: &str) -> Result<(), String> {
     let graph = TopicGraph::from_file(toml_path)?;
-    TOPIC_GRAPH.set(graph).map_err(|_| "TopicGraph already initialized".to_string())
+    install_topic_graph(graph)
 }
 
 /// Load `base_path` and merge `knowledge_graph_sentiment_overlay.toml` from the same directory
@@ -59,17 +67,17 @@ pub fn try_init_topic_graph_bundle_with_extras(
     let base_exists = base_p.exists();
     let overlay_exists = overlay_pb.exists();
 
-    let mut graph = match (base_exists, overlay_exists) {
+    let mut graph: Option<TopicGraph> = match (base_exists, overlay_exists) {
         (true, true) => {
             let base_g = TopicGraph::from_file(base_path)?;
             let overlay_content = std::fs::read_to_string(overlay_s)
                 .map_err(|e| format!("Failed to read {}: {}", overlay_s, e))?;
             let overlay_g = TopicGraph::from_toml_quiet(&overlay_content)?;
-            base_g.merge_overlay(overlay_g)
+            Some(base_g.merge_overlay(overlay_g))
         }
-        (true, false) => TopicGraph::from_file(base_path)?,
-        (false, true) => TopicGraph::from_file(overlay_s)?,
-        (false, false) => return Ok(()),
+        (true, false) => Some(TopicGraph::from_file(base_path)?),
+        (false, true) => Some(TopicGraph::from_file(overlay_s)?),
+        (false, false) => None,
     };
 
     for p in extra_overlay_paths {
@@ -78,36 +86,47 @@ pub fn try_init_topic_graph_bundle_with_extras(
                 format!("Topic overlay path is not valid UTF-8: {}", p.display())
             })?;
             let overlay_g = TopicGraph::from_file(s)?;
-            graph = graph.merge_overlay(overlay_g);
+            graph = Some(match graph {
+                Some(g) => g.merge_overlay(overlay_g),
+                None => overlay_g,
+            });
         }
     }
 
-    TOPIC_GRAPH
-        .set(graph)
-        .map_err(|_| "TopicGraph already initialized".to_string())
+    let Some(graph) = graph else {
+        return Ok(());
+    };
+
+    install_topic_graph(graph)
 }
 
 /// Initialize from an inline TOML string (for tests or embedded configs).
 pub fn init_topic_graph_from_str(toml_str: &str) -> Result<(), String> {
     let graph = TopicGraph::from_toml(toml_str)?;
-    TOPIC_GRAPH.set(graph).map_err(|_| "TopicGraph already initialized".to_string())
+    install_topic_graph(graph)
 }
 
 /// Install a pre-built [`TopicGraph`] (for embedders that parse + merge themselves).
 pub fn init_topic_graph_direct(graph: TopicGraph) -> Result<(), String> {
-    TOPIC_GRAPH.set(graph).map_err(|_| "TopicGraph already initialized".to_string())
+    install_topic_graph(graph)
 }
 
-/// Get a reference to the global TopicGraph, if initialized.
-pub fn topic_graph() -> Option<&'static TopicGraph> {
-    TOPIC_GRAPH.get()
+/// Clear the global topic graph (e.g. before loading another agent's overlay in WASM).
+pub fn clear_topic_graph() {
+    if let Ok(mut guard) = TOPIC_GRAPH.write() {
+        *guard = None;
+    }
 }
 
-/// `true` after a successful [`try_init_topic_graph_bundle`], [`init_topic_graph`], or
-/// [`init_topic_graph_from_str`]. `false` when neither knowledge graph file existed.
+/// Get a clone of the global TopicGraph, if initialized.
+pub fn topic_graph() -> Option<TopicGraph> {
+    TOPIC_GRAPH.read().ok().and_then(|g| g.clone())
+}
+
+/// `true` after a successful graph install. `false` when no graph is loaded.
 #[inline]
 pub fn topic_graph_loaded() -> bool {
-    TOPIC_GRAPH.get().is_some()
+    TOPIC_GRAPH.read().ok().map(|g| g.is_some()).unwrap_or(false)
 }
 
 use crate::clifford::{
@@ -752,8 +771,10 @@ fn is_domain_subject(subject: &str) -> bool {
 
 /// TODO: Derive from a knowledge graph of operations and their relationships.
 pub fn infer_concept(text: &str, semantic_intent: Option<&str>, action_target: Option<&str>) -> MetaConcept {
-    if let Some(graph) = TOPIC_GRAPH.get() {
-        return graph.infer_concept(text, semantic_intent, action_target);
+    if let Ok(guard) = TOPIC_GRAPH.read() {
+        if let Some(graph) = guard.as_ref() {
+            return graph.infer_concept(text, semantic_intent, action_target);
+        }
     }
     // Legacy fallback
     infer_concept_legacy(text, semantic_intent, action_target)
@@ -1034,8 +1055,10 @@ pub fn is_broad_query(text: &str) -> bool {
 /// Delegates to [`TopicGraph`] (`data/knowledge_graph.toml` + optional overlay) when initialized.
 /// Otherwise uses [`infer_operation_topic_legacy`] and prints a **one-time** `eprintln` hint.
 pub fn infer_operation_topic(text: &str) -> Option<String> {
-    if let Some(graph) = TOPIC_GRAPH.get() {
-        return graph.infer_topic(text);
+    if let Ok(guard) = TOPIC_GRAPH.read() {
+        if let Some(graph) = guard.as_ref() {
+            return graph.infer_topic(text);
+        }
     }
     LEGACY_OPERATION_TOPIC_WARN.call_once(|| {
         eprintln!(

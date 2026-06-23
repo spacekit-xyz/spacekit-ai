@@ -92,6 +92,17 @@ impl MainDimension {
             .collect()
     }
 
+    /// Scalar output and penultimate hidden activations for one frozen specialist.
+    pub fn query_penultimate_hidden(
+        &mut self,
+        input: &[f32],
+        group_id: GroupId,
+    ) -> Option<(Vec<f32>, Vec<f32>)> {
+        self.groups.get_mut(&group_id).map(|fg| {
+            fg.env.predict_with_penultimate_hidden(input)
+        })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.groups.is_empty()
     }

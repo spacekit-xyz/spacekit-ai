@@ -38,7 +38,7 @@ use aho_corasick::AhoCorasick;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use super::manifest::InferenceThresholds;
 
@@ -70,7 +70,7 @@ fn inference_toml_rel_search_order() -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// CLI / host overrides (set once before first `inference_toml_loaded()`)
+// CLI / host overrides (updated when `--project` / `--inference-toml` is applied)
 // ---------------------------------------------------------------------------
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -81,16 +81,36 @@ struct CliTomlPaths {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-static CLI_TOML_PATHS: OnceLock<CliTomlPaths> = OnceLock::new();
+static CLI_TOML_PATHS: std::sync::RwLock<CliTomlPaths> =
+    std::sync::RwLock::new(CliTomlPaths {
+        primary: None,
+        defaults: None,
+    });
 
 /// Register inference TOML paths from the growformer CLI or host (call before any inference load).
 /// Passing `None` for both is a no-op (keeps search/env behavior).
+/// Later calls merge non-`None` fields so embedded defaults can be overridden by `--project`.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn set_inference_toml_cli_paths(primary: Option<PathBuf>, defaults: Option<PathBuf>) {
     if primary.is_none() && defaults.is_none() {
         return;
     }
-    let _ = CLI_TOML_PATHS.set(CliTomlPaths { primary, defaults });
+    {
+        let mut guard = CLI_TOML_PATHS.write().unwrap();
+        if primary.is_some() {
+            guard.primary = primary;
+        }
+        if defaults.is_some() {
+            guard.defaults = defaults;
+        }
+    }
+    invalidate_native_inference_toml_cache();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn invalidate_native_inference_toml_cache() {
+    let mut guard = FULL.write().unwrap();
+    *guard = None;
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -98,7 +118,7 @@ pub fn set_inference_toml_cli_paths(_primary: Option<PathBuf>, _defaults: Option
 
 #[cfg(not(target_arch = "wasm32"))]
 fn cli_toml_paths() -> CliTomlPaths {
-    CLI_TOML_PATHS.get().cloned().unwrap_or_default()
+    CLI_TOML_PATHS.read().unwrap().clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +137,8 @@ pub struct InferenceTomlDocument {
     pub response_shaping: ResponseShapingConfig,
     #[serde(default)]
     pub validation: ValidationConfig,
+    #[serde(default)]
+    pub fragment_compose: FragmentComposeConfig,
 }
 
 /// Configuration for the generation/decoding stage, parsed from `[generation]` in inference TOML.
@@ -254,6 +276,573 @@ impl Default for ValidationConfig {
     }
 }
 
+/// Typed fragment composition policy from `[fragment_compose]` in inference TOML.
+/// Agent-specific vocal tokens, intent routing, and library paths live here —
+/// not in the Rust runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FragmentComposeConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// JSONL fragment library path, relative to the inference TOML directory.
+    #[serde(default)]
+    pub library: Option<String>,
+    /// Vocal tokens checked on the terminal sentence of composed output.
+    #[serde(default)]
+    pub vocalizations: Vec<String>,
+    /// Second tokens allowed after a vocal in a coda (e.g. `"now"` → `"Mrrp now."`).
+    #[serde(default = "default_vocal_coda_modifiers")]
+    pub vocal_coda_modifiers: Vec<String>,
+    /// Intents that always try for a second body fragment from a different voice.
+    #[serde(default)]
+    pub force_second_body_intents: Vec<String>,
+    /// Intents allowed to prepend a conversational opener fragment.
+    /// When empty, a built-in greeting/reunion/comfort default list is used.
+    #[serde(default)]
+    pub opener_intents: Vec<String>,
+    /// Baseline runtime state when no `agent_state` dimensions are supplied.
+    #[serde(default)]
+    pub default_neutral_state: std::collections::HashMap<String, f32>,
+    /// Exact greeting phrases for the `greeting` intent rule.
+    #[serde(default)]
+    pub greeting_exact: Vec<String>,
+    /// Prefixes before the agent name for name-based greetings (`"hey luna"`).
+    #[serde(default)]
+    pub agent_name_prefixes: Vec<String>,
+    #[serde(default = "default_agent_name_greeting_max_len")]
+    pub agent_name_greeting_max_len: usize,
+    /// Ordered intent rules; first match wins. Include a terminal `fallback` rule.
+    #[serde(default)]
+    pub intent_rules: Vec<FragmentIntentRuleToml>,
+    /// Offline decomposition heuristics (voice/opener/state-gate classification).
+    #[serde(default)]
+    pub decompose: FragmentDecomposeConfig,
+    /// Intent-specific ordered body sub-slots for templated composition.
+    #[serde(default)]
+    pub compose_templates: Vec<ComposeTemplateToml>,
+    /// Negative affinity: fragments to suppress when a given intent is active.
+    #[serde(default)]
+    pub intent_excludes: Vec<IntentExcludeRuleToml>,
+}
+
+/// One row in `[[fragment_compose.compose_templates]]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComposeTemplateToml {
+    pub intent: String,
+    #[serde(default)]
+    pub body_slots: Vec<String>,
+    #[serde(default = "default_template_min_bodies")]
+    pub min_bodies: usize,
+    #[serde(default = "default_require_distinct_voices")]
+    pub require_distinct_voices: bool,
+}
+
+fn default_template_min_bodies() -> usize {
+    1
+}
+
+fn default_require_distinct_voices() -> bool {
+    true
+}
+
+/// One row in `[[fragment_compose.intent_excludes]]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntentExcludeRuleToml {
+    pub when_intent: String,
+    #[serde(default)]
+    pub exclude_body_slots: Vec<String>,
+    #[serde(default)]
+    pub exclude_keywords: Vec<String>,
+    #[serde(default)]
+    pub exclude_fragment_intents: Vec<String>,
+}
+
+/// Decomposition-only policy under `[fragment_compose.decompose]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FragmentDecomposeConfig {
+    /// Sentence prefixes classified as conversational openers.
+    #[serde(default)]
+    pub opener_prefixes: Vec<String>,
+    /// Keywords scoring a clause as drive/state voice.
+    #[serde(default)]
+    pub drive_keywords: Vec<String>,
+    /// Keywords scoring a clause as activity/action voice.
+    #[serde(default)]
+    pub activity_keywords: Vec<String>,
+    /// Keywords scoring a clause as identity/persona voice.
+    #[serde(default)]
+    pub identity_keywords: Vec<String>,
+    /// Any match forces drive voice (e.g. treat/meal context).
+    #[serde(default)]
+    pub drive_override_keywords: Vec<String>,
+    /// Runtime dims merged into fragment `state_gate` ranges.
+    #[serde(default = "default_state_gate_dims")]
+    pub state_gate_dims: Vec<String>,
+    /// Keywords classifying body fragments into compose sub-slots.
+    #[serde(default)]
+    pub body_slot_keywords: std::collections::HashMap<String, Vec<String>>,
+}
+
+fn default_state_gate_dims() -> Vec<String> {
+    vec!["hunger".into(), "energy".into(), "mood".into()]
+}
+
+impl Default for FragmentDecomposeConfig {
+    fn default() -> Self {
+        Self {
+            opener_prefixes: Vec::new(),
+            drive_keywords: Vec::new(),
+            activity_keywords: Vec::new(),
+            identity_keywords: Vec::new(),
+            drive_override_keywords: Vec::new(),
+            state_gate_dims: default_state_gate_dims(),
+            body_slot_keywords: std::collections::HashMap::new(),
+        }
+    }
+}
+
+fn default_vocal_coda_modifiers() -> Vec<String> {
+    vec!["now".to_string()]
+}
+
+fn default_agent_name_greeting_max_len() -> usize {
+    48
+}
+
+fn default_fragment_min_voices() -> usize {
+    1
+}
+
+impl Default for FragmentComposeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            library: None,
+            vocalizations: Vec::new(),
+            vocal_coda_modifiers: default_vocal_coda_modifiers(),
+            force_second_body_intents: Vec::new(),
+            opener_intents: Vec::new(),
+            default_neutral_state: std::collections::HashMap::new(),
+            greeting_exact: Vec::new(),
+            agent_name_prefixes: Vec::new(),
+            agent_name_greeting_max_len: default_agent_name_greeting_max_len(),
+            intent_rules: Vec::new(),
+            decompose: FragmentDecomposeConfig::default(),
+            compose_templates: Vec::new(),
+            intent_excludes: Vec::new(),
+        }
+    }
+}
+
+/// One row in `[fragment_compose.intent_rules]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FragmentIntentRuleToml {
+    #[serde(default)]
+    pub id: String,
+    pub intent: String,
+    #[serde(default)]
+    pub anchors: Vec<String>,
+    #[serde(default = "default_fragment_min_voices")]
+    pub min_voices: usize,
+    #[serde(default)]
+    pub relaxed_parts: bool,
+    /// `greeting` | `contains_any` | `starts_with_any` | `fallback`
+    #[serde(default)]
+    pub r#match: String,
+    #[serde(default)]
+    pub patterns: Vec<String>,
+    #[serde(default)]
+    pub max_len: Option<usize>,
+}
+
+/// Resolved intent hints for fragment eligibility / quality gate.
+#[derive(Debug, Clone)]
+pub struct FragmentIntentHint {
+    pub intent: String,
+    pub anchors: Vec<String>,
+    pub min_voices: usize,
+    pub relaxed_parts: bool,
+}
+
+impl FragmentComposeConfig {
+    /// Intents that may prepend an opener fragment. Other intents compose body+coda only.
+    pub fn effective_opener_intents(&self) -> Vec<String> {
+        if !self.opener_intents.is_empty() {
+            return self.opener_intents.clone();
+        }
+        [
+            "greeting_check_in",
+            "reunion_warm",
+            "reunion",
+            "identity_intro",
+            "owner_absence",
+            "emotional_support",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
+    pub fn should_use_opener(&self, intent: &str) -> bool {
+        self.effective_opener_intents()
+            .iter()
+            .any(|i| i == intent)
+    }
+
+    /// Compose template for an intent, if configured.
+    pub fn template_for_intent(&self, intent: &str) -> Option<&ComposeTemplateToml> {
+        self.compose_templates.iter().find(|t| t.intent == intent)
+    }
+
+    /// Merge negative-affinity rules for the active intent.
+    pub fn excludes_for_intent(&self, intent: &str) -> crate::fragment_composer::ComposeExcludes {
+        use crate::fragment_composer::ComposeExcludes;
+        let mut out = ComposeExcludes::default();
+        for rule in &self.intent_excludes {
+            if rule.when_intent != intent {
+                continue;
+            }
+            for slot in &rule.exclude_body_slots {
+                out.body_slots.insert(slot.clone());
+            }
+            for kw in &rule.exclude_keywords {
+                out.keywords.push(kw.to_ascii_lowercase());
+            }
+            for fi in &rule.exclude_fragment_intents {
+                out.fragment_intents.insert(fi.clone());
+            }
+        }
+        out
+    }
+
+    /// Classify a body fragment into a compose sub-slot from decompose keywords.
+    pub fn classify_body_slot(&self, text: &str, role: &str) -> Option<String> {
+        if role != "body" || self.decompose.body_slot_keywords.is_empty() {
+            return None;
+        }
+        let lower = text.to_ascii_lowercase();
+        // Fixed priority so mealtime/grounding win over generic empathic/action.
+        const PRIORITY: &[&str] = &[
+            "mealtime", "preference", "lore", "stance", "grounding", "gratitude", "bonding", "refusal",
+            "offer", "empathic", "action",
+        ];
+        for slot in PRIORITY {
+            if let Some(keywords) = self.decompose.body_slot_keywords.get(*slot) {
+                if keywords.iter().any(|kw| lower.contains(&kw.to_ascii_lowercase())) {
+                    return Some(slot.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Match the user prompt against configured intent rules.
+    pub fn match_intent(&self, text: &str, agent_name: &str) -> FragmentIntentHint {
+        let lower = text.to_ascii_lowercase();
+        for rule in &self.intent_rules {
+            if self.rule_matches(&lower, text, agent_name, rule) {
+                return FragmentIntentHint {
+                    intent: rule.intent.clone(),
+                    anchors: rule.anchors.clone(),
+                    min_voices: rule.min_voices,
+                    relaxed_parts: rule.relaxed_parts,
+                };
+            }
+        }
+        FragmentIntentHint {
+            intent: "open_ended_chat".into(),
+            anchors: Vec::new(),
+            min_voices: 2,
+            relaxed_parts: false,
+        }
+    }
+
+    fn rule_matches(
+        &self,
+        lower: &str,
+        original: &str,
+        agent_name: &str,
+        rule: &FragmentIntentRuleToml,
+    ) -> bool {
+        match rule.r#match.as_str() {
+            "greeting" => self.matches_greeting(lower, original),
+            "contains_any" => rule.patterns.iter().any(|p| lower.contains(&p.to_ascii_lowercase())),
+            "starts_with_any" => rule.patterns.iter().any(|p| {
+                let pat = p.to_ascii_lowercase();
+                lower.starts_with(&pat)
+                    && rule.max_len.map(|m| lower.len() < m).unwrap_or(true)
+            }),
+            "agent_name_greeting" => self.matches_agent_name_greeting(lower, agent_name),
+            "fallback" => true,
+            _ => false,
+        }
+    }
+
+    fn matches_greeting(&self, lower: &str, original: &str) -> bool {
+        let trimmed = lower.trim().trim_end_matches(|c: char| c.is_ascii_punctuation());
+        let matched = self.greeting_exact.iter().any(|p| {
+            let p = p.to_ascii_lowercase();
+            trimmed == p || trimmed.starts_with(&format!("{p} "))
+        });
+        if !matched {
+            return false;
+        }
+        if trimmed.len() > 40 {
+            let original_trimmed = original.trim();
+            for prefix in &["Hello ", "Hi ", "Hey "] {
+                if original_trimmed.starts_with(prefix) {
+                    let rest = &original_trimmed[prefix.len()..];
+                    if rest.starts_with(|c: char| c.is_uppercase()) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    fn matches_agent_name_greeting(&self, lower: &str, agent_name: &str) -> bool {
+        let name = agent_name.trim().to_ascii_lowercase();
+        if name.is_empty() {
+            return false;
+        }
+        if self.agent_name_greeting_max_len > 0 && lower.len() >= self.agent_name_greeting_max_len {
+            return false;
+        }
+        self.agent_name_prefixes.iter().any(|prefix| {
+            let p = prefix.to_ascii_lowercase();
+            if !lower.starts_with(&p) {
+                return false;
+            }
+            let rest = lower[p.len()..].trim();
+            rest == name || rest.starts_with(&format!("{name} "))
+        })
+    }
+
+    /// True when the terminal sentence is vocal + disallowed modifier (`"Mrrp math."`).
+    pub fn vocalization_tail_suspicious(&self, text: &str) -> bool {
+        if self.vocalizations.is_empty() {
+            return false;
+        }
+        let last = self.last_sentence(text);
+        let ws: Vec<&str> = last.split_whitespace().collect();
+        if ws.len() <= 1 {
+            return false;
+        }
+        self.detect_vocalization(ws[0]).is_some() && !self.is_pure_vocal_coda(&last)
+    }
+
+    /// Load `[fragment_compose]` from an inference TOML file on disk.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_from_inference_toml_path(path: &std::path::Path) -> Result<Self, String> {
+        let s = std::fs::read_to_string(path)
+            .map_err(|e| format!("read inference TOML {}: {e}", path.display()))?;
+        Self::load_from_inference_toml_str(&s)
+    }
+
+    /// Parse `[fragment_compose]` from a full inference TOML document string.
+    pub fn load_from_inference_toml_str(toml_str: &str) -> Result<Self, String> {
+        let doc: InferenceTomlDocument = toml::from_str(toml_str)
+            .map_err(|e| format!("parse inference TOML: {e}"))?;
+        if doc.fragment_compose.vocalizations.is_empty() {
+            return Err(
+                "fragment_compose.vocalizations is empty — add vocal tokens to inference TOML"
+                    .into(),
+            );
+        }
+        Ok(doc.fragment_compose)
+    }
+
+    /// First matching non-`fallback` intent rule for a user prompt, if any.
+    pub fn prompt_intent_override(&self, text: &str, agent_name: &str) -> Option<FragmentIntentHint> {
+        let lower = text.to_ascii_lowercase();
+        for rule in &self.intent_rules {
+            if rule.r#match == "fallback" {
+                return None;
+            }
+            if self.rule_matches(&lower, text, agent_name, rule) {
+                return Some(FragmentIntentHint {
+                    intent: rule.intent.clone(),
+                    anchors: rule.anchors.clone(),
+                    min_voices: rule.min_voices,
+                    relaxed_parts: rule.relaxed_parts,
+                });
+            }
+        }
+        None
+    }
+
+    /// Detect a configured vocal token at the start of `text` (longest match first).
+    pub fn detect_vocalization(&self, text: &str) -> Option<String> {
+        let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
+        if lower.is_empty() {
+            return None;
+        }
+        let first = lower.split_whitespace().next()?;
+        let mut vocs: Vec<&str> = self.vocalizations.iter().map(String::as_str).collect();
+        vocs.sort_by_key(|v| std::cmp::Reverse(v.len()));
+        for v in vocs {
+            if first == v {
+                return Some(v.to_string());
+            }
+        }
+        None
+    }
+
+    /// Trailing coda slot: bare vocalization or vocal + allowed modifier only.
+    pub fn is_pure_vocal_coda(&self, text: &str) -> bool {
+        let trimmed = text.trim().trim_end_matches('.').trim().to_ascii_lowercase();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let ws: Vec<&str> = trimmed.split_whitespace().collect();
+        match ws.len() {
+            1 => self.detect_vocalization(ws[0]).is_some(),
+            2 => {
+                self.detect_vocalization(ws[0]).is_some()
+                    && self
+                        .vocal_coda_modifiers
+                        .iter()
+                        .any(|m| ws[1] == m.as_str())
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a sentence begins with a configured vocal token.
+    pub fn starts_with_vocalization(&self, text: &str) -> bool {
+        let lower = text.to_ascii_lowercase();
+        self.vocalizations
+            .iter()
+            .any(|v| lower.starts_with(v.as_str()))
+    }
+
+    /// Classify a decomposed sentence into identity / activity / drive voice.
+    pub fn classify_voice(&self, text: &str, role: &str) -> &'static str {
+        if role == "coda" {
+            return "identity";
+        }
+        let lower = text.to_ascii_lowercase();
+        let d = &self.decompose;
+        if d
+            .drive_override_keywords
+            .iter()
+            .any(|k| lower.contains(&k.to_ascii_lowercase()))
+        {
+            return "drive";
+        }
+        let drive_score = Self::score_keywords(&lower, &d.drive_keywords);
+        let activity_score = Self::score_keywords(&lower, &d.activity_keywords);
+        let identity_score = Self::score_keywords(&lower, &d.identity_keywords);
+        if drive_score >= activity_score && drive_score >= identity_score && drive_score > 0 {
+            "drive"
+        } else if activity_score >= identity_score && activity_score > 0 {
+            "activity"
+        } else {
+            "identity"
+        }
+    }
+
+    /// Whether a lowercased sentence is a conversational opener prefix.
+    pub fn is_opener(&self, lower: &str) -> bool {
+        self.decompose
+            .opener_prefixes
+            .iter()
+            .any(|p| lower.starts_with(&p.to_ascii_lowercase()))
+    }
+
+    /// Validate config has decomposition voice keywords.
+    pub fn validate_for_decompose(&self) -> Result<(), String> {
+        let d = &self.decompose;
+        if d.drive_keywords.is_empty()
+            && d.activity_keywords.is_empty()
+            && d.identity_keywords.is_empty()
+        {
+            return Err(
+                "fragment_compose.decompose voice keyword lists are empty — add drive/activity/identity keywords to inference TOML".into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn score_keywords(text: &str, keywords: &[String]) -> i32 {
+        keywords
+            .iter()
+            .filter(|k| text.contains(&k.to_ascii_lowercase()))
+            .count() as i32
+    }
+
+    fn last_sentence(&self, text: &str) -> String {
+        let lower = text.to_ascii_lowercase();
+        lower
+            .split(|c| c == '.' || c == '!' || c == '?')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .last()
+            .map(|s| s.to_string())
+            .unwrap_or(lower)
+    }
+
+    /// Resolve the fragment library path: `GROWFORMER_FRAGMENTS` env, then
+    /// `[fragment_compose].library` relative to the inference TOML / brain dirs.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn resolve_library_path(&self, brain_path: &str) -> Option<std::path::PathBuf> {
+        use std::path::{Path, PathBuf};
+        if let Ok(p) = std::env::var("GROWFORMER_FRAGMENTS") {
+            let p = p.trim();
+            if !p.is_empty() {
+                return Some(PathBuf::from(p));
+            }
+        }
+        if !self.enabled {
+            return None;
+        }
+        let lib = self.library.as_ref()?.trim();
+        if lib.is_empty() {
+            return None;
+        }
+        let rel = PathBuf::from(lib);
+        if rel.is_absolute() && rel.is_file() {
+            return Some(rel);
+        }
+        if let Some(base) = inference_toml_directory() {
+            let cand = base.join(&rel);
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+        if let Some(parent) = Path::new(brain_path).parent() {
+            for cand in [parent.join(&rel), parent.join("data").join(&rel)] {
+                if cand.is_file() {
+                    return Some(cand);
+                }
+            }
+        }
+        if rel.is_file() {
+            Some(rel)
+        } else {
+            None
+        }
+    }
+}
+
+/// Directory containing the active inference TOML (for resolving relative paths).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn inference_toml_directory() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    if let Some(p) = cli_toml_paths().primary {
+        return p.parent().map(|d| d.to_path_buf());
+    }
+    if let Ok(path) = std::env::var("GROWFORMER_INFERENCE_TOML") {
+        return PathBuf::from(path).parent().map(|d| d.to_path_buf());
+    }
+    None
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn inference_toml_directory() -> Option<std::path::PathBuf> {
+    None
+}
+
 /// PR-wire headline: normalized text must start with `prefix`, meet `min_len`, and pass excludes / `require_any`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrWireNeutralPrefixRule {
@@ -318,6 +907,9 @@ pub struct InferenceRulesSection {
     /// Lattice output looks wrong for this intent (intent CNF ∧ response side).
     #[serde(default)]
     pub lattice_misfire: Vec<LatticeMisfireRule>,
+    /// Ordered fallback lines after a misfire in chat passthrough (first matching prompt row wins).
+    #[serde(default)]
+    pub lattice_misfire_fallback: Vec<LatticeMisfireFallbackRule>,
     /// `How …` / `Why …` wire headlines: prefix + min length + excludes + optional `require_any`.
     #[serde(default)]
     pub pr_wire_neutral_prefix: Vec<PrWireNeutralPrefixRule>,
@@ -480,14 +1072,39 @@ impl Default for HeadlineLexicalTopicRule {
 /// Detect composed lattice lines that contradict the headline (replace with routing-only fallback).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LatticeMisfireRule {
+    /// Prompt-side CNF. When empty, any prompt matches (subject to `intent_exclude`).
     #[serde(default)]
     pub intent: Vec<Vec<String>>,
+    /// When this CNF matches the prompt, the rule does not fire (e.g. school context on a school arc).
+    #[serde(default)]
+    pub intent_exclude: Vec<Vec<String>>,
     /// Any listed substring in the response counts as a hit (OR). Combined with `response` when both set.
     #[serde(default)]
     pub response_any: Vec<String>,
     /// AND-of-OR groups on the response (substring match). Empty means ignore unless `response_any` set.
     #[serde(default)]
     pub response: Vec<Vec<String>>,
+    /// When non-empty, at least one prior agent turn must contain any listed substring
+    /// before this rule can fire (cross-turn arc bleed).
+    #[serde(default)]
+    pub prior_response_any: Vec<String>,
+}
+
+/// Short canned line when chat passthrough detects a lattice/compose misfire (first matching row wins).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LatticeMisfireFallbackRule {
+    /// Prompt-side CNF. Empty `intent` matches any prompt (use as last-resort default row).
+    #[serde(default)]
+    pub intent: Vec<Vec<String>>,
+    #[serde(default)]
+    pub intent_exclude: Vec<Vec<String>>,
+    pub response: String,
+    #[serde(default = "default_lattice_misfire_fallback_template_id")]
+    pub template_id: String,
+}
+
+fn default_lattice_misfire_fallback_template_id() -> String {
+    "lattice_misfire_fallback".to_string()
 }
 
 impl InferenceRulesSection {
@@ -561,6 +1178,12 @@ impl InferenceRulesSection {
         } else if !defaults.lattice_misfire.is_empty() {
             s.lattice_misfire
                 .extend(defaults.lattice_misfire.iter().cloned());
+        }
+        if s.lattice_misfire_fallback.is_empty() {
+            s.lattice_misfire_fallback = defaults.lattice_misfire_fallback.clone();
+        } else if !defaults.lattice_misfire_fallback.is_empty() {
+            s.lattice_misfire_fallback
+                .extend(defaults.lattice_misfire_fallback.iter().cloned());
         }
         if s.pr_wire_neutral_prefix.is_empty() {
             s.pr_wire_neutral_prefix = defaults.pr_wire_neutral_prefix.clone();
@@ -686,6 +1309,7 @@ pub struct InferenceRulesRuntime {
     pub objective_fact_rules: Vec<ObjectiveFactRule>,
     pub headline_lexical_topic: Vec<HeadlineLexicalTopicRule>,
     pub lattice_misfire: Vec<LatticeMisfireRule>,
+    pub lattice_misfire_fallback: Vec<LatticeMisfireFallbackRule>,
     pub pr_wire_neutral_prefix: Vec<PrWireNeutralPrefixRule>,
     pub pr_wire_neutral_intent: Vec<PrWireNeutralIntentRow>,
     crypto_market_surface_tokens: Vec<String>,
@@ -774,6 +1398,13 @@ impl InferenceRulesRuntime {
 
 fn cnf_groups_match(haystack: &str, groups: &[Vec<String>]) -> bool {
     !groups.is_empty() && groups.iter().all(|or_alts| or_alts.iter().any(|p| haystack.contains(p)))
+}
+
+/// Any single OR-group match (used for lattice misfire `intent_exclude`).
+fn cnf_any_group_matches(haystack: &str, groups: &[Vec<String>]) -> bool {
+    groups
+        .iter()
+        .any(|or_alts| or_alts.iter().any(|p| haystack.contains(p)))
 }
 
 fn anchor_gloss_map_from_rows(rows: &[AnchorTokenGlossRow]) -> HashMap<String, String> {
@@ -1026,6 +1657,7 @@ impl InferenceRulesRuntime {
             objective_fact_rules: s.objective_fact_rules,
             headline_lexical_topic: s.headline_lexical_topic,
             lattice_misfire: s.lattice_misfire,
+            lattice_misfire_fallback: s.lattice_misfire_fallback,
             pr_wire_neutral_prefix: s.pr_wire_neutral_prefix,
             pr_wire_neutral_intent: s.pr_wire_neutral_intent,
             crypto_market_surface_tokens: s.crypto_market_surface_tokens,
@@ -1398,15 +2030,83 @@ impl InferenceRulesRuntime {
             })
     }
 
-    /// True when a composed line matches any `[[rules.lattice_misfire]]` row (intent ∧ response side).
+    fn lattice_misfire_prompt_matches(
+        &self,
+        prompt_lower: &str,
+        rule: &LatticeMisfireRule,
+        prior_agent_lower: Option<&str>,
+    ) -> bool {
+        if !rule.intent.is_empty() && !cnf_any_group_matches(prompt_lower, &rule.intent) {
+            return false;
+        }
+        if !rule.intent_exclude.is_empty()
+            && cnf_any_group_matches(prompt_lower, &rule.intent_exclude)
+        {
+            return false;
+        }
+        if !rule.prior_response_any.is_empty() {
+            let prior = prior_agent_lower.unwrap_or("");
+            if prior.is_empty()
+                || !rule
+                    .prior_response_any
+                    .iter()
+                    .any(|m| prior.contains(&m.to_ascii_lowercase()))
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// True when a line matches any `[[rules.lattice_misfire]]` row (prompt side ∧ response side).
     pub fn lattice_response_misfire_hit(&self, intent_text: &str, response: &str) -> bool {
+        self.lattice_response_misfire_hit_with_prior(intent_text, response, None)
+    }
+
+    /// Cross-turn variant: optional prior agent text enables `prior_response_any` rules.
+    pub fn lattice_response_misfire_hit_with_prior(
+        &self,
+        intent_text: &str,
+        response: &str,
+        prior_agent_text: Option<&str>,
+    ) -> bool {
         let il = Self::normalize_rules_text(intent_text);
         let l = il.as_str();
         let rl = response.to_ascii_lowercase();
         let rls = rl.as_str();
+        let prior = prior_agent_text.map(|t| t.to_ascii_lowercase());
+        let prior_ref = prior.as_deref();
         self.lattice_misfire.iter().any(|rule| {
-            cnf_groups_match(l, &rule.intent) && rule.response_side_matches(rls)
+            self.lattice_misfire_prompt_matches(l, rule, prior_ref)
+                && rule.response_side_matches(rls)
         })
+    }
+
+    /// First matching `[[rules.lattice_misfire_fallback]]` row for chat passthrough recovery.
+    pub fn lattice_misfire_fallback_line(&self, intent_text: &str) -> Option<(String, String)> {
+        let l = Self::normalize_rules_text(intent_text);
+        let prompt = l.as_str();
+        for rule in &self.lattice_misfire_fallback {
+            if !rule.intent.is_empty() && !cnf_any_group_matches(prompt, &rule.intent) {
+                continue;
+            }
+            if !rule.intent_exclude.is_empty()
+                && cnf_any_group_matches(prompt, &rule.intent_exclude)
+            {
+                continue;
+            }
+            let text = rule.response.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let template_id = if rule.template_id.trim().is_empty() {
+                default_lattice_misfire_fallback_template_id()
+            } else {
+                rule.template_id.clone()
+            };
+            return Some((text.to_string(), template_id));
+        }
+        None
     }
 
     /// After a lattice misfire strips a bad retrieved line, substitute a short canned witness when
@@ -2168,7 +2868,15 @@ fn load_primary_document() -> Result<InferenceTomlDocument, String> {
     if let Some(p) = cli_toml_paths().primary {
         match std::fs::read_to_string(&p) {
             Ok(s) => match toml::from_str::<InferenceTomlDocument>(&s) {
-                Ok(doc) => return Ok(doc),
+                Ok(doc) => {
+                    crate::infer_trace!(
+                        "  [inference-toml] primary {} → {} lattice_misfire, {} lattice_misfire_fallback rows",
+                        p.display(),
+                        doc.rules.lattice_misfire.len(),
+                        doc.rules.lattice_misfire_fallback.len()
+                    );
+                    return Ok(doc);
+                }
                 Err(e) => eprintln!(
                     "[inference-toml] failed to parse inference TOML {}: {} — trying env / default paths",
                     p.display(),
@@ -2247,6 +2955,8 @@ pub struct LoadedInferenceToml {
     pub response_shaping: ResponseShapingConfig,
     /// Validation pipeline config from `[validation]` section.
     pub validation: ValidationConfig,
+    /// Typed fragment composition policy from `[fragment_compose]`.
+    pub fragment_compose: FragmentComposeConfig,
 }
 
 impl LoadedInferenceToml {
@@ -2261,6 +2971,9 @@ impl LoadedInferenceToml {
     }
     pub fn validation_config(&self) -> &ValidationConfig {
         &self.validation
+    }
+    pub fn fragment_compose(&self) -> &FragmentComposeConfig {
+        &self.fragment_compose
     }
 }
 
@@ -2314,6 +3027,7 @@ fn build_native_default() -> Arc<LoadedInferenceToml> {
         generation: file.generation,
         response_shaping: file.response_shaping,
         validation: file.validation,
+        fragment_compose: file.fragment_compose,
     })
 }
 
@@ -2340,6 +3054,7 @@ pub fn reload_inference_toml_from_str(toml_str: &str) -> Result<(), String> {
         generation: file.generation,
         response_shaping: file.response_shaping,
         validation: file.validation,
+        fragment_compose: file.fragment_compose,
     });
     let mut guard = FULL.write().unwrap();
     *guard = Some(loaded);
@@ -2352,6 +3067,12 @@ pub fn reload_inference_toml_from_str(toml_str: &str) -> Result<(), String> {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn force_native_inference_rebuild_from_disk() {
     let loaded = build_native_default();
+    let rules = loaded.rules();
+    crate::infer_trace!(
+        "  [inference] disk reload: {} lattice_misfire, {} lattice_misfire_fallback rows",
+        rules.lattice_misfire.len(),
+        rules.lattice_misfire_fallback.len()
+    );
     let mut guard = FULL.write().unwrap();
     *guard = Some(loaded);
 }
@@ -2397,6 +3118,7 @@ fn build_default_loaded() -> Arc<LoadedInferenceToml> {
         generation: file.generation,
         response_shaping: file.response_shaping,
         validation: file.validation,
+        fragment_compose: file.fragment_compose,
     })
 }
 
@@ -2435,6 +3157,7 @@ pub fn reload_inference_toml_from_str(toml_str: &str) -> Result<(), String> {
         generation: domain.generation,
         response_shaping: domain.response_shaping,
         validation: domain.validation,
+        fragment_compose: domain.fragment_compose,
     });
     WASM_FULL.with(|cell| {
         *cell.borrow_mut() = Some(loaded);
@@ -2456,6 +3179,24 @@ pub fn replace_loaded_from_rules_section(
     let rules_section = section.clone();
     let rules = Arc::new(InferenceRulesRuntime::from_section(section));
     let guardrails = super::inference_guardrails::GuardrailsDiskSummary::default();
+    let fragment_compose = {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            FULL.read()
+                .ok()
+                .and_then(|g| g.as_ref().map(|l| l.fragment_compose.clone()))
+                .unwrap_or_default()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            WASM_FULL.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .map(|l| l.fragment_compose.clone())
+                    .unwrap_or_default()
+            })
+        }
+    };
     let loaded = Arc::new(LoadedInferenceToml {
         thresholds,
         rules,
@@ -2464,6 +3205,7 @@ pub fn replace_loaded_from_rules_section(
         generation: GenerationConfig::default(),
         response_shaping: ResponseShapingConfig::default(),
         validation: ValidationConfig::default(),
+        fragment_compose,
     });
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2477,6 +3219,148 @@ pub fn replace_loaded_from_rules_section(
         WASM_FULL.with(|cell| {
             *cell.borrow_mut() = Some(loaded);
         });
+    }
+}
+
+#[cfg(test)]
+mod fragment_compose_tests {
+    use super::*;
+
+    fn luna_like_config() -> FragmentComposeConfig {
+        FragmentComposeConfig {
+            enabled: true,
+            vocalizations: vec!["mrrp".into(), "chirp".into(), "purr".into()],
+            vocal_coda_modifiers: vec!["now".into()],
+            greeting_exact: vec!["hi".into(), "hello".into(), "hey".into()],
+            agent_name_prefixes: vec!["hey ".into(), "hi ".into()],
+            agent_name_greeting_max_len: 48,
+            intent_rules: vec![
+                FragmentIntentRuleToml {
+                    id: "greeting".into(),
+                    intent: "greeting_check_in".into(),
+                    anchors: vec!["greeting_check_in".into()],
+                    min_voices: 1,
+                    relaxed_parts: true,
+                    r#match: "greeting".into(),
+                    patterns: vec![],
+                    max_len: None,
+                },
+                FragmentIntentRuleToml {
+                    id: "agent".into(),
+                    intent: "greeting_check_in".into(),
+                    anchors: vec![],
+                    min_voices: 1,
+                    relaxed_parts: true,
+                    r#match: "agent_name_greeting".into(),
+                    patterns: vec![],
+                    max_len: None,
+                },
+                FragmentIntentRuleToml {
+                    id: "meal".into(),
+                    intent: "mealtime_request".into(),
+                    anchors: vec!["treat".into()],
+                    min_voices: 1,
+                    relaxed_parts: true,
+                    r#match: "contains_any".into(),
+                    patterns: vec!["treat".into()],
+                    max_len: None,
+                },
+                FragmentIntentRuleToml {
+                    id: "default".into(),
+                    intent: "open_ended_chat".into(),
+                    anchors: vec![],
+                    min_voices: 2,
+                    relaxed_parts: false,
+                    r#match: "fallback".into(),
+                    patterns: vec![],
+                    max_len: None,
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn match_intent_greeting_and_agent_name() {
+        let cfg = luna_like_config();
+        let h = cfg.match_intent("Hey there", "");
+        assert_eq!(h.intent, "greeting_check_in");
+        let h2 = cfg.match_intent("hey luna", "Luna");
+        assert_eq!(h2.intent, "greeting_check_in");
+    }
+
+    #[test]
+    fn match_intent_mealtime() {
+        let cfg = luna_like_config();
+        let h = cfg.match_intent("Want a treat?", "Luna");
+        assert_eq!(h.intent, "mealtime_request");
+    }
+
+    #[test]
+    fn vocalization_tail_from_config() {
+        let cfg = luna_like_config();
+        assert!(cfg.vocalization_tail_suspicious(
+            "There you are. Mrrp greeting."
+        ));
+        assert!(!cfg.vocalization_tail_suspicious(
+            "Chirp alert. I sit. Mrrp."
+        ));
+        assert!(!cfg.vocalization_tail_suspicious(
+            "Kitchen. Mrrp now."
+        ));
+    }
+
+    #[test]
+    fn is_pure_vocal_coda_from_config() {
+        let cfg = luna_like_config();
+        assert!(cfg.is_pure_vocal_coda("Mrrp."));
+        assert!(cfg.is_pure_vocal_coda("Mrrp now."));
+        assert!(!cfg.is_pure_vocal_coda("Mrrp greeting."));
+        assert!(cfg.starts_with_vocalization("Chirp alert."));
+    }
+
+    #[test]
+    fn prompt_intent_override_skips_fallback() {
+        let cfg = luna_like_config();
+        assert!(cfg.prompt_intent_override("want a treat", "Luna").is_some());
+        assert!(cfg.prompt_intent_override("random question", "Luna").is_none());
+    }
+
+    #[test]
+    fn classify_voice_from_config() {
+        let cfg = FragmentComposeConfig {
+            decompose: FragmentDecomposeConfig {
+                opener_prefixes: vec!["there you are".into()],
+                drive_override_keywords: vec!["treat".into()],
+                drive_keywords: vec!["hungry".into(), "stomach".into()],
+                activity_keywords: vec!["chase".into(), "pounce".into()],
+                identity_keywords: vec!["blink".into()],
+                ..Default::default()
+            },
+            ..luna_like_config()
+        };
+        assert_eq!(cfg.classify_voice("My stomach has opinions.", "body"), "drive");
+        assert_eq!(cfg.classify_voice("I pounce on the pen.", "body"), "activity");
+        assert_eq!(cfg.classify_voice("I blink slow at you.", "body"), "identity");
+        assert_eq!(cfg.classify_voice("Trill.", "coda"), "identity");
+        assert!(cfg.is_opener("there you are, human"));
+    }
+
+    #[test]
+    fn parses_fragment_compose_section() {
+        let raw = r#"
+mode = "chat"
+[fragment_compose]
+enabled = true
+library = "fragments.jsonl"
+vocalizations = ["mrrp", "chirp"]
+[[fragment_compose.intent_rules]]
+intent = "greeting_check_in"
+match = "fallback"
+"#;
+        let doc: InferenceTomlDocument = toml::from_str(raw).expect("fragment_compose TOML");
+        assert!(doc.fragment_compose.enabled);
+        assert_eq!(doc.fragment_compose.vocalizations.len(), 2);
     }
 }
 
@@ -2628,6 +3512,88 @@ mod negation_tests {
         let rules = InferenceRulesRuntime::from_section(doc.rules);
         let h = "Why XRP Is Gaining Today";
         assert_eq!(rules.sentiment_lexical_topic_key(h).as_deref(), Some("neutral"));
+    }
+
+    #[test]
+    fn kitsu_inference_pets_toml_parses_and_detects_asakusa_bleed() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "../../spacekit/spacekit-projects/companions/kitsu/data/inference_pets.toml",
+        );
+        if !path.is_file() {
+            eprintln!("skip kitsu fixture (path missing): {}", path.display());
+            return;
+        }
+        let raw = std::fs::read_to_string(&path).expect("read kitsu inference_pets.toml");
+        let doc: InferenceTomlDocument = toml::from_str(&raw).expect("parse kitsu inference_pets.toml");
+        assert!(
+            doc.rules.lattice_misfire.len() >= 10,
+            "expected pet lattice_misfire rows, got {}",
+            doc.rules.lattice_misfire.len()
+        );
+        let rules = InferenceRulesRuntime::from_section(doc.rules);
+        assert!(rules.lattice_response_misfire_hit(
+            "will u be my friend?",
+            "Asakusa, Tokyo. Narrow streets, shrine bells, food stalls — locals called me the little fox."
+        ));
+        let fb = rules.lattice_misfire_fallback_line("will u be my friend?");
+        assert!(
+            fb.as_ref()
+                .map(|(t, _)| t.contains("Already am"))
+                .unwrap_or(false),
+            "expected bonding fallback, got {:?}",
+            fb
+        );
+    }
+
+    #[test]
+    fn lattice_misfire_intent_exclude_and_response_driven_bleed() {
+        let rules = InferenceRulesRuntime::from_section(InferenceRulesSection {
+            lattice_misfire: vec![
+                LatticeMisfireRule {
+                    intent: vec![],
+                    intent_exclude: vec![vec!["school".to_string()]],
+                    response_any: vec!["school is loud".to_string()],
+                    response: vec![],
+                    prior_response_any: vec![],
+                },
+                LatticeMisfireRule {
+                    intent: vec![vec!["who are you".to_string()]],
+                    intent_exclude: vec![vec!["like to be called".to_string()]],
+                    response_any: vec!["old wyrm".to_string()],
+                    response: vec![],
+                    prior_response_any: vec![],
+                },
+            ],
+            lattice_misfire_fallback: vec![LatticeMisfireFallbackRule {
+                intent: vec![vec!["i feel sad".to_string()]],
+                intent_exclude: vec![],
+                response: "Grounding line.".to_string(),
+                template_id: "grounding_fallback".to_string(),
+            }],
+            ..InferenceRulesSection::default()
+        });
+        assert!(rules.lattice_response_misfire_hit(
+            "come here",
+            "School is loud in thy head."
+        ));
+        assert!(!rules.lattice_response_misfire_hit(
+            "school was awful today",
+            "School is loud in thy head."
+        ));
+        assert!(rules.lattice_response_misfire_hit(
+            "who are you?",
+            "Some call me old wyrm."
+        ));
+        assert!(!rules.lattice_response_misfire_hit(
+            "what do you like to be called",
+            "Some call me old wyrm."
+        ));
+        let fb = rules.lattice_misfire_fallback_line("I feel sad");
+        assert_eq!(fb.as_ref().map(|(t, _)| t.as_str()), Some("Grounding line."));
+        assert_eq!(
+            fb.as_ref().map(|(_, id)| id.as_str()),
+            Some("grounding_fallback")
+        );
     }
 
     #[test]

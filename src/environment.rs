@@ -667,6 +667,21 @@ impl NeuralEnvironment {
         self.forward_pass(input, false, &mut dummy_rng)
     }
 
+    /// Output activations and penultimate hidden layer activations (layer before output).
+    pub fn predict_with_penultimate_hidden(&mut self, input: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        let output = self.forward(input);
+        let penult_idx = self.layers.len().saturating_sub(2);
+        let hidden = if penult_idx > 0 && penult_idx < self.layers.len() {
+            self.layers[penult_idx]
+                .iter()
+                .map(|&id| self.neurons.get(&id).map(|n| n.activation).unwrap_or(0.0))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        (output, hidden)
+    }
+
     // -------------------------------------------------------------------------
     // Backprop
     // -------------------------------------------------------------------------

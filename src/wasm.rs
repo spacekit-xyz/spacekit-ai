@@ -308,9 +308,6 @@ pub fn growformer_enable_stochastic_retrieval(temperature: f32) -> Result<(), Js
 /// Call after `growformer_load_brain` and before inference.
 #[wasm_bindgen]
 pub fn growformer_load_topic_graph(base_toml: &str, overlay_toml: Option<String>) -> Result<(), JsValue> {
-    if crate::growformer_lang::topic_graph_loaded() {
-        return Ok(());
-    }
     let base_graph = crate::topic_graph::TopicGraph::from_toml(base_toml)
         .map_err(|e| JsValue::from_str(&format!("topic graph base: {}", e)))?;
     let final_graph = if let Some(ref overlay) = overlay_toml {
@@ -322,6 +319,12 @@ pub fn growformer_load_topic_graph(base_toml: &str, overlay_toml: Option<String>
     };
     crate::growformer_lang::init_topic_graph_direct(final_graph)
         .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Drop the in-memory topic graph so the next `growformer_load_topic_graph` installs fresh rules.
+#[wasm_bindgen]
+pub fn growformer_clear_topic_graph() {
+    crate::growformer_lang::clear_topic_graph();
 }
 
 /// Load a world grounding graph TOML (concept nodes, typed edges, disambiguation).
@@ -344,6 +347,14 @@ pub fn growformer_set_agent_state(state_json: &str) -> Result<(), JsValue> {
     with_rt(|rt| {
         rt.set_agent_state_from_json(state_json)
     })
+}
+
+/// Load a JSONL fragment library for chat-mode fragment composition.
+/// Call after `growformer_load_inference_toml` (which enables `[fragment_compose]`).
+/// Returns the number of fragments loaded.
+#[wasm_bindgen]
+pub fn growformer_load_fragments_jsonl(jsonl: &str) -> Result<usize, JsValue> {
+    with_rt(|rt| Ok(rt.svc.load_fragments_from_str(jsonl)))
 }
 
 #[wasm_bindgen]

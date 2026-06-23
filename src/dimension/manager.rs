@@ -303,6 +303,19 @@ impl DimensionManager {
         })
     }
 
+    /// Gradient-only mirror epoch (no physics side-effects). Faster for small 2D classification demos.
+    #[cfg(feature = "training")]
+    pub fn train_mirror_epoch_gradient(
+        &mut self,
+        task_name: &str,
+        data: &[crate::types::Sample],
+        rng: &mut impl Rng,
+    ) -> Option<EpochResult> {
+        self.mirrors
+            .get_mut(task_name)
+            .map(|m| m.train_epoch_gradient(data, rng))
+    }
+
     /// If mirror has reached epoch_trigger and current_loss > loss_threshold and not yet triggered,
     /// insert one neuron into its last hidden layer (neurogenesis). Returns true if a neuron was added.
     pub fn try_mirror_neurogenesis(
@@ -552,9 +565,29 @@ impl DimensionManager {
                 vg.train_step(&mut self.main, input.as_slice(), target, lr);
             }
         }
+        Self::composition_accuracy(&mut self.main, &vg, data)
+    }
+
+    /// One forward pass per sample + least-squares blend solve (no epoch loop).
+    #[cfg(feature = "training")]
+    pub fn train_composition_one_pass(
+        &mut self,
+        group_ids: &[GroupId],
+        data: &[crate::types::Sample],
+    ) -> (VirtualGroup, f32) {
+        let vg = VirtualGroup::fit_blend_weights_one_pass(group_ids, &mut self.main, data);
+        Self::composition_accuracy(&mut self.main, &vg, data)
+    }
+
+    #[cfg(feature = "training")]
+    fn composition_accuracy(
+        main: &mut MainDimension,
+        vg: &VirtualGroup,
+        data: &[crate::types::Sample],
+    ) -> (VirtualGroup, f32) {
         let mut correct = 0usize;
         for (input, target) in data {
-            let out = vg.predict(&mut self.main, input.as_slice());
+            let out = vg.predict(main, input.as_slice());
             if out.len() >= 1 && (out[0] - target[0]).abs() < 0.5 {
                 correct += 1;
             }
@@ -564,7 +597,7 @@ impl DimensionManager {
         } else {
             correct as f32 / data.len() as f32
         };
-        (vg, acc)
+        (vg.clone(), acc)
     }
 
     /// Store a successful composition in episodic memory. Signature = mean of input coords (any dimension).

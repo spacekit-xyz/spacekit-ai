@@ -346,8 +346,22 @@ fn parse_guardrail_line(
             }
             misfires.push(LatticeMisfireRule {
                 intent,
+                intent_exclude: v
+                    .get("intent_exclude")
+                    .map(json_to_cnf)
+                    .transpose()?
+                    .unwrap_or_default(),
                 response_any,
                 response,
+                prior_response_any: v
+                    .get("prior_response_any")
+                    .and_then(|x| x.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             });
         }
         "" => {}

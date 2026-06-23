@@ -444,6 +444,15 @@ impl ConversationContext {
         self.history.is_empty()
     }
 
+    /// Most recent agent utterance in the rolling history (for cross-turn misfire rules).
+    pub fn last_agent_text(&self) -> Option<&str> {
+        self.history
+            .iter()
+            .rev()
+            .find(|t| t.role == TurnRole::Agent)
+            .map(|t| t.text.as_str())
+    }
+
     pub fn clear(&mut self) {
         self.history.clear();
         self.context_embedding.clear();
@@ -768,6 +777,22 @@ impl LanguageService {
         self.fragment_composer = Some(fc);
     }
 
+    /// Load a JSONL fragment library from a string and enable fragment composition.
+    /// Returns the number of fragments loaded.
+    pub fn load_fragments_from_str(&mut self, jsonl: &str) -> usize {
+        let (fc, skipped) = crate::fragment_composer::FragmentComposer::from_jsonl_str(jsonl);
+        let n = fc.fragments.len();
+        if skipped > 0 {
+            crate::infer_trace!(
+                "  [fragment-compose] loaded {n} fragments ({skipped} malformed lines skipped)"
+            );
+        } else {
+            crate::infer_trace!("  [fragment-compose] loaded {n} fragments");
+        }
+        self.fragment_composer = Some(fc);
+        n
+    }
+
     /// Load a JSONL fragment library from disk and enable fragment composition.
     /// Returns the number of fragments loaded.
     #[cfg(not(target_arch = "wasm32"))]
@@ -775,19 +800,14 @@ impl LanguageService {
         &mut self,
         path: P,
     ) -> std::io::Result<usize> {
-        let (fc, skipped) = crate::fragment_composer::FragmentComposer::from_path(path)?;
-        let n = fc.fragments.len();
-        if skipped > 0 {
-            crate::infer_trace!("  [fragment-compose] loaded {n} fragments ({skipped} malformed lines skipped)");
-        }
-        self.fragment_composer = Some(fc);
-        Ok(n)
+        let s = std::fs::read_to_string(path)?;
+        Ok(self.load_fragments_from_str(&s))
     }
 
     /// Attempt to compose a chat response from the fragment library. Returns
     /// `None` (caller falls through to lattice retrieval) when no library is
-    /// loaded, no fragment is eligible, or the composition uses fewer than two
-    /// voices (too thin to beat retrieval).
+    /// loaded, no fragment is eligible, coherence checks fail, or the blend is
+    /// too thin to beat retrieval.
     fn try_fragment_compose(
         &self,
         intent_text: &str,
@@ -797,6 +817,7 @@ impl LanguageService {
         nm: Option<crate::drive_field::Neuromodulators>,
         turn_count: usize,
     ) -> Option<GeneratedResponse> {
+        use crate::dimension::group_gen::IndexedGenEnv;
         use crate::fragment_composer::ComposeContext;
         use crate::reflective_field::ReflectiveWeights;
 
@@ -805,13 +826,13 @@ impl LanguageService {
             return None;
         }
 
-        // Map the prompt onto a coarse semantic intent. (A learned intent head can
-        // replace this heuristic later.)
-        let intent_key = if Self::is_greeting(intent_text) {
-            "greeting_check_in"
-        } else {
-            "open_ended_chat"
-        };
+        let fc_cfg = crate::inference::inference_toml::inference_toml_loaded();
+        if !fc_cfg.fragment_compose().enabled {
+            return None;
+        }
+        let fc_policy = fc_cfg.fragment_compose();
+
+        let hints = fc_policy.match_intent(intent_text, &self.agent_name);
 
         let mut ocean5 = [0.5f32; 5];
         for (i, slot) in ocean5.iter_mut().enumerate() {
@@ -820,19 +841,20 @@ impl LanguageService {
             }
         }
 
-        // When no runtime state is provided (e.g. a stateless CLI query), supply a
-        // neutral-content baseline so composition reads calm/rested rather than
-        // collapsing onto low-range (sleepy/hungry/aloof) fragments.
-        let state_map = match state {
+        // When no runtime state is provided, use configured neutral baseline.
+        // Prefer live DriveField vitals (post-satisfy/tick) so fragment state_gates
+        // track feeding and mood even when the host only sends turn + minutes_idle.
+        let mut state_map = match state {
             Some(s) if !s.dimensions.is_empty() => s.dimensions.clone(),
-            _ => {
-                let mut m = std::collections::HashMap::new();
-                m.insert("hunger".to_string(), 0.4);
-                m.insert("energy".to_string(), 0.55);
-                m.insert("mood".to_string(), 0.65);
-                m
-            }
+            _ => fc_policy.default_neutral_state.clone(),
         };
+        if let Some(ref df) = self.drive_field {
+            if df.enabled {
+                state_map.insert("hunger".to_string(), df.state.hunger);
+                state_map.insert("energy".to_string(), df.state.energy);
+                state_map.insert("mood".to_string(), df.state.social);
+            }
+        }
         let archetype = state.and_then(|s| s.profile.clone());
         let turn = state.map(|s| s.turn).unwrap_or(0);
         let multi_turn = turn_count > 1;
@@ -846,30 +868,107 @@ impl LanguageService {
             seed = (seed ^ b as u64).wrapping_mul(0x100000001b3);
         }
         seed = seed.wrapping_add((turn as u64).wrapping_mul(0x9e3779b97f4a7c15));
+        seed = seed.wrapping_add(
+            (turn_count as u64).wrapping_mul(0x517cc1b727220a95),
+        );
+
+        let force_second_body = fc_policy
+            .force_second_body_intents
+            .iter()
+            .any(|i| i == &hints.intent);
+
+        let use_opener = fc_policy.should_use_opener(&hints.intent);
+
+        let template = fc_policy.template_for_intent(&hints.intent);
+        let body_slots = template.map(|t| t.body_slots.clone());
+        let min_bodies = template.map(|t| t.min_bodies).unwrap_or(1);
+        let require_distinct_voices = template.map(|t| t.require_distinct_voices).unwrap_or(false);
+        let excludes = fc_policy.excludes_for_intent(&hints.intent);
 
         let ctx = ComposeContext {
-            intent: intent_key.to_string(),
-            graph_anchors: Vec::new(),
+            intent: hints.intent.clone(),
+            graph_anchors: hints.anchors.clone(),
             ocean: ocean5,
             state: state_map,
             weights,
             archetype,
             seed,
+            force_second_body,
+            use_opener,
+            body_slots,
+            min_bodies,
+            require_distinct_voices,
+            excludes,
         };
 
         let composed = fc.compose(&ctx)?;
-        // Require a genuinely blended (≥2 voice) line; thinner output is left to
-        // the existing retrieval path which may have a better verbatim match.
-        if composed.voices_used < 2 {
+
+        if !Self::composed_passes_quality_gate(&composed, &hints, fc_policy) {
+            infer_trace!(
+                "  [fragment-compose] rejected (coherence/thinness): \"{}\"",
+                composed.text.chars().take(72).collect::<String>()
+            );
             return None;
         }
+
+        infer_trace!(
+            "  [fragment-compose] intent={} parts={} voices={} ids={:?}",
+            hints.intent,
+            composed.fragment_ids.len(),
+            composed.voices_used,
+            composed.fragment_ids,
+        );
 
         Some(GeneratedResponse {
             text: composed.text,
             template_id: "fragment_composed_v1".to_string(),
             traceable: true,
-            confidence: 0.9,
+            confidence: if hints.intent == "open_ended_chat" {
+                0.9
+            } else {
+                0.998
+            },
         })
+    }
+
+    /// Quality gate for composed fragment lines before they preempt retrieval.
+    fn composed_passes_quality_gate(
+        composed: &crate::fragment_composer::ComposedResponse,
+        hints: &crate::inference::FragmentIntentHint,
+        fc: &crate::inference::FragmentComposeConfig,
+    ) -> bool {
+        if composed.body_count < 1 {
+            return false;
+        }
+        if composed.text.len() < 8 {
+            return false;
+        }
+        if composed.body_chars < 12 && composed.body_count < 2 {
+            return false;
+        }
+        if IndexedGenEnv::looks_fragmented(&composed.text) {
+            return false;
+        }
+        if fc.vocalization_tail_suspicious(&composed.text) {
+            return false;
+        }
+        if let Some(template) = fc.template_for_intent(&hints.intent) {
+            if composed.body_count < template.min_bodies.max(1) {
+                return false;
+            }
+        }
+        if composed.voices_used >= hints.min_voices {
+            return true;
+        }
+        hints.relaxed_parts && composed.fragment_ids.len() >= 2
+    }
+
+    /// Resolve the fragment library path from inference TOML + env overrides.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn resolve_fragments_library(brain_path: &str) -> Option<std::path::PathBuf> {
+        crate::inference::inference_toml::inference_toml_loaded()
+            .fragment_compose()
+            .resolve_library_path(brain_path)
     }
 
     /// Start recording [`ReflectionOutcome`](crate::metacognition::ReflectionOutcome) as [`Observation`]s into a queue (see [`QueuedEnvironment`]).
@@ -1166,6 +1265,171 @@ impl LanguageService {
             }
         }
         true
+    }
+
+    /// Pet chat: lattice retrieval sometimes returns the school comfort arc on unrelated
+    /// prompts. Detect bleed so we can retry fragment compose (or a small fallback).
+    fn pet_school_comfort_bleed(prompt: &str, response: &str) -> bool {
+        let p = prompt.to_ascii_lowercase();
+        let r = response.to_ascii_lowercase();
+        if !Self::response_looks_like_school_comfort_arc(&r) {
+            return false;
+        }
+        !Self::prompt_has_school_context(&p)
+    }
+
+    fn response_looks_like_school_comfort_arc(response: &str) -> bool {
+        let r = response.to_ascii_lowercase();
+        r.contains("school is loud")
+            || (r.contains("in your head") || r.contains("in thy head"))
+                && (r.contains("make room on the cushion")
+                    || r.contains("make room by my hearth")
+                    || r.contains("make room without asking"))
+            || (r.contains("hear it in your voice") || r.contains("hear it in thy voice"))
+                && (r.contains("come sit") || r.contains("come sit by"))
+    }
+
+    fn prompt_has_school_context(prompt: &str) -> bool {
+        const SCHOOL: &[&str] = &[
+            "school", "grades", "homework", "teacher", "math class", "test today",
+            "failed a test", "failed my test", "bad day at school", "awful day at school",
+            "terrible day at school", "school was awful", "bad grades",
+        ];
+        SCHOOL.iter().any(|k| prompt.contains(k))
+    }
+
+    /// Last resort when lattice or compose returned school comfort on a non-school prompt.
+    fn pet_school_bleed_fallback(prompt: &str) -> Option<GeneratedResponse> {
+        let p = prompt.to_ascii_lowercase();
+        if Self::prompt_has_school_context(&p) {
+            return None;
+        }
+        let bedtime = p.contains("time for bed")
+            || p.contains("bedtime")
+            || p.contains("lights out")
+            || p.contains("night night")
+            || p.contains("go to sleep")
+            || p.contains("time to sleep")
+            || p.contains("sleep now")
+            || p.contains("sleep soon");
+        if bedtime {
+            return Some(GeneratedResponse {
+                text: "I am already on the pillow. I was here first. My eyes are slits. The purr runs slow and deep. Prrp night.".into(),
+                template_id: "pet_bedtime_fallback".into(),
+                traceable: false,
+                confidence: 0.998,
+            });
+        }
+        let text = if p.contains("overwhelm") {
+            "Breathe slow, as from a dragon's hearth. Place thy hand upon thy chest. Feel the life within. Rumble."
+        } else if p.contains("spiral") {
+            "Let thy thoughts drift like smoke into the night. My wings fold wide beside thee — shelter, not cage. Thrum."
+        } else if p.contains("sad") {
+            "Worry not, dear heart. I rumble low and steady for thee. My wings stay wide beside thee. Rumble."
+        } else if p.contains("lonely") {
+            "Rest, do not surrender. Even dragons pause before soaring anew. My wings stay wide beside thee. Rumble."
+        } else {
+            "I heard thee. Breathe with my rumble — slow, steady. Warm the hearth first — I stay beside thee. Thrum."
+        };
+        Some(GeneratedResponse {
+            text: text.into(),
+            template_id: "pet_general_comfort_fallback".into(),
+            traceable: false,
+            confidence: 0.998,
+        })
+    }
+
+    /// Pet chat: lattice sometimes returns origin lore on nickname prompts.
+    fn pet_lore_nickname_misfire(prompt: &str, response: &str) -> bool {
+        let p = prompt.to_ascii_lowercase();
+        let r = response.to_ascii_lowercase();
+        let nickname = p.contains("like to be called")
+            || p.contains("nickname")
+            || p.contains("what should i call you")
+            || p.contains("call you pete")
+            || p.contains("call you petey");
+        if !nickname {
+            return false;
+        }
+        r.contains("medieval terra")
+            || r.contains("long ago, when stars")
+            || r.contains("newborn sparks")
+            || r.contains("cosmic warmth")
+    }
+
+    fn pet_lore_nickname_fallback() -> GeneratedResponse {
+        GeneratedResponse {
+            text: "Pete suits me well. Some call me old wyrm — I answer to that too, with dignity. Rumble.".into(),
+            template_id: "pet_lore_nickname_fallback".into(),
+            traceable: false,
+            confidence: 0.998,
+        }
+    }
+
+    fn pet_bleed_retry_compose(
+        &self,
+        intent_text: &str,
+        ocean: &[f32],
+        state: Option<&AgentRuntimeState>,
+        reflective: Option<&crate::reflective_field::ReflectiveField>,
+        nm: Option<crate::drive_field::Neuromodulators>,
+        turn_count: usize,
+    ) -> Option<GeneratedResponse> {
+        self.try_fragment_compose(
+            intent_text,
+            ocean,
+            state,
+            reflective,
+            nm,
+            turn_count,
+        )
+    }
+
+    /// Substitute line when chat passthrough detects a lattice/compose misfire.
+    /// Rows are defined in inference TOML (`[[rules.lattice_misfire_fallback]]`).
+    fn lattice_misfire_fallback_response(intent_text: &str) -> Option<GeneratedResponse> {
+        crate::inference::inference_rules_runtime()
+            .lattice_misfire_fallback_line(intent_text)
+            .map(|(text, template_id)| GeneratedResponse {
+                text,
+                template_id,
+                traceable: false,
+                confidence: 0.998,
+            })
+    }
+
+    fn chat_response_misfire_hit(
+        intent_text: &str,
+        response: &str,
+        prior_agent_text: Option<&str>,
+    ) -> bool {
+        let rules = crate::inference::inference_rules_runtime();
+        if let Some(prior) = prior_agent_text {
+            rules.lattice_response_misfire_hit_with_prior(intent_text, response, Some(prior))
+        } else {
+            rules.lattice_response_misfire_hit(intent_text, response)
+        }
+    }
+
+    fn apply_chat_output_guardrails(
+        intent_text: &str,
+        prior_agent_text: Option<&str>,
+        mut resp: GeneratedResponse,
+    ) -> GeneratedResponse {
+        let misfire = Self::chat_response_misfire_hit(intent_text, &resp.text, prior_agent_text);
+        let rule_count = crate::inference::inference_rules_runtime().lattice_misfire.len();
+        infer_trace!(
+            "  [chat-guardrail] misfire={} rules={}",
+            misfire,
+            rule_count
+        );
+        if misfire {
+            infer_trace!("  [chat-guardrail] lattice_misfire on output → fallback");
+            if let Some(fb) = Self::lattice_misfire_fallback_response(intent_text) {
+                resp = fb;
+            }
+        }
+        resp
     }
 
     /// Second sentence for [`Self::greeting_response`]: from brain package header when set,
@@ -1559,8 +1823,8 @@ impl LanguageService {
         // response from typed identity/activity/drive fragments instead of
         // retrieving a whole canned program. Gated on a loaded fragment library
         // and a ≥2-voice composition; otherwise fall through to lattice retrieval.
-        if chat_passthrough && !Self::is_identity_query(intent_text) {
-            if let Some(resp) = self.try_fragment_compose(
+        if chat_passthrough {
+            if let Some(mut resp) = self.try_fragment_compose(
                 intent_text,
                 &ocean_snapshot,
                 agent_state_snapshot.as_ref(),
@@ -1568,6 +1832,25 @@ impl LanguageService {
                 drive_nm_snapshot,
                 conversation_turn_count,
             ) {
+                if Self::pet_school_comfort_bleed(intent_text, &resp.text) {
+                    infer_trace!(
+                        "  [pet-misfire] school comfort composed on non-school prompt → compose retry / comfort fallback"
+                    );
+                    if let Some(retry) = self.pet_bleed_retry_compose(
+                        intent_text,
+                        &ocean_snapshot,
+                        agent_state_snapshot.as_ref(),
+                        reflective_field_snapshot.as_ref(),
+                        drive_nm_snapshot,
+                        conversation_turn_count,
+                    ) {
+                        resp = retry;
+                    } else if let Some(fb) = Self::pet_school_bleed_fallback(intent_text) {
+                        resp = fb;
+                    }
+                }
+                let prior_agent = self.conversation.last_agent_text();
+                resp = Self::apply_chat_output_guardrails(intent_text, prior_agent, resp);
                 infer_trace!("  [fragment-compose] composed response ({} chars)", resp.text.len());
                 self.record_latency(start);
                 return Ok((action, resp));
@@ -3010,6 +3293,35 @@ impl LanguageService {
                 traceable: false,
                 confidence: 0.40,
             }
+        } else {
+            resp
+        };
+
+        // Chat passthrough safety net: high-confidence lines that match TOML lattice_misfire
+        // → retry fragment compose, then optional TOML fallback line.
+        let prior_agent = self.conversation.last_agent_text();
+        let resp = if chat_passthrough
+            && resp.confidence > 0.95
+            && Self::chat_response_misfire_hit(intent_text, &resp.text, prior_agent)
+        {
+            infer_trace!(
+                "  [lattice-misfire] high-confidence bleed → compose retry or TOML fallback"
+            );
+            self.try_fragment_compose(
+                intent_text,
+                &ocean_snapshot,
+                agent_state_snapshot.as_ref(),
+                reflective_field_snapshot.as_ref(),
+                drive_nm_snapshot,
+                conversation_turn_count,
+            )
+            .map(|r: GeneratedResponse| {
+                Self::apply_chat_output_guardrails(intent_text, prior_agent, r)
+            })
+            .or_else(|| Self::lattice_misfire_fallback_response(intent_text))
+            .unwrap_or(resp)
+        } else if chat_passthrough {
+            Self::apply_chat_output_guardrails(intent_text, prior_agent, resp)
         } else {
             resp
         };
@@ -5066,5 +5378,102 @@ mod tests {
         assert!((restored.extraversion - p.extraversion).abs() < 1e-6);
         assert!((restored.agreeableness - p.agreeableness).abs() < 1e-6);
         assert!((restored.neuroticism - p.neuroticism).abs() < 1e-6);
+    }
+
+    // -----------------------------------------------------------------------
+    // Fragment composition quality gate
+    // -----------------------------------------------------------------------
+
+    fn test_fragment_compose_config() -> crate::inference::FragmentComposeConfig {
+        crate::inference::FragmentComposeConfig {
+            enabled: true,
+            vocalizations: vec![
+                "mrrp".into(),
+                "chirp".into(),
+                "trill".into(),
+                "purr".into(),
+            ],
+            vocal_coda_modifiers: vec!["now".into()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn composed_quality_gate_accepts_greeting_line() {
+        let fc = test_fragment_compose_config();
+        let hints = crate::inference::FragmentIntentHint {
+            intent: "greeting_check_in".into(),
+            anchors: vec!["greeting_check_in".into()],
+            min_voices: 1,
+            relaxed_parts: true,
+        };
+        let composed = crate::fragment_composer::ComposedResponse {
+            text: "There you are. This is the most attention I give anyone. Purr.".into(),
+            fragment_ids: vec!["a".into(), "b".into(), "c".into()],
+            voices_used: 1,
+            body_count: 2,
+            body_chars: 52,
+        };
+        assert!(LanguageService::composed_passes_quality_gate(
+            &composed, &hints, &fc
+        ));
+    }
+
+    #[test]
+    fn composed_quality_gate_honors_min_voices_not_max_two() {
+        let fc = test_fragment_compose_config();
+        let hints = crate::inference::FragmentIntentHint {
+            intent: "greeting_check_in".into(),
+            anchors: Vec::new(),
+            min_voices: 1,
+            relaxed_parts: false,
+        };
+        let composed = crate::fragment_composer::ComposedResponse {
+            text: "There you are. Purr.".into(),
+            fragment_ids: vec!["a".into(), "b".into()],
+            voices_used: 1,
+            body_count: 1,
+            body_chars: 14,
+        };
+        assert!(LanguageService::composed_passes_quality_gate(
+            &composed, &hints, &fc
+        ));
+    }
+
+    #[test]
+    fn composed_quality_gate_rejects_word_salad() {
+        let fc = test_fragment_compose_config();
+        let hints = crate::inference::FragmentIntentHint {
+            intent: "open_ended_chat".into(),
+            anchors: Vec::new(),
+            min_voices: 2,
+            relaxed_parts: false,
+        };
+        let composed = crate::fragment_composer::ComposedResponse {
+            text: "My claws is polite mrrp my.".into(),
+            fragment_ids: vec!["a".into(), "b".into()],
+            voices_used: 2,
+            body_count: 2,
+            body_chars: 24,
+        };
+        assert!(!LanguageService::composed_passes_quality_gate(
+            &composed, &hints, &fc
+        ));
+    }
+
+    #[test]
+    fn pet_school_comfort_bleed_detects_school_on_non_school_prompts() {
+        assert!(LanguageService::pet_school_comfort_bleed(
+            "come here Lulu",
+            "School is loud in your head. I hear it in your voice. Come sit."
+        ));
+        assert!(LanguageService::pet_school_comfort_bleed(
+            "time for bed",
+            "School is loud in your head. I hear it in your voice. Come sit. I make room on the cushion without asking. Mrrp soft."
+        ));
+        assert!(!LanguageService::pet_school_comfort_bleed(
+            "school was awful today",
+            "School is loud in your head. I hear it in your voice."
+        ));
     }
 }

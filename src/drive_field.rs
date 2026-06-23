@@ -87,6 +87,45 @@ fn clamp01(x: f32) -> f32 {
     x.clamp(0.0, 1.0)
 }
 
+/// True when the user is offering food — not asking what Luna likes.
+fn is_feeding_satisfy_input(input: &str) -> bool {
+    let l = input.to_ascii_lowercase();
+    if l.contains("for example") {
+        return false;
+    }
+    if l.contains('?')
+        && (l.contains("do you like")
+            || l.contains("would you like")
+            || l.contains("what do you like")
+            || l.contains("what food")
+            || l.contains("which do you")
+            || l.contains("favorite food")
+            || l.contains("prefer"))
+    {
+        return false;
+    }
+    const GIVES: &[&str] = &[
+        "here's",
+        "here is",
+        "here are",
+        "have some",
+        "brought you",
+        "gave you",
+        "just fed",
+        "fed you",
+        "i fed",
+        "just gave",
+        "enjoy your",
+        "for you luna",
+        "for you, luna",
+    ];
+    if GIVES.iter().any(|g| l.contains(g)) {
+        return true;
+    }
+    let trimmed = input.trim();
+    trimmed.starts_with('🍣') || trimmed.starts_with('🍱') || trimmed.starts_with('🐟')
+}
+
 #[inline]
 fn centered(x: f32) -> f32 {
     // Map [0,1] level to a [-0.5, 0.5] deviation around neutral.
@@ -154,8 +193,7 @@ impl DriveState {
         let l = input.to_ascii_lowercase();
         let mut tags: Vec<&'static str> = Vec::new();
 
-        let feeds = ["food", "treat", "feed", "dinner", "breakfast", "eat", "snack", "fish", "tuna"];
-        if feeds.iter().any(|k| l.contains(k)) {
+        if is_feeding_satisfy_input(input) {
             self.hunger = clamp01(self.hunger - 0.6);
             tags.push("hunger");
         }
@@ -309,6 +347,13 @@ mod tests {
         let mut s = DriveState { hunger: 0.9, energy: 0.5, social: 0.5 };
         s.satisfy("here is a treat for you");
         assert!(s.hunger < 0.4, "feeding should drop hunger: {}", s.hunger);
+    }
+
+    #[test]
+    fn food_preference_question_does_not_satisfy_hunger() {
+        let mut s = DriveState { hunger: 0.9, energy: 0.5, social: 0.5 };
+        s.satisfy("do you like tuna, salmon or fancy feast?");
+        assert!(s.hunger > 0.85, "questions should not feed: {}", s.hunger);
     }
 
     #[test]
