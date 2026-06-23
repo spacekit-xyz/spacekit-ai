@@ -1630,6 +1630,102 @@ pub struct DisjointEvalAudit {
     pub resolvable: bool,
 }
 
+/// Leave-one-out scan of an entire corpus: how many phrases are feature-disjoint from the *rest*
+/// of their own class (and seen-elsewhere)? This answers the cheap, decisive question behind the
+/// in-domain GLE eval — *does a certifiable held-out set exist in this domain at all, or is the
+/// disjoint-example class structurally empty?* It must be leave-one-out: a phrase is always
+/// (trivially) present in its own class's training, so a `train==eval` audit reports 0 by artifact,
+/// not by domain. Here a phrase is disjoint-from-its-class iff each of its `level` features occurs
+/// in exactly one phrase of that class (itself), and seen-elsewhere iff some such feature appears
+/// in another class.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CorpusDisjointnessScan {
+    pub level: String,
+    pub n_classes: usize,
+    pub n_phrases: usize,
+    /// Classes with ≥ `min_class_size` phrases — only these can serve as eval classes (a class
+    /// needs phrases for both a training centroid and a held-out example; a singleton "disjoint"
+    /// phrase is degenerate, not usable).
+    pub n_eligible_classes: usize,
+    pub n_eligible_phrases: usize,
+    pub n_disjoint: usize,
+    pub n_seen_elsewhere: usize,
+    pub n_novel: usize,
+    /// `(class, seen_elsewhere_count, phrase_count)`, sorted, only eligible classes with ≥1 seen-elsewhere.
+    pub per_class_seen_elsewhere: Vec<(String, usize, usize)>,
+}
+
+pub fn scan_corpus_disjointness(
+    pairs: &[(String, String)],
+    level: &str,
+    min_class_size: usize,
+) -> CorpusDisjointnessScan {
+    // Per (class, feature) → number of phrases in that class containing the feature.
+    let mut class_feat_phrases: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    // Per feature → set of classes it appears in.
+    let mut feat_classes: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut class_phrase_count: HashMap<String, usize> = HashMap::new();
+    let feats: Vec<(String, HashSet<String>)> = pairs
+        .iter()
+        .map(|(t, c)| (c.clone(), restrict_features(&phrase_feature_set(t), level)))
+        .collect();
+    for (c, fp) in &feats {
+        *class_phrase_count.entry(c.clone()).or_insert(0) += 1;
+        let cf = class_feat_phrases.entry(c.clone()).or_default();
+        for f in fp {
+            *cf.entry(f.clone()).or_insert(0) += 1;
+            feat_classes.entry(f.clone()).or_default().insert(c.clone());
+        }
+    }
+
+    let mut per_class: std::collections::BTreeMap<String, (usize, usize)> = std::collections::BTreeMap::new();
+    let (mut n_disjoint, mut n_seen, mut n_novel) = (0usize, 0usize, 0usize);
+    let mut n_eligible_phrases = 0usize;
+    for (c, fp) in &feats {
+        // Only classes big enough to serve as eval classes (training centroid + held-out example).
+        if class_phrase_count.get(c).copied().unwrap_or(0) < min_class_size {
+            continue;
+        }
+        n_eligible_phrases += 1;
+        let entry = per_class.entry(c.clone()).or_insert((0, 0));
+        entry.1 += 1;
+        if fp.is_empty() {
+            continue;
+        }
+        let cf = &class_feat_phrases[c];
+        // Disjoint from the rest of its class iff every feature is unique to this phrase in-class.
+        let disjoint = fp.iter().all(|f| cf.get(f).copied().unwrap_or(0) <= 1);
+        if disjoint {
+            n_disjoint += 1;
+            let seen_elsewhere = fp
+                .iter()
+                .any(|f| feat_classes.get(f).map(|s| s.iter().any(|x| x != c)).unwrap_or(false));
+            if seen_elsewhere {
+                n_seen += 1;
+                entry.0 += 1;
+            } else {
+                n_novel += 1;
+            }
+        }
+    }
+    let n_eligible_classes = class_phrase_count.values().filter(|&&n| n >= min_class_size).count();
+    CorpusDisjointnessScan {
+        level: level.to_string(),
+        n_classes: class_phrase_count.len(),
+        n_phrases: pairs.len(),
+        n_eligible_classes,
+        n_eligible_phrases,
+        n_disjoint,
+        n_seen_elsewhere: n_seen,
+        n_novel,
+        per_class_seen_elsewhere: per_class
+            .into_iter()
+            .filter(|(_, (s, _))| *s > 0)
+            .map(|(c, (s, t))| (c, s, t))
+            .collect(),
+    }
+}
+
 /// Compute the disjointness audit for `eval_pairs` against `train_pairs` (both `(text, class)`).
 pub fn audit_disjoint_eval(
     train_pairs: &[(String, String)],
@@ -2377,6 +2473,24 @@ mod tests {
         i.strict_disjoint_level = false;
         assert_eq!(decide_encoder_verdict(&i), Verdict::PassProvisional);
         assert!(!decide_encoder_verdict(&i).is_promotable());
+    }
+
+    #[test]
+    fn scan_corpus_disjointness_is_leave_one_out_not_self_overlap() {
+        // A class whose phrases share no in-class features except one unique-token phrase that
+        // also shares a token with another class ⇒ exactly one seen-elsewhere disjoint phrase.
+        let pairs = vec![
+            ("alpha bravo".to_string(), "c1".to_string()),
+            ("charlie delta".to_string(), "c1".to_string()),
+            ("alpha echo".to_string(), "c2".to_string()), // shares "alpha" with c1
+            ("foxtrot golf".to_string(), "c2".to_string()),
+        ];
+        let s = scan_corpus_disjointness(&pairs, "w", 2);
+        // Every phrase's words are unique within its class here, so all 4 are disjoint-from-class;
+        // "alpha"-bearing phrases are seen-elsewhere (alpha spans c1 and c2).
+        assert_eq!(s.n_phrases, 4);
+        assert!(s.n_seen_elsewhere >= 1, "the shared-token phrases must count as seen-elsewhere");
+        assert!(s.n_disjoint >= s.n_seen_elsewhere);
     }
 
     #[test]

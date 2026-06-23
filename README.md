@@ -584,9 +584,13 @@ Encoder certification (the contract every encoder — GLE included — is judged
 - Certify an encoder, emit verdict artifact: `cargo run --release --bin growformer-demos -- --certify-encoder supervised <companion_dir>`
 - Positive-control / lexical baseline: `cargo run --release --bin growformer-demos -- --certify-encoder cata <companion_dir>`
 - Certify the GLE on its **own** support/coding domain (the 100%): `cargo run --release --bin growformer-demos -- --certify-gle-indomain`
+- Acceptance-gate a candidate disjoint eval before spending a cert run: `cargo run --release --bin growformer-demos -- --verify-disjoint-eval <train.jsonl> <eval.jsonl> [semantic_intent|action_target]`
+- Full-corpus disjointness scan (is a certifiable in-domain eval constructible at all?): `cargo run --release --bin growformer-demos -- --scan-disjoint-corpus [action_target|semantic_intent]`
 - Re-read / compare a verdict: `cargo run --release --bin growformer-demos -- --certify-verdict certify_verdict_latest.json`
 - Go/no-go field: `disjoint_semantic_lift` (disjoint-bin accuracy − shuffle-floor 95th pct). No
-  encoder is promoted without a `PASS` artifact; pooled accuracy never gates.
+  encoder is promoted without a **promotable** `PASS` artifact (a strict `wbc` pass; a
+  `PASS_PROVISIONAL` earned only at a coarser fallback granularity is not promotable); pooled
+  accuracy never gates.
 
 M5 datasets:
 

@@ -130,6 +130,12 @@ struct Args {
     /// on it. Usage: --verify-disjoint-eval <train.jsonl> <eval.jsonl> [by={action_target|semantic_intent}]
     #[arg(long, num_args = 2..=3, value_names = ["TRAIN", "EVAL", "BY"])]
     verify_disjoint_eval: Option<Vec<String>>,
+    /// Cheap, decisive full-corpus scan (§15.3): leave-one-out, count how many feature-disjoint
+    /// seen-elsewhere phrases exist across ALL home-domain traffic — answers whether a certifiable
+    /// in-domain eval is constructible at all, or structurally empty. Usage:
+    /// --scan-disjoint-corpus [by={action_target|semantic_intent}]
+    #[arg(long, num_args = 0..=1, value_name = "BY")]
+    scan_disjoint_corpus: Option<Vec<String>>,
     #[arg(long)]
     neurogenesis: bool,
     #[arg(long)]
@@ -347,6 +353,8 @@ fn main() {
         demo_certify_gle_indomain();
     } else if let Some(spec) = args.verify_disjoint_eval.clone() {
         demo_verify_disjoint_eval(&spec);
+    } else if let Some(spec) = args.scan_disjoint_corpus.clone() {
+        demo_scan_disjoint_corpus(&spec);
     } else if args.grounding_loop_audit {
         demo_grounding_loop_audit();
     } else if args.cmi_analyze {
@@ -6767,6 +6775,72 @@ fn demo_verify_disjoint_eval(spec: &[String]) {
     if gate1 && gate2 {
         println!("  - This eval can carry a generalization signal: spend a certification run on it.");
     }
+}
+
+/// `--scan-disjoint-corpus [by]`: the cheap, decisive end-of-arc measurement (§15.3). Scans ALL
+/// home-domain traffic leave-one-out and counts feature-disjoint seen-elsewhere phrases, for the
+/// full corpus and the support/coding subset. If the count is ~0 across everything, a certifiable
+/// in-domain eval is structurally non-existent (the claim is unresolvable in principle, not for
+/// lack of collection); a meaningful population means the eval is worth constructing.
+fn demo_scan_disjoint_corpus(spec: &[String]) {
+    println!("--- Full-corpus disjointness scan (§15.3): is a certifiable in-domain eval constructible at all? ---\n");
+    let by = spec.first().cloned().unwrap_or_else(|| "action_target".to_string());
+    let samples = match load_all_m5_training_data() {
+        Ok(s) if !s.is_empty() => s,
+        Ok(_) => { println!("No M5 home-domain data found."); return; }
+        Err(e) => { println!("Could not load M5 home-domain data: {e}"); return; }
+    };
+
+    let class_of = |s: &LanguageSample| -> Option<String> {
+        let c = match by.as_str() {
+            "semantic_intent" => Some(s.semantic_intent.clone()),
+            _ => s.action_target.clone(),
+        }?;
+        let c = c.trim().to_string();
+        if c.is_empty() { None } else { Some(c) }
+    };
+    let all_pairs: Vec<(String, String)> = samples
+        .iter()
+        .filter_map(|s| class_of(s).map(|c| (s.text.trim().to_string(), c)))
+        .filter(|(t, _)| !t.is_empty())
+        .collect();
+    let support_coding: Vec<(String, String)> = all_pairs
+        .iter()
+        .filter(|(_, c)| c == "support" || c.starts_with("coding"))
+        .cloned()
+        .collect();
+
+    // A class must have >=4 phrases to serve as an eval class (centroid + held-out); singleton
+    // "disjoint" phrases are degenerate (leave-one-out empties the class) and must not be counted.
+    const MIN_CLASS: usize = 4;
+    let report = |label: &str, pairs: &[(String, String)]| {
+        let s = grounding_loop::scan_corpus_disjointness(pairs, "wbc", MIN_CLASS);
+        let pct = if s.n_eligible_phrases > 0 { 100.0 * s.n_seen_elsewhere as f32 / s.n_eligible_phrases as f32 } else { 0.0 };
+        println!("[{label}] (class key '{by}', leave-one-out @ wbc, eligible classes >= {MIN_CLASS} phrases)");
+        println!("  classes={} (eligible={})  phrases={} (eligible={})",
+            s.n_classes, s.n_eligible_classes, s.n_phrases, s.n_eligible_phrases);
+        println!("  disjoint-from-class={}  seen_elsewhere={} ({:.1}% of eligible)  novel={}",
+            s.n_disjoint, s.n_seen_elsewhere, pct, s.n_novel);
+        println!("  resolvable population (seen_elsewhere >= {}): {}",
+            grounding_loop::DISJOINT_MIN_N, s.n_seen_elsewhere >= grounding_loop::DISJOINT_MIN_N);
+        if !s.per_class_seen_elsewhere.is_empty() {
+            let top: Vec<String> = s.per_class_seen_elsewhere.iter()
+                .take(10).map(|(c, se, t)| format!("{c}={se}/{t}")).collect();
+            println!("  per-class seen_elsewhere (nonzero, eligible): {}", top.join("  "));
+        }
+        s
+    };
+
+    let full = report("FULL home corpus", &all_pairs);
+    println!();
+    let sc = report("support/coding subset", &support_coding);
+
+    println!("\n>>> WORLD: {} <<<", if full.n_seen_elsewhere >= grounding_loop::DISJOINT_MIN_N
+        || sc.n_seen_elsewhere >= grounding_loop::DISJOINT_MIN_N {
+        "CONSTRUCTIBLE — a feature-disjoint in-domain eval can be drawn from existing traffic; building it is a finite task likely to resolve the claim"
+    } else {
+        "STRUCTURALLY EMPTY — the domain's real traffic does not contain feature-disjoint concept-preserving examples; the in-domain GLE claim is unresolvable in principle, not for lack of collection"
+    });
 }
 
 /// Build a (nodes, captures) fixture from explicit train/eval `(text, class)` pairs:
