@@ -1607,6 +1607,75 @@ pub fn pooled_accuracy(evals: &[DisjointEval]) -> f32 {
     evals.iter().filter(|e| e.routed_correctly).count() as f32 / evals.len() as f32
 }
 
+/// Encoder-free audit of whether a candidate held-out eval set is *capable of carrying a
+/// generalization signal*: does it contain feature-disjoint, seen-elsewhere held-out phrases at
+/// the strictest granularity? This is the acceptance instrument for the feature-disjoint
+/// home-domain eval (§15.2). Disjointness is a property of the surface features vs. training, so
+/// it is independent of any encoder — the GLE's in-domain eval failed this audit (`n_seen_elsewhere=0`),
+/// which is why no score on it could speak to generalization.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct DisjointEvalAudit {
+    pub level: String,
+    pub n_classes: usize,
+    pub n_eval: usize,
+    /// eval phrases with overlap==0 vs. their OWN class's training features (at `level`).
+    pub n_overlap0: usize,
+    /// the gen_a bin: overlap-0 AND at least one feature seen on SOME other class in training.
+    pub n_seen_elsewhere: usize,
+    /// overlap-0 AND features seen nowhere in training (novel tokens — guessing, not routing).
+    pub n_novel: usize,
+    /// `(class, seen_elsewhere_count, eval_count)`, sorted by class.
+    pub per_class_seen_elsewhere: Vec<(String, usize, usize)>,
+    /// `true` iff `n_seen_elsewhere >= DISJOINT_MIN_N` — enough disjoint examples to resolve lift.
+    pub resolvable: bool,
+}
+
+/// Compute the disjointness audit for `eval_pairs` against `train_pairs` (both `(text, class)`).
+pub fn audit_disjoint_eval(
+    train_pairs: &[(String, String)],
+    eval_pairs: &[(String, String)],
+    level: &str,
+) -> DisjointEvalAudit {
+    let (concept_train, global_train) = concept_train_features(train_pairs);
+    let ct: HashMap<&String, HashSet<String>> = concept_train
+        .iter()
+        .map(|(k, v)| (k, restrict_features(v, level)))
+        .collect();
+    let global = restrict_features(&global_train, level);
+    let empty = HashSet::new();
+
+    let mut per_class: std::collections::BTreeMap<String, (usize, usize)> = std::collections::BTreeMap::new();
+    let (mut n_overlap0, mut n_seen, mut n_novel) = (0usize, 0usize, 0usize);
+    for (text, class) in eval_pairs {
+        let entry = per_class.entry(class.clone()).or_insert((0, 0));
+        entry.1 += 1;
+        let fp = restrict_features(&phrase_feature_set(text), level);
+        let train_c = ct.get(class).unwrap_or(&empty);
+        if feature_overlap_fraction(&fp, train_c) == 0.0 {
+            n_overlap0 += 1;
+            if fp.iter().any(|k| global.contains(k)) {
+                n_seen += 1;
+                entry.0 += 1;
+            } else {
+                n_novel += 1;
+            }
+        }
+    }
+    DisjointEvalAudit {
+        level: level.to_string(),
+        n_classes: concept_train.len(),
+        n_eval: eval_pairs.len(),
+        n_overlap0,
+        n_seen_elsewhere: n_seen,
+        n_novel,
+        per_class_seen_elsewhere: per_class
+            .into_iter()
+            .map(|(c, (s, t))| (c, s, t))
+            .collect(),
+        resolvable: n_seen >= DISJOINT_MIN_N,
+    }
+}
+
 pub fn format_certifier_report(
     label: &str,
     before: &CertifierMetrics,
@@ -1732,6 +1801,11 @@ pub enum Verdict {
     BelowResolution,
     FailMemorization,
     FailCollision,
+    /// Lift cleared the floor, but only at a disjointness granularity coarser than `wbc` (i.e. the
+    /// union-disjoint bin was empty and the gate fell back to `wb`/`w`). The pass is real but
+    /// leakier — word-disjoint phrases can still share bigrams/trigrams — so it is **provisional**
+    /// and NOT promotable. It must be re-earned at `wbc` on a feature-disjoint eval to become `PASS`.
+    PassProvisional,
     Pass,
 }
 
@@ -1742,8 +1816,14 @@ impl Verdict {
             Self::BelowResolution => "BELOW_RESOLUTION",
             Self::FailMemorization => "FAIL_MEMORIZATION",
             Self::FailCollision => "FAIL_COLLISION",
+            Self::PassProvisional => "PASS_PROVISIONAL",
             Self::Pass => "PASS",
         }
+    }
+
+    /// Only a strict (`wbc`) pass licenses promotion; `PASS_PROVISIONAL` does not.
+    pub fn is_promotable(self) -> bool {
+        matches!(self, Self::Pass)
     }
 }
 
@@ -1766,6 +1846,11 @@ pub struct VerdictInputs {
     pub lift_ci_lo: f32,
     pub collision_delta: f32,
     pub memorization_gap: f32,
+    /// `true` iff the lift was resolved at the strictest disjointness granularity (`wbc`). When
+    /// the gate fell back to a coarser level (`wb`/`w`) because the union-disjoint bin was empty,
+    /// a cleared lift yields `PASS_PROVISIONAL`, never `PASS` — the fallback cannot launder a
+    /// surface-overlap pass that the finest filter would have caught.
+    pub strict_disjoint_level: bool,
 }
 
 /// `true` if the seen-elsewhere disjoint bin is too small/noisy to separate lift from 0.
@@ -1794,7 +1879,14 @@ pub fn decide_encoder_verdict(inp: &VerdictInputs) -> Verdict {
         // Positive disjoint lift but the captured→held-out gap is blown: still a lookup table.
         return Verdict::FailMemorization;
     }
-    Verdict::Pass
+    // Lift cleared the floor. Only a strict (`wbc`) resolution is a promotable PASS; a pass earned
+    // via a coarser fallback level is provisional, because word/bigram-disjoint phrases can still
+    // share finer features the union filter would have rejected.
+    if inp.strict_disjoint_level {
+        Verdict::Pass
+    } else {
+        Verdict::PassProvisional
+    }
 }
 
 /// Per-feature-family disjoint-0 accuracy: shows which granularity carries overlap inflation
@@ -2213,6 +2305,7 @@ mod tests {
             lift_ci_lo: 0.03,
             collision_delta: 0.0,
             memorization_gap: 0.10,
+            strict_disjoint_level: true,
         }
     }
 
@@ -2273,6 +2366,36 @@ mod tests {
     fn verdict_pass_only_on_ci_clear_positive_lift() {
         let i = base_inputs();
         assert_eq!(decide_encoder_verdict(&i), Verdict::Pass);
+        assert!(decide_encoder_verdict(&i).is_promotable());
+    }
+
+    #[test]
+    fn verdict_coarse_level_pass_is_provisional_not_promotable() {
+        // Same cleared lift, but resolved via a fallback level coarser than `wbc`: the fallback
+        // must not launder a surface-overlap pass into a promotable one.
+        let mut i = base_inputs();
+        i.strict_disjoint_level = false;
+        assert_eq!(decide_encoder_verdict(&i), Verdict::PassProvisional);
+        assert!(!decide_encoder_verdict(&i).is_promotable());
+    }
+
+    #[test]
+    fn audit_disjoint_eval_distinguishes_surface_disjoint_from_overlapping() {
+        // Training: each class has distinctive surface tokens.
+        let train = vec![
+            ("reset my password please".to_string(), "support".to_string()),
+            ("cannot login to account".to_string(), "support".to_string()),
+            ("write a rust function".to_string(), "coding".to_string()),
+            ("implement a parser module".to_string(), "coding".to_string()),
+        ];
+        // Surface-overlapping eval (shares tokens with own class) → not disjoint.
+        let overlapping = vec![
+            ("reset password account".to_string(), "support".to_string()),
+            ("write rust parser".to_string(), "coding".to_string()),
+        ];
+        let a = audit_disjoint_eval(&train, &overlapping, "wbc");
+        assert_eq!(a.n_seen_elsewhere, 0, "overlapping eval has no disjoint phrases");
+        assert!(!a.resolvable);
     }
 
     #[test]

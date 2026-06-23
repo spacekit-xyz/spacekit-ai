@@ -125,6 +125,11 @@ struct Args {
     /// (A) the literal 2-way 100% headline + (B) home-domain many-intent routing.
     #[arg(long)]
     certify_gle_indomain: bool,
+    /// Acceptance instrument for a candidate feature-disjoint held-out eval (§15.2): verify it
+    /// contains disjoint, seen-elsewhere held-out phrases at `wbc` AND that lexical CATA collapses
+    /// on it. Usage: --verify-disjoint-eval <train.jsonl> <eval.jsonl> [by={action_target|semantic_intent}]
+    #[arg(long, num_args = 2..=3, value_names = ["TRAIN", "EVAL", "BY"])]
+    verify_disjoint_eval: Option<Vec<String>>,
     #[arg(long)]
     neurogenesis: bool,
     #[arg(long)]
@@ -340,6 +345,8 @@ fn main() {
         demo_certify_verdict(&path);
     } else if args.certify_gle_indomain {
         demo_certify_gle_indomain();
+    } else if let Some(spec) = args.verify_disjoint_eval.clone() {
+        demo_verify_disjoint_eval(&spec);
     } else if args.grounding_loop_audit {
         demo_grounding_loop_audit();
     } else if args.cmi_analyze {
@@ -6356,6 +6363,7 @@ fn certify_encoder_pipeline(
         lift_ci_lo: verdict.disjoint_lift_ci[0],
         collision_delta: verdict.collision_delta,
         memorization_gap: verdict.memorization_gap,
+        strict_disjoint_level: level == "wbc",
     };
     verdict.verdict = decide_encoder_verdict(&inputs).as_str().to_string();
     if verdict.verdict == Verdict::Invalid.as_str() && verdict.invalid_reason.is_empty() {
@@ -6648,6 +6656,147 @@ fn demo_certify_gle_indomain() {
     println!("\nIn-domain certification complete. Artifacts in {CERTIFY_STORE_DIR}/.");
 }
 
+/// `--verify-disjoint-eval <train.jsonl> <eval.jsonl> [by]`: the acceptance instrument for a
+/// candidate feature-disjoint home-domain eval (§15.2). It answers the only question that makes a
+/// held-out set worth a certification run: *can this eval carry a generalization signal at all?*
+/// Two gates, both encoder-honest: (1) the eval must contain ≥DISJOINT_MIN_N feature-disjoint,
+/// seen-elsewhere held-out phrases at `wbc`; (2) lexical CATA must collapse to floor on it. An eval
+/// that fails (1) is structurally incapable of certification (the GLE-home failure mode); one that
+/// fails (2) is lexically separable (an easy task). Neither should ever be spent on a GLE run.
+fn demo_verify_disjoint_eval(spec: &[String]) {
+    println!("--- Disjoint-eval acceptance instrument (§15.2) ---\n");
+    let train_path = spec.first().cloned().unwrap_or_default();
+    let eval_path = spec.get(1).cloned().unwrap_or_default();
+    let by = spec.get(2).cloned().unwrap_or_else(|| "action_target".to_string());
+
+    let load_pairs = |path: &str| -> Result<Vec<(String, String)>, String> {
+        let samples = load_language_samples_jsonl(path)?;
+        let mut pairs = Vec::new();
+        for s in &samples {
+            let class = match by.as_str() {
+                "semantic_intent" => Some(s.semantic_intent.clone()),
+                _ => s.action_target.clone(),
+            };
+            if let Some(c) = class {
+                let c = c.trim().to_string();
+                let t = s.text.trim().to_string();
+                if !c.is_empty() && !t.is_empty() {
+                    pairs.push((t, c));
+                }
+            }
+        }
+        Ok(pairs)
+    };
+
+    let train = match load_pairs(&train_path) {
+        Ok(p) if !p.is_empty() => p,
+        Ok(_) => { println!("No usable train rows (key '{by}') in {train_path}."); return; }
+        Err(e) => { println!("Could not load train {train_path}: {e}"); return; }
+    };
+    let eval = match load_pairs(&eval_path) {
+        Ok(p) if !p.is_empty() => p,
+        Ok(_) => { println!("No usable eval rows (key '{by}') in {eval_path}."); return; }
+        Err(e) => { println!("Could not load eval {eval_path}: {e}"); return; }
+    };
+    println!("train rows: {}  eval rows: {}  class key: {by}\n", train.len(), eval.len());
+
+    // Gate 1: disjointness audit (encoder-free, strictest granularity).
+    let audit = grounding_loop::audit_disjoint_eval(&train, &eval, "wbc");
+    println!("Gate 1 — feature-disjointness @ wbc (the GLE-home failure mode):");
+    println!("  classes={}  eval={}  overlap0={}  seen_elsewhere={}  novel={}",
+        audit.n_classes, audit.n_eval, audit.n_overlap0, audit.n_seen_elsewhere, audit.n_novel);
+    let mut shown = 0;
+    for (class, seen, total) in &audit.per_class_seen_elsewhere {
+        if *seen > 0 || shown < 8 {
+            println!("    {class}: seen_elsewhere={seen}/{total}");
+            shown += 1;
+        }
+    }
+    println!("  resolvable (seen_elsewhere >= {}): {}",
+        grounding_loop::DISJOINT_MIN_N, audit.resolvable);
+
+    // Gate 2: lexical CATA must collapse to floor at overlap-0 on this eval.
+    let (nodes, captures) = pairs_to_fixture(&train, &eval);
+    let mut cata_overlap0 = f32::NAN;
+    let mut cata_n0 = 0usize;
+    if audit.n_classes >= 2 {
+        let mut node_corpus: Vec<String> = Vec::new();
+        for (_, id, aliases) in &nodes {
+            node_corpus.push(id.replace('_', " "));
+            node_corpus.extend(aliases.iter().cloned());
+        }
+        let propose: Vec<(String, String)> = captures.iter()
+            .filter(|c| c.split == CaptureSplit::Propose)
+            .map(|c| (c.phrase.clone(), c.inferred_concept_id.clone()))
+            .collect();
+        let certify: Vec<FailureCapture> = captures.iter()
+            .filter(|c| c.split == CaptureSplit::Certify).cloned().collect();
+        let (dm, _, _, _) = build_language_demo_manager(0.0);
+        let rt = &dm.language_runtime;
+        let cata = AuditEncoder::Cata;
+        if cata.install(&propose, &node_corpus, 42).is_ok() {
+            if let Ok(idx) = build_grounding_index_from_nodes(rt, &nodes, &GroundingLoopParams::default()) {
+                let (ct, gl) = grounding_loop::concept_train_features(&propose);
+                if let Ok(evals) = grounding_loop::evaluate_disjoint(rt, &idx, &certify, &ct, &gl, "wbc") {
+                    let curve = grounding_loop::build_overlap_curve(&evals);
+                    cata_overlap0 = curve[0].accuracy;
+                    cata_n0 = curve[0].n;
+                }
+            }
+        }
+        clear_phrase_embedder();
+    }
+    println!("\nGate 2 — lexical CATA collapse @ overlap-0 (the easy-eval detector):");
+    if cata_n0 == 0 {
+        println!("  CATA overlap-0 bin EMPTY (n=0) — cannot validate (same wall as Gate 1).");
+    } else {
+        println!("  CATA overlap-0 acc = {:.3} (n={}) — want this near 0 (collapsed).", cata_overlap0, cata_n0);
+    }
+
+    // Verdict on the EVAL (not an encoder).
+    let gate1 = audit.resolvable;
+    let gate2 = cata_n0 > 0 && cata_overlap0 <= 0.20;
+    println!("\n>>> EVAL ACCEPTANCE: {} <<<", if gate1 && gate2 { "ACCEPTABLE" } else { "REJECTED" });
+    if !gate1 {
+        println!("  - REJECTED by Gate 1: too few feature-disjoint seen-elsewhere phrases ({} < {}). This eval cannot separate memorization from generalization — any score on it is silent.",
+            audit.n_seen_elsewhere, grounding_loop::DISJOINT_MIN_N);
+    }
+    if gate1 && !gate2 {
+        println!("  - REJECTED by Gate 2: lexical CATA does not collapse — the disjoint phrases are still lexically separable (an easy task).");
+    }
+    if gate1 && gate2 {
+        println!("  - This eval can carry a generalization signal: spend a certification run on it.");
+    }
+}
+
+/// Build a (nodes, captures) fixture from explicit train/eval `(text, class)` pairs:
+/// node centroids from train (propose), eval as certify, real-traffic provenance.
+fn pairs_to_fixture(
+    train: &[(String, String)],
+    eval: &[(String, String)],
+) -> (Vec<(GroundingFleetDomain, String, Vec<String>)>, Vec<FailureCapture>) {
+    let mut by_class: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for (t, c) in train {
+        by_class.entry(c.clone()).or_default().push(t.clone());
+    }
+    let mut captures = Vec::new();
+    let mut nodes = Vec::new();
+    for (class, phrases) in &by_class {
+        push_indomain_captures(&mut captures, phrases, class, CaptureSplit::Propose);
+        nodes.push((GroundingFleetDomain::Runtime, class.clone(), phrases.clone()));
+    }
+    let mut eval_by_class: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for (t, c) in eval {
+        if by_class.contains_key(c) {
+            eval_by_class.entry(c.clone()).or_default().push(t.clone());
+        }
+    }
+    for (class, phrases) in &eval_by_class {
+        push_indomain_captures(&mut captures, phrases, class, CaptureSplit::Certify);
+    }
+    (nodes, captures)
+}
+
 /// `--certify-encoder <encoder_id> [companion_dir] [seed]`: run the pipeline on a companion
 /// and emit the verdict artifact (append-only longitudinal store + a stable latest copy).
 fn demo_certify_encoder(spec: &[String]) {
@@ -6762,6 +6911,12 @@ fn render_verdict(v: &EncoderVerdict) -> String {
     s.push_str(&format!("  >>> VERDICT: {} <<<\n", v.verdict));
     if !v.invalid_reason.is_empty() {
         s.push_str(&format!("  reason: {}\n", v.invalid_reason));
+    }
+    if v.verdict == Verdict::PassProvisional.as_str() {
+        s.push_str(&format!(
+            "  note: NOT PROMOTABLE — lift cleared the floor only at coarse disjoint level '{}' (the union 'wbc' bin was empty). Re-earn at 'wbc' on a feature-disjoint eval for a promotable PASS.\n",
+            v.disjoint_level
+        ));
     }
     s.push_str(&format!(
         "  disjoint_semantic_lift = {:+.3}  CI=[{:+.3}, {:+.3}]   (gate: lift>0 AND CI excludes 0)\n\n",
