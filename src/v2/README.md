@@ -96,11 +96,12 @@ in increasing order of prior strength:
    `ChunkCodec::build_token_embeddings`). Distinct identities from step 0, and
    with tying a usable output classifier from step 0. Helps at larger scale; at
    `d_model=16` it is roughly a wash.
-3. `corpus_semantic_init` (`--semantic-init`), **random indexing**: each
-  token gets a random index vector, then ±`window` neighbour vectors are
-   distance-weighted-accumulated from the corpus, so tokens sharing contexts end
-   up with similar embeddings (the distributional hypothesis, one pass). This is
-   a genuine *semantic* prior, not just symmetry breaking.
+3. `corpus_semantic_init`, **random indexing**: each token gets a random index
+   vector, then ±`window` neighbour vectors are distance-weighted-accumulated
+   from the corpus, so tokens sharing contexts end up with similar embeddings
+   (the distributional hypothesis, one pass). A genuine *semantic* prior, not
+   just symmetry breaking — and the **default for fresh `tinystories` training**
+   (opt out with `--no-semantic-init`; `--structured-init` selects #2).
 
 **A/B (sentiment corpus, tied head, 200 steps, identical config):**
 
@@ -156,15 +157,16 @@ cargo run --release --bin tinystories -- generate \
 
 Useful `train` flags: `--head-only` (fast head-only sanity run),
 `--init-from <ckpt>` (inherit a base model's architecture + weights, then
-fine-tune), `--freeze-blocks N`, `--freeze-embeddings`, `--structured-init`,
-`--semantic-init [--semantic-window K]`, `--grad-accum N`, `--sample-every`,
-`--val-chunks`.
+fine-tune), `--freeze-blocks N`, `--freeze-embeddings`, `--no-semantic-init`
+(disable the default semantic init), `--structured-init`, `--semantic-window K`,
+`--grad-accum N`, `--sample-every`, `--val-chunks`.
 
 Notes:
 
-- `--semantic-init` seeds embeddings from the **training corpus** post-construction,
-so it overrides `--structured-init` and is ignored with `--init-from`
-(inherited embeddings are kept).
+- Corpus-semantic init is **on by default** for fresh training: it seeds
+  embeddings from the **training corpus** post-construction, overrides
+  `--structured-init`, and is ignored with `--init-from` (inherited embeddings
+  are kept).
 - If decoded text repeats (`the the the`), raise `--repetition-penalty` on
 `generate`.
 - Each training step is one taped forward over the chunk (teacher forcing) plus
