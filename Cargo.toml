@@ -1,0 +1,32 @@
+[package]
+name    = "growformer-llm"
+version = "0.1.0"
+edition = "2021"
+description = "Growformer Clifford LLM"
+
+[lib]
+name = "growformer_llm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tinystories"
+path = "src/bin/tinystories.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+# Classical-compression baselines (gzip / LZMA) for the prediction⇄compression
+# bits/byte comparison.  Prediction and compression are equivalent: a model's
+# cross-entropy in bits/byte is exactly its lossless compression rate.
+spacekit-compressor = { path = "../../spacekit/spacekit-ai/spacekit-compressor" }
+
+[dev-dependencies]
+# nothing extra needed — all tests use the standard harness
+
+[profile.release]
+opt-level     = 3
+lto           = true
+codegen-units = 1   # maximise LLVM optimisation across the crate
