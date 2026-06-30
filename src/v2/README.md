@@ -3,10 +3,12 @@
 The `v2` module is the **full, tape-based training pipeline** for the Clifford
 LLM, plus sampling, checkpointing, and the prediction⇄compression eval.
 
-> For the algebra, the layer types (`Multivector`, `CliffordAttention`,
-> `LinearReal`, …) and the library primitives (`blade`, `cayley_const`,
-> `backprop`, `optim`, `positional`, `mask`, `kv_cache`), see the top-level
-> `[../../README.md](../../README.md)`. This document does **not** repeat them.
+> **Results so far:** measured *training improvements* (embedding init, grad
+> accumulation) on a small sentiment corpus — not yet head-to-head **bits/byte
+> vs. a matched vanilla transformer** on TinyStories. See
+> [Research status](../../README.md#research-status).
+>
+> For algebra and layer types, see [`../../README.md`](../../README.md).
 
 What v2 adds over a forward pass:
 
@@ -188,15 +190,18 @@ the equivalence directly.
 
 ## Sampling
 
+`tinystories generate` (and `main.rs generate-lm`) use [`InferenceCache`](inference.rs)
+for KV-cached incremental forward — only new suffix tokens are processed each step.
+Training and `eval` still call [`model_forward_logits`](tape.rs) (full sequence).
+
 ```rust
+use growformer_llm::v2::inference::InferenceCache;
 use growformer_llm::v2::sample::*;
 
-let cfg = SampleConfig {
-    temperature: 0.8, top_p: Some(0.9), top_k: Some(50),
-    repetition_penalty: 1.1, max_new_tokens: 256,
-    stop_tokens: vec![growformer_llm::v2::data::special::EOS], seed: Some(42),
-};
-let next = sample_next(&logits_last, &context_ids, &cfg, &mut SimpleRng::new(42));
+let mut cache = InferenceCache::new(n_blocks, max_seq, d_model);
+let logits_rows = cache.forward_extend(&alg, &model, &token_ids);
+let last = logits_rows.last().unwrap();
+let next = sample_next(last, &token_ids, &cfg, &mut rng);
 ```
 
 Presets: `SampleConfig::greedy()`, `::focused()` (T=0.7, top-p=0.9, rep=1.15),

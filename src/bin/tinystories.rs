@@ -14,6 +14,7 @@ use growformer_llm::tinystories::{chunk_to_example, encode_corpus, load_tinystor
 use growformer_llm::v2::checkpoint::{load_lm_state, save_lm_state};
 use growformer_llm::v2::data::{special, TrainExample, N_SPECIAL};
 use growformer_llm::v2::sample::{sample_next, softmax as logits_softmax, SampleConfig, SimpleRng};
+use growformer_llm::v2::inference::InferenceCache;
 use growformer_llm::v2::tape::model_forward_logits;
 use growformer_llm::v2::train_v2::{
     corpus_semantic_init, train_step_v2, train_step_v2_accum, train_step_v2_head_only, ModelStateV2,
@@ -521,21 +522,20 @@ fn main() -> Result<(), String> {
                 n_pred, total_bytes, windows, seq_len
             );
             println!();
-            println!("model (growformer-llm):");
+            println!("model (growformer-llm, conditional on trained weights):");
             println!("  cross-entropy : {model_nats_per_tok:.4} nats/token");
             println!("  perplexity    : {model_ppl:.2}");
             println!("  bits/token    : {model_bpt:.4}");
-            println!("  bits/byte     : {model_bpb:.4}   <- lossless compression rate");
+            println!("  bits/byte     : {model_bpb:.4}   (weights NOT amortized; see README)");
             println!();
-            println!("classical baselines (same bytes):");
+            println!("classical baselines (same bytes; codec overhead included, no separate model file):");
             println!("  gzip -9       : {gz_bpb:.4} bits/byte");
             println!("  lzma -9       : {lz_bpb:.4} bits/byte");
             println!();
-            let verdict = |b: f64| if model_bpb < b { "BEATS" } else { "loses to" };
             println!(
-                "model {} gzip; model {} lzma",
-                verdict(gz_bpb),
-                verdict(lz_bpb)
+                "Note: model bits/byte is conditional cross-entropy only — checkpoint \
+                 weights are not included in the bit count. gzip/lzma include codec \
+                 overhead on the same bytes. Not a like-for-like shipped-size comparison."
             );
         }
         Commands::Generate {
@@ -581,9 +581,14 @@ fn main() -> Result<(), String> {
             };
 
             let mut rng = SimpleRng::new(seed.unwrap_or(0xDECAFBAD));
+            let mut cache = InferenceCache::new(
+                state.cfg.n_blocks,
+                state.cfg.max_seq,
+                state.cfg.d_model,
+            );
             for _ in 0..sample_cfg.max_new_tokens {
-                let logits = model_forward_logits(&state.alg, &state.model, &ids, true);
-                let Some(last) = logits.last() else {
+                let logits_rows = cache.forward_extend(&state.alg, &state.model, &ids);
+                let Some(last) = logits_rows.last() else {
                     break;
                 };
                 let next = sample_next(last, &ids, &sample_cfg, &mut rng);

@@ -9,6 +9,7 @@ pub mod tape;
 pub mod attention_backward;
 pub mod block_backward;
 pub mod embedding;
+pub mod inference;
 pub mod sample;
 pub mod train_v2;
 
@@ -25,6 +26,7 @@ pub use sample::{
     apply_repetition_penalty, apply_temperature, apply_top_k, apply_top_p, argmax, generate_stream,
     multinomial, sample_next, softmax as sample_softmax, SampleConfig, SimpleRng, TokenCallback,
 };
+pub use inference::InferenceCache;
 pub use tape::{
     attention_forward_taped, block_forward_taped, ffn_forward_taped, model_forward_logits,
     model_forward_taped, norm_forward_taped, AttentionTape, BlockTape, FfnTape, LayerNormStats,

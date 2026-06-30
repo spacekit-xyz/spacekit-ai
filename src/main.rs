@@ -10,7 +10,7 @@ use growformer_llm::world_grounding::GROUND_FEATURE_DIM;
 use growformer_llm::v2::checkpoint::{load_lm_checkpoint, save_lm_checkpoint};
 use growformer_llm::v2::data::{special, Dataset, Tokenizer};
 use growformer_llm::v2::sample::{generate_stream, SampleConfig, TokenCallback};
-use growformer_llm::v2::tape::model_forward_logits;
+use growformer_llm::v2::inference::InferenceCache;
 use growformer_llm::v2::train_v2::{train_v2, ModelStateV2, TrainConfigV2};
 
 #[derive(Parser)]
@@ -253,11 +253,16 @@ fn main() -> Result<(), String> {
                 }
             };
 
+            let mut cache = InferenceCache::new(
+                state.cfg.n_blocks,
+                state.cfg.max_seq,
+                state.model.embedding[0].len(),
+            );
             let _generated = generate_stream(
                 &ids,
                 &sample_cfg,
                 &tokenizer,
-                |tok_ids| model_forward_logits(&state.alg, &state.model, tok_ids, true),
+                |tok_ids| cache.forward_extend(&state.alg, &state.model, tok_ids),
                 StreamPrint,
             );
             println!();

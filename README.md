@@ -1,16 +1,131 @@
 # Growformer Clifford LLM
 
-A Rust language model built on **Space-Time Algebra**, the Clifford algebra **Cl(1,3)**, signature `(+,−,−,−)`. Every linear layer and every attention score
-is computed with the **geometric product** of multivectors rather than scalar
-dot products and dense matmuls.
+A Rust language model built on **Space-Time Algebra**, Clifford algebra **Cl(1,3)**,
+signature `(+,−,−,−)`. Linear layers and attention scores use the **geometric
+product** of multivectors rather than scalar dot products and dense matmuls.
 
 - Crate (lib): `growformer_llm` — `use growformer_llm::*;`
-- Binary: `tinystories` — the end-to-end BPE → train → eval → generate pipeline
+- Binary: `tinystories` — BPE → train → eval (bits/byte) → generate
 
-> This README is the **library / algebra reference**. The full training and
-> inference pipeline (tape backward, init strategies, gradient accumulation, the
-> `tinystories` CLI, prediction⇄compression eval) lives in
-> `[src/v2/README.md](src/v2/README.md)`.
+> **What this repo is.** A from-scratch Clifford-algebra transformer with a full
+> training stack (tape backward, Adam, checkpoints, arithmetic coding). The *how*
+> is documented in detail below and in `[src/v2/README.md](src/v2/README.md)`.
+>
+> **What it is not yet.** A demonstrated win for geometric algebra on language.
+> Tokens do not live in Minkowski spacetime; Cl(1,3) here is a *hypothesis* about
+> structured mixing, not a principled equivariance inductive bias the way GA layers
+> are for E(3) point clouds or molecular geometry (Brandstetter et al., GATr). The
+> experiment that would settle this — **matched-parameter bits/byte vs. a vanilla
+> transformer and a dense-linear ablation** — has not been run yet. See
+> [Research status](#research-status).
+
+---
+
+
+
+## Research status
+
+
+
+### What is verified
+
+
+| Claim                                | Evidence                                                                                                                                                              |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Algebra & backward are correct       | Cayley-table identities, finite-difference grad checks, `train_v2::end_to_end_loss_decreases`                                                                         |
+| Pipeline works end-to-end            | BPE, packed bins, train, checkpoint, generate, `eval` (bits/byte vs gzip/lzma)                                                                                        |
+| Training tricks help (domain corpus) | On sentiment headlines (`d_model=16`, tied, 200 steps): corpus-semantic init **val ppl 608** vs uniform **962** (~37% ↓) — see `[src/v2/README.md](src/v2/README.md)` |
+
+
+These show the stack *trains* and that **embedding priors** matter. They do **not**
+show that the geometric product beats a matched dense layer on language modeling quality.
+
+### What is missing (the number that matters)
+
+Hold-out **bits/byte on TinyStories** (or any fixed corpus), same tokenizer, same
+training budget, three rows:
+
+
+| Model                       | Params           | bits/byte (val)        | Notes                                                                                                                             |
+| --------------------------- | ---------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Clifford (row 1)            | ~0.7M @ defaults | **2.34** (conditional) | `tinystories-row1.json`: 400 steps, semantic init, tie, grad-accum 2, eval on `val.bin` 64×128 windows; **weights not amortized** |
+| Matched vanilla transformer | same             | —                      | **needed**                                                                                                                        |
+| Dense-linear ablation       | same             | —                      | swap `CliffordLinear` for real matmul of equal param count; isolates *structure*                                                  |
+
+
+Row 1 eval (2026-06-30): conditional **2.34 bpb** vs gzip **2.59** vs lzma **4.34** on 35 583 bytes
+(8024 text tokens). Pipeline validated; model is under-trained (400 steps, train=val shard).
+**Beats gzip on conditional CE only** — not a shipped-size claim. Ablation still warranted once
+training budget is increased.
+
+Until that table exists, treat Cl(1,3) for text as **unproven engineering exploration**,
+not a research result.
+
+**How to read row 1 (measurement caveat).** `tinystories eval` reports the model’s
+**conditional** cross-entropy rate: bits/byte *given the trained weights*, with model
+parameters **not** amortized into the bit count. gzip/lzma totals include their
+codec overhead on the same byte stream but not a separate “model file.” On small
+corpora, a ~0.7M-parameter checkpoint can look better or worse than gzip depending
+on whether you count the weights. Row 1 is pipeline validation and a competence
+sanity check — not a claim that the shipped system beats gzip end-to-end.
+
+### Ablation matching protocol (fix before rows 2–3)
+
+The ablation is defined by the matching rule; implement code only after this is fixed.
+
+
+| Rule                  | Role             | Definition (draft)                                                                                                                                                                                                                                                                                                                                                                           |
+| --------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Parameter-matched** | **Primary**      | Same total learnable scalar count. A `CliffordLinear(out, in)` stores `out×in` multivector weights + `out` multivector biases → `16·(out×in + out)` floats. The dense ablation flattens each position to `16·d_model` reals and uses a standard `LinearReal`-style layer with the same scalar count (not the same `d_model` label). Answers: *does Cayley structure help at equal capacity?* |
+| **FLOP-matched**      | Report alongside | Count multiply-adds in forward (geo product vs dot). Clifford layers do more work per param; report FLOPs separately so “wins at equal params but 3× FLOPs” is visible.                                                                                                                                                                                                                      |
+| **Width-matched**     | Secondary only   | Same `d_model`, `n_blocks`, `n_heads` — convenient but **not** equal params (Clifford cells are 16-wide). Do not use as the headline comparison.                                                                                                                                                                                                                                             |
+
+
+**Implementation scope (not a one-line flag).** A faithful dense ablation needs a
+parallel layer type wired through **forward, tape backward, and inference cache** —
+a second backward path, not a runtime toggle on `CliffordLinear` alone.
+
+**Vanilla transformer row (row 2).** Same tokenizer, corpus, training budget, and
+eval harness; parameter-matched real-valued transformer (dot-product attention,
+standard LayerNorm, same head tying options). External baseline or in-crate — TBD.
+
+### Row 1 procedure (TinyStories)
+
+```bash
+# Train on packed validation shard (small-run convention; replace with train.bin when available)
+cargo run --release --bin tinystories -- train \
+  data/tinystories.tok data/val.bin data/val.bin \
+  --checkpoint-out agent-data/tinystories-row1.json \
+  --steps 400 --tie-embeddings --grad-accum 2
+
+# Conditional bits/byte (+ gzip/lzma on the same bytes)
+cargo run --release --bin tinystories -- eval \
+  --checkpoint agent-data/tinystories-row1.json \
+  --tokenizer data/tinystories.tok \
+  data/val.bin --seq-len 128 --windows 64
+```
+
+Semantic init is on by default for fresh training. Sentiment-corpus runs are a
+separate track and do not fill row 1.
+
+### Open design questions
+
+**Why Cl(1,3) for text at all?** In the GA-for-physics literature, the geometric
+product earns its keep through **equivariance** to a symmetry the data actually has.
+Discrete tokens have no Lorentz symmetry. Here the Cayley table is a fixed sparse
+bilinear mixing pattern — possibly a useful parameterization, possibly a more
+expensive constrained linear layer. We do not know which without the ablation above.
+
+**Attention scores** use the grade-0 part of `Qᵢ ⊛ K̃ⱼ` — a **Minkowski** (indefinite)
+bilinear form, not a positive-definite dot product. Scores can be negative in ways a
+standard dot-product attention cannot; LayerNorm and softmax may tame this, but it is
+a plausible source of training quirks worth monitoring.
+
+**Positional “rotors”** mix compact rotations (`cos`/`sin` on `e12/e13/e23`) with
+non-compact Lorentz boosts (`cosh`/`sinh` on `e01/e02/e03`). Boosts preserve the
+**Clifford** norm `R R̃ = 1` (what `positional.rs` tests assert); they are **not**
+Euclidean-unitary and can change the Euclidean norm of activations. `final_norm` and
+block LayerNorm are doing real work here.
 
 ---
 
@@ -159,34 +274,17 @@ use the `v2` pipeline — see `[src/v2/README.md](src/v2/README.md)`.
 
 
 
-## Why inference is so fast
+## Inference cost
 
-People are often surprised that generation/eval are near-instant. It is **not**
-an asymptotic trick — it is a small model run forward-only with a const-folded
-algebra:
+At default size (`d_model=16`, `n_blocks=4`, `vocab=2048`, ~0.7M params),
+forward-only generation is fast for mundane reasons: tiny model, no backward tape,
+const-folded Cayley table, stack-allocated `[f32;16]` math, release LTO. That is
+expected, not surprising.
 
-1. **Tiny model.** Defaults are `d_model=16, n_heads=4, d_ff=64, n_blocks=4,
-  vocab=2048` — on the order of ~0.7 M parameters. Everything fits in cache.
-2. **Forward-only, no tape.** Training allocates an activation tape and runs the
-  full bilinear backward through every geometric product (≈2× the forward work
-   plus large gradient buffers). Inference does none of that — it is the cheap
-   half of the graph.
-3. **Compile-time Cayley table.** The 16×16 geometric-product table
-  (`CAYLEY_STA`) is evaluated in `const fn`; there is no runtime algebra
-   initialisation and the table stays resident in cache.
-4. **Stack-allocated math.** A multivector is a fixed `[f32; 16]`; geometric
-  products run on the stack with no heap allocation in the hot loop, which the
-   optimiser vectorises well.
-5. **Real output head.** `LinearReal` is a plain real matmul over `16·d_model`
-  features — no blade mixing — even though it is the single largest layer
-   (vocab-sized).
-6. **Aggressive release build.** `opt-level=3`, `lto=true`, `codegen-units=1`.
-
-**Caveat:** `tinystories generate` recomputes the full `O(seq²·layers)` forward
-for every new token — it does *not* yet wire in the `kv_cache` module. It only
-*feels* instant because the model and sequences are small; at larger
-`d_model`/`seq` that recompute would dominate, and you should route generation
-through `kv_cache` (`cached_attention_step`).
+**Generation** uses `InferenceCache` (`v2/inference.rs`): K/V are cached per layer,
+so each new token is **O(seq·layers)** instead of a full **O(seq²·layers)**
+recompute. Training and `eval` still use the full-sequence path. The cache
+respects `max_seq` (sliding-window eviction).
 
 ---
 
@@ -327,34 +425,18 @@ boundaries, KV-cache eviction, and the end-to-end `train_v2` loss-decrease test.
 
 
 
-## Growformer integration (Active Inference)
+## Growformer sibling crate (optional)
 
-The sibling `growformer` crate implements an **Active Inference** episode loop
-(`growformer::active_inference`): internal `BeliefState`, inward `Observation`,
-outward `Action` (Markov blanket). This crate does not contain that spine — use
-`growformer` when wiring Clifford-LLM outputs into routing, lattice generation,
-or MetaCognition.
+The separate `[growformer](../growformer)` crate implements lattice routing,
+sentiment brains, and an Active Inference episode loop. It is **not** part of this
+LM’s training path; use it when wiring LM outputs into domain-specific inference.
+No claim is made here that spacetime algebra + free-energy framing improves
+language modeling — that integration is exploratory.
 
 ```toml
 [dependencies]
 growformer = { path = "../growformer", default-features = false }
 ```
-
-```rust
-use growformer::active_inference::{ActiveInferenceSpine, BeliefState, EchoPolicy,
-    Observation, QueuedEnvironment, SpineConfig};
-
-let mut env    = QueuedEnvironment::from_observations([Observation::UserText("hi".into())]);
-let mut belief = BeliefState::new();
-let mut policy = EchoPolicy::new("> ");
-let spine = ActiveInferenceSpine::new(SpineConfig::default());
-let _trace = spine.run_episode(&mut env, &mut belief, &mut policy).unwrap();
-```
-
-For full turns, swap `EchoPolicy` for `RoutingGenerationMetacogEpisodePolicy`
-(routing + lattice generation + MetaCognition). Enable
-`LanguageService::enable_active_inference_replay_log()` to capture reflection
-observations for offline replay.
 
 ---
 
@@ -362,4 +444,4 @@ observations for offline replay.
 
 ## License
 
-MIT or Apache-2.0 (your choice).
+Apache-2.0.
