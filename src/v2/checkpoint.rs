@@ -5,14 +5,14 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
-use crate::{CliffordBlock, CliffordLinear, LinearReal};
+use crate::{CliffordBlock, CliffordLinear, LinearReal, FfnVariant};
 
 use super::data::Tokenizer;
 use super::train_v2::{ModelStateV2, TrainConfigV2};
 
 // Schema 2: output head is a real-valued projection (LinearReal) over the
 // flattened 16·d_model residual stream rather than a grade-0 CliffordLinear.
-const LM_CHECKPOINT_SCHEMA: u32 = 2;
+const LM_CHECKPOINT_SCHEMA: u32 = 3;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LinearDto {
@@ -39,6 +39,11 @@ pub struct BlockDto {
     pub norm2_beta: Vec<f32>,
     pub fc1: LinearDto,
     pub fc2: LinearDto,
+    /// Dense FFN ablation weights (schema ≥ 3).  When present, `cfg.dense_ffn` must be true.
+    #[serde(default)]
+    pub dense_fc1: Option<RealHeadDto>,
+    #[serde(default)]
+    pub dense_fc2: Option<RealHeadDto>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -105,6 +110,20 @@ fn apply_real_head(h: &mut LinearReal, d: &RealHeadDto) -> Result<(), String> {
 }
 
 fn snap_block(block: &CliffordBlock) -> BlockDto {
+    let (fc1, fc2, dense_fc1, dense_fc2) = match &block.ffn {
+        FfnVariant::Clifford(f) => (
+            snap_linear(&f.fc1),
+            snap_linear(&f.fc2),
+            None,
+            None,
+        ),
+        FfnVariant::Dense(f) => (
+            LinearDto { weights: vec![], bias: vec![] },
+            LinearDto { weights: vec![], bias: vec![] },
+            Some(snap_real_head(&f.fc1)),
+            Some(snap_real_head(&f.fc2)),
+        ),
+    };
     BlockDto {
         norm1_gamma: block.norm1.gamma.clone(),
         norm1_beta: block.norm1.beta.clone(),
@@ -114,12 +133,14 @@ fn snap_block(block: &CliffordBlock) -> BlockDto {
         wo: snap_linear(&block.attn.w_o),
         norm2_gamma: block.norm2.gamma.clone(),
         norm2_beta: block.norm2.beta.clone(),
-        fc1: snap_linear(&block.ffn.fc1),
-        fc2: snap_linear(&block.ffn.fc2),
+        fc1,
+        fc2,
+        dense_fc1,
+        dense_fc2,
     }
 }
 
-fn apply_block(block: &mut CliffordBlock, d: &BlockDto) -> Result<(), String> {
+fn apply_block(block: &mut CliffordBlock, d: &BlockDto, dense_ffn: bool) -> Result<(), String> {
     if block.norm1.gamma.len() != d.norm1_gamma.len() {
         return Err("norm1_gamma len mismatch".into());
     }
@@ -131,8 +152,30 @@ fn apply_block(block: &mut CliffordBlock, d: &BlockDto) -> Result<(), String> {
     apply_linear(&mut block.attn.w_o, &d.wo)?;
     block.norm2.gamma.clone_from(&d.norm2_gamma);
     block.norm2.beta.clone_from(&d.norm2_beta);
-    apply_linear(&mut block.ffn.fc1, &d.fc1)?;
-    apply_linear(&mut block.ffn.fc2, &d.fc2)?;
+
+    if dense_ffn {
+        let d1 = d.dense_fc1.as_ref().ok_or("dense_ffn checkpoint missing dense_fc1")?;
+        let d2 = d.dense_fc2.as_ref().ok_or("dense_ffn checkpoint missing dense_fc2")?;
+        match &mut block.ffn {
+            FfnVariant::Dense(f) => {
+                apply_real_head(&mut f.fc1, d1)?;
+                apply_real_head(&mut f.fc2, d2)?;
+            }
+            FfnVariant::Clifford(_) => {
+                return Err("cfg.dense_ffn but block has Clifford FFN".into());
+            }
+        }
+    } else {
+        match &mut block.ffn {
+            FfnVariant::Clifford(f) => {
+                apply_linear(&mut f.fc1, &d.fc1)?;
+                apply_linear(&mut f.fc2, &d.fc2)?;
+            }
+            FfnVariant::Dense(_) => {
+                return Err("cfg expects Clifford FFN but block is dense".into());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -159,10 +202,11 @@ fn build_state_from_ckpt(ckpt: LmCheckpoint) -> Result<ModelStateV2, String> {
         head,
     } = ckpt;
 
-    if schema != LM_CHECKPOINT_SCHEMA {
+    if schema != LM_CHECKPOINT_SCHEMA && schema != 2 {
         return Err(format!("unsupported LM checkpoint schema {}", schema));
     }
 
+    let dense_ffn = cfg.dense_ffn;
     let mut state = ModelStateV2::new(cfg);
     state.step = step;
 
@@ -182,7 +226,7 @@ fn build_state_from_ckpt(ckpt: LmCheckpoint) -> Result<ModelStateV2, String> {
         return Err("n_blocks mismatch".into());
     }
     for (b, dto) in blocks.into_iter().enumerate() {
-        apply_block(&mut state.model.blocks[b], &dto)?;
+        apply_block(&mut state.model.blocks[b], &dto, dense_ffn)?;
     }
 
     if !final_norm_gamma.is_empty() {
@@ -257,7 +301,7 @@ pub fn save_lm_state(path: &Path, state: &ModelStateV2) -> Result<(), String> {
 pub fn load_lm_checkpoint(path: &Path) -> Result<(ModelStateV2, Tokenizer), String> {
     let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let mut ckpt: LmCheckpoint = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-    if ckpt.schema != LM_CHECKPOINT_SCHEMA {
+    if ckpt.schema != LM_CHECKPOINT_SCHEMA && ckpt.schema != 2 {
         return Err(format!("unsupported LM checkpoint schema {}", ckpt.schema));
     }
 

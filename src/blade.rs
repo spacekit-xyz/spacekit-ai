@@ -62,7 +62,13 @@ pub const BLADE_GRADES: [u8; 16] = [
     2, 3, 3, 4,  // 12  e23 | e023 | e123 | e0123
 ];
 
-/// Grade-reversal sign per blade: (-1)^(k(k-1)/2) for grade k.
+/// Per-blade weight `|⟨B_k B̃_k⟩₀|` used in metric-aware layer norm (STA: all 1).
+pub const BLADE_METRIC_WEIGHT: [f32; 16] = [
+    1.0, 1.0, 1.0, 1.0,
+    1.0, 1.0, 1.0, 1.0,
+    1.0, 1.0, 1.0, 1.0,
+    1.0, 1.0, 1.0, 1.0,
+];
 /// Blades of grade 0,1 keep sign; grade 2,3 flip; grade 4 keeps.
 pub const REVERSE_SIGNS: [f32; 16] = [
     1.0,               //  0  grade 0

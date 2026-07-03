@@ -63,18 +63,29 @@ pub struct AttentionTape {
     pub agg: Vec<Vec<Multivector>>,
     /// Final attention output (after w_o).        [seq][d_model]
     pub output: Vec<Vec<Multivector>>,
+    /// Score kernel used in this forward pass.
+    pub score_mode: crate::AttentionScoreMode,
 }
 
 // ─── FFN activations for one block ────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
+pub enum FfnHidden {
+    Clifford {
+        hidden_pre:  Vec<Vec<Multivector>>,
+        hidden_post: Vec<Vec<Multivector>>,
+    },
+    Dense {
+        input_flat: Vec<Vec<f32>>,
+        pre:        Vec<Vec<f32>>,
+    },
+}
+
+#[derive(Clone, Debug)]
 pub struct FfnTape {
     /// Input to FFN (after norm2).               [seq][d_model]
-    pub input: Vec<Vec<Multivector>>,
-    /// Pre-ReLU hidden (output of fc1).          [seq][d_ff]
-    pub hidden_pre: Vec<Vec<Multivector>>,
-    /// Post-ReLU hidden (input to fc2).          [seq][d_ff]
-    pub hidden_post: Vec<Vec<Multivector>>,
+    pub input:  Vec<Vec<Multivector>>,
+    pub hidden: FfnHidden,
     /// Final FFN output (after fc2).             [seq][d_model]
     pub output: Vec<Vec<Multivector>>,
 }
@@ -137,34 +148,31 @@ impl Tape {
 
 use crate::{
     CliffordAttention, CliffordFFN, CliffordLayerNorm, CliffordBlock,
-    CliffordLLM,
+    CliffordLLM, FfnVariant,
 };
+use crate::ffn::{flatten_mvs, unflatten_mvs};
 use crate::cayley_const::CliffordAlgebraConst;
 use crate::mask::mask_scores;
 
-/// Layer-norm forward with stats recorded.
+/// Layer-norm forward with stats recorded (metric-weighted over blade components).
 pub fn norm_forward_taped(
     ln: &CliffordLayerNorm,
     x:  &[Multivector],
 ) -> (Vec<Multivector>, LayerNormStats) {
-    let flat: Vec<f32> = x.iter().flat_map(|mv| mv.c).collect();
-    let n    = flat.len() as f32;
-    let mean = flat.iter().sum::<f32>() / n;
-    let var  = flat.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / n;
-    let std  = (var + ln.eps).sqrt();
-
-    let x_hat: Vec<f32> = flat.iter().map(|v| (v - mean) / std).collect();
-    let normalised: Vec<f32> = x_hat.iter().enumerate()
-        .map(|(i, &x)| x * ln.gamma[i] + ln.beta[i])
-        .collect();
-
-    let output: Vec<Multivector> = normalised.chunks(16).map(|chunk| {
-        let mut c = [0.0f32; 16];
-        c.copy_from_slice(chunk);
-        Multivector { c }
-    }).collect();
-
-    (output, LayerNormStats { x_hat, mean, std })
+    let (output, stats) = crate::clifford_layer_norm::forward_multivectors(
+        &ln.gamma,
+        &ln.beta,
+        ln.eps,
+        x,
+    );
+    (
+        output,
+        LayerNormStats {
+            x_hat: stats.x_hat,
+            mean: stats.mean,
+            std: stats.std,
+        },
+    )
 }
 
 /// Attention forward, recording Q/K/V/scores/weights for the backward pass.
@@ -173,6 +181,7 @@ pub fn attention_forward_taped(
     attn: &CliffordAttention,
     x:    &[Vec<Multivector>],
     causal: bool,
+    score_mode: crate::AttentionScoreMode,
 ) -> AttentionTape {
     let seq      = x.len();
     let n_heads  = attn.n_heads;
@@ -183,8 +192,7 @@ pub fn attention_forward_taped(
     let k: Vec<Vec<Multivector>> = x.iter().map(|xi| attn.w_k.forward(xi)).collect();
     let v: Vec<Vec<Multivector>> = x.iter().map(|xi| attn.w_v.forward(xi)).collect();
 
-    // Per-head scores: each head h only mixes its own slice of channels
-    // [h·head_dim, (h+1)·head_dim).  score[h][i][j] = (1/scale) Σ_{d∈h} ⟨Q[i][d]⊛K[j][d]⟩₀
+    // Per-head scores: geometric default uses ⟨Q,K⟩ = (Q⊛K̃)₀; dot ablation uses Q·K.
     let mut scores = vec![vec![vec![0.0f32; seq]; seq]; n_heads];
     for h in 0..n_heads {
         let d0 = h * head_dim;
@@ -192,7 +200,7 @@ pub fn attention_forward_taped(
         for i in 0..seq {
             for j in 0..seq {
                 let s: f32 = (d0..d1)
-                    .map(|d| alg.geo_product(&q[i][d], &k[j][d]).c[0])
+                    .map(|d| crate::attention_pair_score(alg, &q[i][d], &k[j][d], score_mode))
                     .sum();
                 scores[h][i][j] = s / scale;
             }
@@ -228,11 +236,37 @@ pub fn attention_forward_taped(
         input: x.to_vec(),
         q, k, v,
         scores, weights, agg, output,
+        score_mode,
     }
 }
 
 /// FFN forward with intermediate activations recorded.
 pub fn ffn_forward_taped(
+    ffn: &FfnVariant,
+    x:   &[Vec<Multivector>],
+) -> FfnTape {
+    match ffn {
+        FfnVariant::Clifford(f) => ffn_forward_taped_clifford(f, x),
+        FfnVariant::Dense(f) => {
+            let input_flat: Vec<Vec<f32>> = x.iter().map(|xi| flatten_mvs(xi)).collect();
+            let pre: Vec<Vec<f32>> = input_flat.iter().map(|flat| f.fc1.forward_flat(flat)).collect();
+            let output: Vec<Vec<Multivector>> = pre
+                .iter()
+                .map(|p| {
+                    let post: Vec<f32> = p.iter().map(|v| v.max(0.0)).collect();
+                    unflatten_mvs(&f.fc2.forward_flat(&post), f.d_model)
+                })
+                .collect();
+            FfnTape {
+                input: x.to_vec(),
+                hidden: FfnHidden::Dense { input_flat, pre },
+                output,
+            }
+        }
+    }
+}
+
+fn ffn_forward_taped_clifford(
     ffn: &CliffordFFN,
     x:   &[Vec<Multivector>],
 ) -> FfnTape {
@@ -250,8 +284,7 @@ pub fn ffn_forward_taped(
 
     FfnTape {
         input: x.to_vec(),
-        hidden_pre,
-        hidden_post,
+        hidden: FfnHidden::Clifford { hidden_pre, hidden_post },
         output,
     }
 }
@@ -262,6 +295,7 @@ pub fn block_forward_taped(
     block:  &CliffordBlock,
     input:  &[Vec<Multivector>],
     causal: bool,
+    score_mode: crate::AttentionScoreMode,
 ) -> BlockTape {
     // Norm 1
     let mut norm1_stats = Vec::with_capacity(input.len());
@@ -272,7 +306,7 @@ pub fn block_forward_taped(
     }).collect();
 
     // Attention
-    let attn = attention_forward_taped(alg, &block.attn, &n1, causal);
+    let attn = attention_forward_taped(alg, &block.attn, &n1, causal, score_mode);
 
     // Residual 1
     let after_res1: Vec<Vec<Multivector>> = input.iter().zip(attn.output.iter())
@@ -321,7 +355,9 @@ pub fn model_forward_taped(
     model:     &CliffordLLM,
     token_ids: &[usize],
     causal:    bool,
+    dot_scores: bool,
 ) -> Tape {
+    let score_mode = crate::AttentionScoreMode::from_dot_flag(dot_scores);
     use crate::positional::RotorPositionalEncoding;
 
     // 1. Embedding lookup
@@ -337,7 +373,7 @@ pub fn model_forward_taped(
     let mut blocks = Vec::with_capacity(model.blocks.len());
     let mut x = post_pe.clone();
     for block in &model.blocks {
-        let bt = block_forward_taped(alg, block, &x, causal);
+        let bt = block_forward_taped(alg, block, &x, causal, score_mode);
         x = bt.after_res2.clone();
         blocks.push(bt);
     }
@@ -373,8 +409,9 @@ pub fn model_forward_logits(
     model: &CliffordLLM,
     token_ids: &[usize],
     causal: bool,
+    dot_scores: bool,
 ) -> Vec<Vec<f32>> {
-    model_forward_taped(alg, model, token_ids, causal).logits
+    model_forward_taped(alg, model, token_ids, causal, dot_scores).logits
 }
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
@@ -406,7 +443,7 @@ mod tests {
         let vocab   = 16;
 
         let attn  = CliffordAttention::new(d_model, 2, alg_arc.clone());
-        let ffn   = CliffordFFN::new(d_model, 8, alg_arc.clone());
+        let ffn   = FfnVariant::clifford(d_model, 8, alg_arc.clone());
         let norm1 = CliffordLayerNorm::new(d_model);
         let norm2 = CliffordLayerNorm::new(d_model);
         let block = CliffordBlock { attn, ffn, norm1, norm2 };
@@ -421,7 +458,7 @@ mod tests {
         };
 
         let ids = vec![1usize, 2, 3, 4];
-        let tape = model_forward_taped(&alg, &model, &ids, true);
+        let tape = model_forward_taped(&alg, &model, &ids, true, false);
 
         assert_eq!(tape.seq_len(), 4);
         assert_eq!(tape.embedded.len(), 4);
@@ -445,7 +482,7 @@ mod tests {
 
         let x: Vec<Vec<Multivector>> = (0..3)
             .map(|i| vec![Multivector::scalar((i + 1) as f32); 4]).collect();
-        let tape = attention_forward_taped(&alg, &attn, &x, true);
+        let tape = attention_forward_taped(&alg, &attn, &x, true, crate::AttentionScoreMode::InnerProduct);
 
         // Check every head: position 0 attends only to position 0; position 2 sees all.
         for head in &tape.weights {

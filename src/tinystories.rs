@@ -5,7 +5,7 @@ use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 
 use crate::bpe::BpeTokenizer;
-use crate::v2::data::{special, TrainExample};
+use crate::v2::data::{special, TrainExample, N_SPECIAL};
 use crate::v2::sample::SimpleRng;
 
 // ─── Raw text loader ──────────────────────────────────────────────────────────
@@ -143,6 +143,72 @@ impl PackedDataset {
 
     pub fn n_tokens(&self) -> usize {
         self.tokens.len()
+    }
+
+    /// Count text-token occurrences (ids ≥ `N_SPECIAL`) for unigram baselines.
+    pub fn unigram_counts(&self, vocab_size: usize) -> (Vec<u64>, u64) {
+        let mut counts = vec![0u64; vocab_size];
+        let mut total = 0u64;
+        for &t in &self.tokens {
+            let id = t as usize;
+            if id < N_SPECIAL as usize || id >= vocab_size {
+                continue;
+            }
+            counts[id] += 1;
+            total += 1;
+        }
+        (counts, total)
+    }
+
+    /// Mean NLL (nats/token) of `tokens` under an empirical unigram from `counts` / `total`.
+    pub fn unigram_nll_nats(counts: &[u64], total: u64, tokens: &[u32], vocab_size: usize) -> (f64, usize) {
+        if total == 0 {
+            return (0.0, 0);
+        }
+        let mut nll = 0.0f64;
+        let mut n = 0usize;
+        for &t in tokens {
+            let id = t as usize;
+            if id < N_SPECIAL as usize || id >= vocab_size {
+                continue;
+            }
+            let p = (counts[id] as f64 / total as f64).max(1e-12);
+            nll += -p.ln();
+            n += 1;
+        }
+        if n == 0 {
+            (0.0, 0)
+        } else {
+            (nll / n as f64, n)
+        }
+    }
+
+    /// Chronological split for held-out eval (first `train_frac` tokens → train).
+    pub fn split_chronological(&self, train_frac: f64) -> (Self, Self) {
+        let n = self.tokens.len();
+        let split = ((n as f64) * train_frac.clamp(0.0, 1.0)) as usize;
+        let split = split.clamp(1, n.saturating_sub(1));
+        let train = Self {
+            tokens: self.tokens[..split].to_vec(),
+            vocab_size: self.vocab_size,
+        };
+        let held = Self {
+            tokens: self.tokens[split..].to_vec(),
+            vocab_size: self.vocab_size,
+        };
+        (train, held)
+    }
+
+    /// Write a CLIFTOKS bin (same format as [`encode_corpus`]).
+    pub fn write<P: AsRef<Path>>(&self, path: P) -> std::io::Result<()> {
+        let mut writer = BufWriter::new(File::create(path)?);
+        writer.write_all(MAGIC)?;
+        writer.write_all(&VERSION.to_le_bytes())?;
+        writer.write_all(&self.vocab_size.to_le_bytes())?;
+        for &t in &self.tokens {
+            writer.write_all(&t.to_le_bytes())?;
+        }
+        Ok(())
     }
 }
 

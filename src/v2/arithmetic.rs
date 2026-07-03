@@ -251,7 +251,7 @@ mod tests {
 
         // Distribution for the token *after* `prefix` (last position's logits).
         let dist_at = |prefix: &[usize]| -> Vec<f32> {
-            let logits = model_forward_logits(&state.alg, &state.model, prefix, true);
+            let logits = model_forward_logits(&state.alg, &state.model, prefix, true, state.cfg.dot_attention);
             softmax(logits.last().unwrap())
         };
 

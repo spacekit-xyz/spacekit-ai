@@ -257,6 +257,7 @@ fn main() -> Result<(), String> {
                 state.cfg.n_blocks,
                 state.cfg.max_seq,
                 state.model.embedding[0].len(),
+                state.cfg.dot_attention,
             );
             let _generated = generate_stream(
                 &ids,

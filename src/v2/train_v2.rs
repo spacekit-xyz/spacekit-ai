@@ -19,7 +19,8 @@ use crate::{Multivector, CliffordLLM, LinearReal, CliffordAlgebra};
 use crate::backprop::{RealHeadGrad, GradLinear, cross_entropy, real_head_backward, layer_norm_backward};
 use crate::optim::{AdamConfig, LayerOptimizer, RealHeadOptimizer, clip_grad_norm, cosine_lr_with_warmup};
 use crate::cayley_const::CliffordAlgebraConst;
-use super::block_backward::{block_backward, BlockGrads};
+use crate::ffn::{FfnVariant, matched_dense_ffn_hidden};
+use super::block_backward::{block_backward, BlockGrads, FfnGrad};
 use super::data::TrainExample;
 use super::embedding::{EmbeddingGrad, EmbeddingOptimizer};
 use super::tape::model_forward_taped;
@@ -42,6 +43,19 @@ fn fill_linear_random(layer: &mut CliffordLinear, rng: &mut StdRng, std: f32) {
     }
     for b in &mut layer.bias {
         *b = Multivector::zero();
+    }
+}
+
+fn fill_real_linear_random(layer: &mut LinearReal, rng: &mut StdRng, fan_in: usize) {
+    let std = (1.0 / fan_in as f32).sqrt();
+    let bound = std * 3.0f32.sqrt();
+    for row in &mut layer.weights {
+        for w in row {
+            *w = rng.gen_range(-bound..bound);
+        }
+    }
+    for b in &mut layer.bias {
+        *b = 0.0;
     }
 }
 
@@ -72,10 +86,20 @@ pub fn randomize_model(model: &mut CliffordLLM, seed: u64) {
         fill_linear_random(&mut block.attn.w_v, &mut rng, std_dm);
         fill_linear_random(&mut block.attn.w_o, &mut rng, std_dm);
 
-        let fc1_in = block.ffn.fc1.in_dim;
-        let fc2_in = block.ffn.fc2.in_dim;
-        fill_linear_random(&mut block.ffn.fc1, &mut rng, (1.0 / (fc1_in * 16) as f32).sqrt());
-        fill_linear_random(&mut block.ffn.fc2, &mut rng, (1.0 / (fc2_in * 16) as f32).sqrt());
+        match &mut block.ffn {
+            FfnVariant::Clifford(f) => {
+                let fc1_in = f.fc1.in_dim;
+                let fc2_in = f.fc2.in_dim;
+                fill_linear_random(&mut f.fc1, &mut rng, (1.0 / (fc1_in * 16) as f32).sqrt());
+                fill_linear_random(&mut f.fc2, &mut rng, (1.0 / (fc2_in * 16) as f32).sqrt());
+            }
+            FfnVariant::Dense(f) => {
+                let fan1 = f.fc1.in_features;
+                let fan2 = f.fc2.in_features;
+                fill_real_linear_random(&mut f.fc1, &mut rng, fan1);
+                fill_real_linear_random(&mut f.fc2, &mut rng, fan2);
+            }
+        }
     }
 
     // Real output head.
@@ -263,6 +287,18 @@ pub struct TrainConfigV2 {
     /// `grad_accum`.  1 = current behaviour (step per microbatch).
     #[serde(default = "default_grad_accum")]
     pub grad_accum: usize,
+    /// FFN-only ablation: param-matched dense real FFN instead of Clifford geometric product.
+    #[serde(default)]
+    pub dense_ffn: bool,
+    /// Attention score ablation (row 3b): dot product on 16-scalar Q/K instead of ⟨Q⊛K⟩₀.
+    #[serde(default)]
+    pub dot_attention: bool,
+    /// Row 2: param-matched vanilla transformer (real embeddings, standard LN, dot attention).
+    #[serde(default)]
+    pub vanilla: bool,
+    /// Row 2: Clifford reference `d_model` before param-budget matching (0 if N/A).
+    #[serde(default)]
+    pub clifford_ref_d_model: usize,
 }
 
 fn default_grad_accum() -> usize { 1 }
@@ -285,22 +321,63 @@ impl TrainConfigV2 {
             tie_embeddings: false,
             structured_init: false,
             grad_accum: 1,
+            dense_ffn: false,
+            dot_attention: false,
+            vanilla: false,
+            clifford_ref_d_model: 0,
         }
     }
 }
 
 // ─── Model + optimiser state ─────────────────────────────────────────────────
 
+/// Adam state for one block's FFN (Clifford or dense param-matched).
+pub enum FfnBlockOptimizer {
+    Clifford {
+        fc1: LayerOptimizer,
+        fc2: LayerOptimizer,
+    },
+    Dense {
+        fc1: RealHeadOptimizer,
+        fc2: RealHeadOptimizer,
+    },
+}
+
+impl FfnBlockOptimizer {
+    fn step_clifford(
+        &mut self,
+        f: &mut crate::CliffordFFN,
+        g1: &GradLinear,
+        g2: &GradLinear,
+    ) {
+        let Self::Clifford { fc1, fc2 } = self else {
+            panic!("FFN optimizer/variant mismatch");
+        };
+        fc1.step(&mut f.fc1.weights, &mut f.fc1.bias, g1);
+        fc2.step(&mut f.fc2.weights, &mut f.fc2.bias, g2);
+    }
+
+    fn step_dense(
+        &mut self,
+        f: &mut crate::DenseFFN,
+        g1: &RealHeadGrad,
+        g2: &RealHeadGrad,
+    ) {
+        let Self::Dense { fc1, fc2 } = self else {
+            panic!("FFN optimizer/variant mismatch");
+        };
+        fc1.step(&mut f.fc1, g1);
+        fc2.step(&mut f.fc2, g2);
+    }
+}
+
 /// Per-block optimiser bundle.
-/// `gamma`/`beta` for the two layer norms are stored as flat Vec<MvAdamState>
-/// because layer-norm parameters are scalars, not multivectors.
 pub struct BlockOptimizer {
     pub wq: LayerOptimizer,
     pub wk: LayerOptimizer,
     pub wv: LayerOptimizer,
     pub wo: LayerOptimizer,
-    pub fc1: LayerOptimizer,
-    pub fc2: LayerOptimizer,
+    pub ffn:  FfnBlockOptimizer,
     pub norm1_gamma_m: Vec<f32>,
     pub norm1_gamma_v: Vec<f32>,
     pub norm1_beta_m:  Vec<f32>,
@@ -313,15 +390,26 @@ pub struct BlockOptimizer {
 }
 
 impl BlockOptimizer {
-    pub fn new(d_model: usize, d_ff: usize, cfg: AdamConfig) -> Self {
-        let n = d_model * 16;
+    pub fn new(cfg: &TrainConfigV2, adam: AdamConfig) -> Self {
+        let n = cfg.d_model * 16;
+        let ffn = if cfg.dense_ffn {
+            let hidden = matched_dense_ffn_hidden(cfg.d_model, cfg.d_ff);
+            FfnBlockOptimizer::Dense {
+                fc1: RealHeadOptimizer::new(hidden, n, adam.clone()),
+                fc2: RealHeadOptimizer::new(n, hidden, adam.clone()),
+            }
+        } else {
+            FfnBlockOptimizer::Clifford {
+                fc1: LayerOptimizer::new(cfg.d_ff, cfg.d_model, adam.clone()),
+                fc2: LayerOptimizer::new(cfg.d_model, cfg.d_ff, adam.clone()),
+            }
+        };
         Self {
-            wq:  LayerOptimizer::new(d_model, d_model, cfg.clone()),
-            wk:  LayerOptimizer::new(d_model, d_model, cfg.clone()),
-            wv:  LayerOptimizer::new(d_model, d_model, cfg.clone()),
-            wo:  LayerOptimizer::new(d_model, d_model, cfg.clone()),
-            fc1: LayerOptimizer::new(d_ff,    d_model, cfg.clone()),
-            fc2: LayerOptimizer::new(d_model, d_ff,    cfg),
+            wq:  LayerOptimizer::new(cfg.d_model, cfg.d_model, adam.clone()),
+            wk:  LayerOptimizer::new(cfg.d_model, cfg.d_model, adam.clone()),
+            wv:  LayerOptimizer::new(cfg.d_model, cfg.d_model, adam.clone()),
+            wo:  LayerOptimizer::new(cfg.d_model, cfg.d_model, adam.clone()),
+            ffn,
             norm1_gamma_m: vec![0.0; n], norm1_gamma_v: vec![0.0; n],
             norm1_beta_m:  vec![0.0; n], norm1_beta_v:  vec![0.0; n],
             norm2_gamma_m: vec![0.0; n], norm2_gamma_v: vec![0.0; n],
@@ -377,13 +465,17 @@ impl ModelStateV2 {
 
         let blocks: Vec<_> = (0..cfg.n_blocks).map(|_| crate::CliffordBlock {
             attn:  crate::CliffordAttention::new(cfg.d_model, cfg.n_heads, alg_arc.clone()),
-            ffn:   crate::CliffordFFN::new(cfg.d_model, cfg.d_ff, alg_arc.clone()),
+            ffn:   if cfg.dense_ffn {
+                FfnVariant::dense_matched(cfg.d_model, cfg.d_ff, cfg.init_seed ^ 0xDE5EFF10)
+            } else {
+                FfnVariant::clifford(cfg.d_model, cfg.d_ff, alg_arc.clone())
+            },
             norm1: crate::CliffordLayerNorm::new(cfg.d_model),
             norm2: crate::CliffordLayerNorm::new(cfg.d_model),
         }).collect();
 
         let block_opts: Vec<_> = (0..cfg.n_blocks)
-            .map(|_| BlockOptimizer::new(cfg.d_model, cfg.d_ff, adam.clone()))
+            .map(|_| BlockOptimizer::new(&cfg, adam.clone()))
             .collect();
 
         let head     = LinearReal::new(cfg.d_model, cfg.vocab_size);
@@ -426,9 +518,20 @@ impl ModelStateV2 {
             self.cfg.lr_max, self.cfg.lr_min,
         );
         for b in &mut self.block_opts {
-            b.wq.cfg.lr  = lr; b.wk.cfg.lr  = lr;
-            b.wv.cfg.lr  = lr; b.wo.cfg.lr  = lr;
-            b.fc1.cfg.lr = lr; b.fc2.cfg.lr = lr;
+            b.wq.cfg.lr = lr;
+            b.wk.cfg.lr = lr;
+            b.wv.cfg.lr = lr;
+            b.wo.cfg.lr = lr;
+            match &mut b.ffn {
+                FfnBlockOptimizer::Clifford { fc1, fc2 } => {
+                    fc1.cfg.lr = lr;
+                    fc2.cfg.lr = lr;
+                }
+                FfnBlockOptimizer::Dense { fc1, fc2 } => {
+                    fc1.cfg.lr = lr;
+                    fc2.cfg.lr = lr;
+                }
+            }
         }
         self.head_opt.cfg.lr  = lr;
         self.embed_opt.cfg.lr = lr;
@@ -436,6 +539,51 @@ impl ModelStateV2 {
 }
 
 // ─── One training step ────────────────────────────────────────────────────────
+
+/// FFN parameter gradients for one block (variant-specific).
+pub enum FfnParamGrads {
+    Clifford { fc1: GradLinear, fc2: GradLinear },
+    Dense    { fc1: RealHeadGrad, fc2: RealHeadGrad },
+}
+
+impl FfnParamGrads {
+    fn zeros(cfg: &TrainConfigV2) -> Self {
+        if cfg.dense_ffn {
+            let hidden = matched_dense_ffn_hidden(cfg.d_model, cfg.d_ff);
+            let n = cfg.d_model * 16;
+            Self::Dense {
+                fc1: RealHeadGrad::zeros(hidden, n),
+                fc2: RealHeadGrad::zeros(n, hidden),
+            }
+        } else {
+            Self::Clifford {
+                fc1: GradLinear::zeros(cfg.d_ff, cfg.d_model),
+                fc2: GradLinear::zeros(cfg.d_model, cfg.d_ff),
+            }
+        }
+    }
+
+    fn add(&mut self, o: &FfnParamGrads) {
+        match (self, o) {
+            (Self::Clifford { fc1, fc2 }, Self::Clifford { fc1: o1, fc2: o2 }) => {
+                fc1.accumulate(o1);
+                fc2.accumulate(o2);
+            }
+            (Self::Dense { fc1, fc2 }, Self::Dense { fc1: o1, fc2: o2 }) => {
+                fc1.accumulate(o1);
+                fc2.accumulate(o2);
+            }
+            _ => panic!("FFN param grad variant mismatch"),
+        }
+    }
+
+    fn scale(&mut self, s: f32) {
+        match self {
+            Self::Clifford { fc1, fc2 } => { fc1.scale(s); fc2.scale(s); }
+            Self::Dense { fc1, fc2 } => { fc1.scale(s); fc2.scale(s); }
+        }
+    }
+}
 
 /// Parameter gradients for one transformer block (no `grad_input`, so it can be
 /// summed across microbatches of differing sequence length).
@@ -448,32 +596,33 @@ pub struct BlockParamGrads {
     pub w_k: GradLinear,
     pub w_v: GradLinear,
     pub w_o: GradLinear,
-    pub fc1: GradLinear,
-    pub fc2: GradLinear,
+    pub ffn: FfnParamGrads,
 }
 
 impl BlockParamGrads {
-    fn zeros(d_model: usize, d_ff: usize) -> Self {
-        let n = d_model * 16;
+    fn zeros(cfg: &TrainConfigV2) -> Self {
+        let n = cfg.d_model * 16;
         Self {
             norm1_gamma: vec![0.0; n], norm1_beta: vec![0.0; n],
             norm2_gamma: vec![0.0; n], norm2_beta: vec![0.0; n],
-            w_q: GradLinear::zeros(d_model, d_model),
-            w_k: GradLinear::zeros(d_model, d_model),
-            w_v: GradLinear::zeros(d_model, d_model),
-            w_o: GradLinear::zeros(d_model, d_model),
-            fc1: GradLinear::zeros(d_ff, d_model),
-            fc2: GradLinear::zeros(d_model, d_ff),
+            w_q: GradLinear::zeros(cfg.d_model, cfg.d_model),
+            w_k: GradLinear::zeros(cfg.d_model, cfg.d_model),
+            w_v: GradLinear::zeros(cfg.d_model, cfg.d_model),
+            w_o: GradLinear::zeros(cfg.d_model, cfg.d_model),
+            ffn: FfnParamGrads::zeros(cfg),
         }
     }
 
-    /// Take the parameter grads out of a full `BlockGrads` (drops `grad_input`).
     fn from_block(g: BlockGrads) -> Self {
+        let ffn = match g.ffn {
+            FfnGrad::Clifford(g1, g2) => FfnParamGrads::Clifford { fc1: g1, fc2: g2 },
+            FfnGrad::Dense(g1, g2) => FfnParamGrads::Dense { fc1: g1, fc2: g2 },
+        };
         Self {
             norm1_gamma: g.norm1_gamma, norm1_beta: g.norm1_beta,
             norm2_gamma: g.norm2_gamma, norm2_beta: g.norm2_beta,
             w_q: g.attn.w_q, w_k: g.attn.w_k, w_v: g.attn.w_v, w_o: g.attn.w_o,
-            fc1: g.ffn_fc1, fc2: g.ffn_fc2,
+            ffn,
         }
     }
 
@@ -486,7 +635,7 @@ impl BlockParamGrads {
         }
         self.w_q.accumulate(&o.w_q); self.w_k.accumulate(&o.w_k);
         self.w_v.accumulate(&o.w_v); self.w_o.accumulate(&o.w_o);
-        self.fc1.accumulate(&o.fc1); self.fc2.accumulate(&o.fc2);
+        self.ffn.add(&o.ffn);
     }
 
     fn scale(&mut self, s: f32) {
@@ -495,7 +644,7 @@ impl BlockParamGrads {
         for v in self.norm2_gamma.iter_mut() { *v *= s; }
         for v in self.norm2_beta.iter_mut()  { *v *= s; }
         self.w_q.scale(s); self.w_k.scale(s); self.w_v.scale(s); self.w_o.scale(s);
-        self.fc1.scale(s); self.fc2.scale(s);
+        self.ffn.scale(s);
     }
 }
 
@@ -520,7 +669,7 @@ impl StepGrads {
             fnorm_dgamma: vec![0.0; n],
             fnorm_dbeta:  vec![0.0; n],
             blocks: (0..cfg.n_blocks)
-                .map(|_| BlockParamGrads::zeros(cfg.d_model, cfg.d_ff))
+                .map(|_| BlockParamGrads::zeros(cfg))
                 .collect(),
             embed: EmbeddingGrad::new(cfg.d_model),
             loss: 0.0,
@@ -565,7 +714,13 @@ pub fn compute_grads_v2(state: &ModelStateV2, example: &TrainExample) -> StepGra
     let mut out = StepGrads::zeros(&state.cfg);
 
     // ── 1. Forward with tape ─────────────────────────────────────────────────
-    let tape = model_forward_taped(&state.alg, &state.model, &example.full_ids, true);
+    let tape = model_forward_taped(
+        &state.alg,
+        &state.model,
+        &example.full_ids,
+        true,
+        state.cfg.dot_attention,
+    );
 
     // ── 2. Loss + grad_logits at every loss-masked position ───────────────────
     let loss_mask = example.loss_mask();
@@ -633,8 +788,7 @@ pub fn compute_grads_v2(state: &ModelStateV2, example: &TrainExample) -> StepGra
         grads.attn.w_k.scale(scale);
         grads.attn.w_v.scale(scale);
         grads.attn.w_o.scale(scale);
-        grads.ffn_fc1.scale(scale);
-        grads.ffn_fc2.scale(scale);
+        grads.ffn.scale(scale);
         for g in &mut grads.norm1_gamma { *g *= scale; }
         for g in &mut grads.norm1_beta  { *g *= scale; }
         for g in &mut grads.norm2_gamma { *g *= scale; }
@@ -646,8 +800,7 @@ pub fn compute_grads_v2(state: &ModelStateV2, example: &TrainExample) -> StepGra
         clip_grad_norm(&mut grads.attn.w_k, state.cfg.grad_clip);
         clip_grad_norm(&mut grads.attn.w_v, state.cfg.grad_clip);
         clip_grad_norm(&mut grads.attn.w_o, state.cfg.grad_clip);
-        clip_grad_norm(&mut grads.ffn_fc1,  state.cfg.grad_clip);
-        clip_grad_norm(&mut grads.ffn_fc2,  state.cfg.grad_clip);
+        grads.ffn.clip_norm(state.cfg.grad_clip);
 
         grad_x = std::mem::take(&mut grads.grad_input);
         out.blocks[b] = BlockParamGrads::from_block(grads);
@@ -719,8 +872,15 @@ fn apply_grads_v2(state: &mut ModelStateV2, grads: &StepGrads) {
         opt.wk.step(&mut bm.attn.w_k.weights, &mut bm.attn.w_k.bias, &pg.w_k);
         opt.wv.step(&mut bm.attn.w_v.weights, &mut bm.attn.w_v.bias, &pg.w_v);
         opt.wo.step(&mut bm.attn.w_o.weights, &mut bm.attn.w_o.bias, &pg.w_o);
-        opt.fc1.step(&mut bm.ffn.fc1.weights, &mut bm.ffn.fc1.bias, &pg.fc1);
-        opt.fc2.step(&mut bm.ffn.fc2.weights, &mut bm.ffn.fc2.bias, &pg.fc2);
+        match (&mut bm.ffn, &mut opt.ffn, &pg.ffn) {
+            (FfnVariant::Clifford(f), FfnBlockOptimizer::Clifford { .. }, FfnParamGrads::Clifford { fc1, fc2 }) => {
+                opt.ffn.step_clifford(f, fc1, fc2);
+            }
+            (FfnVariant::Dense(f), FfnBlockOptimizer::Dense { .. }, FfnParamGrads::Dense { fc1, fc2 }) => {
+                opt.ffn.step_dense(f, fc1, fc2);
+            }
+            _ => panic!("FFN variant / optimizer / grad mismatch at block {b}"),
+        }
 
         adam_step_scalar(
             &mut state.model.blocks[b].norm1.gamma, &pg.norm1_gamma,
@@ -802,7 +962,13 @@ pub fn train_step_v2_head_only(state: &mut ModelStateV2, example: &TrainExample)
     let dm = state.cfg.d_model;
     let vocab = state.cfg.vocab_size;
 
-    let tape = model_forward_taped(&state.alg, &state.model, &example.full_ids, true);
+    let tape = model_forward_taped(
+        &state.alg,
+        &state.model,
+        &example.full_ids,
+        true,
+        state.cfg.dot_attention,
+    );
 
     let loss_mask = example.loss_mask();
     let mut total_loss = 0.0f32;

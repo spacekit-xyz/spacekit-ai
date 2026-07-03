@@ -18,6 +18,11 @@
 // a separate algebra.rs + layers.rs, adjust these lines accordingly.
 
 mod clifford_llm;
+pub mod ffn;
+pub mod attention_score;
+pub mod cl1;
+pub mod clifford_layer_norm;
+pub mod lm_cone_router;
 
 pub mod domain_data;
 pub mod pooled_classifier;
@@ -25,6 +30,9 @@ pub mod train;
 pub mod world_grounding;
 
 pub mod bpe;
+pub mod param_budget;
+pub mod standard_layer_norm;
+pub mod vanilla_llm;
 pub mod tinystories;
 
 /// Taped forward, full backward through Clifford blocks, LM training (`train_v2`), sampling.
@@ -43,6 +51,11 @@ pub use clifford_llm::{
     CliffordLLM,
     LinearReal,
 };
+pub use attention_score::{attention_pair_score, AttentionScoreMode};
+pub use ffn::{
+    DenseFFN, FfnVariant, clifford_ffn_scalars, dense_ffn_scalars,
+    flatten_mvs, matched_dense_ffn_hidden, unflatten_mvs,
+};
 
 // ─── Modules ──────────────────────────────────────────────────────────────────
 
@@ -59,7 +72,7 @@ pub mod kv_cache;
 // blade
 pub use blade::{
     SCALAR, E0, E1, E01, E2, E02, E12, E012, E3, E03, E13, E013, E23, E023, E123, E0123,
-    BLADE_NAMES, BLADE_GRADES, REVERSE_SIGNS,
+    BLADE_NAMES, BLADE_GRADES, REVERSE_SIGNS, BLADE_METRIC_WEIGHT,
     grade_of, blades_of_grade, project_grade, scalar_part, vector_part, bivector_part,
     vector, bivector, display,
 };
@@ -71,7 +84,7 @@ pub use cayley_const::{CayleyCell, CAYLEY_STA, CliffordAlgebraConst};
 pub use backprop::{
     GradLinear, RealHeadGrad,
     geo_product_backward, linear_backward,
-    cross_entropy, scalar_head_backward, real_head_backward, layer_norm_backward,
+    cross_entropy, scalar_head_backward, real_linear_backward, real_head_backward, layer_norm_backward,
 };
 
 // optim

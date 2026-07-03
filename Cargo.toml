@@ -22,6 +22,7 @@ toml = "0.8"
 # bits/byte comparison.  Prediction and compression are equivalent: a model's
 # cross-entropy in bits/byte is exactly its lossless compression rate.
 spacekit-compressor = { path = "../../spacekit/spacekit-ai/spacekit-compressor" }
+growformer-ledger = { path = "../growformer-ledger" }
 
 [dev-dependencies]
 # nothing extra needed — all tests use the standard harness

@@ -220,6 +220,37 @@ impl RealHeadGrad {
     }
 }
 
+/// Backward through a real linear layer for one position (no multivector edges).
+///
+/// Forward: `out[o] = bias[o] + Σ_j W[o][j] · input[j]`
+///
+/// Returns `grad_input` with length `input.len()`.
+pub fn real_linear_backward(
+    weights:  &[Vec<f32>],
+    input:    &[f32],
+    grad_out: &[f32],
+    grad:     &mut RealHeadGrad,
+) -> Vec<f32> {
+    let out_dim = weights.len();
+    let in_features = input.len();
+    let mut grad_input = vec![0.0f32; in_features];
+
+    for o in 0..out_dim {
+        let g = grad_out[o];
+        if g == 0.0 {
+            continue;
+        }
+        grad.d_bias[o] += g;
+        let w = &weights[o];
+        let dw = &mut grad.d_weights[o];
+        for j in 0..in_features {
+            dw[j] += g * input[j];
+            grad_input[j] += g * w[j];
+        }
+    }
+    grad_input
+}
+
 /// Backward through the real output head for one position.
 ///
 /// Forward:  logit[o] = bias[o] + Σ_j W[o][j] · flat[j]      (flat = flatten(head_input))
@@ -237,32 +268,9 @@ pub fn real_head_backward(
     grad_logits: &[f32],
     grad:        &mut RealHeadGrad,
 ) -> Vec<Multivector> {
-    let out_dim     = weights.len();
-    let in_features = head_input.len() * 16;
     let flat: Vec<f32> = head_input.iter().flat_map(|mv| mv.c).collect();
-
-    let mut grad_flat = vec![0.0f32; in_features];
-    for o in 0..out_dim {
-        let g = grad_logits[o];
-        if g == 0.0 { continue; }
-        grad.d_bias[o] += g;
-        let w  = &weights[o];
-        let dw = &mut grad.d_weights[o];
-        for j in 0..in_features {
-            dw[j]        += g * flat[j];
-            grad_flat[j] += g * w[j];
-        }
-    }
-
-    // Reshape grad_flat back into d_model multivectors.
-    grad_flat
-        .chunks(16)
-        .map(|chunk| {
-            let mut c = [0.0f32; 16];
-            c.copy_from_slice(chunk);
-            Multivector { c }
-        })
-        .collect()
+    let grad_flat = real_linear_backward(weights, &flat, grad_logits, grad);
+    crate::ffn::unflatten_mvs(&grad_flat, head_input.len())
 }
 
 // ─── Layer-norm backward (simplified) ────────────────────────────────────────
@@ -274,22 +282,12 @@ pub fn real_head_backward(
 ///
 /// Returns grad_x as a flat Vec<f32> of length 16 × d_model.
 pub fn layer_norm_backward(
-    x_hat:    &[f32],   // normalised x (before γ,β)  length 16×d_model
-    gamma:    &[f32],   // learned scales               same length
-    grad_out: &[f32],   // dL/d(output of layer norm)  same length
+    x_hat:    &[f32],
+    gamma:    &[f32],
+    grad_out: &[f32],
     std:      f32,
 ) -> Vec<f32> {
-    let n = x_hat.len() as f32;
-
-    // dl_dy_gamma[i] = grad_out[i] * gamma[i]
-    let dl_dg: Vec<f32> = grad_out.iter().zip(gamma).map(|(&g, &gam)| g * gam).collect();
-
-    let mean_dl_dg: f32 = dl_dg.iter().sum::<f32>() / n;
-    let mean_dl_dg_xhat: f32 = dl_dg.iter().zip(x_hat).map(|(&d, &x)| d * x).sum::<f32>() / n;
-
-    dl_dg.iter().zip(x_hat).map(|(&d, &x)| {
-        (d - mean_dl_dg - x * mean_dl_dg_xhat) / std
-    }).collect()
+    crate::clifford_layer_norm::backward_flat(x_hat, gamma, grad_out, std)
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

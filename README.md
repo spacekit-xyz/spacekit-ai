@@ -7,17 +7,27 @@ product** of multivectors rather than scalar dot products and dense matmuls.
 - Crate (lib): `growformer_llm` — `use growformer_llm::*;`
 - Binary: `tinystories` — BPE → train → eval (bits/byte) → generate
 
-> **What this repo is.** A from-scratch Clifford-algebra transformer with a full
-> training stack (tape backward, Adam, checkpoints, arithmetic coding). The *how*
-> is documented in detail below and in `[src/v2/README.md](src/v2/README.md)`.
->
-> **What it is not yet.** A demonstrated win for geometric algebra on language.
-> Tokens do not live in Minkowski spacetime; Cl(1,3) here is a *hypothesis* about
-> structured mixing, not a principled equivariance inductive bias the way GA layers
-> are for E(3) point clouds or molecular geometry (Brandstetter et al., GATr). The
-> experiment that would settle this — **matched-parameter bits/byte vs. a vanilla
-> transformer and a dense-linear ablation** — has not been run yet. See
-> [Research status](#research-status).
+> **Headline (2026-07-03).** At matched scalar budget (~737k), a standard transformer
+> reaches **8.15 bits/token** vs the best Clifford stack **9.62** (row 3b) and corrected
+> Clifford **9.74** (row 1b-v2) — **−1.5 to −1.6 bpt**, cleanly measured on the same
+> held-out shard. **Bet B is closed:** Cl(1,3) geo-linear LM does not earn its complexity
+> on TinyStories at this scale. FFN geometry and width are neutral; the gap is elsewhere
+> in the architecture. **Product read:** use the transformer. **Research read:** honest
+> negative result with component ablation. Bet A routing (CL-A/B) runs downstream of this
+> foundation — report when done, do not lead with it.
+
+---
+
+## Separable bets (read before interpreting any number)
+
+| Bet | Question | Where | 1b-v2 is a verdict on… |
+| --- | --- | --- | --- |
+| **A — CL** | Stack knowledge + route frozen specialists? | `growformer` promote-freeze, cone **92.5%** Task E | **No** — already certified on its own terms |
+| **B — Clifford LM** | Does Cl(1,3) LM beat dot/vanilla at matched budget? | This repo (rows 1b–3b, **1b-v2**, row 2) | **Yes — Bet B only** |
+| **C — Oscillators** | Causal region coupling via dynamics? | `growformer` substrate (side quest) | **No** |
+
+A null on Clifford (Bet B) does **not** threaten continual learning or routing. Full gates:
+[`PRE_REGISTRATION.md`](../growformer/docs/PRE_REGISTRATION.md).
 
 ---
 
@@ -25,10 +35,25 @@ product** of multivectors rather than scalar dot products and dense matmuls.
 
 ## Research status
 
+**Bet B answer (row 2, 2026-07-03):** Matched vanilla transformer **8.15 bpt** vs Clifford
+**9.62–9.74 bpt** on held-out TinyStories (64×128 windows, same metric, verified — see
+[`PRE_REGISTRATION.md`](../growformer/docs/PRE_REGISTRATION.md) §1.4 audit). This is the
+finding the Clifford LM ablation arc was pre-registered to produce. Component isolation:
+FFN Cayley vs dense **≈0** (row 3); width **≈0** (row 1c); score kernel dot beats inner
+product **−0.12 bpt** (3b vs 1b-v2) but neither closes the gap to vanilla.
 
+### Research probe vs product
 
-### What is verified
+| Lens | Read |
+| --- | --- |
+| **Research probe** | Real contribution: Cl(1,3) for discrete text underperforms a matched transformer at ~737k scalars; ablations localize where the loss is not (FFN, width) vs where it is (architecture class). Reporting your own architecture losing is the credibility move. |
+| **Product** | Use the standard transformer. Cone routing over Clifford specialists builds a second story on a foundation Bet B just failed — still worth running CL-A cheaply for completeness, not as the headline. |
 
+**Downstream (Bet A, not headline):** CL-1 chronological specialists (CL-A/B training) —
+preflight parity gates; oracle = best single on stacked ablation rows already shown no
+complementarity. See §2.2 in pre-registration.
+
+### What the stack verified (before row 2)
 
 | Claim                                | Evidence                                                                                                                                                              |
 | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -37,29 +62,79 @@ product** of multivectors rather than scalar dot products and dense matmuls.
 | Training tricks help (domain corpus) | On sentiment headlines (`d_model=16`, tied, 200 steps): corpus-semantic init **val ppl 608** vs uniform **962** (~37% ↓) — see `[src/v2/README.md](src/v2/README.md)` |
 
 
-These show the stack *trains* and that **embedding priors** matter. They do **not**
-show that the geometric product beats a matched dense layer on language modeling quality.
+These show the stack *trains* and that **embedding priors** matter. Row 2 showed they do **not** overcome the Clifford-vs-vanilla architecture gap at matched scalars.
 
-### What is missing (the number that matters)
+### Held-out results (complete arc)
+| Model | Params | bits/token (held-out) | bits/byte (held-out) | Notes |
+| ----- | ------ | --------------------- | -------------------- | ----- |
+| Clifford row 1a | ~0.7M | 10.37 | 2.34 | **In-sample / train-shard** — train=eval on `val.bin`, 400 steps; ppl **1261**; pipeline coherence only |
+| Clifford row 1b | ~0.7M | **9.69** | **2.36** | Held-out; **pre-fix** scores `(Q⊛K)₀` w/o `K̃`; historical only |
+| Clifford row 1b-v2 | ~0.7M | **9.74** | **2.37** | Post-fix `⟨Q,K⟩`, metric LN, seed 1000; eval ppl **856**; best val **839** @ 3800 |
+| Dense FFN row 3 | ~0.7M (+66 FFN) | **9.72** | **2.37** | `--dense-ffn`, H=66; eval ppl **844**; **Δ +0.03 bits/token vs 1b** — no FFN signal |
+| Clifford row 1c | ~2.8M | **9.76** | **2.38** | `d_model=32`, `d_ff=128`; best val ppl **837** @ 3600; eval ppl **866**; **no gain vs 1b** |
+| unigram floor | — | 10.06 | 2.43 | MLE from train shard; held-out bytes/token ≈ **4.14** |
+| uniform floor | — | 11.00 | 2.66 | log₂(2048); gzip ~2.69 on held-out (irrelevant bar) |
+| Dot-attention row 3b | ~same | **9.62** | **2.34** | `--dot-attention`, seed 1000; best val ppl **757** @ 3600; eval ppl **789**; **−0.07 bpt vs 1b** |
+| Matched vanilla row 2 | ~737k (d≈148) | **8.15** | **1.98** | `--vanilla`, seed 1000; eval ppl **284**; **−1.59 bpt vs 1b-v2** (ledger paired) |
 
-Hold-out **bits/byte on TinyStories** (or any fixed corpus), same tokenizer, same
-training budget, three rows:
+**Row 1a (in-sample, 2026-06-30):** conditional **2.34 bpb**, ppl **1261**, **10.37 bits/token**.
+Uniform floor **2.48 bpb** (11 bits/token); model is ~**6% below** uniform but still **above** empirical unigram — barely learning at 400 steps.
+gzip **2.59** can be *worse than uniform* on tiny slices (misleading bar). **Headline: ppl, not bpb vs gzip.**
 
+**Baselines in `eval` / `baselines`:** uniform token floor + empirical unigram (from `--train-bin` or `baselines train_bin`) alongside gzip/lzma.
 
-| Model                       | Params           | bits/byte (val)        | Notes                                                                                                                             |
-| --------------------------- | ---------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| Clifford (row 1)            | ~0.7M @ defaults | **2.34** (conditional) | `tinystories-row1.json`: 400 steps, semantic init, tie, grad-accum 2, eval on `val.bin` 64×128 windows; **weights not amortized** |
-| Matched vanilla transformer | same             | —                      | **needed**                                                                                                                        |
-| Dense-linear ablation       | same             | —                      | swap `CliffordLinear` for real matmul of equal param count; isolates *structure*                                                  |
+**Row 1b (held-out):** eval **9.69 bits/token** (ppl **827**, 64 windows); best train val ppl **810** @ step 3000. **0.36 bits/token** below unigram (10.06). Capacity-limited plateau.
 
+**Row 3 (dense FFN, `--init-seed 1000`):** eval **9.72 bits/token** (ppl **844**). **+0.03 bits/token vs 1b** — FFN Cayley structure is not the bottleneck at this size. Dense FFN has **+66** scalar surplus (H=66). *Seed not matched to 1b default; pair with 1b@1000 for strict ablation if needed.*
 
-Row 1 eval (2026-06-30): conditional **2.34 bpb** vs gzip **2.59** vs lzma **4.34** on 35 583 bytes
-(8024 text tokens). Pipeline validated; model is under-trained (400 steps, train=val shard).
-**Beats gzip on conditional CE only** — not a shipped-size claim. Ablation still warranted once
-training budget is increased.
+**Row 1c (capacity, 2026-07-01):** eval **9.76 bits/token** (ppl **866**, 64 windows); best train val ppl **837** @ step 3600. **+0.07 bits/token vs 1b** despite ~4× params — the ~820–850 plateau is **not** width-limited at 4000 steps.
 
-Until that table exists, treat Cl(1,3) for text as **unproven engineering exploration**,
-not a research result.
+**Row 3b (dot scores, `--init-seed 1000`, 2026-07-01):** eval **9.62 bits/token** (ppl **789**, 64 windows); best train val ppl **757** @ step 3600. **−0.07 bits/token vs 1b** (9.69) — dot scores beat pre-fix geometric scores on the same Clifford body.
+
+**Row 1b-v2 (corrected Clifford, `--init-seed 1000`, 2026-07-02):** eval **9.74 bits/token** (ppl **856**, 64 windows); best train val ppl **839** @ step 3800. **+0.05 bits/token vs 1b** (9.69), **+0.12 vs 3b** (9.62). Pre-registered verdict: **bug fix neutral; dot still wins** — see [`PRE_REGISTRATION.md`](../growformer/docs/PRE_REGISTRATION.md) §1.2–1.4. Checkpoint: `agent-data/tinystories-row1b-v2.json`.
+
+**Row 2 (vanilla capstone, `--vanilla`, seed 1000, 2026-07-03):** held-out **8.15 bits/token** (ppl **284**, 64 windows); best train-val ppl **267** @ step 4000. Ledger vs **row1b-v2**: **−1.590 ± 0.068 bpt**. Pre-registered kill **triggered** — standard transformer at matched scalar budget beats Clifford stack; Bet B capstone closed. Checkpoint: `agent-data/tinystories-row2-seed1000.json`.
+
+**CL-1 (Bet A, 2026-07-03):** Stacking frozen Bet B checkpoints — **row2+row3b** is an **imbalanced setup** (Δ=1.47 bpt, 64/0 windows); **row1b-v2+row3b** is the valid **peer negative control** (Δ=0.12 bpt, 0/64 windows). In both cases **oracle = best single** → no complementarity to exploit; router collapse is expected, not a cone-routing finding. See [`PRE_REGISTRATION.md`](../growformer/docs/PRE_REGISTRATION.md) §2.2. Chronological CL-A/B in progress — **preflight parity gates apply before reading router.**
+
+**Ablation summary (held-out bits/token):** FFN geometry **≈0** (row 3); width **≈0** (row 1c); **score kernel** dot beats inner product **−0.12 bpt** (3b vs 1b-v2). Clifford Q/K/V/O projections untested in isolation.
+
+### Results ledger (`growformer-ledger`)
+
+Append-only hash-chained eval log at `agent-data/results.jsonl`. Every held-out
+`eval` (with `--train-bin`) stores **64 per-window bpt values** for paired
+statistics. §1.2 verdict tables are **queries**, not hand-edited prose.
+
+```bash
+# Held-out eval (auto-appends to ledger)
+cargo run --release --bin tinystories -- eval \
+  --checkpoint agent-data/tinystories-row1b-v2.json \
+  --tokenizer data/tinystories.tok \
+  --train-bin data/tinystories-train.bin \
+  data/tinystories-heldout.bin --seq-len 128 --windows 64 \
+  --run-id row1b-v2 --selection-tag first
+
+# Paired-SE §1.2 table (post-fix baseline)
+cargo run --release --bin tinystories -- ledger-table \
+  --baseline row1b-v2 --candidates row3b
+
+# CI integrity check
+cargo run --release --bin tinystories -- ledger-verify
+
+# CL-1: route two frozen specialists (Bet A)
+cargo run --release --bin tinystories -- cl1 \
+  --checkpoint-a agent-data/tinystories-row2-seed1000.json \
+  --checkpoint-b agent-data/tinystories-row3b-seed1000.json \
+  --tokenizer data/tinystories.tok \
+  data/tinystories-heldout.bin --seq-len 128 --windows 64 --cal-windows 30 \
+  --run-id cl1-row2-row3b
+```
+
+**Ledger-backed read (2026-07-02, n=64, same split):** `row3b` **−0.118 ± 0.012 bpt**
+vs `row1b-v2` (paired). Pre-fix checkpoints (`row1b`, `row1c`, `row3`) **must not**
+be compared under the post-fix eval forward — re-eval gives ~**10.0 bpt** (train/eval
+mismatch). Historical row 1b **9.69 bpt** was pre-fix train **and** eval. See
+[`growformer-ledger/README.md`](../growformer-ledger/README.md).
 
 **How to read row 1 (measurement caveat).** `tinystories eval` reports the model’s
 **conditional** cross-entropy rate: bits/byte *given the trained weights*, with model
@@ -76,37 +151,180 @@ The ablation is defined by the matching rule; implement code only after this is 
 
 | Rule                  | Role             | Definition (draft)                                                                                                                                                                                                                                                                                                                                                                           |
 | --------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Parameter-matched** | **Primary**      | Same total learnable scalar count. A `CliffordLinear(out, in)` stores `out×in` multivector weights + `out` multivector biases → `16·(out×in + out)` floats. The dense ablation flattens each position to `16·d_model` reals and uses a standard `LinearReal`-style layer with the same scalar count (not the same `d_model` label). Answers: *does Cayley structure help at equal capacity?* |
+| **Parameter-matched** | **Primary**      | Same **total** learnable scalar count (weights **and** biases). Clifford FFN: `16·(2·d_model·d_ff + d_ff + d_model)` scalars. Dense FFN on flattened residual: `Linear(16·d_model→H)` + `Linear(H→16·d_model)` → `2·16·d_model·H + H + 16·d_model`. Weights-only gives `H = d_ff`; **total** match requires solving for `H` (at defaults `d_model=16`, `d_ff=64`: Clifford **34,048**, naive `H=d_ff` dense **33,088**, Δ **960 bias scalars** — fold into `H`, don't footnote). Runtime assert on totals, not labels. |
 | **FLOP-matched**      | Report alongside | Count multiply-adds in forward (geo product vs dot). Clifford layers do more work per param; report FLOPs separately so “wins at equal params but 3× FLOPs” is visible.                                                                                                                                                                                                                      |
 | **Width-matched**     | Secondary only   | Same `d_model`, `n_blocks`, `n_heads` — convenient but **not** equal params (Clifford cells are 16-wide). Do not use as the headline comparison.                                                                                                                                                                                                                                             |
 
 
-**Implementation scope (not a one-line flag).** A faithful dense ablation needs a
-parallel layer type wired through **forward, tape backward, and inference cache** —
-a second backward path, not a runtime toggle on `CliffordLinear` alone.
+**Implementation scope (not a one-line flag).** First ablation row is **FFN-only**: swap `CliffordFFN` for param-matched `DenseFFN` at the block boundary (flatten post-`norm2` → real linear → unflatten residual delta). Attention deferred (rank/16× confound). Needs parallel forward + tape backward + inference path.
+
+**Param assert (construction time).** Count every learnable scalar:
+
+```rust
+fn clifford_ffn_scalars(d_model: usize, d_ff: usize) -> usize {
+    // fc1: 16·d_model·d_ff weights + 16·d_ff biases; fc2: symmetric
+    16 * (2 * d_model * d_ff + d_ff + d_model)
+}
+
+fn dense_ffn_scalars(d_model: usize, hidden: usize) -> usize {
+    let in_ = 16 * d_model;
+    // fc1: in_·H + H; fc2: H·in_ + in_
+    2 * in_ * hidden + hidden + in_
+}
+
+// Solve hidden s.t. dense_ffn_scalars(d_model, H) == clifford_ffn_scalars(d_model, d_ff)
+// Weights-only: 2·16·d_model·H = 2·16·d_model·d_ff  →  H = d_ff (biases differ by 16·(d_ff + d_model) − (H + 16·d_model))
+debug_assert_eq!(dense_ffn_scalars(d_model, hidden), clifford_ffn_scalars(d_model, d_ff),
+    "FFN scalar budgets must match for single-variable ablation");
+```
+
+**Row procedure (before first number).** ≥3 seeds per row; same `init_seed`, semantic-init scheme, tokenizer, train/held-out bins, eval windows; report bits/token mean ± spread. Match dense-init variance to Clifford's tiny-multivector init (document scheme in row notes).
 
 **Vanilla transformer row (row 2).** Same tokenizer, corpus, training budget, and
 eval harness; parameter-matched real-valued transformer (dot-product attention,
-standard LayerNorm, same head tying options). External baseline or in-crate — TBD.
+standard LayerNorm, ReLU FFN, sinusoidal PE). CLI `--d-model` sets the **Clifford
+reference** width; `param_budget::matched_vanilla_d_model` picks the vanilla
+`d_model` within ±500 scalars. Implemented in `vanilla_llm` + `v2::vanilla_train`.
+
+```bash
+# Row 2 train (matched to ~737k scalars at d_model=16 Clifford ref)
+cargo run --release --bin tinystories -- train \
+  data/tinystories.tok data/tinystories-train.bin data/tinystories-heldout.bin \
+  --checkpoint-out agent-data/tinystories-row2-seed0.json \
+  --vanilla --d-model 16 --d-ff 64 --n-blocks 4 --n-heads 4 \
+  --steps 4000 --tie-embeddings --grad-accum 2 --init-seed 0
+
+# Row 2 held-out eval (vanilla auto-detected from checkpoint cfg)
+cargo run --release --bin tinystories -- eval \
+  --checkpoint agent-data/tinystories-row2-seed0.json \
+  --tokenizer data/tinystories.tok \
+  --train-bin data/tinystories-train.bin \
+  data/tinystories-heldout.bin --seq-len 128 --windows 64
+```
 
 ### Row 1 procedure (TinyStories)
 
 ```bash
-# Train on packed validation shard (small-run convention; replace with train.bin when available)
-cargo run --release --bin tinystories -- train \
-  data/tinystories.tok data/val.bin data/val.bin \
-  --checkpoint-out agent-data/tinystories-row1.json \
-  --steps 400 --tie-embeddings --grad-accum 2
+# 1. Chronological 90/10 split (held-out tail never seen in training)
+cargo run --release --bin tinystories -- split \
+  data/val.bin data/tinystories-train.bin data/tinystories-heldout.bin
 
-# Conditional bits/byte (+ gzip/lzma on the same bytes)
-cargo run --release --bin tinystories -- eval \
-  --checkpoint agent-data/tinystories-row1.json \
+# 2. Train on train shard only (row 1b — increase --steps until ppl ≪ uniform)
+cargo run --release --bin tinystories -- train \
+  data/tinystories.tok data/tinystories-train.bin data/tinystories-heldout.bin \
+  --checkpoint-out agent-data/tinystories-row1b.json \
+  --steps 4000 --tie-embeddings --grad-accum 2
+
+# 3. Held-out eval + unigram floor (uniform + empirical from train shard)
+cargo run --release --bin tinystories -- baselines \
+  --train-bin data/tinystories-train.bin \
   --tokenizer data/tinystories.tok \
-  data/val.bin --seq-len 128 --windows 64
+  data/tinystories-heldout.bin
+
+cargo run --release --bin tinystories -- eval \
+  --checkpoint agent-data/tinystories-row1b.json \
+  --tokenizer data/tinystories.tok \
+  --train-bin data/tinystories-train.bin \
+  data/tinystories-heldout.bin --seq-len 128 --windows 64
 ```
 
-Semantic init is on by default for fresh training. Sentiment-corpus runs are a
-separate track and do not fill row 1.
+Row **1a** (`tinystories-row1.json`) used train=eval on `val.bin` — valid for pipeline
+coherence only; do not cite as held-out val.
+
+### Row 3 procedure (dense FFN ablation)
+
+Same protocol as row 1b (held-out split, unigram floor, ≥3 seeds), with `--dense-ffn`:
+
+```bash
+cargo run --release --bin tinystories -- train \
+  data/tinystories.tok data/tinystories-train.bin data/tinystories-heldout.bin \
+  --checkpoint-out agent-data/tinystories-row3-seed0.json \
+  --steps 4000 --tie-embeddings --grad-accum 2 --dense-ffn \
+  --init-seed 1000   # vary seed per run; report mean ± spread on bits/token
+```
+
+Construction logs matched hidden `H` and scalar budgets (Clifford vs dense). Attention, norms, embeddings, and eval harness are unchanged — only the FFN block differs.
+
+**Row 3 result (2026-06-30):** held-out eval **9.72 bits/token** (ppl 844) vs row 1b **9.69** (ppl 827) — **Δ +0.03 bits/token**. FFN geometry is not the bottleneck.
+
+### Row 1c procedure (capacity bump)
+
+Same held-out protocol as 1b; scale width before attention ablations:
+
+```bash
+cargo run --release --bin tinystories -- train \
+  data/tinystories.tok data/tinystories-train.bin data/tinystories-heldout.bin \
+  --checkpoint-out agent-data/tinystories-row1c.json \
+  --d-model 32 --d-ff 128 --n-heads 4 --n-blocks 4 \
+  --steps 4000 --tie-embeddings --grad-accum 2
+
+cargo run --release --bin tinystories -- eval \
+  --checkpoint agent-data/tinystories-row1c.json \
+  --tokenizer data/tinystories.tok \
+  --train-bin data/tinystories-train.bin \
+  data/tinystories-heldout.bin --seq-len 128 --windows 64
+```
+
+If held-out bits/token drops well below ~9.7, the ~820 plateau was capacity; if not, attention/score ablations (row 3b) are the next mechanism test.
+
+**Row 1c result (2026-07-01):** held-out eval **9.76 bits/token** (ppl **866**) vs row 1b **9.69** (ppl **827**) — **Δ +0.07 bits/token** with ~4× params. Plateau persists; proceed to row **3b**.
+
+### Row 3b procedure (dot attention scores)
+
+Score-only ablation: swap `⟨Q⊛K⟩₀` for 16-component dot product on the same Clifford Q/K projections. Clifford FFN, Q/K/V/O, norms, and eval harness unchanged.
+
+```bash
+cargo run --release --bin tinystories -- train \
+  data/tinystories.tok data/tinystories-train.bin data/tinystories-heldout.bin \
+  --checkpoint-out agent-data/tinystories-row3b-seed1000.json \
+  --steps 4000 --tie-embeddings --grad-accum 2 \
+  --dot-attention --init-seed 1000
+
+cargo run --release --bin tinystories -- eval \
+  --checkpoint agent-data/tinystories-row3b-seed1000.json \
+  --tokenizer data/tinystories.tok \
+  --train-bin data/tinystories-train.bin \
+  data/tinystories-heldout.bin --seq-len 128 --windows 64
+```
+
+Compare to row 1b at the same `--init-seed 1000` for a strict pair.
+
+**Row 3b result (2026-07-01):** held-out eval **9.62 bits/token** (ppl **789**) vs row 1b **9.69** (ppl **827**) — **Δ −0.07 bits/token**. Geometric attention scores underperform dot scores on the same Clifford body; proceed to row **2**.
+
+### Clifford correctness fixes (2026-07-01)
+
+Earlier rows used `(Q ⊛ K)₀` without `reverse(K)` — not the Clifford inner product. Default geometric scores now use **`⟨Q, K⟩ = (Q ⊛ K̃)₀`** everywhere (train, eval, inference cache). Layer norm uses **metric-weighted** statistics over blade components. `CliffordLinear::new` seeds all 16 blades (not scalar-only).
+
+**Re-run row 1b baseline** with the fixed stack (same protocol as 1b, no flags):
+
+```bash
+cargo run --release --bin tinystories -- train \
+  data/tinystories.tok data/tinystories-train.bin data/tinystories-heldout.bin \
+  --checkpoint-out agent-data/tinystories-row1b-v2.json \
+  --steps 4000 --tie-embeddings --grad-accum 2 --init-seed 1000
+```
+
+Compare held-out eval to row 1b, row 3b, and row 3 at seed 1000.
+
+**Row 1b-v2 result (2026-07-02):** held-out **9.74 bits/token** (ppl **856**) vs 1b **9.69** (827) and 3b **9.62** (789). Correctness fix did not close the gap to dot scores or beat the pre-fix baseline.
+
+### What works vs what would generalize (Bet B)
+
+The Clifford LM **works** in the operational sense: it trains stably, beats unigram by **~0.3 bits/token**, train-val and held-out track together (no overfit gap), and produces a usable frozen checkpoint. It does **not** beat matched traditional score kernels or width/FFN ablations at this budget.
+
+| Lever | Tested? | Effect on held-out bpt | Notes |
+| ----- | ------- | ---------------------- | ----- |
+| More steps (4000→?) | Partially | **≈0** | Best val flat by step 3000 (1b) / 3800 (1b-v2); curve converged, not step-starved |
+| GPU / faster hardware | No (CPU train) | **Throughput only** | Same hyperparams → same numbers; GPU enables multi-seed row 2 and CL-1, not a quality fix |
+| Width (`d_model=32`) | Yes (row 1c) | **+0.07** (worse) | ~4× params, same plateau band |
+| Dense FFN | Yes (row 3) | **+0.03** (worse) | FFN geometry not the bottleneck |
+| Clifford score fix (`⟨Q,K⟩`, metric LN) | Yes (1b-v2) | **+0.05** vs 1b | Neutral to marginally worse |
+| Dot attention scores | Yes (3b) | **−0.12** vs 1b-v2 | Best Clifford-stack row so far |
+| Corpus-semantic init | Yes (default) | Large at step 0 | Already applied; buys cold start, not the ~850 ceiling |
+| Matched vanilla transformer | **Yes** | **8.15 bpt** (−1.59 vs 1b-v2) | **Capstone closed** — vanilla wins at matched budget |
+| Stack frozen specialists + cone | **Yes** | **0** (oracle=best single) | Peer control (1b-v2+3b): no window complementarity; row2+3b invalid setup |
+
+**Honest read:** Row **2** closed Bet B at this budget: vanilla **8.15 bpt** vs Clifford **9.74** (1b-v2) and dot-Clifford **9.62** (3b) — measurement verified (§1.4 audit), not a units bug. **CL-1** on row2+row3b is an **invalid routing setup** (imbalanced peers); row1b-v2+row3b shows **oracle = best single** (no complementarity). Bet A routing test requires chronological specialists with **preflight parity** (§2.2).
 
 ### Open design questions
 
@@ -116,10 +334,9 @@ Discrete tokens have no Lorentz symmetry. Here the Cayley table is a fixed spars
 bilinear mixing pattern — possibly a useful parameterization, possibly a more
 expensive constrained linear layer. We do not know which without the ablation above.
 
-**Attention scores** use the grade-0 part of `Qᵢ ⊛ K̃ⱼ` — a **Minkowski** (indefinite)
-bilinear form, not a positive-definite dot product. Scores can be negative in ways a
-standard dot-product attention cannot; LayerNorm and softmax may tame this, but it is
-a plausible source of training quirks worth monitoring.
+**Attention scores** use the Clifford inner product `⟨Q, K⟩ = (Q ⊛ K̃)₀` — not
+the raw grade-0 of `Q ⊛ K` (which omitted `reverse(K)` and mis-specified the metric).
+Use `--dot-attention` for the row 3b ablation (Euclidean dot on all 16 components).
 
 **Positional “rotors”** mix compact rotations (`cos`/`sin` on `e12/e13/e23`) with
 non-compact Lorentz boosts (`cosh`/`sinh` on `e01/e02/e03`). Boosts preserve the
@@ -212,9 +429,12 @@ logits[seq][vocab]
 
 Key points:
 
-- **Genuine multi-head attention** — each head owns the channel slice
-`[h·head_dim, (h+1)·head_dim)`, with its own Q/K/V projection and softmax.
-Scores are the grade-0 (scalar) part of `Qᵢ ⊛ K̃ⱼ`, scaled by `1/√(head_dim·16)`.
+- **Genuine multi-head attention** — each head owns `[h·head_dim, (h+1)·head_dim)`.
+  Scores use the Clifford inner product `⟨Q, K⟩ = (Q ⊛ K̃)₀` (all grades mix via
+  the Cayley table), scaled by `1/√(head_dim·16)`. `--dot-attention` selects the
+  row 3b Euclidean-dot ablation instead.
+- **CliffordLayerNorm** — metric-weighted mean/var over `16·d_model` blade
+  components (not flat Euclidean statistics).
 - **Real-valued output head (**`LinearReal`**)** — the residual stream
 (`16·d_model` reals after `final_norm`) is projected to vocab logits by an
 ordinary real matmul. This is far cheaper than a geometric-product head and is

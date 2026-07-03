@@ -12,13 +12,15 @@ pub mod embedding;
 pub mod inference;
 pub mod sample;
 pub mod train_v2;
+pub mod vanilla_checkpoint;
+pub mod vanilla_train;
 
 pub use arithmetic::{
     cumulative, find_symbol, quantize, ArithmeticDecoder, ArithmeticEncoder, FREQ_BITS, FREQ_TOTAL,
 };
 
 pub use attention_backward::{attention_backward, AttentionGrads};
-pub use block_backward::{block_backward, BlockGrads};
+pub use block_backward::{block_backward, BlockGrads, FfnGrad};
 pub use checkpoint::{load_lm_checkpoint, save_lm_checkpoint};
 pub use data::{encode_record, Dataset, RawRecord, Tokenizer, TrainExample};
 pub use embedding::{EmbeddingGrad, EmbeddingOptimizer};
@@ -35,4 +37,10 @@ pub use tape::{
 pub use train_v2::{
     corpus_semantic_init, structured_embedding_init, train_step_v2, train_step_v2_accum,
     train_step_v2_head_only, train_v2, BlockOptimizer, ModelStateV2, TrainConfigV2,
+};
+pub use vanilla_checkpoint::{load_vanilla_state, save_vanilla_state};
+pub use crate::vanilla_llm::vanilla_forward_logits;
+pub use vanilla_train::{
+    corpus_semantic_init_vanilla, eval_vanilla_lm_loss, randomize_vanilla_model,
+    train_step_vanilla_accum, VanillaModelState,
 };

@@ -6,7 +6,7 @@
 
 use crate::{
     cayley_const::CliffordAlgebraConst, kv_cache::KVCache, CliffordAttention, CliffordBlock,
-    CliffordLLM, Multivector,
+    CliffordLLM, Multivector, AttentionScoreMode, attention_pair_score,
 };
 use crate::positional::RotorPositionalEncoding;
 
@@ -15,14 +15,16 @@ pub struct InferenceCache {
     kv:       KVCache,
     position: usize,
     pe:       RotorPositionalEncoding,
+    dot_scores: bool,
 }
 
 impl InferenceCache {
-    pub fn new(n_blocks: usize, max_seq_len: usize, d_model: usize) -> Self {
+    pub fn new(n_blocks: usize, max_seq_len: usize, d_model: usize, dot_scores: bool) -> Self {
         Self {
             kv: KVCache::new(n_blocks, max_seq_len),
             position: 0,
             pe: RotorPositionalEncoding::new(d_model),
+            dot_scores,
         }
     }
 
@@ -75,7 +77,7 @@ impl InferenceCache {
         let mut h = self.pe.encode_position(alg, &emb, pos);
 
         for (layer_idx, block) in model.blocks.iter().enumerate() {
-            h = block_forward_cached(alg, block, &h, self.kv.layer_mut(layer_idx));
+            h = block_forward_cached(alg, block, &h, self.kv.layer_mut(layer_idx), self.dot_scores);
         }
 
         let normed = model.final_norm.forward(&h);
@@ -90,12 +92,13 @@ fn block_forward_cached(
     block: &CliffordBlock,
     x: &[Multivector],
     cache: &mut crate::kv_cache::LayerKVCache,
+    dot_scores: bool,
 ) -> Vec<Multivector> {
     let n1 = block.norm1.forward(x);
     let q = block.attn.w_q.forward(&n1);
     let k = block.attn.w_k.forward(&n1);
     let v = block.attn.w_v.forward(&n1);
-    let attn_out = cached_multihead_attention(alg, cache, &block.attn, &q, k, v);
+    let attn_out = cached_multihead_attention(alg, cache, &block.attn, &q, k, v, dot_scores);
 
     let res1: Vec<Multivector> = x
         .iter()
@@ -124,7 +127,9 @@ fn cached_multihead_attention(
     q_new: &[Multivector],
     k_new: Vec<Multivector>,
     v_new: Vec<Multivector>,
+    dot_scores: bool,
 ) -> Vec<Multivector> {
+    let score_mode = AttentionScoreMode::from_dot_flag(dot_scores);
     cache.push(k_new, v_new);
     let seq = cache.seq_len();
     let n_heads = attn.n_heads;
@@ -140,7 +145,7 @@ fn cached_multihead_attention(
         let mut scores = vec![0.0f32; seq];
         for j in 0..seq {
             scores[j] = (d0..d1)
-                .map(|d| alg.geo_product(&q_new[d], &cache.k[j][d]).c[0])
+                .map(|d| attention_pair_score(alg, &q_new[d], &cache.k[j][d], score_mode))
                 .sum::<f32>()
                 / scale;
         }
@@ -189,9 +194,9 @@ mod tests {
         let (alg, model) = tiny_model(32);
         let ids: Vec<usize> = vec![1, 5, 9, 2, 7];
 
-        let full = model_forward_logits(&alg, &model, &ids, true);
+        let full = model_forward_logits(&alg, &model, &ids, true, false);
 
-        let mut cache = InferenceCache::new(model.blocks.len(), 128, 8);
+        let mut cache = InferenceCache::new(model.blocks.len(), 128, 8, false);
         let mut cached = Vec::new();
         for i in 1..=ids.len() {
             cached.extend(cache.forward_extend(&alg, &model, &ids[..i]));
@@ -214,9 +219,9 @@ mod tests {
         let (alg, model) = tiny_model(24);
         let ids: Vec<usize> = vec![3, 8, 11, 4];
 
-        let full = model_forward_logits(&alg, &model, &ids, true);
+        let full = model_forward_logits(&alg, &model, &ids, true, false);
 
-        let mut cache = InferenceCache::new(model.blocks.len(), 64, 8);
+        let mut cache = InferenceCache::new(model.blocks.len(), 64, 8, false);
         let batch = cache.forward_extend(&alg, &model, &ids);
 
         assert_eq!(batch.len(), full.len());

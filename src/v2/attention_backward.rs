@@ -39,7 +39,9 @@
 
 use crate::Multivector;
 use crate::CliffordAttention;
+use crate::AttentionScoreMode;
 use crate::backprop::{GradLinear, geo_product_backward, linear_backward};
+use crate::blade::REVERSE_SIGNS;
 use super::tape::AttentionTape;
 
 /// Full set of gradients produced by attention_backward.
@@ -130,7 +132,7 @@ pub fn attention_backward(
     }
 
     // ── Step 4: score → Q, K backward (per head) ──────────────────────────────
-    // score[h][i][j] = (1/scale) Σ_{d∈h} ⟨geo(Q[i][d], K[j][d])⟩₀
+    // geometric: score = (1/scale) Σ ⟨geo(Q,K)⟩₀; dot: score = (1/scale) Σ Q·K
     let mut grad_q = vec![vec![Multivector::zero(); d_model]; seq];
     let mut grad_k = vec![vec![Multivector::zero(); d_model]; seq];
 
@@ -141,21 +143,36 @@ pub fn attention_backward(
         for i in 0..seq {
             for j in 0..seq {
                 let gs = grad_score[h][i][j];
-                if gs == 0.0 { continue; }  // skips masked future positions
+                if gs == 0.0 { continue; }
 
-                // Build the "grade-0-only" gradient multivector:  C̃ = (gs/scale) · 1
-                let mut grad_c = Multivector::zero();
-                grad_c.c[0] = gs * inv_scale;
-
-                for d in d0..d1 {
-                    let (g_qid, g_kjd) = geo_product_backward(
-                        &tape.q[i][d],
-                        &tape.k[j][d],
-                        &grad_c,
-                    );
-                    for k in 0..16 {
-                        grad_q[i][d].c[k] += g_qid.c[k];
-                        grad_k[j][d].c[k] += g_kjd.c[k];
+                match tape.score_mode {
+                    AttentionScoreMode::Dot => {
+                        for d in d0..d1 {
+                            let g = gs * inv_scale;
+                            for k in 0..16 {
+                                grad_q[i][d].c[k] += g * tape.k[j][d].c[k];
+                                grad_k[j][d].c[k] += g * tape.q[i][d].c[k];
+                            }
+                        }
+                    }
+                    AttentionScoreMode::InnerProduct => {
+                        for d in d0..d1 {
+                            let mut k_rev = Multivector::zero();
+                            for m in 0..16 {
+                                k_rev.c[m] = REVERSE_SIGNS[m] * tape.k[j][d].c[m];
+                            }
+                            let mut grad_c = Multivector::zero();
+                            grad_c.c[0] = gs * inv_scale;
+                            let (g_qid, g_krev) = geo_product_backward(
+                                &tape.q[i][d],
+                                &k_rev,
+                                &grad_c,
+                            );
+                            for m in 0..16 {
+                                grad_q[i][d].c[m] += g_qid.c[m];
+                                grad_k[j][d].c[m] += REVERSE_SIGNS[m] * g_krev.c[m];
+                            }
+                        }
                     }
                 }
             }
@@ -199,7 +216,7 @@ pub fn attention_backward(
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use crate::{CliffordAlgebra, CliffordAttention};
+    use crate::{CliffordAlgebra, CliffordAttention, AttentionScoreMode};
     use crate::cayley_const::CliffordAlgebraConst;
     use crate::v2::tape::attention_forward_taped;
 
@@ -222,7 +239,20 @@ mod tests {
     }
 
     #[test]
-    fn finite_diff_grad_input() {
+    fn inner_product_differs_from_raw_geo_scalar() {
+        let alg = CliffordAlgebraConst::new();
+        let mut q = Multivector::zero();
+        let mut k = Multivector::zero();
+        q.c[1] = 0.5;
+        k.c[2] = 0.3;
+        k.c[6] = 0.2;
+        let raw = alg.geo_product(&q, &k).c[0];
+        let inner = alg.inner_product(&q, &k);
+        assert!((raw - inner).abs() > 1e-6 || (raw.abs() < 1e-6 && inner.abs() < 1e-6));
+    }
+
+    #[test]
+    fn finite_diff_grad_input_inner_product() {
         // Numerical check: perturb each component of attn input and verify the
         // analytic gradient matches the finite difference.
         let alg_arc = Arc::new(CliffordAlgebra::sta());
@@ -241,7 +271,7 @@ mod tests {
         }).collect();
 
         // Forward and backward
-        let tape = attention_forward_taped(&alg, &attn, &x, true);
+        let tape = attention_forward_taped(&alg, &attn, &x, true, AttentionScoreMode::InnerProduct);
         let grad_out = dummy_grad_out(seq, d_model);
         let grads = attention_backward(&attn, &tape, &grad_out);
 
@@ -250,11 +280,11 @@ mod tests {
         let checks = [(0usize, 0usize, 0usize), (1, 2, 5), (2, 1, 6)];
         for (i, d, k) in checks {
             x[i][d].c[k] += eps;
-            let tape_plus = attention_forward_taped(&alg, &attn, &x, true);
+            let tape_plus = attention_forward_taped(&alg, &attn, &x, true, AttentionScoreMode::InnerProduct);
             let loss_plus = dummy_loss(&tape_plus.output);
 
             x[i][d].c[k] -= 2.0 * eps;
-            let tape_minus = attention_forward_taped(&alg, &attn, &x, true);
+            let tape_minus = attention_forward_taped(&alg, &attn, &x, true, AttentionScoreMode::InnerProduct);
             let loss_minus = dummy_loss(&tape_minus.output);
 
             x[i][d].c[k] += eps; // restore
@@ -287,7 +317,7 @@ mod tests {
             }).collect()
         }).collect();
 
-        let tape = attention_forward_taped(&alg, &attn, &x, true);
+        let tape = attention_forward_taped(&alg, &attn, &x, true, AttentionScoreMode::InnerProduct);
         let grad_out = dummy_grad_out(seq, d_model);
         let grads = attention_backward(&attn, &tape, &grad_out);
 
@@ -297,11 +327,11 @@ mod tests {
             let original = attn.w_q.weights[out_d][in_d].c[k];
 
             attn.w_q.weights[out_d][in_d].c[k] = original + eps;
-            let t1 = attention_forward_taped(&alg, &attn, &x, true);
+            let t1 = attention_forward_taped(&alg, &attn, &x, true, AttentionScoreMode::InnerProduct);
             let l1 = dummy_loss(&t1.output);
 
             attn.w_q.weights[out_d][in_d].c[k] = original - eps;
-            let t2 = attention_forward_taped(&alg, &attn, &x, true);
+            let t2 = attention_forward_taped(&alg, &attn, &x, true, AttentionScoreMode::InnerProduct);
             let l2 = dummy_loss(&t2.output);
 
             attn.w_q.weights[out_d][in_d].c[k] = original;
@@ -314,5 +344,45 @@ mod tests {
                 "grad_W_Q mismatch at ({out_d},{in_d},{k}): fd={fd:.4} analytic={analytic:.4}"
             );
         }
+    }
+
+    #[test]
+    fn finite_diff_grad_input_dot_scores() {
+        let alg_arc = Arc::new(CliffordAlgebra::sta());
+        let alg     = CliffordAlgebraConst::new();
+        let d_model = 4;
+        let seq     = 3;
+        let attn    = CliffordAttention::new(d_model, 2, alg_arc.clone());
+
+        let mut x: Vec<Vec<Multivector>> = (0..seq).map(|i| {
+            (0..d_model).map(|d| {
+                let mut mv = Multivector::zero();
+                for k in 0..16 { mv.c[k] = ((i * d + k) as f32 * 0.11).sin(); }
+                mv
+            }).collect()
+        }).collect();
+
+        let tape = attention_forward_taped(&alg, &attn, &x, true, AttentionScoreMode::Dot);
+        let grad_out = dummy_grad_out(seq, d_model);
+        let grads = attention_backward(&attn, &tape, &grad_out);
+
+        let eps = 1e-3;
+        let (i, d, k) = (1usize, 2usize, 5usize);
+        x[i][d].c[k] += eps;
+        let tape_plus = attention_forward_taped(&alg, &attn, &x, true, AttentionScoreMode::Dot);
+        let loss_plus = dummy_loss(&tape_plus.output);
+
+        x[i][d].c[k] -= 2.0 * eps;
+        let tape_minus = attention_forward_taped(&alg, &attn, &x, true, AttentionScoreMode::Dot);
+        let loss_minus = dummy_loss(&tape_minus.output);
+
+        x[i][d].c[k] += eps;
+
+        let fd = (loss_plus - loss_minus) / (2.0 * eps);
+        let analytic = grads.grad_input[i][d].c[k];
+        assert!(
+            (fd - analytic).abs() < 0.05 + 0.05 * analytic.abs(),
+            "dot-score grad_input mismatch at ({i},{d},{k}): fd={fd:.4} analytic={analytic:.4}"
+        );
     }
 }

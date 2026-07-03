@@ -6,30 +6,44 @@
 //   norm1.gamma, norm1.beta
 //   attn.w_q, attn.w_k, attn.w_v, attn.w_o
 //   norm2.gamma, norm2.beta
-//   ffn.fc1, ffn.fc2
+//   ffn (Clifford or dense param-matched)
 //
 // Returns those gradients plus dL/d(block input) so the gradient can keep
 // flowing to the layer below (next block, positional encoding, or embedding).
-//
-// Forward graph (pre-norm + residuals):
-//
-//   block_input ──┬──────────────────────────────┐
-//                 │                              │
-//              norm1 ──> attn ──> after_res1 ──┐ │
-//                                              │ │
-//                                              ▼ ▼
-//                                          (residual add)
-//                                              │
-//                            ┌─────────────────┤
-//                            │                 │
-//                         norm2 ──> ffn ──> (residual add) ──> after_res2
-//
-// Backward walks this in reverse, splitting gradients at each residual.
 
 use crate::{Multivector, CliffordBlock};
-use crate::backprop::{GradLinear, linear_backward, layer_norm_backward};
+use crate::backprop::{GradLinear, RealHeadGrad, linear_backward, real_linear_backward, layer_norm_backward};
+use crate::ffn::{flatten_mvs, unflatten_mvs, FfnVariant};
 use super::attention_backward::{attention_backward, AttentionGrads};
-use super::tape::BlockTape;
+use super::tape::{BlockTape, FfnHidden};
+
+/// FFN parameter gradients (Clifford geo-linear or dense real-linear).
+pub enum FfnGrad {
+    Clifford(GradLinear, GradLinear),
+    Dense(RealHeadGrad, RealHeadGrad),
+}
+
+impl FfnGrad {
+    pub fn scale(&mut self, s: f32) {
+        match self {
+            Self::Clifford(g1, g2) => { g1.scale(s); g2.scale(s); }
+            Self::Dense(g1, g2) => { g1.scale(s); g2.scale(s); }
+        }
+    }
+
+    pub fn clip_norm(&mut self, max_norm: f32) {
+        match self {
+            Self::Clifford(g1, g2) => {
+                crate::optim::clip_grad_norm(g1, max_norm);
+                crate::optim::clip_grad_norm(g2, max_norm);
+            }
+            Self::Dense(g1, g2) => {
+                g1.clip_norm(max_norm);
+                g2.clip_norm(max_norm);
+            }
+        }
+    }
+}
 
 /// Full gradient bundle for a single transformer block.
 pub struct BlockGrads {
@@ -38,17 +52,12 @@ pub struct BlockGrads {
     pub attn:        AttentionGrads,
     pub norm2_gamma: Vec<f32>,
     pub norm2_beta:  Vec<f32>,
-    pub ffn_fc1:     GradLinear,
-    pub ffn_fc2:     GradLinear,
+    pub ffn:         FfnGrad,
     /// dL/d(block input) — flows to the layer below.   [seq][d_model]
     pub grad_input:  Vec<Vec<Multivector>>,
 }
 
 /// Backward through one transformer block.
-///
-/// `block`    — the block itself (parameters)
-/// `tape`     — recorded forward pass for this block
-/// `grad_out` — dL/d(block output, i.e. tape.after_res2).  [seq][d_model]
 pub fn block_backward(
     block:    &CliffordBlock,
     tape:     &BlockTape,
@@ -56,62 +65,15 @@ pub fn block_backward(
 ) -> BlockGrads {
     let seq     = tape.block_input.len();
     let d_model = tape.block_input[0].len();
-    let _n_comp = d_model * 16;
 
     // ── 1. Residual 2 split ───────────────────────────────────────────────────
-    // after_res2 = after_res1 + ffn_out
-    // grad_after_res1 ← grad_out;   grad_ffn_out ← grad_out
     let grad_ffn_out: Vec<Vec<Multivector>> = grad_out.to_vec();
     let mut grad_after_res1: Vec<Vec<Multivector>> = grad_out.to_vec();
 
     // ── 2. FFN backward ───────────────────────────────────────────────────────
-    // Through fc2:  grad_h_post[i], grad_fc2 ← linear_backward(W_fc2, h_post[i], grad_ffn_out[i])
-    let mut grad_fc2  = GradLinear::zeros(d_model, block.ffn.fc2.in_dim);
-    let mut grad_h_post = vec![vec![Multivector::zero(); block.ffn.fc2.in_dim]; seq];
-
-    for i in 0..seq {
-        let (g_fc2, g_h) = linear_backward(
-            &block.ffn.fc2.weights,
-            &tape.ffn.hidden_post[i],
-            &grad_ffn_out[i],
-        );
-        grad_fc2.accumulate(&g_fc2);
-        for d in 0..block.ffn.fc2.in_dim {
-            for k in 0..16 { grad_h_post[i][d].c[k] += g_h[d].c[k]; }
-        }
-    }
-
-    // ReLU backward:  grad_h_pre[i][d][k] = grad_h_post[i][d][k] if h_pre > 0 else 0
-    let mut grad_h_pre = vec![vec![Multivector::zero(); block.ffn.fc2.in_dim]; seq];
-    for i in 0..seq {
-        for d in 0..block.ffn.fc2.in_dim {
-            for k in 0..16 {
-                grad_h_pre[i][d].c[k] = if tape.ffn.hidden_pre[i][d].c[k] > 0.0 {
-                    grad_h_post[i][d].c[k]
-                } else { 0.0 };
-            }
-        }
-    }
-
-    // Through fc1
-    let mut grad_fc1   = GradLinear::zeros(block.ffn.fc2.in_dim, d_model);
-    let mut grad_ffn_in = vec![vec![Multivector::zero(); d_model]; seq];
-
-    for i in 0..seq {
-        let (g_fc1, g_x) = linear_backward(
-            &block.ffn.fc1.weights,
-            &tape.ffn.input[i],
-            &grad_h_pre[i],
-        );
-        grad_fc1.accumulate(&g_fc1);
-        for d in 0..d_model {
-            for k in 0..16 { grad_ffn_in[i][d].c[k] += g_x[d].c[k]; }
-        }
-    }
+    let (ffn_grad, grad_ffn_in) = ffn_backward(&block.ffn, &tape.ffn, &grad_ffn_out);
 
     // ── 3. Norm 2 backward ────────────────────────────────────────────────────
-    // grad_ffn_in is dL/d(norm2 output).  Convert through layer_norm_backward
-    // to get dL/d(after_res1) which we then accumulate with the residual path.
     let (grad_n2_gamma, grad_n2_beta, grad_after_res1_from_norm) =
         layer_norm_backward_with_params(
             &tape.norm2_stats,
@@ -120,7 +82,6 @@ pub fn block_backward(
             d_model,
         );
 
-    // Sum residual path and norm-path gradients into grad_after_res1
     for i in 0..seq {
         for d in 0..d_model {
             for k in 0..16 {
@@ -130,15 +91,12 @@ pub fn block_backward(
     }
 
     // ── 4. Residual 1 split ───────────────────────────────────────────────────
-    // after_res1 = block_input + attn_out
-    // grad_attn_out ← grad_after_res1;   grad_block_input(partial) ← grad_after_res1
     let grad_attn_out: Vec<Vec<Multivector>> = grad_after_res1.clone();
     let mut grad_block_input: Vec<Vec<Multivector>> = grad_after_res1.clone();
 
-    // ── 5. Attention backward (full Q/K/V/O) ──────────────────────────────────
+    // ── 5. Attention backward ─────────────────────────────────────────────────
     let attn_grads = attention_backward(&block.attn, &tape.attn, &grad_attn_out);
 
-    // The attention's grad_input is dL/d(norm1 output).
     // ── 6. Norm 1 backward ────────────────────────────────────────────────────
     let (grad_n1_gamma, grad_n1_beta, grad_block_input_from_norm) =
         layer_norm_backward_with_params(
@@ -148,7 +106,6 @@ pub fn block_backward(
             d_model,
         );
 
-    // Add the norm path into the residual path gradient
     for i in 0..seq {
         for d in 0..d_model {
             for k in 0..16 {
@@ -163,17 +120,100 @@ pub fn block_backward(
         attn:        attn_grads,
         norm2_gamma: grad_n2_gamma,
         norm2_beta:  grad_n2_beta,
-        ffn_fc1:     grad_fc1,
-        ffn_fc2:     grad_fc2,
+        ffn:         ffn_grad,
         grad_input:  grad_block_input,
     }
 }
 
-// ─── Layer-norm backward with gamma/beta gradients ───────────────────────────
-//
-// For each position, applies the layer_norm_backward formula and additionally
-// computes dL/dγ = Σ grad_out * x_hat   and   dL/dβ = Σ grad_out.
-// Returns (grad_gamma, grad_beta, grad_x_as_multivectors).
+fn ffn_backward(
+    ffn:        &FfnVariant,
+    tape:       &super::tape::FfnTape,
+    grad_out:   &[Vec<Multivector>],
+) -> (FfnGrad, Vec<Vec<Multivector>>) {
+    let seq = grad_out.len();
+    match (ffn, &tape.hidden) {
+        (FfnVariant::Clifford(f), FfnHidden::Clifford { hidden_pre, hidden_post }) => {
+            let d_ff = f.fc2.in_dim;
+            let d_model = f.fc1.in_dim;
+            let mut grad_fc2 = GradLinear::zeros(d_model, d_ff);
+            let mut grad_h_post = vec![vec![Multivector::zero(); d_ff]; seq];
+
+            for i in 0..seq {
+                let (g_fc2, g_h) = linear_backward(
+                    &f.fc2.weights,
+                    &hidden_post[i],
+                    &grad_out[i],
+                );
+                grad_fc2.accumulate(&g_fc2);
+                for d in 0..d_ff {
+                    for k in 0..16 {
+                        grad_h_post[i][d].c[k] += g_h[d].c[k];
+                    }
+                }
+            }
+
+            let mut grad_h_pre = vec![vec![Multivector::zero(); d_ff]; seq];
+            for i in 0..seq {
+                for d in 0..d_ff {
+                    for k in 0..16 {
+                        grad_h_pre[i][d].c[k] = if hidden_pre[i][d].c[k] > 0.0 {
+                            grad_h_post[i][d].c[k]
+                        } else {
+                            0.0
+                        };
+                    }
+                }
+            }
+
+            let mut grad_fc1 = GradLinear::zeros(d_ff, d_model);
+            let mut grad_ffn_in = vec![vec![Multivector::zero(); d_model]; seq];
+            for i in 0..seq {
+                let (g_fc1, g_x) = linear_backward(
+                    &f.fc1.weights,
+                    &tape.input[i],
+                    &grad_h_pre[i],
+                );
+                grad_fc1.accumulate(&g_fc1);
+                for d in 0..d_model {
+                    for k in 0..16 {
+                        grad_ffn_in[i][d].c[k] += g_x[d].c[k];
+                    }
+                }
+            }
+            (FfnGrad::Clifford(grad_fc1, grad_fc2), grad_ffn_in)
+        }
+        (FfnVariant::Dense(f), FfnHidden::Dense { input_flat, pre }) => {
+            let mut grad_fc2 = RealHeadGrad::zeros(f.fc2.out_dim, f.fc2.in_features);
+            let mut grad_fc1 = RealHeadGrad::zeros(f.fc1.out_dim, f.fc1.in_features);
+            let mut grad_ffn_in = Vec::with_capacity(seq);
+
+            for i in 0..seq {
+                let g_out_flat = flatten_mvs(&grad_out[i]);
+                let post: Vec<f32> = pre[i].iter().map(|v| v.max(0.0)).collect();
+                let g_h = real_linear_backward(
+                    &f.fc2.weights,
+                    &post,
+                    &g_out_flat,
+                    &mut grad_fc2,
+                );
+                let g_pre: Vec<f32> = g_h
+                    .iter()
+                    .zip(pre[i].iter())
+                    .map(|(g, p)| if *p > 0.0 { *g } else { 0.0 })
+                    .collect();
+                let g_in_flat = real_linear_backward(
+                    &f.fc1.weights,
+                    &input_flat[i],
+                    &g_pre,
+                    &mut grad_fc1,
+                );
+                grad_ffn_in.push(unflatten_mvs(&g_in_flat, f.d_model));
+            }
+            (FfnGrad::Dense(grad_fc1, grad_fc2), grad_ffn_in)
+        }
+        _ => panic!("FFN variant / tape hidden mismatch — forward/backward desync"),
+    }
+}
 
 fn layer_norm_backward_with_params(
     stats:    &[super::tape::LayerNormStats],
@@ -189,17 +229,13 @@ fn layer_norm_backward_with_params(
     let mut grad_x = vec![vec![Multivector::zero(); d_model]; seq];
 
     for i in 0..seq {
-        // Flatten grad_out[i] to length n_comp
         let g_flat: Vec<f32> = grad_out[i].iter().flat_map(|mv| mv.c).collect();
 
-        // dL/dγ[k] += g_flat[k] * x_hat[k]
-        // dL/dβ[k] += g_flat[k]
         for k in 0..n_comp {
             grad_gamma[k] += g_flat[k] * stats[i].x_hat[k];
             grad_beta[k]  += g_flat[k];
         }
 
-        // dL/dx using the existing backprop function
         let g_x_flat = layer_norm_backward(
             &stats[i].x_hat,
             gamma,
@@ -207,7 +243,6 @@ fn layer_norm_backward_with_params(
             stats[i].std,
         );
 
-        // Reshape back into [d_model] multivectors
         for d in 0..d_model {
             for k in 0..16 {
                 grad_x[i][d].c[k] = g_x_flat[d * 16 + k];
@@ -218,16 +253,15 @@ fn layer_norm_backward_with_params(
     (grad_gamma, grad_beta, grad_x)
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
     use crate::{
-        CliffordAlgebra, CliffordAttention, CliffordFFN, CliffordLayerNorm,
+        CliffordAlgebra, CliffordAttention, CliffordLayerNorm,
     };
     use crate::cayley_const::CliffordAlgebraConst;
+    use crate::ffn::FfnVariant;
     use crate::v2::tape::block_forward_taped;
 
     fn dummy_loss(out: &[Vec<Multivector>]) -> f32 {
@@ -245,7 +279,7 @@ mod tests {
     fn build_block(d_model: usize, d_ff: usize, alg_arc: Arc<CliffordAlgebra>) -> CliffordBlock {
         CliffordBlock {
             attn:  CliffordAttention::new(d_model, 2, alg_arc.clone()),
-            ffn:   CliffordFFN::new(d_model, d_ff, alg_arc.clone()),
+            ffn:   FfnVariant::clifford(d_model, d_ff, alg_arc.clone()),
             norm1: CliffordLayerNorm::new(d_model),
             norm2: CliffordLayerNorm::new(d_model),
         }
@@ -268,7 +302,7 @@ mod tests {
             }).collect()
         }).collect();
 
-        let tape = block_forward_taped(&alg, &block, &x, true);
+        let tape = block_forward_taped(&alg, &block, &x, true, crate::AttentionScoreMode::InnerProduct);
         let grad_out = dummy_grad_out(seq, d_model);
         let grads = block_backward(&block, &tape, &grad_out);
 
@@ -276,11 +310,11 @@ mod tests {
         let checks = [(0usize, 0usize, 0usize), (1, 1, 3), (2, 2, 7)];
         for (i, d, k) in checks {
             x[i][d].c[k] += eps;
-            let t1 = block_forward_taped(&alg, &block, &x, true);
+            let t1 = block_forward_taped(&alg, &block, &x, true, crate::AttentionScoreMode::InnerProduct);
             let l1 = dummy_loss(&t1.after_res2);
 
             x[i][d].c[k] -= 2.0 * eps;
-            let t2 = block_forward_taped(&alg, &block, &x, true);
+            let t2 = block_forward_taped(&alg, &block, &x, true, crate::AttentionScoreMode::InnerProduct);
             let l2 = dummy_loss(&t2.after_res2);
 
             x[i][d].c[k] += eps;
@@ -288,7 +322,6 @@ mod tests {
             let fd = (l1 - l2) / (2.0 * eps);
             let analytic = grads.grad_input[i][d].c[k];
 
-            // Generous tolerance — there's a long chain of multivector ops
             assert!(
                 (fd - analytic).abs() < 0.1 + 0.1 * analytic.abs(),
                 "block grad_input mismatch at ({i},{d},{k}): fd={fd:.4} analytic={analytic:.4}"

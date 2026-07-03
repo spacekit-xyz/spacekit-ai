@@ -150,10 +150,10 @@ pub fn cached_attention_step(
     let seq = cache.seq_len();
     let d   = q_new.len();
 
-    // Compute attention scores: score[j] = (1/scale) Σ_d <Q[d] ⊛ K_j[d]>₀
+    // Compute attention scores: score[j] = (1/scale) Σ_d ⟨Q[d], K_j[d]⟩
     let scores: Vec<f32> = (0..seq).map(|j| {
         let s: f32 = q_new.iter().zip(cache.k[j].iter())
-            .map(|(qi, kj)| alg.geo_product(qi, kj).c[0])
+            .map(|(qi, kj)| alg.inner_product(qi, kj))
             .sum();
         s / scale
     }).collect();

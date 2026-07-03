@@ -168,9 +168,16 @@ pub struct CliffordLinear {
 
 impl CliffordLinear {
     pub fn new(in_dim: usize, out_dim: usize, algebra: Arc<CliffordAlgebra>) -> Self {
-        // Initialize weights to grade-1 unit vectors + small noise (todo: kaiming)
+        // Small uniform noise on all blades (not scalar-only — geo layers mix grades).
         let weights = (0..out_dim).map(|_| {
-            (0..in_dim).map(|_| Multivector::scalar(0.01)).collect()
+            (0..in_dim).map(|i| {
+                let mut mv = Multivector::zero();
+                let s = 0.01 * (1.0 + (i as f32 * 0.13).sin().abs());
+                for k in 0..16 {
+                    mv.c[k] = s * 0.25;
+                }
+                mv
+            }).collect()
         }).collect();
         let bias = vec![Multivector::zero(); out_dim];
         Self { out_dim, in_dim, weights, bias, algebra }
@@ -205,22 +212,13 @@ impl CliffordLayerNorm {
     }
 
     pub fn forward(&self, x: &[Multivector]) -> Vec<Multivector> {
-        let flat: Vec<f32> = x.iter().flat_map(|mv| mv.c).collect();
-        let n = flat.len() as f32;
-        let mean = flat.iter().sum::<f32>() / n;
-        let var  = flat.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / n;
-        let std  = (var + self.eps).sqrt();
-
-        flat.iter().enumerate()
-            .map(|(i, v)| (v - mean) / std * self.gamma[i] + self.beta[i])
-            .collect::<Vec<_>>()
-            .chunks(16)
-            .map(|chunk| {
-                let mut c = [0.0f32; 16];
-                c.copy_from_slice(chunk);
-                Multivector { c }
-            })
-            .collect()
+        crate::clifford_layer_norm::forward_multivectors(
+            &self.gamma,
+            &self.beta,
+            self.eps,
+            x,
+        )
+        .0
     }
 }
 
@@ -270,7 +268,7 @@ impl CliffordAttention {
             (0..seq).map(|i| {
                 let raw: Vec<f32> = (0..seq).map(|j| {
                     let s: f32 = (d0..d1)
-                        .map(|d| self.algebra.geo_product(&q[i][d], &k[j][d]).scalar_part())
+                        .map(|d| self.algebra.inner_product(&q[i][d], &k[j][d]))
                         .sum();
                     s / scale
                 }).collect();
@@ -323,7 +321,7 @@ impl CliffordFFN {
 
 pub struct CliffordBlock {
     pub attn:  CliffordAttention,
-    pub ffn:   CliffordFFN,
+    pub ffn:   crate::ffn::FfnVariant,
     pub norm1: CliffordLayerNorm,
     pub norm2: CliffordLayerNorm,
 }
@@ -374,7 +372,11 @@ impl LinearReal {
     /// `d_model` multivectors in → `out_dim` logits out.  Zero-initialised;
     /// call a randomiser before training to break symmetry.
     pub fn new(d_model: usize, out_dim: usize) -> Self {
-        let in_features = d_model * 16;
+        Self::new_dims(d_model * 16, out_dim, 0)
+    }
+
+    /// General real linear layer: `in_features` → `out_dim`.  `seed` reserved for init helpers.
+    pub fn new_dims(in_features: usize, out_dim: usize, _seed: u64) -> Self {
         Self {
             out_dim,
             in_features,
@@ -383,20 +385,29 @@ impl LinearReal {
         }
     }
 
-    /// Flatten `x` (d_model multivectors → 16·d_model floats) and project to logits.
-    pub fn forward(&self, x: &[Multivector]) -> Vec<f32> {
-        debug_assert_eq!(x.len() * 16, self.in_features);
-        let flat: Vec<f32> = x.iter().flat_map(|mv| mv.c).collect();
+    pub fn weight_scalars(&self) -> usize {
+        self.out_dim * self.in_features + self.out_dim
+    }
+
+    /// Real matmul: `out[o] = bias[o] + Σ_j W[o][j] · x[j]`.
+    pub fn forward_flat(&self, x: &[f32]) -> Vec<f32> {
+        debug_assert_eq!(x.len(), self.in_features);
         (0..self.out_dim)
             .map(|o| {
                 let w = &self.weights[o];
                 let mut s = self.bias[o];
                 for j in 0..self.in_features {
-                    s += w[j] * flat[j];
+                    s += w[j] * x[j];
                 }
                 s
             })
             .collect()
+    }
+
+    /// Flatten `x` (d_model multivectors → 16·d_model floats) and project to logits.
+    pub fn forward(&self, x: &[Multivector]) -> Vec<f32> {
+        debug_assert_eq!(x.len() * 16, self.in_features);
+        self.forward_flat(&x.iter().flat_map(|mv| mv.c).collect::<Vec<_>>())
     }
 }
 
