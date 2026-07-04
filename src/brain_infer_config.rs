@@ -342,3 +342,63 @@ pub fn battery_cases(battery_brains: bool) -> [BatteryCase; 4] {
         },
     ]
 }
+
+/// Held-out paraphrase eval (pre-registered; prompts not in train globs).
+#[derive(Clone)]
+pub struct HeldoutCase {
+    pub label: String,
+    pub project: PathBuf,
+    pub brain: PathBuf,
+    pub prompt: String,
+    pub expected_topic: Option<String>,
+}
+
+pub fn heldout_battery_cases() -> Result<Vec<HeldoutCase>, String> {
+    let path = PathBuf::from("../growformer/data/sentiment/eval_battery_heldout_prompts.jsonl");
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| format!("held-out prompts {}: {e}", path.display()))?;
+    let sk = spacekit_sentiment_root();
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let obj: serde_json::Value =
+            serde_json::from_str(line).map_err(|e| format!("held-out JSONL: {e}"))?;
+        let corpus = obj
+            .get("corpus")
+            .and_then(|v| v.as_str())
+            .ok_or("held-out row missing corpus")?;
+        let (project, brain) = match corpus {
+            "crypto" => (
+                sk.join("crypto/crypto-sentiment-analysis.gf.toml"),
+                sk.join("crypto/agent/crypto-brain.bin"),
+            ),
+            "fintech" => (
+                sk.join("fintech/fintech-sentiment-analysis.gf.toml"),
+                sk.join("fintech/agent/fintech-brain.bin"),
+            ),
+            other => return Err(format!("held-out corpus `{other}` unsupported")),
+        };
+        out.push(HeldoutCase {
+            label: obj
+                .get("case_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("heldout")
+                .to_string(),
+            project,
+            brain,
+            prompt: obj
+                .get("prompt")
+                .and_then(|v| v.as_str())
+                .ok_or("held-out row missing prompt")?
+                .to_string(),
+            expected_topic: obj
+                .get("expected_topic")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        });
+    }
+    Ok(out)
+}

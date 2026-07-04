@@ -768,27 +768,35 @@ cd ../growformer && python3 scripts/rag_baseline_battery.py --heldout
 cargo run --release --bin tinystories -- brain-raw-diag --battery --top-k 3 -v
 ```
 
-### Full-path inference (includes gates — not the diagnostic)
+### Full-path inference (HYBRID — brain memory + optional LM)
+
+Default **`--hybrid`** (on): prefer raw lattice top-1 when scenario-topic rubric passes; fall back to full generation path (metacog + gates). Use **`--no-hybrid`** for legacy full-path memory only.
 
 ```bash
-# Brain routing + lattice memory only (includes metacog + grounding gate)
+# Scored SpaceKit battery (cases 2–3) — brain memory only
+cargo run --release --bin tinystories -- brain-infer --battery --brain-only
+
+# Held-out paraphrase eval (pre-registered)
+cargo run --release --bin tinystories -- brain-infer --heldout --brain-only
+
+# Single prompt — crypto brain + hybrid raw memory
 cargo run --release --bin tinystories -- brain-infer \
   --brain ../../spacekit/spacekit-projects/sentiment/crypto/agent/crypto-brain.bin \
   --project ../../spacekit/spacekit-projects/sentiment/crypto/crypto-sentiment-analysis.gf.toml \
   --prompt "Bitcoin crashed after the ETF delay" \
   --brain-only
 
-# Brain memory prefix + row2 vanilla continuation (downstream — not validated)
-# Requires a trained general sentiment brain; sentiment-brain-v3.bin is not trained yet.
-# cargo run --release --bin tinystories -- brain-infer \
-#   --brain ../growformer/agent-data/sentiment-analysis/sentiment-brain-v3.bin \
-#   --prompt "Bitcoin crashed after the ETF delay" \
-#   --checkpoint agent-data/tinystories-row2-seed1000.json \
-#   --tokenizer data/tinystories.tok \
-#   --max-new-tokens 64 --greedy
+# HYBRID prefix + row2 vanilla continuation (downstream — not validated on held-out LM quality)
+cargo run --release --bin tinystories -- brain-infer \
+  --brain ../../spacekit/spacekit-projects/sentiment/crypto/agent/crypto-brain.bin \
+  --project ../../spacekit/spacekit-projects/sentiment/crypto/crypto-sentiment-analysis.gf.toml \
+  --prompt "Bitcoin crashed after the ETF delay" \
+  --checkpoint agent-data/tinystories-row2-seed1000.json \
+  --tokenizer data/tinystories.tok \
+  --max-new-tokens 64 --greedy
 ```
 
-API: `growformer_llm::brain_memory::{BrainMemoryRuntime, format_lm_memory_prefix, brain_router_features}`.
+API: `growformer_llm::brain_memory::{BrainMemoryRuntime, query_hybrid, MemorySource, format_lm_memory_prefix_with_source, brain_router_features}`.
 Raw diagnostic: `BrainMemoryRuntime::raw_lattice_diagnostic`.
 
 Disable the dependency: `cargo build --no-default-features` (tinystories CL/eval only).

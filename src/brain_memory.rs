@@ -11,8 +11,54 @@ use growformer::runtime::{BrainInfo, Runtime};
 
 use crate::brain_infer_config::BrainInferConfig;
 
-/// Default bridge width from growformer (`LanguageBridge` output).
-pub const BRIDGE_DIM: usize = 128;
+/// How lattice text was chosen for LM prefixing (HYBRID_DOMAIN_BRAIN product path).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemorySource {
+    /// Pre-gate raw top-1 (scenario topic + witness or forced-topic match).
+    RawLattice,
+    /// Full generation path (metacog + grounding gate + user-anchored).
+    FullGeneration,
+}
+
+impl MemorySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RawLattice => "raw_lattice",
+            Self::FullGeneration => "full_generation",
+        }
+    }
+}
+
+/// Scenario retrieval buckets (not generic polarity-only topics).
+fn is_scenario_lattice_topic(topic: &str) -> bool {
+    matches!(
+        topic,
+        "etf_delay_bearish" | "mortgage_rate_complaint" | "fee_complaint"
+    )
+}
+
+fn raw_candidate_usable(
+    c: &growformer::dimension::group_gen::RawLatticeCandidate,
+    report: &RawLatticeDiagnosticReport,
+) -> bool {
+    if c.hard_reject {
+        return false;
+    }
+    if c.witness_ok {
+        return true;
+    }
+    if let Some(ref forced) = report.forced_topic {
+        if c.topic == *forced
+            && is_scenario_lattice_topic(forced)
+            && c.above_score_floor
+            && !c.soft_reject
+        {
+            return true;
+        }
+    }
+    false
+}
+
 
 /// Compact oracle-free features derived from a brain query (for routers / diagnostics).
 pub const BRAIN_FEATURE_DIM: usize = 8;
@@ -66,6 +112,28 @@ impl BrainMemoryRuntime {
 
     pub fn brain_info(&self) -> BrainInfo {
         self.runtime.brain_info()
+    }
+
+    /// HYBRID retrieval: prefer raw lattice top-1 when rubric passes; else full generation path.
+    pub fn query_hybrid(&mut self, text: &str) -> Result<(BrainMemoryQuery, MemorySource), String> {
+        let raw = self.raw_lattice_diagnostic(text, 1)?;
+        let mut q = self.query(text)?;
+        let source = if let Some(c) = raw.candidates.first() {
+            if raw_candidate_usable(c, &raw) {
+                q.memory_text =
+                    growformer::dimension::language::strip_sentiment_lattice_witness_for_display(
+                        &c.text_preview,
+                    );
+                q.memory_template_id = format!("raw_lattice_prog_{}", c.prog_idx);
+                q.memory_confidence = c.score;
+                MemorySource::RawLattice
+            } else {
+                MemorySource::FullGeneration
+            }
+        } else {
+            MemorySource::FullGeneration
+        };
+        Ok((q, source))
     }
 
     /// Route + retrieve a lattice memory unit for `text` (full generation path: metacog + gates).
@@ -170,8 +238,13 @@ pub fn raw_lattice_report_json(report: &RawLatticeDiagnosticReport) -> Result<St
 
 /// Prefix string for LM conditioning: brain routing metadata + retrieved lattice text.
 pub fn format_lm_memory_prefix(q: &BrainMemoryQuery) -> String {
+    format_lm_memory_prefix_with_source(q, MemorySource::FullGeneration)
+}
+
+pub fn format_lm_memory_prefix_with_source(q: &BrainMemoryQuery, source: MemorySource) -> String {
     format!(
-        "[brain route group={} margin={:.3} action={} mem_conf={:.2}]\n{}\n\n",
+        "[brain memory={} route group={} margin={:.3} action={} mem_conf={:.2}]\n{}\n\n",
+        source.as_str(),
         q.group_id
             .map(|g| g.to_string())
             .unwrap_or_else(|| "none".into()),
@@ -206,7 +279,7 @@ mod tests {
     #[test]
     fn brain_features_len() {
         let q = BrainMemoryQuery {
-            bridge_vector: vec![0.1; BRIDGE_DIM],
+            bridge_vector: vec![0.1; growformer::dimension::language::DEFAULT_BRIDGE_DIM],
             bridge_confidence: 0.5,
             group_id: Some(1),
             route_margin: 0.2,
@@ -220,5 +293,6 @@ mod tests {
         };
         assert_eq!(brain_router_features(&q).len(), BRAIN_FEATURE_DIM);
         assert!(format_lm_memory_prefix(&q).contains("hello"));
+        assert!(format_lm_memory_prefix_with_source(&q, MemorySource::RawLattice).contains("raw_lattice"));
     }
 }
