@@ -23,6 +23,11 @@ toml = "0.8"
 # cross-entropy in bits/byte is exactly its lossless compression rate.
 spacekit-compressor = { path = "../../spacekit/spacekit-ai/spacekit-compressor" }
 growformer-ledger = { path = "../growformer-ledger" }
+growformer = { path = "../growformer", default-features = false, optional = true }
+
+[features]
+default = ["brain-memory"]
+brain-memory = ["dep:growformer"]
 
 [dev-dependencies]
 # nothing extra needed — all tests use the standard harness

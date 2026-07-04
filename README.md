@@ -645,13 +645,153 @@ boundaries, KV-cache eviction, and the end-to-end `train_v2` loss-decrease test.
 
 
 
-## Growformer sibling crate (optional)
+## Growformer sibling crate (`brain-memory` feature)
 
-The separate `[growformer](../growformer)` crate implements lattice routing,
-sentiment brains, and an Active Inference episode loop. It is **not** part of this
-LM’s training path; use it when wiring LM outputs into domain-specific inference.
-No claim is made here that spacetime algebra + free-energy framing improves
-language modeling — that integration is exploratory.
+**Canonical project paths (SpaceKit):** crypto and fintech train/infer data + deployed brains live under [`spacekit-projects/sentiment`](../../spacekit/spacekit-projects/sentiment) (`crypto/`, `fintech/`). Override root with `SPACEKIT_SENTIMENT_ROOT`. General sentiment (cases 1/4) still uses neurokit `growformer/scripts/sentiment-analysis.gf.toml` until a matching SpaceKit project exists.
+
+**Status (2026-07-04):** Bet D **revised for product scope**. Full 4-prompt pre-registration still **`SWITCH_TO_EMBEDDING_RAG`** (RAG 4/4, brain 2/4 raw). **Scored SpaceKit cases 2–3:** brain raw **2/2** after scenario topics + `service.rs` lexical-hint fix → product verdict **`HYBRID_DOMAIN_BRAIN`**. **`brain-raw-diag --battery`** uses per-brain `*.gf.toml` config parity.
+
+| Case | Topic hint | Raw #1 | Full infer |
+|------|------------|--------|------------|
+| 2 crypto × Bitcoin ETF | `etf_delay_bearish` ✅ | ETF-delay paraphrase, `witness=true` ✅ | user-anchored NEGATIVE ✅ |
+| 3 fintech × Chase hike | `mortgage_rate_complaint` ✅ | mortgage paraphrase, `witness=true` ✅ | user-anchored NEGATIVE ✅ |
+
+Cases 1/4 still use untrained neurokit `sentiment-brain-v3.bin` — skipped in default `--battery`.
+
+**Retrieval-gap training (held-out paraphrases — not battery strings):** `train_sentiment_retrieval_gaps.jsonl` uses **scenario topics** (`etf_delay_bearish`, `mortgage_rate_complaint`) — not polarity-only `negative_mild`. Inference TOML maps the two scored battery prompts into those buckets before forced-topic retrieval. Mis-bucketed rows evicted: counterfactual rally → `copium`, custody fee → `fee_complaint`.
+
+Retrain after data/TOML changes:
+
+```bash
+cd growformer
+cargo run --release --no-default-features --features cli,native --bin growformer -- \
+  --train-brain --project ../../spacekit/spacekit-projects/sentiment/crypto/crypto-sentiment-analysis.gf.toml
+cargo run --release --no-default-features --features cli,native --bin growformer -- \
+  --train-brain --project ../../spacekit/spacekit-projects/sentiment/fintech/fintech-sentiment-analysis.gf.toml
+```
+
+**Prior unfair scores (no project wiring):** round 1 RAG **1/4**, brain raw **0/4**. Round-2 `*-battery.bin` retrain remains **invalid** (train-on-test).
+
+The `[growformer](../growformer)` crate implements lattice routing, sentiment brains,
+and promote-freeze CL. With the default **`brain-memory`** feature, growformer-llm can
+load a `brain.bin` as a **memory unit** — route + retrieve lattice text — then prefix
+a vanilla or Clifford LM checkpoint for fluent continuation (downstream; not validated).
+
+**Architecture (target):** brain handles domain routing/retrieval; LM handles open-ended tokens.
+This is the product-shaped integration, not stacking Clifford LM specialists.
+
+### Raw lattice diagnostic (pre-gate, fork-resolving)
+
+Bypasses metacog and grounding gate. Dumps top-K lattice candidates after cosine+BM25+graph+lex-align scoring, with witness/hard-reject flags computed but **not** applied.
+
+```bash
+# Four-prompt battery — each case loads its own *.gf.toml (inference TOML + guardrails + topic graph)
+cargo run --release --bin tinystories -- brain-raw-diag --battery --top-k 5
+
+# Single brain + prompt (pass --project for native infer parity)
+cargo run --release --bin tinystories -- brain-raw-diag \
+  --brain ../growformer/agent-data/sentiment-analysis/sentiment-brain-v3.bin \
+  --project ../growformer/scripts/sentiment-analysis.gf.toml \
+  --prompt "Bitcoin crashed after the ETF delay" \
+  --top-k 5
+
+# Crypto case — SpaceKit canonical project
+cargo run --release --bin tinystories -- brain-raw-diag \
+  --brain ../../spacekit/spacekit-projects/sentiment/crypto/agent/crypto-brain.bin \
+  --project ../../spacekit/spacekit-projects/sentiment/crypto/crypto-sentiment-analysis.gf.toml \
+  --prompt "Bitcoin crashed after the ETF delay" \
+  --top-k 5 -v
+
+# Fintech case — SpaceKit canonical project
+cargo run --release --bin tinystories -- brain-raw-diag \
+  --brain ../../spacekit/spacekit-projects/sentiment/fintech/agent/fintech-brain.bin \
+  --project ../../spacekit/spacekit-projects/sentiment/fintech/fintech-sentiment-analysis.gf.toml \
+  --prompt "Chase raised my mortgage rate without notice" \
+  --top-k 5 -v
+```
+
+**Config flags (single-prompt / `brain-infer`):** `--project`, `--inference-toml`, `--inference-defaults-toml`, `--guardrails-jsonl`, `-v`. World grounding graphs (base + crypto + fintech) are always compile-time embedded; runtime `grounding_toml` from the project is optional.
+
+**Pre-registered rubric (read before tuning gates):**
+
+| Raw top-1 | Interpretation | Next step |
+|-----------|----------------|-----------|
+| Topical + correct polarity/rank | Core retrieval OK | Tune witness / grounding gate / metacog — memory layer recoverable |
+| Surface-matched, wrong rank (esp. case 4 polarity flip) | Core retrieval bug | Fix lattice scoring/training before any LM conditioning |
+| Right terms in top-3 but wrong #1 | Mixed — ranking vs gating | Check witness_ok on #1 vs #2; gate if #2 is correct |
+| `no_topic_hint` / empty candidates | Routing bug | Fix topic/subject setup before retrieval |
+
+**Regression checklist (stage-tagged — do not flatten to FAIL):**
+
+Default `--battery` runs **cases 2–3 only** (trained SpaceKit crypto + fintech). Cases 1 and 4 use neurokit `sentiment-brain-v3.bin`, which **is not trained** — ignore until a SpaceKit general-sentiment project exists. Pass `--battery-all` to run them for routing diagnostics only (not scored).
+
+| Case | Brain × prompt | Expected | Stage if broken | Default battery |
+|------|----------------|----------|-----------------|-----------------|
+| 1 | sentiment × Bitcoin ETF crash | negative/crypto headline memory | retrieval / gate / interface | **skipped** |
+| 2 | crypto × same | `etf_delay_bearish` lattice (ETF delay + crash copy) | retrieval / gate | **scored** |
+| 3 | fintech × Chase mortgage hike | `mortgage_rate_complaint` lattice (not custody fee) | retrieval / gate | **scored** |
+| 4 | sentiment × Chase hike (wrong brain) | low confidence or neutral — **not** opposite-sentiment top-1 | retrieval (polarity flip) | **skipped** |
+
+Record which stage failed: **retrieval** (raw top-K wrong), **gate** (raw OK but `--brain-only` decline), **interface** (held). Token-interface and generator fork are **held** until the store is populated and both retrieval methods re-pass.
+
+### Bet D — embedding RAG baseline (same battery)
+
+Pre-registered head-to-head vs raw brain top-1. Harness:
+
+```bash
+cd ../growformer && python3 scripts/rag_baseline_battery.py
+# → agent-data/brain-rag-baseline/rag_baseline_results.json
+```
+
+**Outcome (2026-07-03 – 2026-07-04):**
+
+| Round | RAG | Brain raw (fair) | Outcome |
+|-------|-----|------------------|---------|
+| 1 (empty store) | 1/4 | **0/4** (pre-battery `.bin`) | `POPULATE_STORE_FIRST` |
+| 2 (store + RAG index) | **4/4** | **0/4** (unretrained `.bin`) | **`SWITCH_TO_EMBEDDING_RAG`** (full battery) |
+| 2 brain retrain | — | 2/4 (`*-battery.bin`) | **Invalid** — train-on-test; not scored |
+| 3 (SpaceKit retrain + routing fix) | **4/4** | **0/2 scored** (routing OK, raw rank wrong) | **`SWITCH_TO_EMBEDDING_RAG`** (full battery) |
+| 4 (scenario topics + hint guard) | **4/4** | **2/2 scored**, 2/4 full | **`HYBRID_DOMAIN_BRAIN`** (product scope) |
+
+Round-2 brain `train-brain` on battery rows then eval on same battery is contaminated (memory-layer train=val). Round 4 brain raw on scored cases: case 2 ETF-delay paraphrase at #1; case 3 mortgage paraphrase at #1 (both `witness=true`). Full-battery rule unchanged; **scored subset** supports domain brain retrieval + optional RAG.
+
+Battery JSONL (exact eval strings — do **not** train on for fair score): `growformer/data/{sentiment,crypto,fintech}/train_sentiment_battery.jsonl`. Held-out retrieval paraphrases (train): `train_sentiment_retrieval_gaps.jsonl`. **Held-out eval prompts (not in any train glob):** `growformer/data/sentiment/eval_battery_heldout_prompts.jsonl` — run with `--heldout` (2026-07-04: brain **2/2**, RAG **1/2**).
+
+```bash
+# RAG round 4 (round-4 brain frozen scores in harness)
+cd ../growformer && python3 scripts/rag_baseline_battery.py --round 4
+
+# Held-out paraphrase eval (pre-registered)
+cd ../growformer && python3 scripts/rag_baseline_battery.py --heldout
+
+# Brain raw (fair — project config parity, SpaceKit .bin)
+cargo run --release --bin tinystories -- brain-raw-diag --battery --top-k 3 -v
+```
+
+### Full-path inference (includes gates — not the diagnostic)
+
+```bash
+# Brain routing + lattice memory only (includes metacog + grounding gate)
+cargo run --release --bin tinystories -- brain-infer \
+  --brain ../../spacekit/spacekit-projects/sentiment/crypto/agent/crypto-brain.bin \
+  --project ../../spacekit/spacekit-projects/sentiment/crypto/crypto-sentiment-analysis.gf.toml \
+  --prompt "Bitcoin crashed after the ETF delay" \
+  --brain-only
+
+# Brain memory prefix + row2 vanilla continuation (downstream — not validated)
+# Requires a trained general sentiment brain; sentiment-brain-v3.bin is not trained yet.
+# cargo run --release --bin tinystories -- brain-infer \
+#   --brain ../growformer/agent-data/sentiment-analysis/sentiment-brain-v3.bin \
+#   --prompt "Bitcoin crashed after the ETF delay" \
+#   --checkpoint agent-data/tinystories-row2-seed1000.json \
+#   --tokenizer data/tinystories.tok \
+#   --max-new-tokens 64 --greedy
+```
+
+API: `growformer_llm::brain_memory::{BrainMemoryRuntime, format_lm_memory_prefix, brain_router_features}`.
+Raw diagnostic: `BrainMemoryRuntime::raw_lattice_diagnostic`.
+
+Disable the dependency: `cargo build --no-default-features` (tinystories CL/eval only).
 
 ```toml
 [dependencies]

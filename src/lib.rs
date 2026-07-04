@@ -24,6 +24,11 @@ pub mod cl1;
 pub mod clifford_layer_norm;
 pub mod lm_cone_router;
 
+#[cfg(feature = "brain-memory")]
+pub mod brain_infer_config;
+#[cfg(feature = "brain-memory")]
+pub mod brain_memory;
+
 pub mod domain_data;
 pub mod pooled_classifier;
 pub mod train;

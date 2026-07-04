@@ -29,6 +29,13 @@ use growformer_llm::v2::vanilla_train::{
 use growformer_llm::cl1::{append_cl1_ledger, load_frozen_specialist, load_heldout_tokens, run_cl1};
 use growformer_llm::vanilla_llm::vanilla_forward_logits;
 
+#[cfg(feature = "brain-memory")]
+use growformer_llm::brain_infer_config::{battery_cases, scored_battery_cases, BrainInferConfig};
+#[cfg(feature = "brain-memory")]
+use growformer_llm::brain_memory::{
+    brain_router_features, format_lm_memory_prefix, raw_lattice_report_json, BrainMemoryRuntime,
+};
+
 use growformer_ledger::results_ledger as ledger;
 
 use spacekit_compressor::binary::{BinaryAlgorithm, BinaryCompressor};
@@ -235,6 +242,75 @@ enum Commands {
         seed: Option<u64>,
         #[arg(long, default_value_t = 1.15)]
         repetition_penalty: f32,
+    },
+    /// Query a growformer brain.bin for routing/memory, then optionally continue with an LM.
+    #[cfg(feature = "brain-memory")]
+    BrainInfer {
+        #[arg(long)]
+        brain: PathBuf,
+        #[arg(long)]
+        prompt: String,
+        /// Growformer project manifest (`*.gf.toml`) — loads inference TOML, guardrails, topic graph.
+        #[arg(long, value_name = "PATH")]
+        project: Option<PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        inference_toml: Option<PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        inference_defaults_toml: Option<PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        guardrails_jsonl: Option<PathBuf>,
+        #[arg(long, short = 'v', default_value_t = false)]
+        verbose: bool,
+        /// LM checkpoint for continuation (vanilla or Clifford; auto-detected).
+        #[arg(long)]
+        checkpoint: Option<PathBuf>,
+        #[arg(long)]
+        tokenizer: Option<PathBuf>,
+        #[arg(long, default_value_t = 128)]
+        max_new_tokens: usize,
+        #[arg(long, default_value_t = 0.8)]
+        temperature: f32,
+        #[arg(long, default_value_t = false)]
+        greedy: bool,
+        #[arg(long)]
+        seed: Option<u64>,
+        #[arg(long, default_value_t = 1.15)]
+        repetition_penalty: f32,
+        /// Print brain routing + lattice memory only (no LM).
+        #[arg(long, default_value_t = false)]
+        brain_only: bool,
+    },
+    /// Pre-gate raw lattice retrieval diagnostic (no metacog, no grounding gate).
+    #[cfg(feature = "brain-memory")]
+    BrainRawDiag {
+        #[arg(long, required_unless_present = "battery")]
+        brain: Option<PathBuf>,
+        #[arg(long, required_unless_present = "battery")]
+        prompt: Option<String>,
+        /// Growformer project manifest (`*.gf.toml`) for single-prompt mode.
+        #[arg(long, value_name = "PATH")]
+        project: Option<PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        inference_toml: Option<PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        inference_defaults_toml: Option<PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        guardrails_jsonl: Option<PathBuf>,
+        #[arg(long, short = 'v', default_value_t = false)]
+        verbose: bool,
+        #[arg(long, default_value_t = 5)]
+        top_k: usize,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        /// Run the 4-prompt fork-resolving battery (ignores --brain/--prompt).
+        #[arg(long, default_value_t = false)]
+        battery: bool,
+        /// Use battery-retrained brains (includes new JSONL rows).
+        #[arg(long, default_value_t = false)]
+        battery_brains: bool,
+        /// Include cases 1/4 (untrained neurokit sentiment-brain-v3.bin — diagnostic only).
+        #[arg(long, default_value_t = false)]
+        battery_all: bool,
     },
 }
 
@@ -1398,6 +1474,239 @@ fn main() -> Result<(), String> {
             }
             println!();
         }
+        #[cfg(feature = "brain-memory")]
+        Commands::BrainInfer {
+            brain,
+            prompt,
+            project,
+            inference_toml,
+            inference_defaults_toml,
+            guardrails_jsonl,
+            verbose,
+            checkpoint,
+            tokenizer,
+            max_new_tokens,
+            temperature,
+            greedy,
+            seed,
+            repetition_penalty,
+            brain_only,
+        } => {
+            let infer_cfg = BrainInferConfig {
+                project,
+                inference_toml,
+                inference_defaults_toml,
+                guardrails_jsonl,
+                verbose,
+            };
+            let mut mem = BrainMemoryRuntime::from_path_with_config(&brain, &infer_cfg)?;
+            let info = mem.brain_info();
+            let q = mem.query(&prompt)?;
+            println!("=== brain memory unit ===");
+            println!(
+                "brain: {}  groups={}  router={}  gen_envs={}",
+                brain.display(),
+                info.num_groups,
+                info.has_router,
+                info.gen_envs
+            );
+            println!(
+                "route: group={:?} margin={:.3} bridge_conf={:.3} ood={}",
+                q.group_id, q.route_margin, q.bridge_confidence, q.route_rejected_ood
+            );
+            println!(
+                "action: {} conf={:.3}  memory template={} conf={:.3}",
+                q.action_type, q.action_confidence, q.memory_template_id, q.memory_confidence
+            );
+            println!("memory text:\n{}", q.memory_text.trim());
+            let feats = brain_router_features(&q);
+            println!(
+                "router features [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}, {:.3}, {:.3}, {:.3}]",
+                feats[0], feats[1], feats[2], feats[3], feats[4], feats[5], feats[6], feats[7]
+            );
+            if brain_only {
+                return Ok(());
+            }
+            let checkpoint = checkpoint.ok_or("--checkpoint required unless --brain-only")?;
+            let tokenizer = tokenizer.ok_or("--tokenizer required unless --brain-only")?;
+            let lm_prompt = format!("{}{}", format_lm_memory_prefix(&q), prompt);
+            eprintln!("[brain-infer] LM prompt prefix: {} chars", lm_prompt.len());
+
+            let peek_cfg = peek_checkpoint_cfg(&checkpoint)?;
+            let bpe = BpeTokenizer::load(&tokenizer).map_err(|e| e.to_string())?;
+            if peek_cfg.vocab_size != bpe.vocab_size() as usize {
+                return Err(format!(
+                    "checkpoint vocab {} != BPE {}",
+                    peek_cfg.vocab_size,
+                    bpe.vocab_size()
+                ));
+            }
+
+            let mut ids: Vec<usize> = vec![special::BOS];
+            ids.extend(bpe.encode(&lm_prompt).iter().map(|&x| x as usize));
+
+            let sample_cfg = if greedy {
+                SampleConfig {
+                    max_new_tokens,
+                    repetition_penalty,
+                    seed,
+                    stop_tokens: vec![special::EOS],
+                    ..SampleConfig::greedy()
+                }
+            } else {
+                SampleConfig {
+                    temperature,
+                    max_new_tokens,
+                    repetition_penalty,
+                    seed,
+                    stop_tokens: vec![special::EOS],
+                    ..SampleConfig::focused()
+                }
+            };
+            let mut rng = SimpleRng::new(seed.unwrap_or(0xDECAFBAD));
+
+            print!("=== LM continuation ===\n");
+            if peek_cfg.vanilla {
+                let state = load_vanilla_state(&checkpoint)?;
+                for _ in 0..sample_cfg.max_new_tokens {
+                    let logits_rows = vanilla_forward_logits(&state.model, &ids, true);
+                    let Some(last) = logits_rows.last() else {
+                        break;
+                    };
+                    let next = sample_next(last, &ids, &sample_cfg, &mut rng);
+                    if sample_cfg.stop_tokens.contains(&next) {
+                        break;
+                    }
+                    print!("{}", bpe.decode_one(next as u32));
+                    let _ = std::io::stdout().flush();
+                    ids.push(next);
+                }
+            } else {
+                let state = load_lm_state(&checkpoint)?;
+                let mut cache = InferenceCache::new(
+                    state.cfg.n_blocks,
+                    state.cfg.max_seq,
+                    state.cfg.d_model,
+                    state.cfg.dot_attention,
+                );
+                for _ in 0..sample_cfg.max_new_tokens {
+                    let logits_rows = cache.forward_extend(&state.alg, &state.model, &ids);
+                    let Some(last) = logits_rows.last() else {
+                        break;
+                    };
+                    let next = sample_next(last, &ids, &sample_cfg, &mut rng);
+                    if sample_cfg.stop_tokens.contains(&next) {
+                        break;
+                    }
+                    print!("{}", bpe.decode_one(next as u32));
+                    let _ = std::io::stdout().flush();
+                    ids.push(next);
+                }
+            }
+            println!();
+        }
+        #[cfg(feature = "brain-memory")]
+        Commands::BrainRawDiag {
+            brain,
+            prompt,
+            project,
+            inference_toml,
+            inference_defaults_toml,
+            guardrails_jsonl,
+            verbose,
+            top_k,
+            json,
+            battery,
+            battery_brains,
+            battery_all,
+        } => {
+            if battery {
+                if !battery_all {
+                    for case in battery_cases(battery_brains) {
+                        if let Some(reason) = case.skip_reason {
+                            eprintln!("[battery] skip {}: {}", case.label, reason);
+                        }
+                    }
+                }
+                let cases: Vec<_> = if battery_all {
+                    battery_cases(battery_brains).to_vec()
+                } else {
+                    scored_battery_cases(battery_brains).collect()
+                };
+                for case in cases {
+                    if case.skip_reason.is_some() {
+                        eprintln!(
+                            "[battery] {} (untrained sentiment brain — diagnostic only, not scored)",
+                            case.label
+                        );
+                    }
+                    println!("========== {} ==========", case.label);
+                    let infer_cfg = BrainInferConfig {
+                        project: Some(case.project.clone()),
+                        inference_toml: None,
+                        inference_defaults_toml: None,
+                        guardrails_jsonl: None,
+                        verbose,
+                    };
+                    let mut mem =
+                        BrainMemoryRuntime::from_path_with_config(&case.brain, &infer_cfg)?;
+                    let report = mem.raw_lattice_diagnostic(case.prompt, top_k)?;
+                    if json {
+                        println!("{}", raw_lattice_report_json(&report)?);
+                    } else {
+                        print_raw_lattice_report(&report);
+                    }
+                    println!();
+                }
+            } else {
+                let brain = brain.ok_or("--brain required unless --battery")?;
+                let prompt = prompt.ok_or("--prompt required unless --battery")?;
+                let infer_cfg = BrainInferConfig {
+                    project,
+                    inference_toml,
+                    inference_defaults_toml,
+                    guardrails_jsonl,
+                    verbose,
+                };
+                let mut mem = BrainMemoryRuntime::from_path_with_config(&brain, &infer_cfg)?;
+                let report = mem.raw_lattice_diagnostic(&prompt, top_k)?;
+                if json {
+                    println!("{}", raw_lattice_report_json(&report)?);
+                } else {
+                    print_raw_lattice_report(&report);
+                }
+            }
+        }
     }
     Ok(())
+}
+
+#[cfg(feature = "brain-memory")]
+fn print_raw_lattice_report(report: &growformer::dimension::group_gen::RawLatticeDiagnosticReport) {
+    println!("prompt: {}", report.prompt);
+    println!(
+        "route: group={:?} topic_hint={:?} path={} forced_topic={:?}",
+        report.group_idx, report.topic_hint, report.retrieval_path, report.forced_topic
+    );
+    println!("subject_keywords: {:?}", report.subject_keywords);
+    if report.candidates.is_empty() {
+        println!("candidates: (none — check retrieval_path)");
+        return;
+    }
+    println!("top-{} pre-gate candidates:", report.candidates.len());
+    for c in &report.candidates {
+        println!(
+            "  #{} prog={} score={:.3} topic={} witness={} hard_reject={} soft_reject={} graph_conf={} floor={}",
+            c.rank,
+            c.prog_idx,
+            c.score,
+            c.topic,
+            c.witness_ok,
+            c.hard_reject,
+            c.soft_reject,
+            c.graph_confident,
+            c.above_score_floor
+        );
+        println!("      {}", c.text_preview.replace('\n', " "));
+    }
 }
