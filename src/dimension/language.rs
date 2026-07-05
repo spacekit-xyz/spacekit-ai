@@ -1470,6 +1470,88 @@ const CLIFFORD_GRADE_FEATURES: usize = 8 + 7 + 21 + 1;
 /// Preserves per-dimension lexical anchors AND geometric cross-subspace structure.
 const CLIFFORD_ENCODER_OUTPUT_DIM: usize = CLIFFORD_ENCODER_HASH_DIM + CLIFFORD_GRADE_FEATURES;
 
+/// Blend of the semantic centroid (generalization) vs the surface chunk centroid
+/// (exact-token precision) in the routing encoder. 0.0 = legacy behavior.
+const SEM_BLEND: f32 = 0.5;
+/// Half-width of the semantic-ID neighborhood smoothed per token. The dictionary
+/// orders IDs by corpus co-occurrence, so adjacent IDs are semantically related;
+/// smoothing over the neighborhood makes related content words share vector mass.
+const SEM_NEIGHBOR_W: usize = 3;
+
+/// Function/boilerplate words that should not dominate a request's meaning vector
+/// (so "how do i implement binary search in python" centers on binary/search).
+const ENCODER_STOPWORDS: &[&str] = &[
+    "a", "an", "the", "of", "to", "in", "on", "at", "for", "and", "or", "is", "are", "be", "was",
+    "were", "this", "that", "these", "those", "it", "its", "i", "we", "you", "they", "he", "she",
+    "how", "do", "does", "did", "with", "without", "as", "into", "from", "by", "not", "no", "so",
+    "such", "please", "can", "could", "would", "should", "will", "may", "might", "me", "my", "your",
+    "our", "their", "there", "here", "then", "than", "write", "implement", "create", "make", "build",
+    "give", "want", "need", "code", "program", "python", "function", "func", "def", "class", "method",
+    "using", "use", "some", "any", "get", "have",
+];
+
+fn content_weight(token: &str) -> f32 {
+    if ENCODER_STOPWORDS.contains(&token.to_ascii_lowercase().as_str()) {
+        0.25
+    } else {
+        1.0
+    }
+}
+
+/// Content-weighted mean of semantic-neighbor-smoothed token vectors. Reuses the
+/// dictionary's co-occurrence ID ordering (otherwise wasted, since per-token
+/// vectors are random) so paraphrases with related content words land closer.
+/// Decode path is untouched — this only shapes the routing/query embedding.
+fn semantic_centroid(
+    dict: &crate::spectral::TokenDictionary,
+    codec: &crate::text_autoencoder::ChunkCodec,
+    text: &str,
+) -> Vec<f32> {
+    use crate::text_autoencoder::CATA_DIM;
+    let ids = dict.encode(text);
+    let vocab = codec.vocab_size;
+    let mut acc = vec![0.0f32; CATA_DIM];
+    let mut wsum = 0.0f32;
+    let w_half = SEM_NEIGHBOR_W as i32;
+    for &id in &ids {
+        if id == 0 {
+            continue; // EOS
+        }
+        let w = content_weight(dict.token_str(id).unwrap_or(""));
+        if w <= 0.0 {
+            continue;
+        }
+        let mut sm = vec![0.0f32; CATA_DIM];
+        let mut ksum = 0.0f32;
+        let idi = id as i32;
+        for off in -w_half..=w_half {
+            let nid = idi + off;
+            if nid < 1 || nid as usize >= vocab {
+                continue;
+            }
+            let kw = (w_half + 1) as f32 - off.unsigned_abs() as f32; // triangular kernel
+            let emb = codec.token_embedding(nid as u16);
+            for j in 0..CATA_DIM {
+                sm[j] += kw * emb[j];
+            }
+            ksum += kw;
+        }
+        if ksum <= 0.0 {
+            continue;
+        }
+        for j in 0..CATA_DIM {
+            acc[j] += w * sm[j] / ksum;
+        }
+        wsum += w;
+    }
+    if wsum > 0.0 {
+        for x in acc.iter_mut() {
+            *x /= wsum;
+        }
+    }
+    acc
+}
+
 #[derive(Clone)]
 struct CliffordLanguageEncoder {
     /// Fallback hash encoder (used when no dictionary is available, and for
@@ -1509,8 +1591,15 @@ impl LanguageEncoder for CliffordLanguageEncoder {
 
     fn encode(&self, text: &str) -> Vec<f32> {
         let base_vec = if let Some((ref dict, ref codec)) = self.codec {
-            let seq = codec.encode_text(text, dict);
-            let mut centroid = seq.centroid().to_vec();
+            // Surface centroid (CDMA chunks): preserves exact-token precision.
+            let chunk = codec.encode_text(text, dict).centroid();
+            // Semantic centroid: content-weighted, neighbor-smoothed token mean
+            // that generalizes across phrasings sharing related content words.
+            let sem = semantic_centroid(dict, codec, text);
+            let mut centroid = vec![0.0f32; chunk.len()];
+            for j in 0..centroid.len() {
+                centroid[j] = SEM_BLEND * sem[j] + (1.0 - SEM_BLEND) * chunk[j];
+            }
             // Inject lexical anchors from the hash encoder into v[0..10].
             // The hash encoder places sentiment/domain signals in these
             // dimensions; the CATA centroid has no reserved slots for them.

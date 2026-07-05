@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::dimension::action::ActionJson;
+use crate::dimension::group_gen::RawLatticeDiagnosticReport;
 use crate::dimension::generation::GeneratedResponse;
 use crate::dimension::tool::{ToolCallInfo, ToolResult};
 use crate::service::AgentRuntimeState;
@@ -119,6 +120,25 @@ impl Runtime {
     }
 
     // ─── Inference ───────────────────────────────────────────────────────
+
+    /// Pre-gate lattice retrieval diagnostic (no metacog / grounding gate).
+    pub fn raw_lattice_diagnostic(
+        &mut self,
+        text: &str,
+        top_k: usize,
+    ) -> Result<RawLatticeDiagnosticReport, String> {
+        self.svc.raw_lattice_diagnostic(text, top_k)
+    }
+
+    pub fn raw_lattice_diagnostic_with_force_topic(
+        &mut self,
+        text: &str,
+        top_k: usize,
+        force_topic: Option<&str>,
+    ) -> Result<RawLatticeDiagnosticReport, String> {
+        self.svc
+            .raw_lattice_diagnostic_with_force_topic(text, top_k, force_topic)
+    }
 
     /// Single-shot prompt: routes, generates text, optionally generates code.
     pub fn prompt(&mut self, text: &str) -> Result<RuntimeResponse, String> {

@@ -3,6 +3,10 @@ target/
 src/.DS_Store
 ./src/.DS_Store
 
+# Local secrets — never commit API keys
+.env.local
+*.env.local
+
 docs
 agent-data/
 data/audio
@@ -15,3 +19,4 @@ data/arc-agi
 growformer-pkg
 micro-brains
 visualizer
+capture_artifacts/

@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock, RwLock};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -243,11 +244,22 @@ pub fn capture_log_len() -> usize {
     capture_log().lock().map(|g| g.len()).unwrap_or(0)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+// `std::time::SystemTime::now()` panics on wasm32-unknown-unknown ("time not
+// implemented on this platform"), which aborts the live `converse` path inside
+// `capture_lightweight`. The browser records traffic with real timestamps in JS
+// (GrowformerTrafficCapture), so the engine-side capture record can use 0 here
+// without losing any information.
+#[cfg(target_arch = "wasm32")]
+fn now_unix() -> u64 {
+    0
 }
 
 /// Which representation the grounding loop measures similarity on.
@@ -738,6 +750,22 @@ pub fn build_grounding_index_from_nodes(
     nodes: &[(GroundingFleetDomain, String, Vec<String>)],
     params: &GroundingLoopParams,
 ) -> Result<GroundingNodeIndex, String> {
+    build_grounding_index_from_nodes_ex(rt, nodes, params, None)
+}
+
+/// Build a grounding index, optionally enriching centroids with training phrase embeddings.
+///
+/// When `training_pairs` is provided, the centroid for each concept is the mean of
+/// (a) the node ID and alias embeddings, plus (b) all training phrase embeddings for
+/// that concept. This is critical for frozen/pretrained encoders (BYO vectors), where
+/// the node label alone is a poor prototype — a real nearest-centroid classifier uses
+/// all available labeled examples, not just the concept name.
+pub fn build_grounding_index_from_nodes_ex(
+    rt: &LanguageRuntime,
+    nodes: &[(GroundingFleetDomain, String, Vec<String>)],
+    params: &GroundingLoopParams,
+    training_pairs: Option<&[(String, String)]>,
+) -> Result<GroundingNodeIndex, String> {
     let mut by_domain: Vec<(GroundingFleetDomain, Vec<EmbeddedNode>)> = Vec::new();
     for (domain, node_id, aliases) in nodes {
         let mut alias_keys: Vec<String> = vec![node_id.clone()];
@@ -748,6 +776,15 @@ pub fn build_grounding_index_from_nodes(
         for a in &alias_keys {
             let (emb, _) = embed_phrase(rt, a)?;
             vecs.push(emb);
+        }
+        if let Some(pairs) = training_pairs {
+            for (phrase, concept_id) in pairs {
+                if concept_id == node_id {
+                    if let Ok((emb, _)) = embed_phrase(rt, phrase) {
+                        vecs.push(emb);
+                    }
+                }
+            }
         }
         let centroid = mean_embedding(&vecs);
         let node = EmbeddedNode {
@@ -815,6 +852,108 @@ pub struct NearestMatch {
     pub second_similarity: f32,
 }
 
+/// §18.2 passive capture record: one live routing decision, tagged `RealTraffic`.
+///
+/// Deliberately label-free. Production traffic is unlabeled, and per §18.3 (the blind-label
+/// rule) only later blind human adjudication may assign a ground-truth `semantic_intent`. This
+/// records *what the router did*, never *what was correct* — using the routed node as a label
+/// would make any downstream gate certify agreement-with-incumbent rather than correctness.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RoutingCapture {
+    pub phrase: String,
+    pub routed_node: String,
+    pub domain: String,
+    pub similarity: f32,
+    pub second_similarity: f32,
+    pub margin: f32,
+    /// `similarity >= activation_threshold` — whether the router considered the node active
+    /// (vs. an abstain-eligible low-confidence route). A sampling signal for triage, not a label.
+    pub activated: bool,
+    pub timestamp_unix: u64,
+    pub session_id: String,
+    pub provenance: PhraseProvenance,
+}
+
+impl RoutingCapture {
+    pub fn to_jsonl(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
+    }
+}
+
+/// §18.2 persistence: append one routing capture as a JSONL line to
+/// `<dir>/routing_<domain>.jsonl` (append-only, one file per fleet domain). Safe for the live
+/// service to call once per routing decision — it opens, appends, and closes, so concurrent
+/// sessions interleave whole lines rather than corrupting partial writes. This is the in-process
+/// hook the live Luna path calls; the `--capture-routing` CLI is a batch/replay path over the
+/// same function.
+pub fn append_routing_capture(cap: &RoutingCapture, dir: &std::path::Path) -> std::io::Result<()> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(format!("routing_{}.jsonl", cap.domain));
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(f, "{}", cap.to_jsonl())
+}
+
+/// §18.2 live-traffic phrase capture: one real user prompt seen by the serving path
+/// (`spacekit agent infer`), tagged `RealTraffic`.
+///
+/// This is the *scarce resource* — the real, unlabeled phrases the offline certifier later
+/// batch-embeds (Phase 1C) and gates. The serving path here is brain `converse`, not the
+/// grounding-index router, so there is no certified routing decision to record at capture time;
+/// the routing/gating is computed offline against the certified encoder. The optional `response`
+/// is the incumbent system's reply, kept as a triage/sampling signal only — per §18.3 it (and any
+/// implicit-feedback derived from it) is never a label the gate reads.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TrafficCapture {
+    pub phrase: String,
+    pub agent: String,
+    pub response: Option<String>,
+    pub timestamp_unix: u64,
+    pub session_id: String,
+    pub provenance: PhraseProvenance,
+}
+
+impl TrafficCapture {
+    pub fn real(phrase: impl Into<String>, agent: impl Into<String>) -> Self {
+        let phrase = phrase.into();
+        Self {
+            provenance: PhraseProvenance::real(phrase.clone()),
+            phrase,
+            agent: agent.into(),
+            response: None,
+            timestamp_unix: now_unix(),
+            session_id: String::new(),
+        }
+    }
+
+    pub fn to_jsonl(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
+    }
+}
+
+/// Append a `TrafficCapture` as one JSONL line to `<dir>/traffic_<agent>.jsonl` (append-only).
+/// Best-effort and side-effect-only: callers on the serving path must ignore the error so capture
+/// can never break inference.
+pub fn append_traffic_capture(cap: &TrafficCapture, dir: &std::path::Path) -> std::io::Result<()> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir)?;
+    let safe_agent: String = cap
+        .agent
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect();
+    let safe_agent = if safe_agent.is_empty() { "unknown".to_string() } else { safe_agent };
+    let path = dir.join(format!("traffic_{safe_agent}.jsonl"));
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(f, "{}", cap.to_jsonl())
+}
+
 impl GroundingNodeIndex {
     fn all_nodes(&self) -> impl Iterator<Item = &EmbeddedNode> {
         self.domains.iter().flat_map(|(_, nodes)| nodes.iter())
@@ -878,6 +1017,37 @@ impl GroundingNodeIndex {
     ) -> Option<NearestMatch> {
         self.nearest_in_domain(embedding, preferred)
             .or_else(|| self.nearest_fleet_wide(embedding))
+    }
+
+    /// §18.2 passive capture: route a live phrase and build a `RealTraffic` decision record.
+    ///
+    /// Pure measurement — does not mutate the index, does not gate anything, and assigns no
+    /// label (see `RoutingCapture`). The caller persists it (I/O lives outside this module).
+    /// Centroids must be the same training-enriched ones the certifier used (`*_ex`), or the
+    /// captured decision is not the certified router's decision (§18.6 parity).
+    pub fn capture_decision(
+        &self,
+        rt: &LanguageRuntime,
+        phrase: &str,
+        preferred: GroundingFleetDomain,
+        session_id: impl Into<String>,
+    ) -> Result<RoutingCapture, String> {
+        let (emb, _) = embed_phrase(rt, phrase)?;
+        let m = self
+            .nearest_for_domain(&emb, preferred)
+            .ok_or_else(|| "no nodes to route against".to_string())?;
+        Ok(RoutingCapture {
+            phrase: phrase.to_string(),
+            routed_node: m.node_id,
+            domain: m.domain.as_str().to_string(),
+            similarity: m.similarity,
+            second_similarity: m.second_similarity,
+            margin: m.similarity - m.second_similarity,
+            activated: m.similarity >= self.activation_threshold,
+            timestamp_unix: now_unix(),
+            session_id: session_id.into(),
+            provenance: PhraseProvenance::real(phrase.to_string()),
+        })
     }
 
     pub fn activated_node_scores(&self, embedding: &[f32]) -> Vec<(String, f32)> {
@@ -1772,6 +1942,158 @@ pub fn audit_disjoint_eval(
     }
 }
 
+/// §18.4 pre-label triage of captured, *unlabeled* traffic against the production training corpus.
+/// Label-free by construction (§18.3): it ranks *which* phrases to surface to a blind human, and
+/// never assigns a label.
+///
+/// Per phrase, at `level`: `global_coverage = |F(p) ∩ global_train| / |F(p)|` (surface
+/// familiarity), and `max_concept_overlap = max_c |F(p) ∩ F_c| / |F(p)|` (how strongly any single
+/// concept's training lexically claims it). The disjoint-bin sweet spot (§17 "seen-elsewhere
+/// disjoint") is *familiar but not concept-locked*: high coverage, low max-concept-overlap — a
+/// paraphrase built from seen vocabulary that matches no single concept's surface. Those are the
+/// phrases worth a human's label; concept-locked phrases are trivial in-lexicon, and zero-coverage
+/// phrases are novel/OOD (guessing, not routing). Priority = `coverage * (1 - max_concept_overlap)`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CaptureTriageRow {
+    pub phrase: String,
+    pub global_coverage: f32,
+    pub max_concept_overlap: f32,
+    pub nearest_concept: String,
+    pub tier: String,
+    pub label_priority: f32,
+    /// Always empty here — the blind human fills it (§18.3). Present so the queue file is the
+    /// exact schema the labeled bucketing pass (`audit_disjoint_eval`) reads back.
+    pub semantic_intent: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CaptureTriageReport {
+    pub level: String,
+    pub n_captured: usize,
+    pub n_unique: usize,
+    pub n_disjoint_candidate: usize,
+    pub n_in_lexicon: usize,
+    pub n_novel_ood: usize,
+    /// Sorted descending by `label_priority`.
+    pub rows: Vec<CaptureTriageRow>,
+}
+
+/// §18.9 / DEFECT-G1 — malformation screen for the labeling front.
+///
+/// Returns the reason a captured *phrase* is malformed (MASK-leak, decode-collapse soup, or empty),
+/// or `None` if it is a legitimate labeling candidate. This screens the **phrase** (the labeling
+/// target that enters `label_queue.jsonl`), **not** the incumbent response (which is never a label,
+/// §18.2) — so a clean phrase whose *response* happened to garble (e.g. `"bad cat"`) is correctly
+/// kept. Conservative by construction: false-negatives are acceptable, false-positives are not, since
+/// discarding a real phrase would shrink the very disjoint bin we are trying to fill. The point is to
+/// guarantee garble can never be hand-labeled into the certification bin even if a degraded engine or
+/// a capture bug ever logs soup as input.
+pub fn malformed_capture_reason(phrase: &str) -> Option<&'static str> {
+    let t = phrase.trim();
+    if t.is_empty() {
+        return Some("empty");
+    }
+    // Training MASK token leaked into the surface (the "bad cat" garble family).
+    if t.contains("[MASK]")
+        || t.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| w == "MASK")
+    {
+        return Some("mask_leak");
+    }
+    // Known decode-collapse multi-word n-grams — improbable in genuine user input (single words are
+    // intentionally excluded to avoid quarantining legitimate phrases).
+    let l = t.to_lowercase();
+    const COLLAPSE: [&str; 4] =
+        ["schedule both", "puddle brush", "vibrates sleeping", "sleeping minutes"];
+    if COLLAPSE.iter().any(|sig| l.contains(sig)) {
+        return Some("decode_collapse");
+    }
+    None
+}
+
+pub fn triage_captured_phrases(
+    captured: &[String],
+    train_pairs: &[(String, String)],
+    level: &str,
+    coverage_min: f32,
+    concept_lock_max: f32,
+) -> CaptureTriageReport {
+    let (concept_train, global_train) = concept_train_features(train_pairs);
+    let ct: Vec<(String, HashSet<String>)> = concept_train
+        .iter()
+        .map(|(k, v)| (k.clone(), restrict_features(v, level)))
+        .collect();
+    let global = restrict_features(&global_train, level);
+
+    // Dedup by normalized key, preserving first-seen surface form.
+    let mut seen_keys: HashSet<String> = HashSet::new();
+    let mut unique: Vec<String> = Vec::new();
+    for p in captured {
+        let key = normalize_phrase_key(p);
+        if key.is_empty() {
+            continue;
+        }
+        if seen_keys.insert(key) {
+            unique.push(p.clone());
+        }
+    }
+
+    let mut rows: Vec<CaptureTriageRow> = Vec::new();
+    let (mut n_disjoint, mut n_lex, mut n_novel) = (0usize, 0usize, 0usize);
+    for phrase in &unique {
+        let fp = restrict_features(&phrase_feature_set(phrase), level);
+        if fp.is_empty() {
+            continue;
+        }
+        let global_coverage = feature_overlap_fraction(&fp, &global);
+        let mut max_overlap = 0.0f32;
+        let mut nearest = String::new();
+        for (c, fc) in &ct {
+            let o = feature_overlap_fraction(&fp, fc);
+            if o > max_overlap {
+                max_overlap = o;
+                nearest = c.clone();
+            }
+        }
+        let tier = if global_coverage <= 0.0 {
+            n_novel += 1;
+            "novel_ood"
+        } else if max_overlap >= concept_lock_max {
+            n_lex += 1;
+            "in_lexicon"
+        } else if global_coverage >= coverage_min {
+            n_disjoint += 1;
+            "disjoint_candidate"
+        } else {
+            // familiar-ish but sparse coverage — keep as a weaker candidate.
+            n_disjoint += 1;
+            "disjoint_candidate"
+        };
+        rows.push(CaptureTriageRow {
+            phrase: phrase.clone(),
+            global_coverage,
+            max_concept_overlap: max_overlap,
+            nearest_concept: nearest,
+            tier: tier.to_string(),
+            label_priority: global_coverage * (1.0 - max_overlap),
+            semantic_intent: String::new(),
+        });
+    }
+    rows.sort_by(|a, b| {
+        b.label_priority
+            .partial_cmp(&a.label_priority)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    CaptureTriageReport {
+        level: level.to_string(),
+        n_captured: captured.len(),
+        n_unique: unique.len(),
+        n_disjoint_candidate: n_disjoint,
+        n_in_lexicon: n_lex,
+        n_novel_ood: n_novel,
+        rows,
+    }
+}
+
 pub fn format_certifier_report(
     label: &str,
     before: &CertifierMetrics,
@@ -1832,6 +2154,14 @@ fn tally_provenance(kind: ProvenanceKind, real: &mut usize, authored: &mut usize
 ///
 /// Any violation ⇒ the run is `INVALID` (a pipeline/data problem), never a score.
 pub fn run_augmentation_firewall(captures: &[FailureCapture]) -> FirewallReport {
+    run_augmentation_firewall_ex(captures, false)
+}
+
+/// Extended firewall. When `allow_authored_certify` is true, `Authored` provenance
+/// in the certify set is treated as clean (§2.2 of the real-encoder experiment spec:
+/// authored phrases are genuinely held-out when no encoder trained on them). `Augmented`
+/// provenance in certify is always rejected regardless of this flag.
+pub fn run_augmentation_firewall_ex(captures: &[FailureCapture], allow_authored_certify: bool) -> FirewallReport {
     let mut r = FirewallReport { clean: true, ..Default::default() };
     let mut train_lineage: HashSet<String> = HashSet::new();
     let mut certify_ids: Vec<(String, String)> = Vec::new(); // (phrase_id, phrase)
@@ -1858,12 +2188,18 @@ pub fn run_augmentation_firewall(captures: &[FailureCapture]) -> FirewallReport 
                     &mut r.certify_authored,
                     &mut r.certify_augmented,
                 );
-                if c.provenance.kind != ProvenanceKind::RealTraffic {
+                let rejected = match c.provenance.kind {
+                    ProvenanceKind::RealTraffic => false,
+                    ProvenanceKind::Authored => !allow_authored_certify,
+                    ProvenanceKind::Augmented => true,
+                };
+                if rejected {
                     r.clean = false;
                     r.violations.push(format!(
-                        "certify phrase '{}' has provenance {} (must be real_traffic)",
+                        "certify phrase '{}' has provenance {} (must be {})",
                         c.phrase,
-                        c.provenance.kind.as_str()
+                        c.provenance.kind.as_str(),
+                        if allow_authored_certify { "real_traffic or authored" } else { "real_traffic" }
                     ));
                 }
                 let id = if c.provenance.phrase_id.is_empty() {
@@ -1920,6 +2256,18 @@ impl Verdict {
     /// Only a strict (`wbc`) pass licenses promotion; `PASS_PROVISIONAL` does not.
     pub fn is_promotable(self) -> bool {
         matches!(self, Self::Pass)
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "INVALID" => Self::Invalid,
+            "BELOW_RESOLUTION" => Self::BelowResolution,
+            "FAIL_MEMORIZATION" => Self::FailMemorization,
+            "FAIL_COLLISION" => Self::FailCollision,
+            "PASS_PROVISIONAL" => Self::PassProvisional,
+            "PASS" => Self::Pass,
+            _ => Self::Invalid,
+        }
     }
 }
 
@@ -2109,6 +2457,397 @@ pub fn data_hash(captures: &[FailureCapture], node_ids: &[String]) -> String {
     format!("{h:016x}")
 }
 
+// =============================================================================
+// §16 — P4 Longitudinal Drift Telemetry
+// =============================================================================
+// Monitors deployed companion routers over time for degradation on signals
+// observable in production WITHOUT ground-truth labels. This is a reliability
+// monitor, not a certifier. It alerts; it does not act. Every corrective action
+// re-enters the human-gated, certifier-checked path (§15 P0 gate).
+// Auto-remediation is structurally forbidden — no code path exists that edits
+// the graph or swaps an encoder without a human in the loop.
+
+/// The cause of a detected change point: input distribution moved (world) or a
+/// system change (encoder swap, graph edit, deploy) explains it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DriftCause {
+    World,
+    System { description: String },
+}
+
+impl DriftCause {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::World => "world",
+            Self::System { .. } => "system",
+        }
+    }
+}
+
+/// A detected change point on a single signal, with cause and persistence count.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChangePoint {
+    pub signal: String,
+    pub cause: DriftCause,
+    /// How many consecutive windows this deviation has persisted (≥1).
+    pub persisted_windows: usize,
+}
+
+/// A single telemetry window for one domain — the append-only artifact (§6).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DriftWindow {
+    pub domain: String,
+    pub window_id: String,
+    pub window_start_unix: u64,
+    pub window_duration_secs: u64,
+
+    // --- §1 signals ---
+    pub fallthrough_rate: f32,
+    pub fallthrough_baseline: f32,
+    pub fallthrough_alert: bool,
+
+    pub routing_entropy_p50: f32,
+    pub entropy_trend: String,
+
+    pub guard_fire_rate: f32,
+
+    pub coverage_elasticity: f32,
+    pub saturation_flag: bool,
+
+    pub cross_domain_collision_rate: f32,
+    pub total_aliases_fleet: usize,
+
+    pub encoder_version: String,
+    /// Fraction of live traffic that routes differently under old vs new encoder.
+    /// `None` if no encoder change this window.
+    pub encoder_shift_vs_prev: Option<f32>,
+
+    pub dissatisfaction_rate: f32,
+    pub dissatisfaction_baseline: f32,
+
+    // --- §2 detection ---
+    pub change_points: Vec<ChangePoint>,
+    pub alerts: Vec<DriftAlert>,
+}
+
+/// An alert emitted when a change point persists long enough.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DriftAlert {
+    pub signal: String,
+    pub cause: DriftCause,
+    pub persisted_windows: usize,
+    pub severity: AlertSeverity,
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AlertSeverity {
+    Warning,
+    Critical,
+}
+
+impl AlertSeverity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::Critical => "critical",
+        }
+    }
+}
+
+/// Summary report across multiple windows for one domain.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DriftReport {
+    pub domain: String,
+    pub n_windows: usize,
+    pub latest_window: Option<String>,
+    pub active_alerts: Vec<DriftAlert>,
+    pub fallthrough_trend: TrendSummary,
+    pub entropy_trend: TrendSummary,
+    pub dissatisfaction_trend: TrendSummary,
+    pub coverage_saturated: bool,
+    pub collision_trend: TrendSummary,
+    pub recert_recommended: bool,
+    /// When `recert_recommended` is true, whether the current traffic can actually
+    /// construct a disjoint eval for re-certification. `None` = not checked (no recert).
+    /// `Some(false)` = structurally unconstructible — fall back to behavioral-drift
+    /// response (rollback/human review) instead of scheduling an unresolvable recert.
+    pub recert_constructible: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TrendSummary {
+    pub direction: String,
+    pub current: f32,
+    pub baseline: f32,
+    pub deviation_z: f32,
+}
+
+// ---------------------------------------------------------------------------
+// §2 — CUSUM deviation detector (pure, testable)
+// ---------------------------------------------------------------------------
+
+/// Tabular CUSUM (cumulative sum) for detecting a sustained upward or downward
+/// shift against a rolling baseline. Returns `(cusum_high, cusum_low)` — the
+/// high-side and low-side cumulative deviations. An alarm fires when either
+/// exceeds `threshold_h`. `allowance_k` is the slack per observation (half the
+/// minimum shift to detect).
+pub fn cusum_update(
+    cusum_high: f32,
+    cusum_low: f32,
+    observation: f32,
+    baseline: f32,
+    allowance_k: f32,
+) -> (f32, f32) {
+    let hi = (cusum_high + (observation - baseline) - allowance_k).max(0.0);
+    let lo = (cusum_low + (baseline - observation) - allowance_k).max(0.0);
+    (hi, lo)
+}
+
+/// Check whether the CUSUM state exceeds the alarm threshold on either side.
+pub fn cusum_alarm(cusum_high: f32, cusum_low: f32, threshold_h: f32) -> bool {
+    cusum_high > threshold_h || cusum_low > threshold_h
+}
+
+/// Compute z-score deviation of `value` from a rolling baseline with known
+/// `baseline_mean` and `baseline_std`. Returns 0 if std is near-zero.
+pub fn z_score_deviation(value: f32, baseline_mean: f32, baseline_std: f32) -> f32 {
+    if baseline_std < 1e-9 {
+        return 0.0;
+    }
+    (value - baseline_mean) / baseline_std
+}
+
+/// Rolling baseline: mean and std of the last `window_size` observations.
+pub fn rolling_baseline(history: &[f32], window_size: usize) -> (f32, f32) {
+    if history.is_empty() {
+        return (0.0, 0.0);
+    }
+    let n = history.len().min(window_size);
+    let tail = &history[history.len() - n..];
+    let mean = tail.iter().sum::<f32>() / n as f32;
+    let var = tail.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / n as f32;
+    (mean, var.sqrt())
+}
+
+// ---------------------------------------------------------------------------
+// §1 — Coverage elasticity + saturation
+// ---------------------------------------------------------------------------
+
+/// Coverage elasticity = Δfallthrough / Δaliases (negative means aliases are
+/// reducing fallthrough; near-zero = saturated). `saturation_flag` is true when
+/// the latest elasticity is near zero (aliases grow but fallthrough is flat).
+pub fn coverage_elasticity(
+    fallthrough_history: &[f32],
+    alias_count_history: &[usize],
+) -> (f32, bool) {
+    if fallthrough_history.len() < 2 || alias_count_history.len() < 2 {
+        return (0.0, false);
+    }
+    let n = fallthrough_history.len().min(alias_count_history.len());
+    let df = fallthrough_history[n - 1] - fallthrough_history[n - 2];
+    let da = alias_count_history[n - 1] as f32 - alias_count_history[n - 2] as f32;
+    if da.abs() < 1e-9 {
+        return (0.0, false);
+    }
+    let elasticity = df / da;
+    let saturated = elasticity.abs() < 0.001 && da > 0.0;
+    (elasticity, saturated)
+}
+
+// ---------------------------------------------------------------------------
+// §1 — Cross-domain collision rate
+// ---------------------------------------------------------------------------
+
+/// Fraction of turns where a foreign-domain node activated above threshold.
+/// `foreign_activations` = count of turns with a foreign-domain hit;
+/// `total_turns` = all turns in the window.
+pub fn cross_domain_collision_rate(foreign_activations: usize, total_turns: usize) -> f32 {
+    if total_turns == 0 { 0.0 } else { foreign_activations as f32 / total_turns as f32 }
+}
+
+// ---------------------------------------------------------------------------
+// §1 — Encoder-shadow stability diff
+// ---------------------------------------------------------------------------
+
+/// Fraction of live traffic that routes differently under two encoder versions.
+/// `routing_pairs` = `(old_route, new_route)` per turn; returns the mismatch rate.
+pub fn encoder_stability_diff(routing_pairs: &[(String, String)]) -> f32 {
+    if routing_pairs.is_empty() {
+        return 0.0;
+    }
+    let mismatches = routing_pairs.iter().filter(|(a, b)| a != b).count();
+    mismatches as f32 / routing_pairs.len() as f32
+}
+
+// ---------------------------------------------------------------------------
+// §2 — Alert persistence + cause classification
+// ---------------------------------------------------------------------------
+
+/// Minimum consecutive windows a deviation must persist before an alert fires.
+pub const ALERT_PERSISTENCE_MIN: usize = 3;
+/// Z-score threshold for a signal to count as "deviating" in a given window.
+pub const ALERT_Z_THRESHOLD: f32 = 2.5;
+/// Z-score threshold for critical severity (vs warning).
+pub const ALERT_Z_CRITICAL: f32 = 4.0;
+
+/// Given a history of z-scores for a signal and a log of system changes, produce
+/// the current change-point (if deviating) and an alert (if persisted long enough).
+/// `system_changes` maps window index → description of the system change (if any).
+pub fn evaluate_signal_drift(
+    signal_name: &str,
+    z_history: &[f32],
+    system_changes: &HashMap<usize, String>,
+) -> (Option<ChangePoint>, Option<DriftAlert>) {
+    if z_history.is_empty() {
+        return (None, None);
+    }
+    // Count consecutive deviating windows from the tail.
+    let mut persisted = 0usize;
+    let mut first_deviating_idx = z_history.len();
+    for i in (0..z_history.len()).rev() {
+        if z_history[i].abs() >= ALERT_Z_THRESHOLD {
+            persisted += 1;
+            first_deviating_idx = i;
+        } else {
+            break;
+        }
+    }
+    if persisted == 0 {
+        return (None, None);
+    }
+
+    // Cause: if any system change coincides with the first deviating window, it's system-drift.
+    let cause = if let Some(desc) = system_changes.get(&first_deviating_idx) {
+        DriftCause::System { description: desc.clone() }
+    } else {
+        DriftCause::World
+    };
+
+    let cp = ChangePoint {
+        signal: signal_name.to_string(),
+        cause: cause.clone(),
+        persisted_windows: persisted,
+    };
+
+    let alert = if persisted >= ALERT_PERSISTENCE_MIN {
+        let latest_z = z_history.last().copied().unwrap_or(0.0);
+        let severity = if latest_z.abs() >= ALERT_Z_CRITICAL {
+            AlertSeverity::Critical
+        } else {
+            AlertSeverity::Warning
+        };
+        let direction = if latest_z > 0.0 { "rising" } else { "falling" };
+        Some(DriftAlert {
+            signal: signal_name.to_string(),
+            cause: cause.clone(),
+            persisted_windows: persisted,
+            severity,
+            message: format!(
+                "{} {} for {} consecutive windows (z={:.2}, cause={})",
+                signal_name, direction, persisted, latest_z, cause.as_str()
+            ),
+        })
+    } else {
+        None
+    };
+
+    (Some(cp), alert)
+}
+
+/// Determine whether a re-certification run should be recommended: sustained
+/// world-drift on fallthrough or dissatisfaction (the live distribution may have
+/// moved past what the encoder was certified on).
+pub fn recommend_recert(alerts: &[DriftAlert]) -> bool {
+    alerts.iter().any(|a| {
+        matches!(a.cause, DriftCause::World)
+            && (a.signal == "fallthrough" || a.signal == "dissatisfaction")
+            && a.persisted_windows >= ALERT_PERSISTENCE_MIN * 2
+    })
+}
+
+/// Render a `DriftWindow` to its append-only JSON artifact.
+impl DriftWindow {
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".into())
+    }
+
+    pub fn filename(&self) -> String {
+        format!("drift_{}_{}.json", self.domain, self.window_id)
+    }
+}
+
+/// Render a `DriftReport` to JSON.
+impl DriftReport {
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".into())
+    }
+}
+
+/// Build a summary report from a series of drift windows.
+/// When `traffic_pairs` is provided and recert is recommended, checks whether
+/// the current traffic can construct a disjoint eval for re-certification.
+pub fn build_drift_report(
+    domain: &str,
+    windows: &[DriftWindow],
+    traffic_pairs: Option<&[(String, String)]>,
+) -> DriftReport {
+    let latest = windows.last();
+
+    let ft_history: Vec<f32> = windows.iter().map(|w| w.fallthrough_rate).collect();
+    let ent_history: Vec<f32> = windows.iter().map(|w| w.routing_entropy_p50).collect();
+    let dis_history: Vec<f32> = windows.iter().map(|w| w.dissatisfaction_rate).collect();
+    let col_history: Vec<f32> = windows.iter().map(|w| w.cross_domain_collision_rate).collect();
+
+    let trend_of = |history: &[f32]| -> TrendSummary {
+        let (mean, std) = rolling_baseline(history, 12);
+        let current = history.last().copied().unwrap_or(0.0);
+        let z = z_score_deviation(current, mean, std);
+        let direction = if z > ALERT_Z_THRESHOLD {
+            "rising"
+        } else if z < -ALERT_Z_THRESHOLD {
+            "falling"
+        } else {
+            "stable"
+        };
+        TrendSummary {
+            direction: direction.to_string(),
+            current,
+            baseline: mean,
+            deviation_z: z,
+        }
+    };
+
+    let active_alerts: Vec<DriftAlert> = latest
+        .map(|w| w.alerts.clone())
+        .unwrap_or_default();
+
+    let recert = recommend_recert(&active_alerts);
+
+    let recert_constructible = if recert {
+        traffic_pairs.map(|pairs| {
+            let scan = scan_corpus_disjointness(pairs, "wbc", 4);
+            scan.n_seen_elsewhere >= DISJOINT_MIN_N
+        })
+    } else {
+        None
+    };
+
+    DriftReport {
+        domain: domain.to_string(),
+        n_windows: windows.len(),
+        latest_window: latest.map(|w| w.window_id.clone()),
+        recert_recommended: recert,
+        recert_constructible,
+        active_alerts,
+        fallthrough_trend: trend_of(&ft_history),
+        entropy_trend: trend_of(&ent_history),
+        dissatisfaction_trend: trend_of(&dis_history),
+        coverage_saturated: latest.map(|w| w.saturation_flag).unwrap_or(false),
+        collision_trend: trend_of(&col_history),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2116,6 +2855,34 @@ mod tests {
     // The phrase embedder is process-global; serialize tests that install/clear it so
     // the default parallel test runner cannot let them stomp on each other.
     static EMBEDDER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn malformed_capture_screen_keeps_real_phrases_drops_garble() {
+        // Legitimate phrases pass — crucially including "bad cat", the clean PHRASE whose
+        // *response* garbled. Screening the response would wrongly discard a real labeling target.
+        for ok in [
+            "bad cat",
+            "Hey Luna",
+            "what is 2 plus 2",
+            "Here's some sushi for you 🍣",
+            "good morning sunshine",
+            "are you having a nice day?",
+        ] {
+            assert_eq!(malformed_capture_reason(ok), None, "false positive on {ok:?}");
+        }
+        // Empty / MASK-leak / decode-collapse soup are quarantined before they can reach the queue.
+        assert_eq!(malformed_capture_reason("   "), Some("empty"));
+        assert_eq!(
+            malformed_capture_reason("I shoes brave the brush bestow MASK Some, vibrates sleeping just"),
+            Some("mask_leak"),
+        );
+        assert_eq!(
+            malformed_capture_reason("schedule both nothing across puddle brush"),
+            Some("decode_collapse"),
+        );
+        // A bare "mask" inside a normal word/sentence must NOT trip the standalone-token check.
+        assert_eq!(malformed_capture_reason("do you like my face mask?"), None);
+    }
 
     #[test]
     fn cluster_requires_k_min() {
@@ -2523,5 +3290,217 @@ mod tests {
         let c = cap_with("beta", "c3", CaptureSplit::Certify, PhraseProvenance::real("b"));
         let h3 = data_hash(&[a, c], &nodes);
         assert_ne!(h1, h3, "different content must change the hash");
+    }
+
+    // -----------------------------------------------------------------------
+    // §16 — P4 Drift telemetry tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cusum_detects_sustained_upward_shift() {
+        let (mut hi, mut lo) = (0.0f32, 0.0f32);
+        let baseline = 0.05;
+        let k = 0.01;
+        let threshold = 0.10;
+        // 5 observations at baseline → no alarm.
+        for _ in 0..5 {
+            let (h, l) = cusum_update(hi, lo, baseline, baseline, k);
+            hi = h;
+            lo = l;
+        }
+        assert!(!cusum_alarm(hi, lo, threshold), "no alarm at baseline");
+        // Sustained shift: observation = 0.12 for 5 windows.
+        for _ in 0..5 {
+            let (h, l) = cusum_update(hi, lo, 0.12, baseline, k);
+            hi = h;
+            lo = l;
+        }
+        assert!(cusum_alarm(hi, lo, threshold), "alarm after sustained high shift");
+    }
+
+    #[test]
+    fn z_score_deviation_near_zero_when_at_baseline() {
+        let z = z_score_deviation(0.05, 0.05, 0.01);
+        assert!(z.abs() < 1e-6);
+    }
+
+    #[test]
+    fn z_score_deviation_handles_zero_std() {
+        let z = z_score_deviation(0.1, 0.05, 0.0);
+        assert_eq!(z, 0.0);
+    }
+
+    #[test]
+    fn rolling_baseline_computes_windowed_stats() {
+        let history = vec![0.05, 0.05, 0.05, 0.10, 0.10];
+        let (mean, std) = rolling_baseline(&history, 3);
+        let expected_mean = (0.05 + 0.10 + 0.10) / 3.0;
+        assert!((mean - expected_mean).abs() < 1e-5);
+        assert!(std > 0.0, "std should be nonzero with mixed values");
+    }
+
+    #[test]
+    fn coverage_elasticity_detects_saturation() {
+        // Aliases grew but fallthrough didn't budge.
+        let ft = vec![0.07, 0.07];
+        let al = vec![100, 120];
+        let (_, sat) = coverage_elasticity(&ft, &al);
+        assert!(sat, "flat fallthrough with alias growth = saturated");
+    }
+
+    #[test]
+    fn coverage_elasticity_detects_improvement() {
+        let ft = vec![0.10, 0.06];
+        let al = vec![100, 120];
+        let (elas, sat) = coverage_elasticity(&ft, &al);
+        assert!(elas < 0.0, "negative elasticity = aliases reducing fallthrough");
+        assert!(!sat);
+    }
+
+    #[test]
+    fn encoder_stability_diff_all_same() {
+        let pairs = vec![
+            ("node_a".to_string(), "node_a".to_string()),
+            ("node_b".to_string(), "node_b".to_string()),
+        ];
+        assert_eq!(encoder_stability_diff(&pairs), 0.0);
+    }
+
+    #[test]
+    fn encoder_stability_diff_detects_mismatch() {
+        let pairs = vec![
+            ("node_a".to_string(), "node_b".to_string()),
+            ("node_b".to_string(), "node_b".to_string()),
+        ];
+        assert!((encoder_stability_diff(&pairs) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn alert_requires_persistence_not_single_window() {
+        // 2 deviating windows (below threshold of 3) → change point but no alert.
+        let z = vec![0.0, 0.0, 3.0, 3.0];
+        let (cp, alert) = evaluate_signal_drift("fallthrough", &z, &HashMap::new());
+        assert!(cp.is_some(), "change point detected");
+        assert!(alert.is_none(), "no alert below persistence threshold");
+    }
+
+    #[test]
+    fn alert_fires_after_persistence_threshold() {
+        let z = vec![0.0, 3.0, 3.0, 3.0];
+        let (cp, alert) = evaluate_signal_drift("fallthrough", &z, &HashMap::new());
+        assert!(cp.is_some());
+        let a = alert.expect("alert should fire after 3 consecutive deviating windows");
+        assert_eq!(a.persisted_windows, 3);
+        assert_eq!(a.severity, AlertSeverity::Warning);
+        assert!(matches!(a.cause, DriftCause::World));
+    }
+
+    #[test]
+    fn alert_cause_is_system_when_change_coincides() {
+        let z = vec![0.0, 0.0, 4.5, 4.5, 4.5];
+        let mut sys = HashMap::new();
+        sys.insert(2, "encoder swap v1→v2".to_string());
+        let (_, alert) = evaluate_signal_drift("fallthrough", &z, &sys);
+        let a = alert.expect("alert after 3 persisted");
+        assert!(matches!(a.cause, DriftCause::System { .. }));
+        assert_eq!(a.severity, AlertSeverity::Critical);
+    }
+
+    #[test]
+    fn alert_does_not_fire_when_deviation_not_consecutive() {
+        // Deviating, then normal, then deviating — not consecutive.
+        let z = vec![3.0, 0.5, 3.0];
+        let (_, alert) = evaluate_signal_drift("entropy", &z, &HashMap::new());
+        assert!(alert.is_none(), "non-consecutive deviation should not alert");
+    }
+
+    #[test]
+    fn recommend_recert_on_sustained_world_drift() {
+        let alerts = vec![DriftAlert {
+            signal: "fallthrough".to_string(),
+            cause: DriftCause::World,
+            persisted_windows: ALERT_PERSISTENCE_MIN * 2,
+            severity: AlertSeverity::Warning,
+            message: "test".to_string(),
+        }];
+        assert!(recommend_recert(&alerts));
+    }
+
+    #[test]
+    fn no_recert_on_system_drift() {
+        let alerts = vec![DriftAlert {
+            signal: "fallthrough".to_string(),
+            cause: DriftCause::System { description: "graph edit".into() },
+            persisted_windows: ALERT_PERSISTENCE_MIN * 2,
+            severity: AlertSeverity::Warning,
+            message: "test".to_string(),
+        }];
+        assert!(!recommend_recert(&alerts), "system drift → rollback, not recert");
+    }
+
+    #[test]
+    fn cross_domain_collision_rate_basic() {
+        assert!((cross_domain_collision_rate(5, 100) - 0.05).abs() < 1e-6);
+        assert_eq!(cross_domain_collision_rate(0, 0), 0.0);
+    }
+
+    #[test]
+    fn recert_recommended_but_unconstructible_falls_back() {
+        // Simulate a scenario where recert is recommended (world drift) but
+        // the traffic is structurally incapable of producing a disjoint eval.
+        // All phrases in each class share features → no disjoint examples.
+        let pairs: Vec<(String, String)> = vec![
+            ("reset password".into(), "support".into()),
+            ("reset my password".into(), "support".into()),
+            ("reset the password".into(), "support".into()),
+            ("password reset".into(), "support".into()),
+            ("write code".into(), "coding".into()),
+            ("write some code".into(), "coding".into()),
+            ("write my code".into(), "coding".into()),
+            ("write the code".into(), "coding".into()),
+        ];
+
+        let alert = DriftAlert {
+            signal: "fallthrough".to_string(),
+            cause: DriftCause::World,
+            persisted_windows: ALERT_PERSISTENCE_MIN * 2,
+            severity: AlertSeverity::Warning,
+            message: "sustained world drift".to_string(),
+        };
+        let window = DriftWindow {
+            domain: "test".into(),
+            window_id: "w1".into(),
+            window_start_unix: 0,
+            window_duration_secs: 100,
+            fallthrough_rate: 0.15,
+            fallthrough_baseline: 0.05,
+            fallthrough_alert: true,
+            routing_entropy_p50: 0.0,
+            entropy_trend: "rising".into(),
+            guard_fire_rate: 0.0,
+            dissatisfaction_rate: 0.0,
+            dissatisfaction_baseline: 0.0,
+            coverage_elasticity: 0.0,
+            saturation_flag: false,
+            total_aliases_fleet: 10,
+            cross_domain_collision_rate: 0.0,
+            encoder_version: "test".into(),
+            encoder_shift_vs_prev: None,
+            change_points: Vec::new(),
+            alerts: vec![alert],
+        };
+
+        let report = build_drift_report("test", &[window], Some(&pairs));
+        assert!(report.recert_recommended, "recert should be recommended");
+        assert_eq!(report.recert_constructible, Some(false),
+            "traffic with overlapping features must be unconstructible");
+    }
+
+    #[test]
+    fn verdict_from_str_roundtrips() {
+        for v in [Verdict::Invalid, Verdict::BelowResolution, Verdict::FailMemorization,
+                   Verdict::FailCollision, Verdict::PassProvisional, Verdict::Pass] {
+            assert_eq!(Verdict::from_str(v.as_str()), v);
+        }
     }
 }

@@ -2675,7 +2675,11 @@ fn train_brain(
     println!("\n--- Stages 3+4: Indexed Generation (Paramecium lattice) ---");
 
     use crate::dimension::group_gen::IndexedGenEnv;
-    let spawn_threshold = 0.97;
+    // Code lattices: only merge near-identical programs. Distinct functions within a
+    // topic (templated prompts embed >0.97 cosine apart) were collapsing into one
+    // canonical representative; 0.985 keeps slightly-different functions as separate
+    // programs (paired with per-function subtopics on the data side).
+    let spawn_threshold = 0.985;
     // Sentiment lattices use a looser threshold so positive/negative programs stay
     // distinct after polarity-aware encoding (P0/P1); the default 0.97 over-merges.
     let sentiment_spawn_threshold = 0.92;
@@ -2769,8 +2773,22 @@ fn train_brain(
                 gidx, effective_spawn, is_sentiment_group, is_chat_group, topic_names.iter().collect::<std::collections::HashSet<_>>().len());
             let mut env = IndexedGenEnv::from_tagged_parts(dict, cb, hopf, &training_pairs, effective_spawn);
             const TOPIC_AUTOGAMY_MERGE: f32 = 0.96;
+            const SCENARIO_TOPIC_AUTOGAMY: f32 = 0.88;
+            const SCENARIO_TOPICS: &[&str] = &[
+                "etf_delay_bearish",
+                "mortgage_rate_complaint",
+                "fee_complaint",
+            ];
             for topic in &mut env.topic_subindex {
-                topic.lattice.autogamy(TOPIC_AUTOGAMY_MERGE);
+                let merge = if SCENARIO_TOPICS
+                    .iter()
+                    .any(|&s| topic.topic_name.eq_ignore_ascii_case(s))
+                {
+                    SCENARIO_TOPIC_AUTOGAMY
+                } else {
+                    TOPIC_AUTOGAMY_MERGE
+                };
+                topic.lattice.autogamy(merge);
             }
             env.freeze();
             println!(
@@ -3032,6 +3050,17 @@ fn train_brain(
             let Some(algebraic) = env.codebook.as_ref().filter(|cb| !cb.archetypes.is_empty()) else {
                 continue;
             };
+            let is_sentiment_lattice = env.topic_subindex.iter().any(|t| {
+                crate::inference::sentiment_generation_lexicon::global()
+                    .is_sentiment_lattice_topic_hint(&t.topic_name)
+            });
+            if is_sentiment_lattice {
+                println!(
+                    "  cloze[g{}]: skipped (sentiment lattice — cloze refines codebook slot decode, not forced-topic retrieval; add JSONL rows instead)",
+                    gidx
+                );
+                continue;
+            }
             println!(
                 "  cloze[g{}]: generating tasks from {} programs (this can take a bit on large lattices)",
                 gidx,

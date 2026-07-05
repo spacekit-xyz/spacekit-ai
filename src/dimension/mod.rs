@@ -2,6 +2,7 @@
 //! Phase 3: isolated env per task; no shared substrate.
 
 pub mod composition;
+pub mod cone_router;
 pub mod action;
 pub mod action_classifier;
 pub mod codegen;
@@ -22,6 +23,7 @@ pub mod paramecium;
 pub mod polarity_probe;
 
 pub use composition::{EpisodicMemory, Episode, RoutingEntropyGuard, VirtualGroup, routing_entropy_bits, routing_entropy_degenerate};
+pub use cone_router::{cone_features, AdjustableConeRouter, ConeConfig, ConeDecision, ConeSample, CONE_FEATURE_DIM};
 pub use action::{ActionJson, ActionType, action_from_routing};
 pub use codegen::{CodeGeneration, generate_code_from_action};
 pub use generation::{GeneratedResponse, render_action_template};

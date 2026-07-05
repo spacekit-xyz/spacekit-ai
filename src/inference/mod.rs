@@ -19,6 +19,7 @@ pub mod plugins;
 pub mod retrieval_rescore;
 pub mod retrieval_lexicon;
 pub mod sentiment_generation_lexicon;
+pub mod frame_lexicon;
 
 pub use harness::{
     BrainInferencePlugin, GenerationPreemptOutcome, InferenceHarness, TemplatePostprocessFlags,

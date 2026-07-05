@@ -17,7 +17,7 @@ use crate::dimension::{
     LanguageConfig, LanguageRoutingDecision, LanguageSample,
 };
 use crate::dimension::language::DEFAULT_BRIDGE_DIM;
-use crate::dimension::group_gen::{GEN_COND_DIM, IndexedGenEnv};
+use crate::dimension::group_gen::{GEN_COND_DIM, IndexedGenEnv, RawLatticeDiagnosticReport};
 use crate::dimension::action::{ActionType, ActionPayload};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::dimension::EncoderPreset;
@@ -670,6 +670,11 @@ pub struct LanguageService {
     /// identity/activity/drive fragments. `None` ⇒ disabled (lattice retrieval
     /// only); load a library via [`Self::load_fragments_from_path`].
     pub fragment_composer: Option<crate::fragment_composer::FragmentComposer>,
+    /// When set, [`Self::generation_with_intent_override`] captures pre-gate lattice top-K and returns early.
+    raw_lattice_diag_top_k: Option<usize>,
+    /// Override headline routing for raw lattice diagnostic (micro-experiments only).
+    raw_lattice_diag_force_topic: Option<String>,
+    last_raw_lattice_diag: Option<RawLatticeDiagnosticReport>,
 }
 
 /// P0-02: when true, skip System 2 deliberate cross-group reasoning for this turn.
@@ -768,6 +773,9 @@ impl LanguageService {
             reflective_field: None,
             basal_ganglia: None,
             fragment_composer: None,
+            raw_lattice_diag_top_k: None,
+            raw_lattice_diag_force_topic: None,
+            last_raw_lattice_diag: None,
         })
     }
 
@@ -1398,6 +1406,205 @@ impl LanguageService {
             })
     }
 
+    /// Enforce the `[response_shaping]` contract that the inference TOML promises but
+    /// the runtime previously only applied as a soft confidence penalty (`runtime.rs`).
+    /// Returns the first violated check, or `None` when the line satisfies the contract.
+    ///
+    /// This is the config-driven half of the chat garble gate: it makes
+    /// `forbidden_phrases`, `forbid_asterisks`, and `require_sensory_or_vocalization`
+    /// actually route to the in-voice `[[rules.lattice_misfire_fallback]]` line instead
+    /// of being satisfied only incidentally by fragment composition. wasm has no `regex`
+    /// crate (only `aho-corasick`), so `required_signal_patterns` are matched via a
+    /// regex-free literal expander rather than a full engine.
+    fn chat_response_shaping_violation(text: &str) -> Option<&'static str> {
+        let loaded = crate::inference::inference_toml::inference_toml_loaded();
+        let shaping = loaded.response_shaping();
+        let lower = text.to_ascii_lowercase();
+
+        for phrase in &shaping.forbidden_phrases {
+            if !phrase.is_empty() && lower.contains(&phrase.to_ascii_lowercase()) {
+                return Some("forbidden_phrase");
+            }
+        }
+        if shaping.forbid_asterisks && text.contains('*') {
+            return Some("asterisk_action");
+        }
+        if shaping.require_sensory_or_vocalization
+            && !Self::chat_response_has_required_signal(&lower, &shaping, loaded.fragment_compose())
+        {
+            return Some("missing_required_signal");
+        }
+        None
+    }
+
+    /// True when `lower` (already lowercased) carries at least one configured pet
+    /// signal: a `[fragment_compose].vocalizations` token or a literal drawn from
+    /// `[response_shaping].required_signal_patterns`.
+    fn chat_response_has_required_signal(
+        lower: &str,
+        shaping: &crate::inference::inference_toml::ResponseShapingConfig,
+        fragment: &crate::inference::inference_toml::FragmentComposeConfig,
+    ) -> bool {
+        for v in &fragment.vocalizations {
+            if !v.is_empty() && Self::contains_word(lower, &v.to_ascii_lowercase()) {
+                return true;
+            }
+        }
+        for pat in &shaping.required_signal_patterns {
+            for lit in Self::regex_literal_alternatives(pat) {
+                if !lit.is_empty() && lower.contains(&lit) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Word-ish containment: `needle` must appear in `haystack` bounded by non-alnum
+    /// neighbours, so `"ack"` does not match inside `"black"`.
+    fn contains_word(haystack: &str, needle: &str) -> bool {
+        let bytes = haystack.as_bytes();
+        let mut from = 0;
+        while let Some(pos) = haystack[from..].find(needle) {
+            let start = from + pos;
+            let end = start + needle.len();
+            let left_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+            let right_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
+            if left_ok && right_ok {
+                return true;
+            }
+            from = start + 1;
+        }
+        false
+    }
+
+    /// Expand a restricted regex subset into the concrete lowercased literals it can
+    /// match. Handles `\b` (dropped), `^`/`$` (dropped), alternation groups `(a|b)`,
+    /// single-char classes `[- ]`, and sequential concatenation via a cartesian product.
+    /// Sufficient for the `required_signal_patterns` forms shipped by companions; it is
+    /// intentionally not a general regex engine (wasm has no `regex` crate).
+    fn regex_literal_alternatives(pat: &str) -> Vec<String> {
+        fn split_top_alts(inner: &str) -> Vec<String> {
+            let mut alts = Vec::new();
+            let mut depth = 0i32;
+            let mut cur = String::new();
+            for ch in inner.chars() {
+                match ch {
+                    '(' | '[' => {
+                        depth += 1;
+                        cur.push(ch);
+                    }
+                    ')' | ']' => {
+                        depth -= 1;
+                        cur.push(ch);
+                    }
+                    '|' if depth == 0 => {
+                        alts.push(std::mem::take(&mut cur));
+                    }
+                    _ => cur.push(ch),
+                }
+            }
+            alts.push(cur);
+            alts
+        }
+
+        fn expand(pat: &str) -> Vec<String> {
+            let chars: Vec<char> = pat.chars().collect();
+            let mut out = vec![String::new()];
+            let mut lit = String::new();
+            let flush = |out: &mut Vec<String>, lit: &mut String| {
+                if !lit.is_empty() {
+                    for s in out.iter_mut() {
+                        s.push_str(lit);
+                    }
+                    lit.clear();
+                }
+            };
+            let mut i = 0;
+            while i < chars.len() {
+                match chars[i] {
+                    '\\' => {
+                        if i + 1 < chars.len() {
+                            if chars[i + 1] != 'b' {
+                                lit.push(chars[i + 1]);
+                            }
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    '^' | '$' => i += 1,
+                    '(' => {
+                        flush(&mut out, &mut lit);
+                        let mut depth = 1;
+                        let mut j = i + 1;
+                        let mut inner = String::new();
+                        while j < chars.len() && depth > 0 {
+                            match chars[j] {
+                                '(' => {
+                                    depth += 1;
+                                    inner.push('(');
+                                }
+                                ')' => {
+                                    depth -= 1;
+                                    if depth > 0 {
+                                        inner.push(')');
+                                    }
+                                }
+                                ch => inner.push(ch),
+                            }
+                            j += 1;
+                        }
+                        let mut variants = Vec::new();
+                        for alt in split_top_alts(&inner) {
+                            variants.extend(expand(&alt));
+                        }
+                        let mut next = Vec::new();
+                        for prefix in &out {
+                            for v in &variants {
+                                next.push(format!("{}{}", prefix, v));
+                            }
+                        }
+                        out = next;
+                        i = j;
+                    }
+                    '[' => {
+                        flush(&mut out, &mut lit);
+                        let mut j = i + 1;
+                        let mut inner = String::new();
+                        while j < chars.len() && chars[j] != ']' {
+                            inner.push(chars[j]);
+                            j += 1;
+                        }
+                        j += 1;
+                        let variants: Vec<String> =
+                            inner.chars().map(|c| c.to_string()).collect();
+                        let mut next = Vec::new();
+                        for prefix in &out {
+                            for v in &variants {
+                                next.push(format!("{}{}", prefix, v));
+                            }
+                        }
+                        out = next;
+                        i = j;
+                    }
+                    c => {
+                        lit.push(c);
+                        i += 1;
+                    }
+                }
+            }
+            flush(&mut out, &mut lit);
+            out
+        }
+
+        expand(pat)
+            .into_iter()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
     fn chat_response_misfire_hit(
         intent_text: &str,
         response: &str,
@@ -1680,6 +1887,79 @@ impl LanguageService {
         self.generation_with_intent_override(text, text)
     }
 
+    /// Pre-gate lattice top-K dump using the same routing/topic/subject setup as
+    /// [`Self::generation`], but bypassing metacog, grounding gate, and decline templates.
+    pub fn raw_lattice_diagnostic(
+        &mut self,
+        text: &str,
+        top_k: usize,
+    ) -> Result<RawLatticeDiagnosticReport, String> {
+        self.raw_lattice_diagnostic_with_force_topic(text, top_k, None)
+    }
+
+    /// Like [`Self::raw_lattice_diagnostic`] but skips headline lexical routing and uses
+    /// `force_topic` for sub-lattice retrieval (routing bottleneck isolation).
+    pub fn raw_lattice_diagnostic_with_force_topic(
+        &mut self,
+        text: &str,
+        top_k: usize,
+        force_topic: Option<&str>,
+    ) -> Result<RawLatticeDiagnosticReport, String> {
+        self.last_raw_lattice_diag = None;
+        self.raw_lattice_diag_top_k = Some(top_k.max(1));
+        self.raw_lattice_diag_force_topic = force_topic.map(|s| s.to_string());
+        let _ = self.generation_with_intent_override(text, text)?;
+        self.raw_lattice_diag_force_topic = None;
+        self.last_raw_lattice_diag.take().ok_or_else(|| {
+            "raw lattice diagnostic did not capture (no encoded routing path)".into()
+        })
+    }
+
+    fn build_raw_lattice_diagnostic(
+        dm: &mut crate::dimension::DimensionManager,
+        prompt: &str,
+        effective_gidx: Option<usize>,
+        topic_hint: Option<&str>,
+        subject_keywords: &[String],
+        conditioned: &[f32],
+        h_raw: &[f32],
+        top_k: usize,
+    ) -> RawLatticeDiagnosticReport {
+        let (candidates, retrieval_path, forced_topic) = if let Some(gidx) = effective_gidx {
+            if let Some(th) = topic_hint {
+                let cond = dm.adapt_for_group_clifford(gidx, conditioned, h_raw, GEN_COND_DIM);
+                if let Some(env) = dm.group_gen_envs.get(&gidx) {
+                    let cands = env.raw_forced_topic_top_k(&cond, th, top_k);
+                    (
+                        cands,
+                        "forced_topic".to_string(),
+                        Some(th.to_string()),
+                    )
+                } else {
+                    (
+                        Vec::new(),
+                        "missing_gen_env".to_string(),
+                        Some(th.to_string()),
+                    )
+                }
+            } else {
+                (Vec::new(), "no_topic_hint".to_string(), None)
+            }
+        } else {
+            (Vec::new(), "no_group".to_string(), None)
+        };
+
+        RawLatticeDiagnosticReport {
+            prompt: prompt.to_string(),
+            group_idx: effective_gidx,
+            topic_hint: topic_hint.map(|s| s.to_string()),
+            subject_keywords: subject_keywords.to_vec(),
+            forced_topic,
+            retrieval_path,
+            candidates,
+        }
+    }
+
     /// Like `generation()` but parses intent from `intent_text` instead of the
     /// full `text`. Used by `converse()` to prevent previous-turn context from
     /// dominating topic routing for the current query.
@@ -1701,6 +1981,8 @@ impl LanguageService {
         };
         let intent_text = intent_text_owned.as_str();
         let text = text_owned.as_str();
+        let raw_diag_k = self.raw_lattice_diag_top_k.take();
+        let raw_diag_force_topic = self.raw_lattice_diag_force_topic.clone();
 
         let inference_profile_opt = self
             .brain_package_header
@@ -2121,13 +2403,29 @@ impl LanguageService {
                 }
             }
 
+            let fp_finance_complaint = infer_rules_rt.looks_like_first_person_finance_intent(intent_text)
+                && !Self::is_identity_query(intent_text);
             let op_topic_opt = crate::growformer_lang::infer_operation_topic(intent_text);
             // Override topic_hint with operation-specific intent from GrowformerLang.
             // This gives the topic sub-lattice a precise key (e.g., "addition_operation")
             // instead of a generic label from the understanding layer.
             if let Some(op_topic) = op_topic_opt.as_ref() {
                 if !pr_press {
-                    topic_hint = Some(op_topic.clone());
+                    let spurious_identity_op = op_topic.eq_ignore_ascii_case("identity")
+                        || op_topic.eq_ignore_ascii_case("conversation");
+                    if fp_finance_complaint && spurious_identity_op {
+                        infer_trace!(
+                            "  [topic-lex] skip spurious identity operation topic on finance complaint"
+                        );
+                        if topic_hint
+                            .as_ref()
+                            .is_some_and(|t| t.eq_ignore_ascii_case("identity"))
+                        {
+                            topic_hint = None;
+                        }
+                    } else {
+                        topic_hint = Some(op_topic.clone());
+                    }
 
                     // Cross-group topic search: find the group with the MOST programs for
                     // this topic, regardless of whether the current group also has it.
@@ -2160,10 +2458,17 @@ impl LanguageService {
                             // just because another group has more coding_implementation programs.
                             let should_redirect = current_count == 0
                                 || (redirect_count >= current_count * 3 && current_count < 3);
-                            if should_redirect {
+                            let spurious_identity_op = op_topic.eq_ignore_ascii_case("identity")
+                                || op_topic.eq_ignore_ascii_case("conversation");
+                            let skip_identity_cross = fp_finance_complaint && spurious_identity_op;
+                            if should_redirect && !skip_identity_cross {
                                 infer_trace!("  [cross-group] topic '{}': group {} has {} progs vs current group {} with {}, redirecting",
                                     op_topic, redirect_g, redirect_count, current_g, current_count);
                                 group_idx = Some(redirect_g);
+                            } else if should_redirect && skip_identity_cross {
+                                infer_trace!(
+                                    "  [cross-group] skip identity redirect on first-person finance complaint"
+                                );
                             }
                         }
                         if current_count == 0 && best_redirect.is_none() {
@@ -2176,6 +2481,35 @@ impl LanguageService {
                     "  [topic-miss] no topic inferred for: {}",
                     &intent_text[..intent_text.len().min(60)]
                 );
+            }
+
+            // Multi-group fintech: surface classifier + weak GeneralKnowledge meta-route often leave
+            // first-person complaints on the identity shard (g0). Force the sentiment lattice so
+            // TOML lexical guards and trained sub-topics can run.
+            if fp_finance_complaint {
+                if let Some(sgx) = sentiment_lattice_gidx {
+                    if dm.group_gen_envs.len() > 1 && group_idx != Some(sgx) {
+                        infer_trace!(
+                            "  [sentiment-redirect] first-person finance complaint → sentiment lattice group {}",
+                            sgx
+                        );
+                        group_idx = Some(sgx);
+                    }
+                }
+                let low_conf_meta = meta_result.as_ref().map_or(true, |r| r.confidence < 0.05);
+                if low_conf_meta
+                    && topic_hint.as_ref().is_some_and(|t| {
+                        t.eq_ignore_ascii_case("identity")
+                            || t.eq_ignore_ascii_case("positive_strong")
+                            || t.eq_ignore_ascii_case("positive_mild")
+                    })
+                {
+                    infer_trace!(
+                        "  [topic-lex] clearing spurious MetaBrain topic {:?} on finance complaint",
+                        topic_hint.as_deref()
+                    );
+                    topic_hint = None;
+                }
             }
 
             // Brains with a dedicated sentiment lattice: MetaBrain / TopicGraph alone can mis-track
@@ -2295,7 +2629,11 @@ impl LanguageService {
                         let k_ok = lattice_shortcuts::TOPIC_KEYS.iter().any(|t| *t == k.as_str());
                         if k_ok {
                             let th = topic_hint.as_deref();
-                            let th_ok = th.is_some_and(|t| lattice_shortcuts::TOPIC_KEYS.iter().any(|x| *x == t));
+                            let lex = crate::inference::sentiment_generation_lexicon::global();
+                            let th_ok = th.is_some_and(|t| {
+                                lattice_shortcuts::TOPIC_KEYS.iter().any(|x| t.eq_ignore_ascii_case(x))
+                                    || lex.is_sentiment_lattice_topic_hint(t)
+                            });
                             if !th_ok {
                                 topic_hint = Some(k);
                             }
@@ -2487,6 +2825,33 @@ impl LanguageService {
             // Primary generation: prefer classifier's group_idx over MetaBrain's.
             // Only use MetaBrain's archetype when the classifier didn't provide a group.
             let effective_gidx = group_idx.or_else(|| meta_result.as_ref().and_then(|mr| mr.group_idx));
+
+            if let Some(k) = raw_diag_k {
+                let diag_topic = raw_diag_force_topic
+                    .as_deref()
+                    .or(topic_hint.as_deref());
+                let report = Self::build_raw_lattice_diagnostic(
+                    dm,
+                    intent_text,
+                    effective_gidx,
+                    diag_topic,
+                    &subject_kw,
+                    &conditioned,
+                    h_raw,
+                    k,
+                );
+                self.last_raw_lattice_diag = Some(report);
+                self.record_latency(start);
+                return Ok((
+                    action,
+                    GeneratedResponse {
+                        text: String::new(),
+                        template_id: "raw_lattice_diag_capture".into(),
+                        traceable: false,
+                        confidence: 0.0,
+                    },
+                ));
+            }
 
             let gen_preempt = inference_harness.try_preempt_generation(
                 dm,
@@ -3318,6 +3683,38 @@ impl LanguageService {
             resp
         };
 
+        // Chat garble gate: chat-mode brains skip the sentiment `final-garble-gate`
+        // above, so a generated line that trips the lattice garble detector, leaks a
+        // training `MASK` token, or lands far below the chat confidence floor would
+        // otherwise reach the user as soup (e.g. "...MASK,, vibrates sleeping minutes
+        // opinions...."). Fragment-composed pet lines score ~0.9; a decode collapse
+        // scores ~0.13, so the floor cleanly separates them. The TOML
+        // `[[rules.lattice_misfire_fallback]]` catch-all (`intent = []`) always yields
+        // an in-voice line, with prompt-specific rows (e.g. "bad cat") matched first.
+        const CHAT_GARBLE_CONFIDENCE_FLOOR: f32 = 0.25;
+        let shaping_violation = if chat_passthrough {
+            Self::chat_response_shaping_violation(&resp.text)
+        } else {
+            None
+        };
+        let resp = if chat_passthrough
+            && resp.template_id != "metacog_degradation"
+            && resp.template_id != "final_garble_gate"
+            && (resp.confidence < CHAT_GARBLE_CONFIDENCE_FLOOR
+                || resp.text.contains("MASK")
+                || IndexedGenEnv::lattice_surface_hard_reject(&resp.text)
+                || shaping_violation.is_some())
+        {
+            infer_trace!(
+                "  [chat-garble-gate] conf={:.3} violation={:?} garbled/low-conf/off-contract chat output → TOML lattice_misfire_fallback",
+                resp.confidence,
+                shaping_violation
+            );
+            Self::lattice_misfire_fallback_response(intent_text).unwrap_or(resp)
+        } else {
+            resp
+        };
+
         // Chat passthrough safety net: high-confidence lines that match TOML lattice_misfire
         // → retry fragment compose, then optional TOML fallback line.
         let prior_agent = self.conversation.last_agent_text();
@@ -3929,6 +4326,22 @@ impl LanguageService {
                             topic
                         })
                 });
+
+            // Topic-graph authority: if the resolved (sub)topic lives in exactly one
+            // code group, pin routing to it. Otherwise cross-group competition can let
+            // an unrelated group's collapsed sink (e.g. a seed `binary_search` in
+            // coding_implementation) non-deterministically outscore the correct group.
+            if let Some(ref th) = topic_hint {
+                let owning: Vec<usize> = dm.group_code_envs.iter()
+                    .filter(|(_, env)| env.topic_subindex.iter()
+                        .any(|t| t.topic_name.eq_ignore_ascii_case(th)))
+                    .map(|(&g, _)| g)
+                    .collect();
+                if owning.len() == 1 && group_idx != Some(owning[0]) {
+                    infer_trace!("  [topic-pin] subtopic '{}' owned solely by group {} → pin", th, owning[0]);
+                    group_idx = Some(owning[0]);
+                }
+            }
             let lang = match action.payload {
                 Some(crate::dimension::action::ActionPayload::CodingAssist { ref language_hint, .. }) =>
                     language_hint.clone(),
@@ -4050,7 +4463,17 @@ impl LanguageService {
                     "  [metacog codegen] quality={:.3}, coherence={:.3}, relevance={:.3}",
                     scores.quality, scores.coherence, scores.relevance
                 );
-                if scores.quality >= mc.config.accept_threshold * 0.8
+                // The reflection brain is trained on (prompt, response) TEXT pairs;
+                // on raw code bodies it has no signal (coherence and relevance
+                // collapse to ~0), so its `quality` number is meaningless for code.
+                // When blind like this, trust the retrieval path instead — it already
+                // applies its own forced-topic match threshold (mirrors the gen path's
+                // "[metacog] SKIP: ... trust retrieval"). Otherwise keep the gate.
+                let metacog_blind_on_code = scores.coherence < 0.01 && scores.relevance < 0.01;
+                if metacog_blind_on_code {
+                    infer_trace!("  [metacog codegen] SKIP: blind on code, trusting retrieval");
+                    Some(cg)
+                } else if scores.quality >= mc.config.accept_threshold * 0.8
                     || (scores.coherence >= 0.95 && scores.quality >= 0.15) {
                     Some(cg)
                 } else {
@@ -5236,6 +5659,47 @@ mod tests {
         assert!(g.is_sentiment_lattice_topic_hint("neutral"));
         assert!(g.is_sentiment_lattice_topic_hint("negative_mild"));
         assert!(!g.is_sentiment_lattice_topic_hint("addition_operation"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Chat shaping gate: regex-free literal expansion of required_signal_patterns
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn regex_literal_alternatives_expands_companion_signal_patterns() {
+        let vocal = LanguageService::regex_literal_alternatives(
+            r"\b(mrrp|meow|purr|chirp|mrr|prrp|trill)\b",
+        );
+        assert!(vocal.contains(&"purr".to_string()));
+        assert!(vocal.contains(&"trill".to_string()));
+
+        let body = LanguageService::regex_literal_alternatives(
+            r"\bmy (tail|ear|paw|nose|eyes|whiskers|face|forehead)\b",
+        );
+        assert!(body.contains(&"my tail".to_string()));
+        assert!(body.contains(&"my whiskers".to_string()));
+
+        // `[- ]` single-char class must yield both hyphen and space variants.
+        let behavior = LanguageService::regex_literal_alternatives(
+            r"\b(slow blink|head[- ]bump|knead|stretch|crouch)\b",
+        );
+        assert!(behavior.contains(&"head-bump".to_string()));
+        assert!(behavior.contains(&"head bump".to_string()));
+        assert!(behavior.contains(&"knead".to_string()));
+
+        // Two concatenated groups must cartesian-product.
+        let sensory = LanguageService::regex_literal_alternatives(
+            r"\b(the |your )(bowl|lap|hand|voice|knee|leg|shoulder)\b",
+        );
+        assert!(sensory.contains(&"the bowl".to_string()));
+        assert!(sensory.contains(&"your shoulder".to_string()));
+    }
+
+    #[test]
+    fn contains_word_respects_boundaries() {
+        assert!(LanguageService::contains_word("i let out a soft purr.", "purr"));
+        assert!(!LanguageService::contains_word("the black cat", "ack"));
+        assert!(LanguageService::contains_word("ack. i hiss.", "ack"));
     }
 
     // -----------------------------------------------------------------------

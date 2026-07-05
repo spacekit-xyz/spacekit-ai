@@ -48,6 +48,13 @@ impl ChunkCodec {
         Self { token_embeddings, position_codes: codes, vocab_size: vs }
     }
 
+    /// Raw per-token embedding (read-only). Used by the routing encoder to build
+    /// a semantic-neighbor-smoothed sentence vector; the decode path is untouched.
+    pub fn token_embedding(&self, id: u16) -> &[f32; CATA_DIM] {
+        let idx = (id as usize).min(self.vocab_size.saturating_sub(1));
+        &self.token_embeddings[idx]
+    }
+
     // -- Single chunk encode/decode -------------------------------------------
 
     /// Encode up to K tokens into a 256d Cl(1,7) multivector.

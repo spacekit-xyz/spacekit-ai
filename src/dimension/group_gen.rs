@@ -42,6 +42,33 @@ pub const GEN_COND_DIM: usize = 192;
 /// Pet/chat conditioning is weaker than sentiment headlines; a floor of 0.10 discarded
 /// the entire hinted sub-lattice and fell back to global mealtime-dominant retrieval.
 pub const FORCED_TOPIC_SCORE_FLOOR: f32 = 0.02;
+
+/// One lattice program after cosine+BM25+graph+lex-align scoring, before witness/hard-reject gates.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RawLatticeCandidate {
+    pub rank: usize,
+    pub prog_idx: usize,
+    pub score: f32,
+    pub topic: String,
+    pub text_preview: String,
+    pub witness_ok: bool,
+    pub hard_reject: bool,
+    pub soft_reject: bool,
+    pub graph_confident: bool,
+    pub above_score_floor: bool,
+}
+
+/// Pre-gate lattice retrieval dump (no metacog, no grounding gate).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RawLatticeDiagnosticReport {
+    pub prompt: String,
+    pub group_idx: Option<usize>,
+    pub topic_hint: Option<String>,
+    pub subject_keywords: Vec<String>,
+    pub forced_topic: Option<String>,
+    pub retrieval_path: String,
+    pub candidates: Vec<RawLatticeCandidate>,
+}
 /// Temperature multiplier applied to global retrieval when a query is out-of-distribution
 /// (no topic routed). Spreads softmax mass across nearby coherent programs so OOD prompts
 /// stop collapsing onto a single high-prior canned response.
@@ -3093,8 +3120,9 @@ impl IndexedGenEnv {
         let garbled = Self::has_tokenization_artifacts(&text) || text.len() < 5;
         if garbled {
             let primary_idx = scored[0].0;
-            let primary_text = self.dictionary.decode(
-                &topic.lattice.programs[primary_idx].token_sequence);
+            // Prefer the exact stored source (verbatim_display_text) over a token
+            // re-decode — the latter rejoins tokens with spaces (`arr[ mid]`).
+            let primary_text = topic.lattice.programs[primary_idx].display_text(&self.dictionary);
             if primary_text.len() >= 5 && !Self::has_tokenization_artifacts(&primary_text) {
                 gen_stats::record_verbatim_fallback();
                 crate::infer_trace!(
@@ -4016,27 +4044,33 @@ impl IndexedGenEnv {
     /// When `lang_hint` is Some (e.g., "rust"), programs whose decoded text matches the
     /// target language's markers are preferred, preventing Python code from being returned
     /// when Rust was requested.
-    fn forced_topic_response(&mut self, cond: &[f32], forced_topic: &str) -> Option<(String, String, f32)> {
-        self.forced_topic_response_lang(cond, forced_topic, None, None)
-    }
-
-    fn forced_topic_response_lang(&mut self, cond: &[f32], forced_topic: &str, lang_hint: Option<&str>, subject_keywords: Option<&[&str]>) -> Option<(String, String, f32)> {
-        // Exact match first, then fuzzy word-overlap fallback
-        let topic_match = self.topic_subindex.iter()
+    fn resolve_forced_topic_subindex<'a>(
+        &'a self,
+        forced_topic: &str,
+    ) -> Option<&'a TopicSubIndex> {
+        self.topic_subindex
+            .iter()
             .find(|t| t.topic_name.eq_ignore_ascii_case(forced_topic))
             .or_else(|| {
-                let hint_words: Vec<&str> = forced_topic.split('_')
+                let hint_words: Vec<&str> = forced_topic
+                    .split('_')
                     .filter(|w| w.len() > 2)
                     .collect();
-                if hint_words.is_empty() { return None; }
+                if hint_words.is_empty() {
+                    return None;
+                }
                 let mut best: Option<(&TopicSubIndex, usize)> = None;
                 for t in &self.topic_subindex {
-                    if t.lattice.programs.is_empty() { continue; }
+                    if t.lattice.programs.is_empty() {
+                        continue;
+                    }
                     let tname_lower = t.topic_name.to_ascii_lowercase();
-                    let tname_words: Vec<&str> = tname_lower.split('_')
+                    let tname_words: Vec<&str> = tname_lower
+                        .split('_')
                         .filter(|w| w.len() > 2)
                         .collect();
-                    let overlap = hint_words.iter()
+                    let overlap = hint_words
+                        .iter()
                         .filter(|hw| tname_words.iter().any(|tw| tw == *hw))
                         .count();
                     if overlap > 0 {
@@ -4048,11 +4082,391 @@ impl IndexedGenEnv {
                 if let Some((t, _)) = best {
                     crate::infer_trace!(
                         "    [fuzzy-topic] '{}' → fuzzy matched '{}' ({} progs)",
-                        forced_topic, t.topic_name, t.lattice.programs.len()
+                        forced_topic,
+                        t.topic_name,
+                        t.lattice.programs.len()
                     );
                 }
                 best.map(|(t, _)| t)
-            });
+            })
+    }
+
+    /// Cosine → BM25 → graph signature → lex-align scoring for a forced topic sub-lattice.
+    /// Does not apply witness / hard-reject selection gates.
+    fn compute_forced_topic_scored_list(
+        &self,
+        topic: &TopicSubIndex,
+        forced_topic: &str,
+        cond: &[f32],
+        subject_keywords: Option<&[&str]>,
+    ) -> (Vec<String>, Vec<(usize, f32)>) {
+        let query_terms: Vec<String> = dedup_lowercase_query_terms(
+            subject_keywords
+                .unwrap_or(&[])
+                .iter()
+                .filter(|kw| kw.len() > 2)
+                .map(|kw| kw.to_ascii_lowercase())
+                .collect(),
+        );
+
+        let bearing = crate::inference::world_grounding::sentiment_bearing_from_intent(
+            self.retrieval_intent_text.as_str(),
+        );
+        let cond_retrieval_owned: Option<Vec<f32>> =
+            if bearing.abs() > 1e-5 && !self.retrieval_intent_text.is_empty() {
+                Self::sentiment_retrieval_axis(&self.topic_subindex, cond.len()).map(|axis| {
+                    let w = bearing * WORLD_GROUND_SENTIMENT_BEARING_WEIGHT;
+                    let mut v = cond.to_vec();
+                    let d = v.len().min(axis.len());
+                    for i in 0..d {
+                        v[i] += w * axis[i];
+                    }
+                    crate::infer_trace!(
+                        "    [world-ground] retrieval valence nudge: bearing={:.3} w={:.4}",
+                        bearing,
+                        w
+                    );
+                    v
+                })
+            } else {
+                None
+            };
+        let cond_r: &[f32] = cond_retrieval_owned.as_deref().unwrap_or(cond);
+
+        let retrieval_lex = crate::inference::retrieval_lexicon::global_for_locale(None);
+
+        let n = topic.lattice.programs.len();
+        let mut cosine_scores: Vec<(usize, f32)> = topic
+            .lattice
+            .programs
+            .iter()
+            .enumerate()
+            .map(|(i, prog)| (i, gen_cosine_sim(cond_r, &prog.ema_centroid)))
+            .collect();
+        cosine_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        Self::sentiment_apply_topic_domain_slice(
+            &mut cosine_scores,
+            forced_topic,
+            &query_terms,
+            topic,
+            &self.dictionary,
+        );
+
+        let mut scored: Vec<(usize, f32)> = if query_terms.is_empty() {
+            cosine_scores
+        } else {
+            let docs: Vec<(usize, Vec<String>)> = cosine_scores
+                .iter()
+                .map(|&(idx, _)| {
+                    let text = topic.lattice.programs[idx].display_text(&self.dictionary);
+                    let words: Vec<String> = text
+                        .to_ascii_lowercase()
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .filter(|w| w.len() > 1)
+                        .map(|w| w.to_string())
+                        .collect();
+                    (idx, words)
+                })
+                .collect();
+
+            let avgdl: f32 =
+                docs.iter().map(|(_, w)| w.len() as f32).sum::<f32>() / (docs.len().max(1) as f32);
+            let k1: f32 = 1.2;
+            let b: f32 = 0.75;
+
+            let idfs: Vec<f32> = query_terms
+                .iter()
+                .map(|qt| {
+                    let df = docs
+                        .iter()
+                        .filter(|(_, words)| {
+                            words.iter().any(|w| w == qt || w.contains(qt.as_str()))
+                        })
+                        .count() as f32;
+                    ((n as f32 - df + 0.5) / (df + 0.5) + 1.0).ln()
+                })
+                .collect();
+
+            let bm25_scores: Vec<f32> = docs
+                .iter()
+                .map(|(_, words)| {
+                    let dl = words.len() as f32;
+                    let mut score = 0.0f32;
+                    for (qi, qt) in query_terms.iter().enumerate() {
+                        let tf = words
+                            .iter()
+                            .filter(|w| *w == qt || w.contains(qt.as_str()))
+                            .count() as f32;
+                        if tf > 0.0 {
+                            let num = tf * (k1 + 1.0);
+                            let den = tf + k1 * (1.0 - b + b * dl / avgdl);
+                            score += idfs[qi] * num / den;
+                        }
+                    }
+                    score
+                })
+                .collect();
+
+            let bm25_max = bm25_scores.iter().cloned().fold(0.0f32, f32::max);
+            let bm25_norm: Vec<f32> = if bm25_max > 0.0 {
+                bm25_scores.iter().map(|s| s / bm25_max).collect()
+            } else {
+                bm25_scores
+            };
+
+            let lambda = 0.35f32;
+            let mut combined: Vec<(usize, f32)> = cosine_scores
+                .iter()
+                .enumerate()
+                .map(|(di, &(idx, cos))| {
+                    let base = cos + lambda * bm25_norm[di];
+                    let intent_mod = if !self.intent_action.is_empty() {
+                        let (_, words) = &docs[di];
+                        let text = topic.lattice.programs[idx].display_text(&self.dictionary);
+                        let has_code = retrieval_lex.program_has_code_markers_bm25(&text);
+                        let action = self.intent_action.as_str();
+                        if retrieval_lex.intent_prefers_code(action) && has_code {
+                            0.08
+                        } else if retrieval_lex.intent_prefers_prose(action)
+                            && !has_code
+                            && words.len() > 15
+                        {
+                            0.05
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        0.0
+                    };
+                    (idx, base + intent_mod)
+                })
+                .collect();
+            combined.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            combined
+        };
+
+        crate::infer_trace!(
+            "    [retrieval-diag] topic='{}', {} progs, query_terms={:?}",
+            forced_topic,
+            n,
+            query_terms
+        );
+        for (rank, &(idx, score)) in scored.iter().enumerate().take(3) {
+            let snippet: String = topic.lattice.programs[idx]
+                .display_text(&self.dictionary)
+                .chars()
+                .take(50)
+                .collect();
+            crate::infer_trace!(
+                "      pre-graph[{}]: prog={}, score={:.3}, text=\"{}...\"",
+                rank,
+                idx,
+                score,
+                snippet
+            );
+        }
+        if let Some(ref graph) = topic.graph {
+            if !query_terms.is_empty() {
+                let sig_scores: Vec<f32> = scored
+                    .iter()
+                    .map(|&(idx, _)| graph.signature_score(idx, &query_terms))
+                    .collect();
+                let sig_max = sig_scores.iter().cloned().fold(0.0f32, f32::max);
+
+                for (rank, (&(idx, combined), &sig)) in
+                    scored.iter().zip(sig_scores.iter()).enumerate().take(4)
+                {
+                    let sigs_for_prog: Vec<String> = graph
+                        .signatures
+                        .get(idx)
+                        .map(|s| {
+                            s.iter()
+                                .take(5)
+                                .map(|dk| format!("{}:{:.2}", dk.keyword, dk.specificity))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    crate::infer_trace!(
+                        "      graph[{}]: prog={}, combined={:.3}, sig_score={:.3}, top_keys=[{}]",
+                        rank,
+                        idx,
+                        combined,
+                        sig,
+                        sigs_for_prog.join(", ")
+                    );
+                }
+
+                let lookup = graph.keyword_lookup(&query_terms);
+                if !lookup.is_empty() {
+                    let top3: Vec<String> = lookup
+                        .iter()
+                        .take(3)
+                        .map(|(idx, s)| format!("prog{}={:.2}", idx, s))
+                        .collect();
+                    crate::infer_trace!("      keyword_lookup: [{}]", top3.join(", "));
+                }
+
+                if sig_max > 0.0 {
+                    let sig_lambda = 0.30f32;
+                    for (di, &mut (ref _idx, ref mut score)) in scored.iter_mut().enumerate() {
+                        *score += sig_lambda * (sig_scores[di] / sig_max);
+                    }
+                }
+
+                scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                if let Some(&(top_idx, top_score)) = scored.first() {
+                    if let Some(redirect_idx) = graph.neighbor_redirect(top_idx, &query_terms) {
+                        if let Some(entry) = scored.iter_mut().find(|e| e.0 == redirect_idx) {
+                            entry.1 = top_score + 0.05;
+                            crate::infer_trace!(
+                                "    [graph-redirect] prog {} → neighbor {} (better keyword match)",
+                                top_idx,
+                                redirect_idx
+                            );
+                        }
+                    }
+                }
+            }
+        } else {
+            crate::infer_trace!(
+                "      [no-graph] topic '{}' has no ProgramGraph",
+                forced_topic
+            );
+        }
+
+        if query_terms.len() >= 2 {
+            let qcontent: Vec<&String> = query_terms
+                .iter()
+                .filter(|t| t.len() > 2 && !retrieval_lex.is_lex_align_stop(t.as_str()))
+                .collect();
+            if qcontent.len() >= 2 {
+                for (idx, sc) in scored.iter_mut() {
+                    let text = topic.lattice.programs[*idx].display_text(&self.dictionary);
+                    let tl = text.to_ascii_lowercase();
+                    let hits = qcontent.iter().filter(|qt| tl.contains(qt.as_str())).count();
+                    let align = hits as f32 / qcontent.len() as f32;
+                    *sc += 0.22 * align;
+                    if hits == 1 && qcontent.len() >= 3 {
+                        *sc -= 0.14;
+                    }
+                }
+                scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                crate::infer_trace!(
+                    "      [lex-align] reranked with {} content terms (stopwords stripped)",
+                    qcontent.len()
+                );
+            }
+        }
+        let mut scored_mut = scored;
+        Self::sentiment_apply_crypto_market_retrieval_rescore(
+            &mut scored_mut,
+            &query_terms,
+            topic,
+            &self.dictionary,
+        );
+        scored_mut.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        for (rank, &(idx, score)) in scored_mut.iter().enumerate().take(3) {
+            let snippet: String = topic.lattice.programs[idx]
+                .display_text(&self.dictionary)
+                .chars()
+                .take(50)
+                .collect();
+            crate::infer_trace!(
+                "      post-graph[{}]: prog={}, score={:.3}, text=\"{}...\"",
+                rank,
+                idx,
+                score,
+                snippet
+            );
+        }
+        (query_terms, scored_mut)
+    }
+
+    /// Top-K lattice candidates after full scoring, with gate flags computed but not applied.
+    pub fn raw_forced_topic_top_k(
+        &self,
+        cond: &[f32],
+        forced_topic: &str,
+        top_k: usize,
+    ) -> Vec<RawLatticeCandidate> {
+        let Some(topic) = self.resolve_forced_topic_subindex(forced_topic) else {
+            return Vec::new();
+        };
+        if topic.lattice.programs.is_empty() {
+            return Vec::new();
+        }
+        let kw_refs: Vec<&str> = self.subject_keywords.iter().map(|s| s.as_str()).collect();
+        let kw_opt = if kw_refs.is_empty() {
+            None
+        } else {
+            Some(kw_refs.as_slice())
+        };
+        let (query_terms, scored) =
+            self.compute_forced_topic_scored_list(topic, forced_topic, cond, kw_opt);
+        if scored.is_empty() {
+            return Vec::new();
+        }
+
+        let intent_lower = self.retrieval_intent_text.to_ascii_lowercase();
+        let intent_witness = (!intent_lower.is_empty()).then_some(intent_lower.as_str());
+        let sentiment_forced = Self::is_sentiment_lattice_topic_hint(forced_topic);
+        let top_prog_idx = scored.first().map(|&(idx, _)| idx);
+        let graph_confident = top_prog_idx
+            .map(|top_idx| {
+                topic.graph.as_ref().map_or(false, |g| {
+                    g.signature_score(top_idx, &query_terms) > 0.5
+                })
+            })
+            .unwrap_or(false);
+
+        scored
+            .into_iter()
+            .take(top_k)
+            .enumerate()
+            .map(|(rank, (idx, score))| {
+                let text = topic.lattice.programs[idx].display_text(&self.dictionary);
+                let opening: String = text.chars().take(300).collect();
+                let hard_reject = Self::hard_reject_lattice_decoded_text(&opening);
+                let soft_reject = if graph_confident {
+                    false
+                } else {
+                    Self::should_reject_text_soft(
+                        &opening,
+                        Some(topic.lattice.programs[idx].ema_centroid.as_slice()),
+                        Some(cond),
+                    )
+                };
+                let witness_ok = !sentiment_forced
+                    || query_terms.len() < 2
+                    || Self::sentiment_witness_matches_subject_keywords(
+                        &text,
+                        &query_terms,
+                        intent_witness,
+                    );
+                let preview: String = text.chars().take(160).collect();
+                RawLatticeCandidate {
+                    rank: rank + 1,
+                    prog_idx: idx,
+                    score,
+                    topic: topic.topic_name.clone(),
+                    text_preview: preview,
+                    witness_ok,
+                    hard_reject,
+                    soft_reject,
+                    graph_confident,
+                    above_score_floor: score > FORCED_TOPIC_SCORE_FLOOR,
+                }
+            })
+            .collect()
+    }
+
+    fn forced_topic_response(&mut self, cond: &[f32], forced_topic: &str) -> Option<(String, String, f32)> {
+        self.forced_topic_response_lang(cond, forced_topic, None, None)
+    }
+
+    fn forced_topic_response_lang(&mut self, cond: &[f32], forced_topic: &str, lang_hint: Option<&str>, subject_keywords: Option<&[&str]>) -> Option<(String, String, f32)> {
+        let topic_match = self.resolve_forced_topic_subindex(forced_topic);
 
         // Snapshot recently-returned lines so the selector can skip an immediate
         // verbatim repeat (closure borrows `self` immutably; we push back after).
@@ -4061,254 +4475,17 @@ impl IndexedGenEnv {
         let result = topic_match.and_then(|topic| {
                 if topic.lattice.programs.is_empty() { return None; }
 
-                let query_terms: Vec<String> = dedup_lowercase_query_terms(
-                    subject_keywords
-                        .unwrap_or(&[])
-                        .iter()
-                        .filter(|kw| kw.len() > 2)
-                        .map(|kw| kw.to_ascii_lowercase())
-                        .collect(),
+                let (query_terms, mut scored) = self.compute_forced_topic_scored_list(
+                    topic,
+                    forced_topic,
+                    cond,
+                    subject_keywords,
                 );
-
-                let bearing =
-                    crate::inference::world_grounding::sentiment_bearing_from_intent(
-                        self.retrieval_intent_text.as_str(),
-                    );
-                let cond_retrieval_owned: Option<Vec<f32>> =
-                    if bearing.abs() > 1e-5 && !self.retrieval_intent_text.is_empty() {
-                        Self::sentiment_retrieval_axis(&self.topic_subindex, cond.len()).map(
-                            |axis| {
-                                let w = bearing * WORLD_GROUND_SENTIMENT_BEARING_WEIGHT;
-                                let mut v = cond.to_vec();
-                                let d = v.len().min(axis.len());
-                                for i in 0..d {
-                                    v[i] += w * axis[i];
-                                }
-                                crate::infer_trace!(
-                                    "    [world-ground] retrieval valence nudge: bearing={:.3} w={:.4}",
-                                    bearing,
-                                    w
-                                );
-                                v
-                            },
-                        )
-                    } else {
-                        None
-                    };
-                let cond_r: &[f32] = cond_retrieval_owned.as_deref().unwrap_or(cond);
+                if scored.is_empty() {
+                    return None;
+                }
 
                 let retrieval_lex = crate::inference::retrieval_lexicon::global_for_locale(None);
-
-                // ── Stage 1: Vector recall ──
-                // Score all programs by cosine similarity to conditioning vector (optionally nudged
-                // along an empirical valence axis when world-graph `sentiment_bearing` is active).
-                let n = topic.lattice.programs.len();
-                let mut cosine_scores: Vec<(usize, f32)> = topic.lattice.programs.iter().enumerate()
-                    .map(|(i, prog)| (i, gen_cosine_sim(cond_r, &prog.ema_centroid)))
-                    .collect();
-                cosine_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-                Self::sentiment_apply_topic_domain_slice(
-                    &mut cosine_scores,
-                    forced_topic,
-                    &query_terms,
-                    topic,
-                    &self.dictionary,
-                );
-
-                // ── Stage 2: BM25 re-rank ──
-                // Decode program texts once, compute BM25 against query subject keywords.
-                // BM25 acts as a lexical safety net: even if cosine picks "quicksort"
-                // for a "stack" query, BM25 will boost programs containing "stack".
-
-                let mut scored: Vec<(usize, f32)> = if query_terms.is_empty() {
-                    cosine_scores
-                } else {
-                    // Decode all program texts and tokenize into words
-                    let docs: Vec<(usize, Vec<String>)> = cosine_scores.iter()
-                        .map(|&(idx, _)| {
-                            let text = topic.lattice.programs[idx].display_text(&self.dictionary);
-                            let words: Vec<String> = text.to_ascii_lowercase()
-                                .split(|c: char| !c.is_alphanumeric() && c != '_')
-                                .filter(|w| w.len() > 1)
-                                .map(|w| w.to_string())
-                                .collect();
-                            (idx, words)
-                        })
-                        .collect();
-
-                    let avgdl: f32 = docs.iter().map(|(_, w)| w.len() as f32).sum::<f32>()
-                        / (docs.len().max(1) as f32);
-                    let k1: f32 = 1.2;
-                    let b: f32 = 0.75;
-
-                    // IDF per query term: log((N - df + 0.5) / (df + 0.5) + 1)
-                    let idfs: Vec<f32> = query_terms.iter().map(|qt| {
-                        let df = docs.iter()
-                            .filter(|(_, words)| words.iter().any(|w| w == qt || w.contains(qt.as_str())))
-                            .count() as f32;
-                        ((n as f32 - df + 0.5) / (df + 0.5) + 1.0).ln()
-                    }).collect();
-
-                    // BM25 score per document
-                    let bm25_scores: Vec<f32> = docs.iter().map(|(_, words)| {
-                        let dl = words.len() as f32;
-                        let mut score = 0.0f32;
-                        for (qi, qt) in query_terms.iter().enumerate() {
-                            let tf = words.iter()
-                                .filter(|w| *w == qt || w.contains(qt.as_str()))
-                                .count() as f32;
-                            if tf > 0.0 {
-                                let num = tf * (k1 + 1.0);
-                                let den = tf + k1 * (1.0 - b + b * dl / avgdl);
-                                score += idfs[qi] * num / den;
-                            }
-                        }
-                        score
-                    }).collect();
-
-                    // Normalize BM25 to [0, 1] range for blending with cosine
-                    let bm25_max = bm25_scores.iter().cloned().fold(0.0f32, f32::max);
-                    let bm25_norm: Vec<f32> = if bm25_max > 0.0 {
-                        bm25_scores.iter().map(|s| s / bm25_max).collect()
-                    } else {
-                        bm25_scores
-                    };
-
-                    // Blend: cosine + λ * bm25_normalized (λ=0.35 gives BM25 strong influence)
-                    let lambda = 0.35f32;
-                    let mut combined: Vec<(usize, f32)> = cosine_scores.iter().enumerate()
-                        .map(|(di, &(idx, cos))| {
-                            let base = cos + lambda * bm25_norm[di];
-                            // Intent-driven nudge: implement/code/write vs explain/define/describe (lexicon-driven).
-                            let intent_mod = if !self.intent_action.is_empty() {
-                                let (_, words) = &docs[di];
-                                let text = topic.lattice.programs[idx].display_text(&self.dictionary);
-                                let has_code = retrieval_lex.program_has_code_markers_bm25(&text);
-                                let action = self.intent_action.as_str();
-                                if retrieval_lex.intent_prefers_code(action) && has_code {
-                                    0.08
-                                } else if retrieval_lex.intent_prefers_prose(action) && !has_code && words.len() > 15 {
-                                    0.05
-                                } else {
-                                    0.0
-                                }
-                            } else {
-                                0.0
-                            };
-                            (idx, base + intent_mod)
-                        })
-                        .collect();
-                    combined.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                    combined
-                };
-
-                // ── Stage 3: Graph signature re-rank ──
-                // Use discriminative keyword signatures from the ProgramGraph to
-                // further separate confusable programs that cosine+BM25 can't distinguish.
-                crate::infer_trace!(
-                    "    [retrieval-diag] topic='{}', {} progs, query_terms={:?}",
-                    forced_topic, n, query_terms
-                );
-                for (rank, &(idx, score)) in scored.iter().enumerate().take(3) {
-                    let snippet: String = topic.lattice.programs[idx].display_text(&self.dictionary)
-                        .chars().take(50).collect();
-                    crate::infer_trace!(
-                        "      pre-graph[{}]: prog={}, score={:.3}, text=\"{}...\"",
-                        rank, idx, score, snippet
-                    );
-                }
-                if let Some(ref graph) = topic.graph {
-                    if !query_terms.is_empty() {
-                        let sig_scores: Vec<f32> = scored.iter()
-                            .map(|&(idx, _)| graph.signature_score(idx, &query_terms))
-                            .collect();
-                        let sig_max = sig_scores.iter().cloned().fold(0.0f32, f32::max);
-
-                        // Diagnostic: show signature scores for top candidates
-                        for (rank, (&(idx, combined), &sig)) in scored.iter().zip(sig_scores.iter()).enumerate().take(4) {
-                            let sigs_for_prog: Vec<String> = graph.signatures.get(idx)
-                                .map(|s| s.iter().take(5).map(|dk| format!("{}:{:.2}", dk.keyword, dk.specificity)).collect())
-                                .unwrap_or_default();
-                            crate::infer_trace!(
-                                "      graph[{}]: prog={}, combined={:.3}, sig_score={:.3}, top_keys=[{}]",
-                                rank, idx, combined, sig, sigs_for_prog.join(", ")
-                            );
-                        }
-
-                        // Also show what keyword_lookup returns
-                        let lookup = graph.keyword_lookup(&query_terms);
-                        if !lookup.is_empty() {
-                            let top3: Vec<String> = lookup.iter().take(3)
-                                .map(|(idx, s)| format!("prog{}={:.2}", idx, s))
-                                .collect();
-                            crate::infer_trace!("      keyword_lookup: [{}]", top3.join(", "));
-                        }
-
-                        if sig_max > 0.0 {
-                            let sig_lambda = 0.30f32;
-                            for (di, &mut (ref _idx, ref mut score)) in scored.iter_mut().enumerate() {
-                                *score += sig_lambda * (sig_scores[di] / sig_max);
-                            }
-                        }
-
-                        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                        if let Some(&(top_idx, top_score)) = scored.first() {
-                            if let Some(redirect_idx) = graph.neighbor_redirect(top_idx, &query_terms) {
-                                if let Some(entry) = scored.iter_mut().find(|e| e.0 == redirect_idx) {
-                                    entry.1 = top_score + 0.05;
-                                    crate::infer_trace!(
-                                        "    [graph-redirect] prog {} → neighbor {} (better keyword match)",
-                                        top_idx, redirect_idx
-                                    );
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    crate::infer_trace!("      [no-graph] topic '{}' has no ProgramGraph", forced_topic);
-                }
-                // Stage 4: lexical alignment — boost programs that match several query
-                // content words; penalize matches that hinge on a single frequent token
-                // (e.g. "love" shared across unrelated positive_strong prototypes).
-                if query_terms.len() >= 2 {
-                    let qcontent: Vec<&String> = query_terms
-                        .iter()
-                        .filter(|t| t.len() > 2 && !retrieval_lex.is_lex_align_stop(t.as_str()))
-                        .collect();
-                    if qcontent.len() >= 2 {
-                        for (idx, sc) in scored.iter_mut() {
-                            let text = topic.lattice.programs[*idx].display_text(&self.dictionary);
-                            let tl = text.to_ascii_lowercase();
-                            let hits = qcontent.iter().filter(|qt| tl.contains(qt.as_str())).count();
-                            let align = hits as f32 / qcontent.len() as f32;
-                            *sc += 0.22 * align;
-                            if hits == 1 && qcontent.len() >= 3 {
-                                *sc -= 0.14;
-                            }
-                        }
-                        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                        crate::infer_trace!(
-                            "      [lex-align] reranked with {} content terms (stopwords stripped)",
-                            qcontent.len()
-                        );
-                    }
-                }
-                Self::sentiment_apply_crypto_market_retrieval_rescore(
-                    &mut scored,
-                    &query_terms,
-                    topic,
-                    &self.dictionary,
-                );
-                scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                for (rank, &(idx, score)) in scored.iter().enumerate().take(3) {
-                    let snippet: String = topic.lattice.programs[idx].display_text(&self.dictionary)
-                        .chars().take(50).collect();
-                    crate::infer_trace!(
-                        "      post-graph[{}]: prog={}, score={:.3}, text=\"{}...\"",
-                        rank, idx, score, snippet
-                    );
-                }
 
                 let mut try_order = self.stochastic_selection_order(&topic.lattice, &scored, 4);
 

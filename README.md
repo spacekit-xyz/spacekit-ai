@@ -356,6 +356,7 @@ growformer/
     ├── active_inference/    — BeliefState, Markov blanket, episode spine, replay harness
     ├── inference/
     │   ├── harness.rs, inference_toml.rs, manifest.rs, inference_guardrails.rs
+    │   ├── grounding_loop.rs — Encoder certification gate, disjointness scan, live traffic capture/audit, drift telemetry
     │   ├── causal_hints.rs, causal_relation.rs, world_grounding.rs, grounding_expand.rs
     │   ├── retrieval_rescore.rs, retrieval_lexicon.rs, sentiment_generation_lexicon.rs
     │   └── plugins/         — LatticeShortcutsPlugin + `default_inference_harness()`
@@ -461,7 +462,16 @@ let mut rt = Runtime::from_brain_bytes(&brain_bytes)?;
 let response = rt.prompt("help me reset my password")?;
 ```
 
-With `--features wasm-bindgen`, `wasm.rs` exposes JS-callable wrappers.
+With `--features wasm-bindgen`, `wasm.rs` exposes JS-callable wrappers. The browser chat path
+(SpaceKit `spacekit-js`) drives a stateful host: `growformer_init`, `growformer_load_brain`,
+`growformer_load_inference_toml`, `growformer_load_topic_graph`, `growformer_load_grounding_graph`,
+`growformer_load_fragments_jsonl`, `growformer_set_agent_state`, then `growformer_converse` /
+`growformer_generation`. **Parity note:** wasm32 has no `std::fs`, so the JSONL guardrails layer
+(`inference_guardrails.jsonl`, the `--inference-guardrails-jsonl` path) does **not** load in the
+browser — there is no `growformer_load_inference_guardrails_jsonl` binding. Chat-mode output safety
+on wasm therefore rests on the in-engine gates (TOML `[response_shaping]`/`[validation]`, the
+sentiment `final-garble-gate`, and the chat garble gate that routes low-confidence/`MASK`/garbled
+lines to the `[[rules.lattice_misfire_fallback]]` catch-all), not on the disk-loaded guardrails.
 
 ### What is gated behind `#[cfg(not(target_arch = "wasm32"))]`
 
@@ -591,6 +601,61 @@ Encoder certification (the contract every encoder — GLE included — is judged
   encoder is promoted without a **promotable** `PASS` artifact (a strict `wbc` pass; a
   `PASS_PROVISIONAL` earned only at a coarser fallback granularity is not promotable); pooled
   accuracy never gates.
+
+Longitudinal drift telemetry (P4 — reliability monitor, NOT a certifier; see
+`docs/GROUNDING_LOOP_SPEC.md` §16):
+
+- Compute a telemetry window: `cargo run --release --bin growformer-demos -- --drift-telemetry <domain> [companion_dir]`
+- Read drift report + alerts: `cargo run --release --bin growformer-demos -- --drift-report <domain>`
+- Alerts route to a human; every corrective action re-enters the certified path (P0 gate). No
+  auto-remediation path exists in code.
+- P4 hardening: when `recommend_recert` fires but the traffic is structurally unconstructible
+  (no feature-disjoint examples), the system falls back to behavioral-drift response instead
+  of scheduling an unresolvable recert loop.
+
+Real-encoder experiment (§17 — is the wall the encoder or the data?):
+
+- Export phrases: `cargo run --release --bin growformer-demos -- --export-phrases [companion_dir]`
+- Encode offline: `python scripts/encode_phrases.py phrases_to_encode.json --model all-mpnet-base-v2`
+- Authoring feedback: `cargo run --release --bin growformer-demos -- --check-disjointness train.jsonl eval.jsonl`
+- Run experiment: `cargo run --release --bin growformer-demos -- --real-encoder-experiment data/authored_disjoint_eval embeddings.json`
+- Answers whether the wall is encoder-bound, task-bound, or eval-invalid. Capability only —
+  not a deployment certificate. See `docs/GROUNDING_LOOP_SPEC.md` §17.
+
+Live traffic capture & audit (§18 — "measure before you serve"; turns a capability PASS into a
+deployment certification by gating on real production traffic, not authored evals):
+
+- Passive routing capture (CLI): `cargo run --release --bin growformer-demos -- --capture-routing <phrases.txt> [companion_dir]`
+  routes each phrase through the live index and appends label-free `RealTraffic` records to
+  `capture_artifacts/routing_<domain>.jsonl` (§18.3 blind-label rule — capture never writes labels).
+- Browser capture (WASM): the Agent Hub path records each turn via `grounding_loop::capture_lightweight`
+  and POSTs batches as DID-authed documents to a storage node's `growformer_capture` collection
+  under one shared capture-service DID, so a single listing returns everything.
+- Drain browser captures to disk: `python scripts/drain_capture.py --storage-url <node> [--did did:spacekit:growformer-capture] [--collection growformer_capture] [--out-dir capture_artifacts]`
+  flattens each document's `records` and writes `traffic_web_<agent>.jsonl` in the schema `--audit-capture` reads.
+- Audit captured traffic: `cargo run --release --bin growformer-demos -- --audit-capture <capture_dir> [companion_dir] [labeled_eval.jsonl]`
+  — **triage mode** (no labeled file) ranks unlabeled captures into a blind labeling queue
+  (`<capture_dir>/label_queue.jsonl`), over-sampling disjoint candidates so a bounded human-label
+  budget targets the cases that resolve lift; **bucketing mode** (labeled file given) runs the
+  production disjoint-bin + `resolvable` readiness check. See `docs/GROUNDING_LOOP_SPEC.md` §18.
+
+Chat-output certification (the same "measure before you serve" discipline applied to the
+generative chat path, not just the encoder):
+
+- Held-out, property-based eval set: `data/chat_certify/luna_chat_eval.jsonl` (in-domain /
+  out-of-domain / adversarial prompts, authored disjoint from the training corpus). It scores
+  *properties* of generative output, not exact strings.
+- Run: `node scripts/certify_chat.mjs` loads the **shipped browser engine** (`growformer_bg.wasm`)
+  plus the companion's `[inference]` artifacts and scores every generation against the companion's
+  own `[response_shaping]`/`[validation]` contract: garble / `MASK`-leak / decode-collapse,
+  `forbidden_phrases`, `voice_violation_patterns`, and `required_signal` presence. Verdict gates on
+  garble=0, forbidden=0, voice=0, and a configurable signal pass-rate.
+- Measured (Luna `luna-v3-3d`, 30 prompts × 6 samples = 180 generations): **100% pass, 0 garble,
+  0 forbidden, 0 voice-violation, 0 missing-signal**. Ablating fragment composition
+  (`SKIP=fragments`) drives the raw decoder into collapse on the adversarial "bad cat" family; the
+  config-driven chat gate then routes those lines to the in-voice `[[rules.lattice_misfire_fallback]]`
+  template — still **0 garble** reaching the user (6/180 served as fallback instead of soup).
+  This is the regression test for the chat garble fix.
 
 M5 datasets:
 
@@ -910,6 +975,15 @@ The next step here is a reverse adjacency index and a recurrent layer.
 ---
 
 ## **Quantum Biology and Neural Communication**
+
+> **Scope note.** This section and the *Philosophical framing* below are **speculative motivation**,
+> not claims the implementation verifies. None of the engineering results in this README — the
+> certifier verdicts, Split MNIST retention, the disjointness/capture pipeline, or the chat-output
+> certification — depend on any quantum-biology or "alive" hypothesis being true. The Growformer
+> borrows the *mathematics* of non-commutative/deformed algebras for concrete engineering reasons
+> (specialist composition ordering); the physical-quantum and "becomes alive" readings are framing
+> the evidence here neither establishes nor requires. Read them as research hypotheses, kept
+> deliberately separate from the measured claims.
 
 Recent experimental evidence has established that quantum effects operate at functional scales in biological systems. Quantum coherence in photosynthetic light-harvesting complexes (Fleming et al., 2007), radical-pair entanglement in avian magnetoreception, and proton tunneling in enzyme catalysis all demonstrate that the "too warm and wet" objection to biological quantum mechanics is empirically false.
 

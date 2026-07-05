@@ -353,6 +353,50 @@ pub fn load_grounding_graph_from_str(toml_str: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `raised` is a fundraising alias, but "Chase raised my mortgage rate" is a consumer complaint —
+/// not a venture round / earnings headline.
+fn fundraising_root_false_positive_on_consumer_rate(intent_text: &str) -> bool {
+    let lower = intent_text.to_ascii_lowercase();
+    let padded = format!(" {} ", lower.replace('\n', " "));
+    let first_person = padded.contains(" my ")
+        || padded.contains(" i ")
+        || padded.contains(" me ")
+        || lower.trim_start().starts_with("my ")
+        || lower.trim_start().starts_with("i ");
+    if !first_person {
+        return false;
+    }
+    padded.contains("mortgage")
+        || padded.contains("interest rate")
+        || padded.contains(" my rate ")
+        || padded.contains("without notice")
+        || padded.contains("without warning")
+        || padded.contains(" my apr")
+        || padded.contains(" apr ")
+}
+
+fn filter_fundraising_root_from_indices(
+    g: &WorldGraph,
+    intent_text: &str,
+    roots: &mut Vec<usize>,
+    trace_prefix: &str,
+) {
+    if !fundraising_root_false_positive_on_consumer_rate(intent_text) {
+        return;
+    }
+    let Some(&fundraising_ix) = g.lookup.get("fundraising") else {
+        return;
+    };
+    let before = roots.len();
+    roots.retain(|&ix| ix != fundraising_ix);
+    if roots.len() != before {
+        crate::infer_trace!(
+            "  [{}] skip fundraising root on first-person mortgage/rate complaint",
+            trace_prefix
+        );
+    }
+}
+
 fn activated_roots(intent_text: &str) -> Vec<usize> {
     let g = graph();
     let mut seen_idx = HashSet::new();
@@ -368,6 +412,7 @@ fn activated_roots(intent_text: &str) -> Vec<usize> {
             }
         }
     }
+    filter_fundraising_root_from_indices(g, intent_text, &mut roots, "world-ground");
     roots
 }
 
@@ -549,7 +594,11 @@ fn domain_graph_expand(dg: &WorldGraph, intent_text: &str, subject_kw: &mut Vec<
             }
         }
     }
+    filter_fundraising_root_from_indices(dg, intent_text, &mut roots, "domain-ground");
     if roots.is_empty() { return; }
+
+    let skip_fundraising = fundraising_root_false_positive_on_consumer_rate(intent_text);
+    let fundraising_ix = dg.lookup.get("fundraising").copied();
 
     let mut added: Vec<String> = Vec::new();
     let mut visited = HashSet::new();
@@ -557,10 +606,16 @@ fn domain_graph_expand(dg: &WorldGraph, intent_text: &str, subject_kw: &mut Vec<
 
     while let Some((idx, depth)) = queue.pop_front() {
         if depth > 2 || !visited.insert(idx) { continue; }
+        if skip_fundraising && fundraising_ix == Some(idx) {
+            continue;
+        }
         let node = &dg.nodes[idx];
         for e in &node.edges {
             let kind = e.kind.as_str();
             if kind == "disambiguated_by" { continue; }
+            if skip_fundraising && kind == "sentiment_bearing" && e.target == "positive" {
+                continue;
+            }
             if let Some(ref ctx) = e.requires_context {
                 if !roots.iter().any(|&r| dg.nodes[r].id == *ctx) { continue; }
             }
@@ -574,6 +629,9 @@ fn domain_graph_expand(dg: &WorldGraph, intent_text: &str, subject_kw: &mut Vec<
             }
             if let Some(&tix) = dg.lookup.get(target_key.as_str()) {
                 if depth < 2 {
+                    if skip_fundraising && fundraising_ix == Some(tix) {
+                        continue;
+                    }
                     queue.push_back((tix, depth + 1));
                 }
             }
@@ -867,6 +925,48 @@ mod tests {
         );
         assert!(kw.contains(&"financial_gain".to_string()), "kw={kw:?}");
         assert!(!kw.iter().any(|x| x == "positive"), "kw={kw:?}");
+    }
+
+    #[test]
+    fn consumer_mortgage_domain_overlay_skips_fundraising() {
+        let overlay = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/data/fintech/world_grounding_fintech.toml"
+        ));
+        super::load_grounding_graph_from_str(overlay).expect("fintech overlay");
+        let mut kw = Vec::new();
+        super::extend_subject_keywords_with_world_graph(
+            "Chase raised my mortgage rate without notice",
+            &mut kw,
+        );
+        assert!(
+            !kw.iter().any(|x| {
+                matches!(
+                    x.as_str(),
+                    "positive" | "venture_capital" | "ipo" | "financial_gain" | "fundraising"
+                )
+            }),
+            "domain overlay fundraising spillover, kw={kw:?}"
+        );
+        assert!(
+            kw.iter().any(|x| x == "consumer_credit" || x == "interest_rate" || x == "mortgage"),
+            "expected consumer mortgage keywords, kw={kw:?}"
+        );
+    }
+
+    #[test]
+    fn consumer_mortgage_rate_skips_fundraising_root() {
+        let mut kw = Vec::new();
+        super::extend_subject_keywords_with_world_graph(
+            "Chase raised my mortgage rate without notice",
+            &mut kw,
+        );
+        assert!(
+            !kw.iter().any(|x| x == "positive" || x == "venture_capital" || x == "ipo"),
+            "fundraising spillover on consumer complaint, kw={kw:?}"
+        );
+        let b = super::sentiment_bearing_from_intent("Chase raised my mortgage rate without notice");
+        assert!(b < 0.15, "consumer rate hike should not nudge positive, b={b}");
     }
 
     #[test]

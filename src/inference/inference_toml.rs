@@ -1893,6 +1893,10 @@ impl InferenceRulesRuntime {
         let lower = Self::normalize_rules_text(intent_text);
         let lower = lower.as_str();
 
+        if let Some(t) = super::frame_lexicon::resolve_scenario_topic(intent_text) {
+            return Some(t);
+        }
+
         if let Some(t) = self.scan_headline_lexical_topic(lower, false) {
             return Some(t);
         }
