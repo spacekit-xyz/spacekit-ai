@@ -37,10 +37,26 @@ fn is_scenario_lattice_topic(topic: &str) -> bool {
     )
 }
 
+/// Extract lattice headline body from raw diagnostic preview (witness marker may truncate).
+fn lattice_body_from_preview(preview: &str) -> String {
+    const WITNESS: &str = "__GROWFORMER_SENT_WITNESS__";
+    if let Some(idx) = preview.find(WITNESS) {
+        let body = preview[..idx].trim();
+        if !body.is_empty() {
+            return body.to_string();
+        }
+    }
+    growformer::dimension::language::strip_sentiment_lattice_witness_for_display(preview)
+}
+
 fn raw_candidate_usable(
     c: &growformer::dimension::group_gen::RawLatticeCandidate,
     report: &RawLatticeDiagnosticReport,
+    prompt: &str,
 ) -> bool {
+    if growformer::inference::frame_lexicon::matches_reject_frame(prompt) {
+        return false;
+    }
     if c.hard_reject {
         return false;
     }
@@ -119,11 +135,8 @@ impl BrainMemoryRuntime {
         let raw = self.raw_lattice_diagnostic(text, 1)?;
         let mut q = self.query(text)?;
         let source = if let Some(c) = raw.candidates.first() {
-            if raw_candidate_usable(c, &raw) {
-                q.memory_text =
-                    growformer::dimension::language::strip_sentiment_lattice_witness_for_display(
-                        &c.text_preview,
-                    );
+            if raw_candidate_usable(c, &raw, text) {
+                q.memory_text = lattice_body_from_preview(&c.text_preview);
                 q.memory_template_id = format!("raw_lattice_prog_{}", c.prog_idx);
                 q.memory_confidence = c.score;
                 MemorySource::RawLattice

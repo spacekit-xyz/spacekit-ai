@@ -275,70 +275,48 @@ pub fn spacekit_sentiment_root() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("../../spacekit/spacekit-projects/sentiment"))
 }
 
-/// Pre-registered 4-prompt battery with per-brain project manifests (config parity).
+/// Pre-registered battery case (SpaceKit crypto + fintech only).
 #[derive(Clone)]
 pub struct BatteryCase {
     pub label: &'static str,
     pub project: PathBuf,
     pub brain: PathBuf,
     pub prompt: &'static str,
-    /// When set, default `--battery` skips this case (diagnostic-only / not scored).
-    pub skip_reason: Option<&'static str>,
 }
 
-/// Cases included in default `--battery` runs (trained SpaceKit brains only).
+/// Default `--battery` cases (trained SpaceKit crypto + fintech).
 pub fn scored_battery_cases(battery_brains: bool) -> impl Iterator<Item = BatteryCase> {
-    battery_cases(battery_brains).into_iter().filter(|c| c.skip_reason.is_none())
+    battery_cases(battery_brains).into_iter()
 }
 
-pub fn battery_cases(battery_brains: bool) -> [BatteryCase; 4] {
+pub fn battery_cases(battery_brains: bool) -> [BatteryCase; 2] {
     let sk = spacekit_sentiment_root();
     let neurokit = PathBuf::from("../growformer");
 
-    let (sentiment_brain, crypto_brain, fintech_brain) = if battery_brains {
+    let (crypto_brain, fintech_brain) = if battery_brains {
         (
-            neurokit.join("agent-data/sentiment-analysis/sentiment-brain-v3-battery.bin"),
             neurokit.join("agent-data/crypto-analysis/crypto-brain-battery.bin"),
             neurokit.join("agent-data/fintech-analysis/fintech-brain-battery.bin"),
         )
     } else {
         (
-            neurokit.join("agent-data/sentiment-analysis/sentiment-brain-v3.bin"),
             sk.join("crypto/agent/crypto-brain.bin"),
             sk.join("fintech/agent/fintech-brain.bin"),
         )
     };
 
-    const UNTRAINED_SENTIMENT: &str = "sentiment-brain-v3.bin is not trained — skip until a SpaceKit general-sentiment brain exists";
-
     [
-        BatteryCase {
-            label: "case1_sentiment_bitcoin",
-            project: neurokit.join("scripts/sentiment-analysis.gf.toml"),
-            brain: sentiment_brain.clone(),
-            prompt: "Bitcoin crashed after the ETF delay",
-            skip_reason: Some(UNTRAINED_SENTIMENT),
-        },
         BatteryCase {
             label: "case2_crypto_bitcoin",
             project: sk.join("crypto/crypto-sentiment-analysis.gf.toml"),
             brain: crypto_brain,
             prompt: "Bitcoin crashed after the ETF delay",
-            skip_reason: None,
         },
         BatteryCase {
             label: "case3_fintech_chase",
             project: sk.join("fintech/fintech-sentiment-analysis.gf.toml"),
             brain: fintech_brain,
             prompt: "Chase raised my mortgage rate without notice",
-            skip_reason: None,
-        },
-        BatteryCase {
-            label: "case4_sentiment_chase_wrong_brain",
-            project: neurokit.join("scripts/sentiment-analysis.gf.toml"),
-            brain: sentiment_brain.clone(),
-            prompt: "Chase raised my mortgage rate without notice",
-            skip_reason: Some(UNTRAINED_SENTIMENT),
         },
     ]
 }

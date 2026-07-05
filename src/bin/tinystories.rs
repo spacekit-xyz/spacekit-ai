@@ -31,7 +31,7 @@ use growformer_llm::vanilla_llm::vanilla_forward_logits;
 
 #[cfg(feature = "brain-memory")]
 use growformer_llm::brain_infer_config::{
-    battery_cases, heldout_battery_cases, scored_battery_cases, BrainInferConfig,
+    battery_cases, heldout_battery_cases, BrainInferConfig,
 };
 #[cfg(feature = "brain-memory")]
 use growformer_llm::brain_memory::{
@@ -293,8 +293,6 @@ enum Commands {
         heldout: bool,
         #[arg(long, default_value_t = false)]
         battery_brains: bool,
-        #[arg(long, default_value_t = false)]
-        battery_all: bool,
     },
     /// Pre-gate raw lattice retrieval diagnostic (no metacog, no grounding gate).
     #[cfg(feature = "brain-memory")]
@@ -318,15 +316,12 @@ enum Commands {
         top_k: usize,
         #[arg(long, default_value_t = false)]
         json: bool,
-        /// Run the 4-prompt fork-resolving battery (ignores --brain/--prompt).
+        /// Run the SpaceKit battery (cases 2–3; ignores --brain/--prompt).
         #[arg(long, default_value_t = false)]
         battery: bool,
         /// Use battery-retrained brains (includes new JSONL rows).
         #[arg(long, default_value_t = false)]
         battery_brains: bool,
-        /// Include cases 1/4 (untrained neurokit sentiment-brain-v3.bin — diagnostic only).
-        #[arg(long, default_value_t = false)]
-        battery_all: bool,
     },
 }
 
@@ -1511,31 +1506,12 @@ fn main() -> Result<(), String> {
             battery,
             heldout,
             battery_brains,
-            battery_all,
         } => {
             if battery && heldout {
                 return Err("use --battery or --heldout, not both".into());
             }
             if battery {
-                if !battery_all {
-                    for case in battery_cases(battery_brains) {
-                        if let Some(reason) = case.skip_reason {
-                            eprintln!("[battery] skip {}: {}", case.label, reason);
-                        }
-                    }
-                }
-                let cases: Vec<_> = if battery_all {
-                    battery_cases(battery_brains).to_vec()
-                } else {
-                    scored_battery_cases(battery_brains).collect()
-                };
-                for case in cases {
-                    if case.skip_reason.is_some() {
-                        eprintln!(
-                            "[battery] {} (untrained sentiment brain — diagnostic only, not scored)",
-                            case.label
-                        );
-                    }
+                for case in battery_cases(battery_brains) {
                     println!("========== {} ==========", case.label);
                     let infer_cfg = BrainInferConfig {
                         project: Some(case.project.clone()),
@@ -1628,28 +1604,9 @@ fn main() -> Result<(), String> {
             json,
             battery,
             battery_brains,
-            battery_all,
         } => {
             if battery {
-                if !battery_all {
-                    for case in battery_cases(battery_brains) {
-                        if let Some(reason) = case.skip_reason {
-                            eprintln!("[battery] skip {}: {}", case.label, reason);
-                        }
-                    }
-                }
-                let cases: Vec<_> = if battery_all {
-                    battery_cases(battery_brains).to_vec()
-                } else {
-                    scored_battery_cases(battery_brains).collect()
-                };
-                for case in cases {
-                    if case.skip_reason.is_some() {
-                        eprintln!(
-                            "[battery] {} (untrained sentiment brain — diagnostic only, not scored)",
-                            case.label
-                        );
-                    }
+                for case in battery_cases(battery_brains) {
                     println!("========== {} ==========", case.label);
                     let infer_cfg = BrainInferConfig {
                         project: Some(case.project.clone()),

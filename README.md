@@ -647,16 +647,16 @@ boundaries, KV-cache eviction, and the end-to-end `train_v2` loss-decrease test.
 
 ## Growformer sibling crate (`brain-memory` feature)
 
-**Canonical project paths (SpaceKit):** crypto and fintech train/infer data + deployed brains live under [`spacekit-projects/sentiment`](../../spacekit/spacekit-projects/sentiment) (`crypto/`, `fintech/`). Override root with `SPACEKIT_SENTIMENT_ROOT`. General sentiment (cases 1/4) still uses neurokit `growformer/scripts/sentiment-analysis.gf.toml` until a matching SpaceKit project exists.
+**Canonical project paths (SpaceKit):** crypto and fintech train/infer data + deployed brains live under [`spacekit-projects/sentiment`](../../spacekit/spacekit-projects/sentiment) (`crypto/`, `fintech/`). Override root with `SPACEKIT_SENTIMENT_ROOT`. General sentiment (Bet D cases 1/4) has **no brain arm** — RAG-only on `growformer/data/sentiment` until a SpaceKit general-sentiment project exists. Deprecated `sentiment-brain-v3.bin` is not used.
 
-**Status (2026-07-04):** Bet D **revised for product scope**. Full 4-prompt pre-registration still **`SWITCH_TO_EMBEDDING_RAG`** (RAG 4/4, brain 2/4 raw). **Scored SpaceKit cases 2–3:** brain raw **2/2** after scenario topics + `service.rs` lexical-hint fix → product verdict **`HYBRID_DOMAIN_BRAIN`**. **`brain-raw-diag --battery`** uses per-brain `*.gf.toml` config parity.
+**Status (2026-07-04):** Bet D pre-registered verdict **`SWITCH_TO_EMBEDDING_RAG`** on full 4-prompt battery (**RAG 4/4, brain 2/4** round 4). SpaceKit cases 2–3 show brain raw **2/2** on the **original battery prompts** after gap retrain + routing fixes — **exploratory, not certified** (see [`PRE_REGISTRATION.md`](../growformer/docs/PRE_REGISTRATION.md) §6 protocol caveats). Held-out (2 prompts): brain **2/2**, RAG **1/2**; routing rules were patched after initial held-out failure (**eval leakage**).
 
 | Case | Topic hint | Raw #1 | Full infer |
 |------|------------|--------|------------|
 | 2 crypto × Bitcoin ETF | `etf_delay_bearish` ✅ | ETF-delay paraphrase, `witness=true` ✅ | user-anchored NEGATIVE ✅ |
 | 3 fintech × Chase hike | `mortgage_rate_complaint` ✅ | mortgage paraphrase, `witness=true` ✅ | user-anchored NEGATIVE ✅ |
 
-Cases 1/4 still use untrained neurokit `sentiment-brain-v3.bin` — skipped in default `--battery`.
+Cases 1/4 (general sentiment corpus) have **no SpaceKit brain** — brain diagnostics and `--battery` cover **cases 2–3 only**.
 
 **Retrieval-gap training (held-out paraphrases — not battery strings):** `train_sentiment_retrieval_gaps.jsonl` uses **scenario topics** (`etf_delay_bearish`, `mortgage_rate_complaint`) — not polarity-only `negative_mild`. Inference TOML maps the two scored battery prompts into those buckets before forced-topic retrieval. Mis-bucketed rows evicted: counterfactual rally → `copium`, custody fee → `fee_complaint`.
 
@@ -685,17 +685,10 @@ This is the product-shaped integration, not stacking Clifford LM specialists.
 Bypasses metacog and grounding gate. Dumps top-K lattice candidates after cosine+BM25+graph+lex-align scoring, with witness/hard-reject flags computed but **not** applied.
 
 ```bash
-# Four-prompt battery — each case loads its own *.gf.toml (inference TOML + guardrails + topic graph)
+# SpaceKit battery (cases 2–3) — each case loads its own *.gf.toml
 cargo run --release --bin tinystories -- brain-raw-diag --battery --top-k 5
 
-# Single brain + prompt (pass --project for native infer parity)
-cargo run --release --bin tinystories -- brain-raw-diag \
-  --brain ../growformer/agent-data/sentiment-analysis/sentiment-brain-v3.bin \
-  --project ../growformer/scripts/sentiment-analysis.gf.toml \
-  --prompt "Bitcoin crashed after the ETF delay" \
-  --top-k 5
-
-# Crypto case — SpaceKit canonical project
+# Single brain + prompt (pass --project for native infer parity) — crypto example
 cargo run --release --bin tinystories -- brain-raw-diag \
   --brain ../../spacekit/spacekit-projects/sentiment/crypto/agent/crypto-brain.bin \
   --project ../../spacekit/spacekit-projects/sentiment/crypto/crypto-sentiment-analysis.gf.toml \
@@ -723,14 +716,14 @@ cargo run --release --bin tinystories -- brain-raw-diag \
 
 **Regression checklist (stage-tagged — do not flatten to FAIL):**
 
-Default `--battery` runs **cases 2–3 only** (trained SpaceKit crypto + fintech). Cases 1 and 4 use neurokit `sentiment-brain-v3.bin`, which **is not trained** — ignore until a SpaceKit general-sentiment project exists. Pass `--battery-all` to run them for routing diagnostics only (not scored).
+Default `--battery` runs **cases 2–3 only** (SpaceKit crypto + fintech). Bet D cases 1/4 (`sentiment` corpus) are **RAG-only** — no brain arm until a SpaceKit general-sentiment project exists. Deprecated `sentiment-brain-v3.bin` is not invoked.
 
 | Case | Brain × prompt | Expected | Stage if broken | Default battery |
 |------|----------------|----------|-----------------|-----------------|
-| 1 | sentiment × Bitcoin ETF crash | negative/crypto headline memory | retrieval / gate / interface | **skipped** |
+| 1 | sentiment × Bitcoin ETF crash | negative/crypto headline memory | retrieval / gate / interface | **RAG only (no brain)** |
 | 2 | crypto × same | `etf_delay_bearish` lattice (ETF delay + crash copy) | retrieval / gate | **scored** |
 | 3 | fintech × Chase mortgage hike | `mortgage_rate_complaint` lattice (not custody fee) | retrieval / gate | **scored** |
-| 4 | sentiment × Chase hike (wrong brain) | low confidence or neutral — **not** opposite-sentiment top-1 | retrieval (polarity flip) | **skipped** |
+| 4 | sentiment × Chase hike (wrong brain) | low confidence or neutral — **not** opposite-sentiment top-1 | retrieval (polarity flip) | **RAG only (no brain)** |
 
 Record which stage failed: **retrieval** (raw top-K wrong), **gate** (raw OK but `--brain-only` decline), **interface** (held). Token-interface and generator fork are **held** until the store is populated and both retrieval methods re-pass.
 
@@ -751,7 +744,7 @@ cd ../growformer && python3 scripts/rag_baseline_battery.py
 | 2 (store + RAG index) | **4/4** | **0/4** (unretrained `.bin`) | **`SWITCH_TO_EMBEDDING_RAG`** (full battery) |
 | 2 brain retrain | — | 2/4 (`*-battery.bin`) | **Invalid** — train-on-test; not scored |
 | 3 (SpaceKit retrain + routing fix) | **4/4** | **0/2 scored** (routing OK, raw rank wrong) | **`SWITCH_TO_EMBEDDING_RAG`** (full battery) |
-| 4 (scenario topics + hint guard) | **4/4** | **2/2 scored**, 2/4 full | **`HYBRID_DOMAIN_BRAIN`** (product scope) |
+| 4 (scenario topics + hint guard) | **4/4** | **2/2 scored**, 2/4 full | Full rule: **`SWITCH_TO_EMBEDDING_RAG`**; scoped 2/2 exploratory only |
 
 Round-2 brain `train-brain` on battery rows then eval on same battery is contaminated (memory-layer train=val). Round 4 brain raw on scored cases: case 2 ETF-delay paraphrase at #1; case 3 mortgage paraphrase at #1 (both `witness=true`). Full-battery rule unchanged; **scored subset** supports domain brain retrieval + optional RAG.
 
