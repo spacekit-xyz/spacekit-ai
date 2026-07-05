@@ -187,6 +187,16 @@ impl BrainMemoryRuntime {
     ) -> Result<RawLatticeDiagnosticReport, String> {
         self.runtime.raw_lattice_diagnostic(text, top_k)
     }
+
+    pub fn raw_lattice_diagnostic_with_force_topic(
+        &mut self,
+        text: &str,
+        top_k: usize,
+        force_topic: Option<&str>,
+    ) -> Result<RawLatticeDiagnosticReport, String> {
+        self.runtime
+            .raw_lattice_diagnostic_with_force_topic(text, top_k, force_topic)
+    }
 }
 
 /// JSON-serializable mirror of [`RawLatticeDiagnosticReport`] (avoids cross-crate serde mismatch).

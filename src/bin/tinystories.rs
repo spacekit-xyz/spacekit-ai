@@ -316,6 +316,9 @@ enum Commands {
         top_k: usize,
         #[arg(long, default_value_t = false)]
         json: bool,
+        /// Skip headline routing; retrieve from this topic sub-lattice (routing isolation).
+        #[arg(long, value_name = "TOPIC")]
+        force_topic: Option<String>,
         /// Run the SpaceKit battery (cases 2–3; ignores --brain/--prompt).
         #[arg(long, default_value_t = false)]
         battery: bool,
@@ -1602,6 +1605,7 @@ fn main() -> Result<(), String> {
             verbose,
             top_k,
             json,
+            force_topic,
             battery,
             battery_brains,
         } => {
@@ -1636,7 +1640,11 @@ fn main() -> Result<(), String> {
                     verbose,
                 };
                 let mut mem = BrainMemoryRuntime::from_path_with_config(&brain, &infer_cfg)?;
-                let report = mem.raw_lattice_diagnostic(&prompt, top_k)?;
+                let report = if let Some(ref ft) = force_topic {
+                    mem.raw_lattice_diagnostic_with_force_topic(&prompt, top_k, Some(ft))?
+                } else {
+                    mem.raw_lattice_diagnostic(&prompt, top_k)?
+                };
                 if json {
                     println!("{}", raw_lattice_report_json(&report)?);
                 } else {
