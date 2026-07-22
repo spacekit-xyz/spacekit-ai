@@ -8,6 +8,7 @@ pub mod energy_jepa;
 pub mod wm_frontier;
 pub mod wm_transfer;
 pub mod wm_proof;
+pub mod wm_open;
 pub mod action;
 pub mod action_classifier;
 pub mod codegen;
@@ -56,6 +57,12 @@ pub use wm_proof::{
     ensure_frozen_encoder_file, run_phase3r_action_rank_seed, run_phase3r_foreign_seed,
     run_phase3r_sim_loop, ActionRankSeedResult, ForeignDomainResult, ForeignProofSeedResult,
     FrozenExternalEncoder, SimLoopResult, SimStepLog,
+};
+pub use wm_open::{
+    ensure_frozen_vision_encoder, render_visuomotor, run_phase3s_spacekit_host_seed,
+    run_phase3s_visuomotor_seed, step_visuomotor, write_visuomotor_log, FrozenVisionEncoder,
+    SpacekitHostSeedResult, VisuomotorSeedResult, WmHostRequest, WmHostResponse, WmHostSession,
+    VISION_PIXELS, VISION_SIDE,
 };
 pub use action::{ActionJson, ActionType, action_from_routing};
 pub use codegen::{CodeGeneration, generate_code_from_action};

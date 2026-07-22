@@ -44,6 +44,8 @@ use growformer::dimension::{
     DeploySeedResult,
     run_phase3r_action_rank_seed, run_phase3r_foreign_seed, run_phase3r_sim_loop,
     ActionRankSeedResult, ForeignProofSeedResult, SimLoopResult,
+    run_phase3s_visuomotor_seed, run_phase3s_spacekit_host_seed,
+    VisuomotorSeedResult, SpacekitHostSeedResult,
 };
 
 use growformer::types::GroupId;
@@ -135,6 +137,9 @@ struct Args {
     /// Phase 3r: beyond-toy proof — close E-rank, two foreign domains, sim loop logs.
     #[arg(long)]
     phase3r_beyond_toy: bool,
+    /// Phase 3s: open ladder — frozen vision encoder (D), visuomotor log (C), SpaceKit host (E).
+    #[arg(long)]
+    phase3s_open_ladder: bool,
     #[arg(long)]
     phase3f_analyze: bool,
     /// Conditional MI measurement: present-but-inaccessible formalization (Task E).
@@ -482,6 +487,8 @@ fn main() {
         demo_phase3q_deploy_wm();
     } else if args.phase3r_beyond_toy {
         demo_phase3r_beyond_toy();
+    } else if args.phase3s_open_ladder {
+        demo_phase3s_open_ladder();
     } else if args.phase3f_competence {
         demo_phase3f_competence_routing();
     } else if args.phase3e_boundary_analyze {
@@ -10858,6 +10865,110 @@ fn demo_phase3r_beyond_toy() {
             "OVERALL: Phase 3r KILL — foreign transfer or ranking collapsed."
         } else {
             "OVERALL: Phase 3r INCONCLUSIVE — partial beyond-toy progress."
+        }
+    );
+}
+
+fn demo_phase3s_open_ladder() {
+    println!("--- Phase 3s: Open Ladder (WORLD_MODELS §8 D + visuomotor C + SpaceKit E) ---\n");
+    println!("Not Luna. Frozen vision encoder · push–object camera log · deploy_step host.\n");
+    const SEEDS: [u64; 10] = [42, 43, 44, 45, 46, 47, 48, 49, 50, 51];
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let dir = std::env::temp_dir().join("growformer_wm_open");
+    let _ = std::fs::create_dir_all(&dir);
+
+    // --- D + C: visuomotor with frozen vision encoder ---
+    println!("[D/C] Offline-pretrained frozen vision encoder + visuomotor log");
+    let mut vm: Vec<VisuomotorSeedResult> = Vec::new();
+    for &seed in &SEEDS {
+        print!("  visuomotor seed {} ...", seed);
+        let _ = std::io::stdout().flush();
+        vm.push(run_phase3s_visuomotor_seed(seed, &dir));
+        println!(" ok");
+    }
+    let mean_v = |g: fn(&VisuomotorSeedResult) -> f32| {
+        vm.iter().map(g).sum::<f32>() / vm.len() as f32
+    };
+    let reg = mean_v(|r| r.regime_agreement);
+    let mar = mean_v(|r| r.energy_margin);
+    let mse = mean_v(|r| r.selected_mse);
+    let vg = mean_v(|r| r.vg_mse);
+    let frozen = vm.iter().filter(|r| r.encoder_was_frozen).count();
+    let degen = vm.iter().filter(|r| r.degenerate).count();
+    let g_dc = [
+        frozen == vm.len(),
+        degen <= 1,
+        reg >= 0.60,
+        mar > 0.01,
+        mse <= vg + 5e-4,
+    ];
+    println!(
+        "  Frozen {}/{} | Regime {:.1}% | Margin {:.3} | MSE {:.6} vs VG {:.6} | Degen {}/{}",
+        frozen,
+        vm.len(),
+        reg * 100.0,
+        mar,
+        mse,
+        vg,
+        degen,
+        vm.len()
+    );
+
+    // --- E: SpaceKit host ---
+    println!("\n[E] SpaceKit WM host (load / step / reload pin)");
+    let mut sk: Vec<SpacekitHostSeedResult> = Vec::new();
+    for &seed in &SEEDS {
+        print!("  host seed {} ...", seed);
+        let _ = std::io::stdout().flush();
+        sk.push(run_phase3s_spacekit_host_seed(seed, &dir));
+        println!(" ok");
+    }
+    let load_ok = sk.iter().filter(|r| r.load_ok).count();
+    let step_ok = sk.iter().filter(|r| r.step_ok).count();
+    let pin_ok = sk.iter().filter(|r| r.pin_stable_reload).count();
+    let abstain = sk.iter().filter(|r| r.abstain_seen).count();
+    let g_e = [
+        load_ok == sk.len(),
+        step_ok == sk.len(),
+        pin_ok == sk.len(),
+        abstain >= 1,
+    ];
+    println!(
+        "  Load {}/{} | Step {}/{} | Pin-reload {}/{} | Abstain-seen {}/{}",
+        load_ok,
+        sk.len(),
+        step_ok,
+        sk.len(),
+        pin_ok,
+        sk.len(),
+        abstain,
+        sk.len()
+    );
+
+    println!("\n=== VERDICT ===");
+    println!("[D/C] Vision encoder + visuomotor");
+    println!("  [{}] Encoder frozen (pin unchanged) for all seeds", mark(g_dc[0]));
+    println!("  [{}] ≤1 degenerate", mark(g_dc[1]));
+    println!("  [{}] Regime ≥ 60% ({:.1}%)", mark(g_dc[2]), reg * 100.0);
+    println!("  [{}] Margin > 0.01 ({:.3})", mark(g_dc[3]), mar);
+    println!("  [{}] Selected MSE ≤ VG", mark(g_dc[4]));
+    println!("[E] SpaceKit host");
+    println!("  [{}] All loads ok", mark(g_e[0]));
+    println!("  [{}] All steps ok", mark(g_e[1]));
+    println!("  [{}] Pin stable across reload", mark(g_e[2]));
+    println!("  [{}] Abstain observed (≥1 seed)", mark(g_e[3]));
+
+    let pass = g_dc.iter().chain(g_e.iter()).filter(|b| **b).count();
+    let need = g_dc.len() + g_e.len();
+    println!("\nGates: {}/{}", pass, need);
+    println!(
+        "{}",
+        if pass == need {
+            "OVERALL: Phase 3s PASS — D (frozen vision slot) + visuomotor C + SpaceKit E host green. Swap real V-JEPA JSON when available; product surface (F) still open."
+        } else if !g_dc[0] || reg <= 0.55 {
+            "OVERALL: Phase 3s KILL — encoder drift or visuomotor collapse."
+        } else {
+            "OVERALL: Phase 3s INCONCLUSIVE — partial open-ladder progress."
         }
     );
 }
