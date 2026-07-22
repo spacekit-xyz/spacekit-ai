@@ -57,6 +57,12 @@ pub mod environment;
 #[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 pub mod mnist;
 #[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+pub mod cifar10;
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+pub mod cifar_patch;
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+pub mod cifar100;
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 pub mod clifford_mnist;
 #[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 pub mod pathmnist;

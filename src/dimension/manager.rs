@@ -88,7 +88,10 @@ pub struct DimensionManager {
     pub understanding: Option<UnderstandingLayer>,
     #[serde(default)]
     pub meta_brain: Option<MetaBrain>,
-    next_group_id: GroupId,
+    /// World-model citizens (Phase 5a spike): GroupId → pinned WM bundle record.
+    #[serde(default)]
+    pub wm_citizens: HashMap<GroupId, super::wm_citizen::WmCitizenRecord>,
+    pub(crate) next_group_id: GroupId,
     low_confidence_streak: u32,
     pub auto_spawn_threshold: f32,
     pub auto_spawn_k: u32,
@@ -142,6 +145,7 @@ impl DimensionManager {
             group_fingerprints: HashMap::new(),
             understanding: None,
             meta_brain: None,
+            wm_citizens: HashMap::new(),
             next_group_id: 0,
             low_confidence_streak: 0,
             auto_spawn_threshold: 0.15,

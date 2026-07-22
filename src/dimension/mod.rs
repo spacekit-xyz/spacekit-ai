@@ -13,6 +13,9 @@ pub mod wm_act;
 pub mod wm_vjepa;
 pub mod wm_scene;
 pub mod wm_scene_host;
+pub mod wm_citizen;
+pub mod wm_dm;
+pub mod wm_product;
 pub mod context_free_mnist;
 pub mod split_cifar_scaffold;
 pub mod action;
@@ -29,6 +32,7 @@ pub mod policy;
 pub mod promotion;
 pub mod router;
 pub mod observer;
+// manager after wm_dm (WmCitizenRecord field)
 pub mod manager;
 pub mod tool;
 pub mod paramecium;
@@ -90,10 +94,17 @@ pub use wm_scene_host::{
     SceneHostSession,
 };
 pub use context_free_mnist::{
-    run_phase4a_context_free_mnist, run_phase4b_cf_mnist_router, CfMnistRouterResult,
+    run_phase4a_context_free_mnist, run_phase4b_cf_mnist_router, run_phase4d_cf_mnist_full,
+    run_phase4d_cf_mnist_multiseed, CfMnistMultiSeedResult, CfMnistRouterResult,
     ContextFreeMnistResult,
 };
-pub use split_cifar_scaffold::{run_phase4c_split_cifar_scaffold, SplitCifarScaffoldResult};
+pub use split_cifar_scaffold::{
+    run_phase4c_split_cifar_scaffold, run_phase4e_split_cifar_lite, run_phase4f_split_cifar_frozen,
+    SplitCifarFrozenResult, SplitCifarLiteResult, SplitCifarScaffoldResult,
+};
+pub use wm_citizen::{WmCitizenKind, WmCitizenRecord};
+pub use wm_dm::{run_phase5a_wm_dm_spike, WmDmSpikeResult};
+pub use wm_product::{run_phase5b_product_act_loop, ProductActLoopResult};
 pub use action::{ActionJson, ActionType, action_from_routing};
 pub use codegen::{CodeGeneration, generate_code_from_action};
 pub use generation::{GeneratedResponse, render_action_template};

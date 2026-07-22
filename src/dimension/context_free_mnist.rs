@@ -1,9 +1,10 @@
-//! Phase 4a/4b — context-free MNIST routing (Whitepaper §4.4 / §5.5).
+//! Phase 4a/4b/4d — context-free MNIST routing (Whitepaper §4.4 / §5.5).
 //!
 //! - **4a:** tag-guided vs hidden↔embedding cosine (scaffold).
 //! - **4b:** LearnedRouter trained with task labels; **test is context-free** (input only).
+//! - **4d:** full 5-task Split-MNIST CF LearnedRouter + multi-seed aggregate.
 //!
-//! Split-CIFAR remains a separate scaffold (`split_cifar_scaffold.rs`).
+//! Split-CIFAR: `split_cifar_scaffold.rs` / real lite in same module.
 
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -242,17 +243,45 @@ pub fn run_phase4a_context_free_mnist(
     }
 }
 
-/// Phase 4b — LearnedRouter on projected pixels; **no task tags at test**.
+/// Phase 4b — LearnedRouter on projected pixels; **no task tags at test** (3 tasks).
 pub fn run_phase4b_cf_mnist_router(
     seed: u64,
     data_root: &Path,
     train_limit: usize,
     max_epochs: u32,
 ) -> CfMnistRouterResult {
-    // Three digit-pair tasks — harder CF routing than binary.
     const TASKS: [(u8, u8); 3] = [(0, 1), (2, 3), (4, 5)];
+    run_cf_mnist_router(seed, data_root, train_limit, max_epochs, &TASKS, "4b: 3-task CF LearnedRouter")
+}
+
+/// Phase 4d — full 5-task Split-MNIST context-free LearnedRouter (Whitepaper §4.4).
+pub fn run_phase4d_cf_mnist_full(
+    seed: u64,
+    data_root: &Path,
+    train_limit: usize,
+    max_epochs: u32,
+) -> CfMnistRouterResult {
+    const TASKS: [(u8, u8); 5] = [(0, 1), (2, 3), (4, 5), (6, 7), (8, 9)];
+    run_cf_mnist_router(
+        seed,
+        data_root,
+        train_limit,
+        max_epochs,
+        &TASKS,
+        "4d: full 5-task Split-MNIST CF LearnedRouter (test input-only)",
+    )
+}
+
+fn run_cf_mnist_router(
+    seed: u64,
+    data_root: &Path,
+    train_limit: usize,
+    max_epochs: u32,
+    tasks: &[(u8, u8)],
+    note: &str,
+) -> CfMnistRouterResult {
     let Some((mut dm, group_ids, train_per_task, test_per_task)) =
-        train_split_mnist_dm(seed, data_root, train_limit, max_epochs, &TASKS)
+        train_split_mnist_dm(seed, data_root, train_limit, max_epochs, tasks)
     else {
         return CfMnistRouterResult {
             mnist_available: false,
@@ -364,6 +393,106 @@ pub fn run_phase4b_cf_mnist_router(
         router_degenerate: max_share > 0.90,
         mean_task_acc: mean_acc,
         chat_metric_used: false,
-        note: "4b: LearnedRouter train with task labels; test context-free (input only)".into(),
+        note: note.into(),
+    }
+}
+
+/// Multi-seed aggregate for Phase 4d certifiers.
+#[derive(Clone, Debug)]
+pub struct CfMnistMultiSeedResult {
+    pub seeds: Vec<u64>,
+    pub per_seed: Vec<CfMnistRouterResult>,
+    pub mean_router_free: f32,
+    pub mean_cosine_free: f32,
+    pub mean_guided: f32,
+    pub mean_task_acc: f32,
+    pub mean_margin: f32,
+    pub n_non_degenerate: usize,
+    pub n_available: usize,
+    pub chat_metric_used: bool,
+    pub note: String,
+}
+
+/// Phase 4d multi-seed: full 5-task Split-MNIST CF LearnedRouter.
+pub fn run_phase4d_cf_mnist_multiseed(
+    seeds: &[u64],
+    data_root: &Path,
+    train_limit: usize,
+    max_epochs: u32,
+) -> CfMnistMultiSeedResult {
+    let mut per_seed = Vec::new();
+    for &seed in seeds {
+        per_seed.push(run_phase4d_cf_mnist_full(
+            seed,
+            data_root,
+            train_limit,
+            max_epochs,
+        ));
+    }
+    let n_available = per_seed.iter().filter(|r| r.mnist_available).count();
+    if n_available == 0 {
+        return CfMnistMultiSeedResult {
+            seeds: seeds.to_vec(),
+            per_seed,
+            mean_router_free: 0.0,
+            mean_cosine_free: 0.0,
+            mean_guided: 0.0,
+            mean_task_acc: 0.0,
+            mean_margin: 0.0,
+            n_non_degenerate: 0,
+            n_available: 0,
+            chat_metric_used: false,
+            note: "MNIST not found; set MNIST_ROOT or run scripts/download_mnist.sh".into(),
+        };
+    }
+    let n = n_available as f32;
+    let mean_router_free = per_seed
+        .iter()
+        .filter(|r| r.mnist_available)
+        .map(|r| r.router_free_agree)
+        .sum::<f32>()
+        / n;
+    let mean_cosine_free = per_seed
+        .iter()
+        .filter(|r| r.mnist_available)
+        .map(|r| r.cosine_free_agree)
+        .sum::<f32>()
+        / n;
+    let mean_guided = per_seed
+        .iter()
+        .filter(|r| r.mnist_available)
+        .map(|r| r.context_guided_agree)
+        .sum::<f32>()
+        / n;
+    let mean_task_acc = per_seed
+        .iter()
+        .filter(|r| r.mnist_available)
+        .map(|r| r.mean_task_acc)
+        .sum::<f32>()
+        / n;
+    let mean_margin = per_seed
+        .iter()
+        .filter(|r| r.mnist_available)
+        .map(|r| r.router_margin)
+        .sum::<f32>()
+        / n;
+    let n_non_degenerate = per_seed
+        .iter()
+        .filter(|r| r.mnist_available && !r.router_degenerate)
+        .count();
+    CfMnistMultiSeedResult {
+        seeds: seeds.to_vec(),
+        per_seed,
+        mean_router_free,
+        mean_cosine_free,
+        mean_guided,
+        mean_task_acc,
+        mean_margin,
+        n_non_degenerate,
+        n_available,
+        chat_metric_used: false,
+        note: format!(
+            "4d multi-seed: {n_available} seeds × 5-task Split-MNIST CF LearnedRouter (test input-only)"
+        ),
     }
 }

@@ -51,8 +51,11 @@ use growformer::dimension::{
     run_phase3u_vjepa_seed, VjepaWmSeedResult,
     run_phase3v_scene_seed, SceneWmSeedResult,
     run_phase3w_scene_host_seed, SceneHostSeedResult,
-    run_phase4a_context_free_mnist, run_phase4b_cf_mnist_router, ContextFreeMnistResult,
-    CfMnistRouterResult, run_phase4c_split_cifar_scaffold, SplitCifarScaffoldResult,
+    run_phase4a_context_free_mnist, run_phase4b_cf_mnist_router, run_phase4d_cf_mnist_multiseed,
+    ContextFreeMnistResult, CfMnistRouterResult, CfMnistMultiSeedResult,
+    run_phase4c_split_cifar_scaffold, run_phase4e_split_cifar_lite, run_phase4f_split_cifar_frozen,
+    SplitCifarScaffoldResult, SplitCifarLiteResult, SplitCifarFrozenResult,
+    run_phase5a_wm_dm_spike, WmDmSpikeResult, run_phase5b_product_act_loop, ProductActLoopResult,
     ActingHostSession, SceneHostSession, WmHostSession,
 };
 
@@ -172,6 +175,21 @@ struct Args {
     /// Phase 4c: Split-CIFAR protocol scaffold (synthetic promote–freeze smoke; not CIFAR claim).
     #[arg(long)]
     phase4c_split_cifar_scaffold: bool,
+    /// Phase 4d: full 5-task Split-MNIST CF LearnedRouter + multi-seed.
+    #[arg(long)]
+    phase4d_cf_mnist_full: bool,
+    /// Phase 4e: Split-CIFAR-10 lite (torchvision export; SKIP if data missing).
+    #[arg(long)]
+    phase4e_split_cifar_lite: bool,
+    /// Phase 4f: Split-CIFAR-10 with frozen patch bank (pin-stable encoder).
+    #[arg(long)]
+    phase4f_split_cifar_frozen: bool,
+    /// Phase 5a: WM citizens inside DimensionManager (promote + act/deploy + pin).
+    #[arg(long)]
+    phase5a_wm_dm: bool,
+    /// Phase 5b: Product act-loop (return vs random/VG; chat non-certifier).
+    #[arg(long)]
+    phase5b_product_act: bool,
     /// SpaceKit stdio JSONL host: `scene` | `acting` | `deploy` (one JSON request per stdin line).
     #[arg(long, value_name = "MODE")]
     wm_host_stdio: Option<String>,
@@ -546,6 +564,16 @@ fn main() {
         demo_phase4b_cf_mnist_router();
     } else if args.phase4c_split_cifar_scaffold {
         demo_phase4c_split_cifar_scaffold();
+    } else if args.phase4d_cf_mnist_full {
+        demo_phase4d_cf_mnist_full();
+    } else if args.phase4e_split_cifar_lite {
+        demo_phase4e_split_cifar_lite();
+    } else if args.phase4f_split_cifar_frozen {
+        demo_phase4f_split_cifar_frozen();
+    } else if args.phase5a_wm_dm {
+        demo_phase5a_wm_dm();
+    } else if args.phase5b_product_act {
+        demo_phase5b_product_act();
     } else if args.phase3f_competence {
         demo_phase3f_competence_routing();
     } else if args.phase3e_boundary_analyze {
@@ -11523,6 +11551,429 @@ fn demo_phase4c_split_cifar_scaffold() {
             summary
         );
         println!("\nWrote phase4c_split_cifar_scaffold_results.txt");
+    }
+}
+
+fn demo_phase4d_cf_mnist_full() {
+    println!("--- Phase 4d: Full 5-task Split-MNIST CF LearnedRouter (multi-seed) ---\n");
+    println!("Tasks (0,1)(2,3)(4,5)(6,7)(8,9); train labels; test input-only.\n");
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let data = std::env::var("MNIST_ROOT").unwrap_or_else(|_| "data".into());
+    // 3 seeds keeps CI wall-clock sane; expand to 5 locally if needed.
+    let seeds: [u64; 3] = [42, 43, 44];
+    let r: CfMnistMultiSeedResult =
+        run_phase4d_cf_mnist_multiseed(&seeds, Path::new(&data), 700, 220);
+    if r.n_available == 0 {
+        println!("MNIST unavailable: {}", r.note);
+        println!("OVERALL: Phase 4d SKIP — install MNIST to run.");
+        let _ = std::fs::write(
+            "phase4d_cf_mnist_full_results.txt",
+            format!("Phase 4d SKIP\n{}\n", r.note),
+        );
+        return;
+    }
+    for (seed, sr) in r.seeds.iter().zip(r.per_seed.iter()) {
+        if !sr.mnist_available {
+            continue;
+        }
+        println!(
+            "seed {} | tasks {} | acc {:.1}% | guided {:.1}% | cos {:.1}% | rout {:.1}% | margin {:.3} | degen={}",
+            seed,
+            sr.n_tasks,
+            sr.mean_task_acc * 100.0,
+            sr.context_guided_agree * 100.0,
+            sr.cosine_free_agree * 100.0,
+            sr.router_free_agree * 100.0,
+            sr.router_margin,
+            sr.router_degenerate
+        );
+    }
+    println!(
+        "\nMean over {} seeds | acc {:.1}% | guided {:.1}% | cos {:.1}% | rout {:.1}% | margin {:.3} | non-degen {}/{}",
+        r.n_available,
+        r.mean_task_acc * 100.0,
+        r.mean_guided * 100.0,
+        r.mean_cosine_free * 100.0,
+        r.mean_router_free * 100.0,
+        r.mean_margin,
+        r.n_non_degenerate,
+        r.n_available
+    );
+    let g = [
+        r.n_available == seeds.len(),
+        !r.chat_metric_used,
+        r.mean_task_acc >= 0.78,
+        r.mean_guided >= 0.90,
+        r.n_non_degenerate == r.n_available,
+        r.mean_router_free > r.mean_cosine_free + 0.05,
+        r.mean_router_free >= 0.50,
+    ];
+    println!("\n=== VERDICT ===");
+    println!("[{}] All seeds available ({}/{})", mark(g[0]), r.n_available, seeds.len());
+    println!("[{}] Chat metric unused", mark(g[1]));
+    println!("[{}] Mean task acc ≥ 78% ({:.1}%)", mark(g[2]), r.mean_task_acc * 100.0);
+    println!("[{}] Mean guided ≥ 90% ({:.1}%)", mark(g[3]), r.mean_guided * 100.0);
+    println!(
+        "[{}] No seed router-degenerate ({}/{})",
+        mark(g[4]),
+        r.n_non_degenerate,
+        r.n_available
+    );
+    println!(
+        "[{}] Mean router > cosine+5pp ({:.1}% > {:.1}%)",
+        mark(g[5]),
+        r.mean_router_free * 100.0,
+        r.mean_cosine_free * 100.0
+    );
+    println!(
+        "[{}] Mean router-free ≥ 50% ({:.1}%)",
+        mark(g[6]),
+        r.mean_router_free * 100.0
+    );
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    let summary = if pass == g.len() {
+        "OVERALL: Phase 4d PASS — 5-task multi-seed CF LearnedRouter beats cosine."
+    } else if r.n_non_degenerate < r.n_available / 2 || r.mean_router_free <= 0.35 {
+        "OVERALL: Phase 4d KILL — router collapse across seeds."
+    } else {
+        "OVERALL: Phase 4d INCONCLUSIVE — partial 5-task CF progress."
+    };
+    println!("{}", summary);
+    println!("Note: {}", r.note);
+    if let Ok(mut f) = std::fs::File::create("phase4d_cf_mnist_full_results.txt") {
+        let _ = writeln!(
+            f,
+            "Phase 4d CF MNIST full\nseeds={:?}\nguided={:.4} cos={:.4} rout={:.4} margin={:.4} acc={:.4} non_degen={}/{} gates={}/{} {}",
+            r.seeds,
+            r.mean_guided,
+            r.mean_cosine_free,
+            r.mean_router_free,
+            r.mean_margin,
+            r.mean_task_acc,
+            r.n_non_degenerate,
+            r.n_available,
+            pass,
+            g.len(),
+            summary
+        );
+        println!("\nWrote phase4d_cf_mnist_full_results.txt");
+    }
+}
+
+fn demo_phase4e_split_cifar_lite() {
+    println!("--- Phase 4e: Split-CIFAR-10 Lite (torchvision export) ---\n");
+    println!("5 class-pair binary tasks; grayscale→64d; promote–freeze + CF router.");
+    println!("Data: python3 scripts/export_cifar10.py  (DeepAugment optional / out-of-band)\n");
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let data = std::env::var("CIFAR_ROOT").unwrap_or_else(|_| "data".into());
+    let r: SplitCifarLiteResult =
+        run_phase4e_split_cifar_lite(42, Path::new(&data), 800, 300);
+    if !r.cifar_available {
+        println!("CIFAR-10 unavailable: {}", r.note);
+        println!("OVERALL: Phase 4e SKIP — run python3 scripts/export_cifar10.py");
+        let _ = std::fs::write(
+            "phase4e_split_cifar_lite_results.txt",
+            format!("Phase 4e SKIP\n{}\n", r.note),
+        );
+        return;
+    }
+    println!(
+        "Tasks {} | acc {:.1}% | forget0={} | guided {:.1}% | cos {:.1}% | rout {:.1}% | margin {:.3} | degen={}",
+        r.n_tasks,
+        r.mean_task_acc * 100.0,
+        r.retention_zero_forget,
+        r.context_guided_agree * 100.0,
+        r.cosine_free_agree * 100.0,
+        r.router_free_agree * 100.0,
+        r.router_margin,
+        r.router_degenerate
+    );
+    // Honest thresholds for projected grayscale CIFAR lite (not ImageNet-scale claim).
+    let g = [
+        r.cifar_available,
+        !r.chat_metric_used,
+        r.n_tasks == 5,
+        r.retention_zero_forget,
+        r.mean_task_acc >= 0.60,
+        r.context_guided_agree >= 0.90,
+        !r.router_degenerate,
+        r.router_free_agree > r.cosine_free_agree + 0.03,
+        r.router_free_agree >= 0.35,
+    ];
+    println!("\n=== VERDICT ===");
+    println!("[{}] CIFAR-10 export available", mark(g[0]));
+    println!("[{}] Chat metric unused", mark(g[1]));
+    println!("[{}] 5 class-pair binary tasks", mark(g[2]));
+    println!("[{}] Zero forgetting (promote–freeze)", mark(g[3]));
+    println!("[{}] Mean task acc ≥ 60% ({:.1}%)", mark(g[4]), r.mean_task_acc * 100.0);
+    println!(
+        "[{}] Context-guided ≥ 90% ({:.1}%)",
+        mark(g[5]),
+        r.context_guided_agree * 100.0
+    );
+    println!("[{}] Router not constant-specialist degenerate", mark(g[6]));
+    println!(
+        "[{}] Router > cosine-free+3pp ({:.1}% > {:.1}%)",
+        mark(g[7]),
+        r.router_free_agree * 100.0,
+        r.cosine_free_agree * 100.0
+    );
+    println!(
+        "[{}] Router-free agree ≥ 35% ({:.1}%)",
+        mark(g[8]),
+        r.router_free_agree * 100.0
+    );
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    let summary = if pass == g.len() {
+        "OVERALL: Phase 4e PASS — Split-CIFAR-10 lite promote–freeze + CF router (projected gray)."
+    } else if !g[3] || r.router_degenerate {
+        "OVERALL: Phase 4e KILL — retention or router collapse."
+    } else {
+        "OVERALL: Phase 4e INCONCLUSIVE — partial CIFAR-10 lite progress."
+    };
+    println!("{}", summary);
+    println!("Note: {}", r.note);
+    if let Ok(mut f) = std::fs::File::create("phase4e_split_cifar_lite_results.txt") {
+        let _ = writeln!(
+            f,
+            "Phase 4e Split-CIFAR lite\nacc={:.4} forget0={} guided={:.4} cos={:.4} rout={:.4} margin={:.4} degen={} gates={}/{} {}",
+            r.mean_task_acc,
+            r.retention_zero_forget,
+            r.context_guided_agree,
+            r.cosine_free_agree,
+            r.router_free_agree,
+            r.router_margin,
+            r.router_degenerate,
+            pass,
+            g.len(),
+            summary
+        );
+        println!("\nWrote phase4e_split_cifar_lite_results.txt");
+    }
+}
+
+fn demo_phase4f_split_cifar_frozen() {
+    println!("--- Phase 4f: Split-CIFAR-10 Frozen Patch Bank ---\n");
+    println!("Frozen contrast-norm 8×8 patches → 128-D (pin-stable); promote–freeze + CF router.\n");
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let data = std::env::var("CIFAR_ROOT").unwrap_or_else(|_| "data".into());
+    let r: SplitCifarFrozenResult =
+        run_phase4f_split_cifar_frozen(42, Path::new(&data), 1000, 350);
+    if !r.cifar_available {
+        println!("CIFAR-10 unavailable: {}", r.note);
+        println!("OVERALL: Phase 4f SKIP — run python3 scripts/export_cifar10.py");
+        let _ = std::fs::write(
+            "phase4f_split_cifar_frozen_results.txt",
+            format!("Phase 4f SKIP\n{}\n", r.note),
+        );
+        return;
+    }
+    println!(
+        "pin={:016x} stable={} | tasks {} | acc {:.1}% | forget0={} | guided {:.1}% | cos {:.1}% | rout {:.1}%",
+        r.encoder_fingerprint,
+        r.encoder_pin_stable,
+        r.n_tasks,
+        r.mean_task_acc * 100.0,
+        r.retention_zero_forget,
+        r.context_guided_agree * 100.0,
+        r.cosine_free_agree * 100.0,
+        r.router_free_agree * 100.0
+    );
+    let g = [
+        r.cifar_available,
+        !r.chat_metric_used,
+        r.encoder_pin_stable,
+        r.n_tasks == 5,
+        r.retention_zero_forget,
+        r.mean_task_acc >= 0.60,
+        r.context_guided_agree >= 0.90,
+        !r.router_degenerate,
+        r.router_free_agree > r.cosine_free_agree + 0.03,
+        r.router_free_agree >= 0.40,
+    ];
+    println!("\n=== VERDICT ===");
+    println!("[{}] CIFAR-10 export available", mark(g[0]));
+    println!("[{}] Chat metric unused", mark(g[1]));
+    println!("[{}] Encoder pin stable (frozen)", mark(g[2]));
+    println!("[{}] 5 class-pair tasks", mark(g[3]));
+    println!("[{}] Zero forgetting", mark(g[4]));
+    println!("[{}] Mean task acc ≥ 60% ({:.1}%)", mark(g[5]), r.mean_task_acc * 100.0);
+    println!("[{}] Guided ≥ 90% ({:.1}%)", mark(g[6]), r.context_guided_agree * 100.0);
+    println!("[{}] Router not degenerate", mark(g[7]));
+    println!(
+        "[{}] Router > cosine+3pp ({:.1}% > {:.1}%)",
+        mark(g[8]),
+        r.router_free_agree * 100.0,
+        r.cosine_free_agree * 100.0
+    );
+    println!(
+        "[{}] Router-free ≥ 40% ({:.1}%)",
+        mark(g[9]),
+        r.router_free_agree * 100.0
+    );
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    let summary = if pass == g.len() {
+        "OVERALL: Phase 4f PASS — frozen patch CIFAR-10 lite + CF router."
+    } else if !g[2] || !g[4] || r.router_degenerate {
+        "OVERALL: Phase 4f KILL — pin/retention/router collapse."
+    } else {
+        "OVERALL: Phase 4f INCONCLUSIVE — partial frozen-feature CIFAR progress."
+    };
+    println!("{}", summary);
+    println!("Note: {}", r.note);
+    if let Ok(mut f) = std::fs::File::create("phase4f_split_cifar_frozen_results.txt") {
+        let _ = writeln!(
+            f,
+            "Phase 4f Split-CIFAR frozen\npin={:016x} stable={} acc={:.4} forget0={} guided={:.4} cos={:.4} rout={:.4} gates={}/{} {}",
+            r.encoder_fingerprint,
+            r.encoder_pin_stable,
+            r.mean_task_acc,
+            r.retention_zero_forget,
+            r.context_guided_agree,
+            r.cosine_free_agree,
+            r.router_free_agree,
+            pass,
+            g.len(),
+            summary
+        );
+        println!("\nWrote phase4f_split_cifar_frozen_results.txt");
+    }
+}
+
+fn demo_phase5a_wm_dm() {
+    println!("--- Phase 5a: WM Citizens in DimensionManager ---\n");
+    println!("Promote acting+composed bundles into Main; act/deploy via DM; pin reload.\n");
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let dir = Path::new("data/wm/dm_spike");
+    let r: WmDmSpikeResult = run_phase5a_wm_dm_spike(42, dir);
+    println!(
+        "gid={} pin={:016x} citizens={} pin_stable={} reload_match={} act={} deploy={}",
+        r.group_id,
+        r.encoder_fingerprint,
+        r.n_citizens,
+        r.pin_stable,
+        r.reload_fingerprint_match,
+        r.act_ok,
+        r.deploy_ok
+    );
+    let g = [
+        !r.chat_metric_used,
+        r.n_citizens >= 2,
+        r.pin_stable,
+        r.reload_fingerprint_match,
+        r.act_ok,
+        r.deploy_ok,
+    ];
+    println!("\n=== VERDICT ===");
+    println!("[{}] Chat metric unused", mark(g[0]));
+    println!("[{}] ≥2 WM citizens registered", mark(g[1]));
+    println!("[{}] Bundle pin stable", mark(g[2]));
+    println!("[{}] Reload fingerprint matches citizen", mark(g[3]));
+    println!("[{}] DM wm_act_disk ok", mark(g[4]));
+    println!("[{}] DM wm_deploy_step ok", mark(g[5]));
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    let summary = if pass == g.len() {
+        "OVERALL: Phase 5a PASS — WM citizens live in DimensionManager (spike; not full AMI)."
+    } else {
+        "OVERALL: Phase 5a FAIL — DM WM wiring incomplete."
+    };
+    println!("{}", summary);
+    println!("Note: {}", r.note);
+    if let Ok(mut f) = std::fs::File::create("phase5a_wm_dm_results.txt") {
+        let _ = writeln!(
+            f,
+            "Phase 5a WM-DM spike\ngid={} pin={:016x} citizens={} pin={} reload={} act={} deploy={} gates={}/{} {}",
+            r.group_id,
+            r.encoder_fingerprint,
+            r.n_citizens,
+            r.pin_stable,
+            r.reload_fingerprint_match,
+            r.act_ok,
+            r.deploy_ok,
+            pass,
+            g.len(),
+            summary
+        );
+        println!("\nWrote phase5a_wm_dm_results.txt");
+    }
+}
+
+fn demo_phase5b_product_act() {
+    println!("--- Phase 5b: Product Act-Loop (return is the ship metric) ---\n");
+    println!("Disk + visuomotor return vs random/VG; host pin; SpaceKit; chat excluded.\n");
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let dir = Path::new("data/wm/product_act");
+    let r: ProductActLoopResult = run_phase5b_product_act_loop(42, dir);
+    println!(
+        "disk ret wm/rand/vg = {:.3}/{:.3}/{:.3} | vm = {:.3}/{:.3}/{:.3} | pin={} host={} spacekit={}",
+        r.disk.return_wm,
+        r.disk.return_random,
+        r.disk.return_vg,
+        r.visuomotor.return_wm,
+        r.visuomotor.return_random,
+        r.visuomotor.return_vg,
+        r.pin_stable_all,
+        r.host_pin_ok,
+        r.spacekit_host_ok
+    );
+    let g = [
+        !r.chat_metric_used,
+        r.pin_stable_all,
+        r.return_beats_random,
+        r.return_beats_vg,
+        r.host_pin_ok,
+        r.spacekit_host_ok,
+        r.disk.regime_agreement >= 0.70,
+        r.product_gate_pass,
+    ];
+    println!("\n=== VERDICT ===");
+    println!("[{}] Chat metric unused", mark(g[0]));
+    println!("[{}] Pins stable (disk+vm+host)", mark(g[1]));
+    println!("[{}] Disk return beats random (ship metric)", mark(g[2]));
+    println!("[{}] Disk return beats VG (ship metric)", mark(g[3]));
+    println!("[{}] Acting host pin reload", mark(g[4]));
+    println!("[{}] SpaceKit host pin reload", mark(g[5]));
+    println!(
+        "[{}] Disk regime agree ≥ 70% ({:.1}%)",
+        mark(g[6]),
+        r.disk.regime_agreement * 100.0
+    );
+    println!("[{}] Product gate (disk return + pins + host)", mark(g[7]));
+    println!(
+        "  (diagnostic) visuomotor ret wm/rand/vg = {:.3}/{:.3}/{:.3}",
+        r.visuomotor.return_wm, r.visuomotor.return_random, r.visuomotor.return_vg
+    );
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    let summary = if pass == g.len() {
+        "OVERALL: Phase 5b PASS — product act-loop; return is the metric (not chat)."
+    } else if r.chat_metric_used || !r.pin_stable_all {
+        "OVERALL: Phase 5b KILL — chat leakage or pin drift."
+    } else {
+        "OVERALL: Phase 5b INCONCLUSIVE — return/host partial."
+    };
+    println!("{}", summary);
+    println!("Note: {}", r.note);
+    if let Ok(mut f) = std::fs::File::create("phase5b_product_act_results.txt") {
+        let _ = writeln!(
+            f,
+            "Phase 5b product act\ndisk_wm={:.4} rand={:.4} vg={:.4} vm_wm={:.4} pin={} spacekit={} product={} gates={}/{} {}",
+            r.disk.return_wm,
+            r.disk.return_random,
+            r.disk.return_vg,
+            r.visuomotor.return_wm,
+            r.pin_stable_all,
+            r.spacekit_host_ok,
+            r.product_gate_pass,
+            pass,
+            g.len(),
+            summary
+        );
+        println!("\nWrote phase5b_product_act_results.txt");
     }
 }
 

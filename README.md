@@ -5,6 +5,7 @@
 | Doc | What it's for |
 |-----|---------------|
 | **This file** (`README.md`) | Overview, architecture, training/inference CLI, WASM, GLE milestones, latest results |
+| [`docs/APPLICATIONS.md`](docs/APPLICATIONS.md) | **What you can build/use today** — applications catalog for devs and users, across Growformer (language/agents/code) and Growformer JEPA (world models), with maturity tags |
 | [`docs/GROWFORMER_WHITEPAPER.md`](docs/GROWFORMER_WHITEPAPER.md) | Preprint: parameter-isolated specialists, VirtualGroup negative, cone anti-collapse (qualified), retention invariant; appendices for deployment stack |
 | [`USE_CASES.md`](USE_CASES.md) | Where the substrate wins, emergent architectures, continual learning, edge deployment, explainability (uses “Neuro” naming for the same system) |
 | [`DOCKER.md`](DOCKER.md) | Linux amd64 builds (`build-linux.sh`), Docker image, cloud VM deployment |
