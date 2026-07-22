@@ -589,6 +589,15 @@ impl ActingHostSession {
             },
         }
     }
+
+    pub fn handle_json(&mut self, line: &str) -> String {
+        match serde_json::from_str::<ActingHostRequest>(line) {
+            Ok(req) => serde_json::to_string(&self.handle(req)).unwrap_or_else(|e| {
+                format!(r#"{{"ok":false,"error":"{e}","note":"serialize"}}"#)
+            }),
+            Err(e) => format!(r#"{{"ok":false,"error":"{e}","note":"bad request"}}"#),
+        }
+    }
 }
 
 pub fn run_phase3t_host_act_seed(seed: u64, work_dir: &Path) -> bool {

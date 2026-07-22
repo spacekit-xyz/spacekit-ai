@@ -787,6 +787,22 @@ pub fn activated_root_ids(intent_text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Layer‑0 expansion terms only (no subject seed list). Used by certifiers.
+pub fn layer0_expand_terms(intent_text: &str, max_depth: u8, max_terms: usize) -> Vec<String> {
+    let roots = activated_roots(intent_text);
+    if roots.is_empty() {
+        return Vec::new();
+    }
+    expand_from_roots(&roots, intent_text, max_depth, max_terms)
+}
+
+/// True if expansion at `deep` adds terms beyond shallow (depth‑0) — structure used.
+pub fn layer0_depth_adds_terms(intent_text: &str) -> bool {
+    let shallow = layer0_expand_terms(intent_text, 0, 32);
+    let deep = layer0_expand_terms(intent_text, 2, 32);
+    deep.iter().any(|t| !shallow.iter().any(|s| s == t))
+}
+
 /// Activated root node ids on the optional runtime domain graph only.
 pub fn activated_root_ids_in_domain_graph(intent_text: &str) -> Vec<String> {
     let Some(dg) = domain_graph_clone() else {

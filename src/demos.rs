@@ -51,6 +51,8 @@ use growformer::dimension::{
     run_phase3u_vjepa_seed, VjepaWmSeedResult,
     run_phase3v_scene_seed, SceneWmSeedResult,
     run_phase3w_scene_host_seed, SceneHostSeedResult,
+    run_phase4a_context_free_mnist, ContextFreeMnistResult,
+    ActingHostSession, SceneHostSession, WmHostSession,
 };
 
 use growformer::types::GroupId;
@@ -157,6 +159,15 @@ struct Args {
     /// Phase 3w: SpaceKit scene-graph host (load/step/act/reload pin).
     #[arg(long)]
     phase3w_scene_host: bool,
+    /// Layer 0 typed concept-graph certifier (language path; not JEPA / not chat WM).
+    #[arg(long)]
+    layer0_concept_graph: bool,
+    /// Phase 4a: context-free vs context-guided MNIST routing scaffold (Whitepaper §4.4).
+    #[arg(long)]
+    phase4a_context_free_mnist: bool,
+    /// SpaceKit stdio JSONL host: `scene` | `acting` | `deploy` (one JSON request per stdin line).
+    #[arg(long, value_name = "MODE")]
+    wm_host_stdio: Option<String>,
     #[arg(long)]
     phase3f_analyze: bool,
     /// Conditional MI measurement: present-but-inaccessible formalization (Task E).
@@ -354,11 +365,17 @@ struct Args {
 }
 
 fn main() {
+    let args = Args::parse();
+    // SpaceKit stdio: JSONL only (no banner).
+    if let Some(mode) = args.wm_host_stdio.as_deref() {
+        demo_wm_host_stdio(mode);
+        return;
+    }
+
     println!("=============================================================");
     println!("  Growformer — Demos & Benchmarks");
     println!("=============================================================\n");
 
-    let args = Args::parse();
     if let Some(path) = args.print_gle_card.as_deref() {
         if let Err(e) = print_gle_model_card(path) {
             eprintln!("Failed to print GLE model card: {}", e);
@@ -514,6 +531,10 @@ fn main() {
         demo_phase3v_scene_wm();
     } else if args.phase3w_scene_host {
         demo_phase3w_scene_host();
+    } else if args.layer0_concept_graph {
+        demo_layer0_concept_graph();
+    } else if args.phase4a_context_free_mnist {
+        demo_phase4a_context_free_mnist();
     } else if args.phase3f_competence {
         demo_phase3f_competence_routing();
     } else if args.phase3e_boundary_analyze {
@@ -11177,6 +11198,232 @@ fn demo_phase3u_vjepa_wm() {
             "OVERALL: Phase 3u INCONCLUSIVE."
         }
     );
+}
+
+fn demo_layer0_concept_graph() {
+    use growformer::inference::world_grounding::{
+        activated_root_ids, layer0_depth_adds_terms, layer0_expand_terms,
+    };
+    println!("--- Layer 0: Typed Concept Graph Certifier (language path) ---\n");
+    println!("Complements JEPA WM; not a chat/Luna WM metric.\n");
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+
+    struct Case {
+        intent: &'static str,
+        must_have: &'static [&'static str],
+        must_activate: bool,
+    }
+    let cases = [
+        Case {
+            intent: "Morgan Stanley launches Bitcoin ETF",
+            must_have: &["product_release", "go_live", "listing", "exchange_traded_product"],
+            must_activate: true,
+        },
+        Case {
+            intent: "HSBC granted Hong Kong stablecoin issuer licence",
+            must_have: &["regulatory_approval", "issuer", "licence", "license"],
+            must_activate: true,
+        },
+        Case {
+            intent: "the weather is mild today",
+            must_have: &[],
+            must_activate: false,
+        },
+    ];
+
+    let mut hit_ok = 0usize;
+    let mut depth_any = false;
+    let mut neg_ok = 0usize;
+    let mut n_pos = 0usize;
+    for c in &cases {
+        let roots = activated_root_ids(c.intent);
+        let deep = layer0_expand_terms(c.intent, 2, 32);
+        let adds = layer0_depth_adds_terms(c.intent);
+        println!(
+            "  intent={:?}\n    roots={:?}\n    expand={:?}\n    depth_adds={}",
+            c.intent, roots, deep, adds
+        );
+        if c.must_activate {
+            n_pos += 1;
+            let has = c
+                .must_have
+                .iter()
+                .any(|need| deep.iter().any(|t| t == need));
+            if has {
+                hit_ok += 1;
+            }
+            depth_any |= adds;
+        } else if deep.is_empty() || roots.is_empty() {
+            neg_ok += 1;
+        }
+    }
+
+    let g = [
+        hit_ok == n_pos && n_pos > 0,
+        depth_any, // ≥1 fixture uses multi-hop structure (first-hop alone is not enough for all)
+        neg_ok >= 1,
+        true, // chat unused by construction
+    ];
+    println!("\n=== VERDICT ===");
+    println!(
+        "[{}] Positive fixtures expand expected terms ({}/{})",
+        mark(g[0]),
+        hit_ok,
+        n_pos
+    );
+    println!(
+        "[{}] Multi-hop depth adds terms on ≥1 fixture",
+        mark(g[1])
+    );
+    println!("[{}] Neutral intent does not spuriously expand", mark(g[2]));
+    println!("[{}] Chat metric unused", mark(g[3]));
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    let summary = if pass == g.len() {
+        "OVERALL: Layer 0 PASS — typed concept graph expansion certified (language path)."
+    } else {
+        "OVERALL: Layer 0 INCONCLUSIVE — expand fixtures need graph coverage."
+    };
+    println!("{}", summary);
+    if let Ok(mut f) = std::fs::File::create("layer0_concept_graph_results.txt") {
+        let _ = writeln!(
+            f,
+            "Layer 0 concept graph\nhit={}/{} depth_any={} neg={} gates={}/{} {}",
+            hit_ok, n_pos, depth_any, neg_ok, pass, g.len(), summary
+        );
+        println!("\nWrote layer0_concept_graph_results.txt");
+    }
+}
+
+fn demo_phase4a_context_free_mnist() {
+    println!("--- Phase 4a: Context-Free MNIST Routing Scaffold (Whitepaper §4.4) ---\n");
+    println!("2-task Split-MNIST; context-guided tags vs context-free cosine. Not closed.\n");
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let data = std::env::var("MNIST_ROOT").unwrap_or_else(|_| "data".into());
+    let r: ContextFreeMnistResult =
+        run_phase4a_context_free_mnist(42, Path::new(&data), 1200, 400);
+    if !r.mnist_available {
+        println!("MNIST unavailable: {}", r.note);
+        println!("OVERALL: Phase 4a SKIP — install MNIST to run scaffold.");
+        let _ = std::fs::write(
+            "phase4a_context_free_mnist_results.txt",
+            format!("Phase 4a SKIP\n{}\n", r.note),
+        );
+        return;
+    }
+    println!(
+        "Tasks {} | mean acc {:.1}% | guided agree {:.1}% (margin {:.3}) | free agree {:.1}% (margin {:.3})",
+        r.n_tasks,
+        r.mean_task_acc * 100.0,
+        r.context_guided_agree * 100.0,
+        r.context_guided_margin,
+        r.context_free_agree * 100.0,
+        r.context_free_margin
+    );
+    let g = [
+        r.mnist_available,
+        !r.chat_metric_used,
+        r.mean_task_acc >= 0.80,
+        r.context_guided_agree >= 0.90,
+        r.context_guided_agree > r.context_free_agree,
+    ];
+    println!("\n=== VERDICT ===");
+    println!("[{}] MNIST available", mark(g[0]));
+    println!("[{}] Chat metric unused", mark(g[1]));
+    println!("[{}] Mean task acc ≥ 80% ({:.1}%)", mark(g[2]), r.mean_task_acc * 100.0);
+    println!(
+        "[{}] Context-guided agree ≥ 90% ({:.1}%)",
+        mark(g[3]),
+        r.context_guided_agree * 100.0
+    );
+    println!(
+        "[{}] Guided > free ({:.1}% > {:.1}%) — CF harder, as expected",
+        mark(g[4]),
+        r.context_guided_agree * 100.0,
+        r.context_free_agree * 100.0
+    );
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    let summary = if pass == g.len() {
+        "OVERALL: Phase 4a SCAFFOLD GREEN — context-free still open (not a closed §4.4 result)."
+    } else if !g[0] {
+        "OVERALL: Phase 4a SKIP — MNIST missing."
+    } else if !g[2] && r.mean_task_acc < 0.70 {
+        "OVERALL: Phase 4a KILL — train collapse."
+    } else {
+        "OVERALL: Phase 4a INCONCLUSIVE — scaffold partial (CF MNIST remains open)."
+    };
+    println!("{}", summary);
+    println!("Note: {}", r.note);
+    if let Ok(mut f) = std::fs::File::create("phase4a_context_free_mnist_results.txt") {
+        let _ = writeln!(
+            f,
+            "Phase 4a context-free MNIST scaffold\nguided={:.4} free={:.4} g_m={:.4} f_m={:.4} acc={:.4} gates={}/{} {}",
+            r.context_guided_agree,
+            r.context_free_agree,
+            r.context_guided_margin,
+            r.context_free_margin,
+            r.mean_task_acc,
+            pass,
+            g.len(),
+            summary
+        );
+        println!("\nWrote phase4a_context_free_mnist_results.txt");
+    }
+}
+
+fn demo_wm_host_stdio(mode: &str) {
+    use std::io::{BufRead, BufReader};
+    let mode = mode.trim().to_ascii_lowercase();
+    // Quiet path for SpaceKit: only JSON responses on stdout.
+    match mode.as_str() {
+        "scene" => {
+            let mut host = SceneHostSession::new();
+            let stdin = std::io::stdin();
+            for line in BufReader::new(stdin.lock()).lines() {
+                let Ok(line) = line else { break };
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                println!("{}", host.handle_json(line));
+                let _ = std::io::stdout().flush();
+            }
+        }
+        "acting" => {
+            let mut host = ActingHostSession::new();
+            let stdin = std::io::stdin();
+            for line in BufReader::new(stdin.lock()).lines() {
+                let Ok(line) = line else { break };
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                println!("{}", host.handle_json(line));
+                let _ = std::io::stdout().flush();
+            }
+        }
+        "deploy" => {
+            let mut host = WmHostSession::new();
+            let stdin = std::io::stdin();
+            for line in BufReader::new(stdin.lock()).lines() {
+                let Ok(line) = line else { break };
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                println!("{}", host.handle_json(line));
+                let _ = std::io::stdout().flush();
+            }
+        }
+        _ => {
+            eprintln!(
+                "wm-host-stdio mode must be scene|acting|deploy (got {:?})",
+                mode
+            );
+            std::process::exit(2);
+        }
+    }
 }
 
 fn demo_phase3w_scene_host() {

@@ -13,6 +13,7 @@ pub mod wm_act;
 pub mod wm_vjepa;
 pub mod wm_scene;
 pub mod wm_scene_host;
+pub mod context_free_mnist;
 pub mod action;
 pub mod action_classifier;
 pub mod codegen;
@@ -87,6 +88,7 @@ pub use wm_scene_host::{
     run_phase3w_scene_host_seed, SceneHostRequest, SceneHostResponse, SceneHostSeedResult,
     SceneHostSession,
 };
+pub use context_free_mnist::{run_phase4a_context_free_mnist, ContextFreeMnistResult};
 pub use action::{ActionJson, ActionType, action_from_routing};
 pub use codegen::{CodeGeneration, generate_code_from_action};
 pub use generation::{GeneratedResponse, render_action_template};
