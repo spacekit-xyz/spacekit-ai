@@ -382,7 +382,7 @@ fn support_score(scene: &SceneGraph) -> f32 {
         .count() as f32
 }
 
-fn goal_scene(before: &SceneGraph, after: &SceneGraph) -> f32 {
+pub fn goal_scene(before: &SceneGraph, after: &SceneGraph) -> f32 {
     if before.regime_stable {
         // Keep tower: height + supports − lateral spread
         let h0 = stack_height(before);
@@ -419,33 +419,162 @@ fn oracle_action(scene: &SceneGraph, block_idx: usize) -> WmAction {
 }
 
 // =============================================================================
-// Seed runner
+// Serializable scene WM bundle (SpaceKit deploy artifact)
 // =============================================================================
 
-#[derive(Clone, Debug)]
-pub struct SceneWmSeedResult {
-    pub regime_agreement: f32,
-    pub energy_margin: f32,
-    pub selected_mse: f32,
-    pub vg_mse: f32,
-    pub return_wm: f32,
-    pub return_random: f32,
-    pub return_vg: f32,
-    pub structure_ablation_drop: f32,
-    pub pin_stable: bool,
-    pub degenerate: bool,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SceneWmBundle {
+    pub encoder: FrozenSceneEncoder,
     pub encoder_fingerprint: u64,
-    pub chat_metric_used: bool,
+    pub abstain_tau: f32,
+    pub energy_stable: EnergyAdapter,
+    pub energy_slip: EnergyAdapter,
+    pub act_stable: ActionEnergyAdapter,
+    pub act_slip: ActionEnergyAdapter,
+    pub note: String,
 }
 
-fn pick_block(scene: &SceneGraph, rng: &mut StdRng) -> usize {
+impl SceneWmBundle {
+    pub fn verify(&self) -> Result<(), String> {
+        if self.encoder.fingerprint != self.encoder_fingerprint {
+            return Err("scene encoder fingerprint drift".into());
+        }
+        for (name, pin) in [
+            ("energy_stable", self.energy_stable.encoder_pin),
+            ("energy_slip", self.energy_slip.encoder_pin),
+            ("act_stable", self.act_stable.encoder_pin),
+            ("act_slip", self.act_slip.encoder_pin),
+        ] {
+            if pin != self.encoder_fingerprint {
+                return Err(format!("{name} adapter pin drift"));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn save(&self, path: &Path) -> Result<(), String> {
+        self.verify()?;
+        if let Some(p) = path.parent() {
+            std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
+        }
+        let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        std::fs::write(path, json).map_err(|e| e.to_string())
+    }
+
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let s = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let b: Self = serde_json::from_str(&s).map_err(|e| e.to_string())?;
+        b.verify()?;
+        Ok(b)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SceneStepDecision {
+    pub route_stable: bool,
+    pub abstain: bool,
+    pub energy_stable: f32,
+    pub energy_slip: f32,
+    pub affinity_stable: f32,
+    pub affinity_slip: f32,
+    pub proposed_z: Vec<f32>,
+    pub encoder_fingerprint: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SceneActDecision {
+    pub action: u8,
+    pub block_idx: usize,
+    pub planning_energy: f32,
+    pub route_stable: bool,
+    pub abstain: bool,
+    pub encoder_fingerprint: u64,
+}
+
+/// Predictive route / energy on a scene graph (deploy_step analog).
+pub fn scene_deploy_step(bundle: &SceneWmBundle, scene: &SceneGraph) -> Result<SceneStepDecision, String> {
+    bundle.verify()?;
+    let z = bundle.encoder.encode(scene);
+    let ps = bundle.energy_stable.propose_next(&z);
+    let pl = bundle.energy_slip.propose_next(&z);
+    let es = bundle.energy_stable.energy(&z, &ps);
+    let el = bundle.energy_slip.energy(&z, &pl);
+    let as_ = bundle.energy_stable.affinity(&z);
+    let al = bundle.energy_slip.affinity(&z);
+    let route_stable = es < el;
+    let abstain = (as_ - al).abs() < bundle.abstain_tau;
+    let proposed_z = if route_stable { ps } else { pl };
+    Ok(SceneStepDecision {
+        route_stable,
+        abstain,
+        energy_stable: es,
+        energy_slip: el,
+        affinity_stable: as_,
+        affinity_slip: al,
+        proposed_z,
+        encoder_fingerprint: bundle.encoder_fingerprint,
+    })
+}
+
+/// Route → plan_action on scene graph (product act surface).
+///
+/// Default route matches [`scene_deploy_step`] (proposal-energy). Optional sticky
+/// keeps the specialist for an episode (avoids mid-horizon thrash).
+pub fn scene_act_step(
+    bundle: &SceneWmBundle,
+    scene: &SceneGraph,
+    block_idx: usize,
+) -> Result<SceneActDecision, String> {
+    scene_act_step_routed(bundle, scene, block_idx, None)
+}
+
+pub fn scene_act_step_routed(
+    bundle: &SceneWmBundle,
+    scene: &SceneGraph,
+    block_idx: usize,
+    sticky_route_stable: Option<bool>,
+) -> Result<SceneActDecision, String> {
+    bundle.verify()?;
+    if block_idx == 0 || block_idx >= scene.nodes.len() {
+        return Err("block_idx must address a Block node".into());
+    }
+    let z = bundle.encoder.encode(scene);
+    let as_ = bundle.energy_stable.affinity(&z);
+    let al = bundle.energy_slip.affinity(&z);
+    let abstain = (as_ - al).abs() < bundle.abstain_tau;
+    let route_stable = match sticky_route_stable {
+        Some(s) => s,
+        None => {
+            let ps = bundle.energy_stable.propose_next(&z);
+            let pl = bundle.energy_slip.propose_next(&z);
+            bundle.energy_stable.energy(&z, &ps) < bundle.energy_slip.energy(&z, &pl)
+        }
+    };
+    let ad = if route_stable {
+        &bundle.act_stable
+    } else {
+        &bundle.act_slip
+    };
+    let (act, e) = plan_action(ad, &z, 1);
+    Ok(SceneActDecision {
+        action: act as u8,
+        block_idx,
+        planning_energy: e,
+        route_stable,
+        abstain,
+        encoder_fingerprint: bundle.encoder_fingerprint,
+    })
+}
+
+pub fn pick_block(scene: &SceneGraph, rng: &mut StdRng) -> usize {
     if scene.nodes.len() <= 1 {
         return 0;
     }
     rng.gen_range(1..scene.nodes.len())
 }
 
-pub fn run_phase3v_scene_seed(seed: u64) -> SceneWmSeedResult {
+/// Train frozen-encoder + energy/act adapters (3v/3w shared).
+pub fn train_scene_wm_bundle(seed: u64) -> SceneWmBundle {
     let enc = FrozenSceneEncoder::new(seed.wrapping_add(0x5CE_11E));
     let pin = enc.fingerprint;
     let mut rng = StdRng::seed_from_u64(seed.wrapping_mul(41).wrapping_add(7));
@@ -476,7 +605,6 @@ pub fn run_phase3v_scene_seed(seed: u64) -> SceneWmSeedResult {
     a_s.train(&stable_pairs, &slippery_pairs, &cz_l, 350, 0.14, &mut rng);
     a_l.train(&slippery_pairs, &stable_pairs, &cz_s, 350, 0.14, &mut rng);
 
-    // Action specialists for planning return — labels from geometric oracle
     let mut ranked_s = Vec::new();
     let mut ranked_l = Vec::new();
     while ranked_s.len() < 160 || ranked_l.len() < 160 {
@@ -507,10 +635,53 @@ pub fn run_phase3v_scene_seed(seed: u64) -> SceneWmSeedResult {
     act_s.train_rank_only(&ranked_s, 220, 0.10);
     act_l.train_rank_only(&ranked_l, 220, 0.10);
 
-    let pin_after = fp_mats(&[&enc.w1, &enc.w2], &[&enc.b1, &enc.b2]);
-    let pin_stable = pin_after == pin;
+    SceneWmBundle {
+        encoder: enc,
+        encoder_fingerprint: pin,
+        abstain_tau: 0.08,
+        energy_stable: a_s,
+        energy_slip: a_l,
+        act_stable: act_s,
+        act_slip: act_l,
+        note: "Phase 3v/3w scene-graph WM — frozen encoder; adapters only; not Luna/chat".into(),
+    }
+}
 
-    // Eval predictive + acting
+// =============================================================================
+// Seed runner
+// =============================================================================
+
+#[derive(Clone, Debug)]
+pub struct SceneWmSeedResult {
+    pub regime_agreement: f32,
+    pub energy_margin: f32,
+    pub selected_mse: f32,
+    pub vg_mse: f32,
+    pub return_wm: f32,
+    pub return_random: f32,
+    pub return_vg: f32,
+    pub structure_ablation_drop: f32,
+    pub pin_stable: bool,
+    pub degenerate: bool,
+    pub encoder_fingerprint: u64,
+    pub chat_metric_used: bool,
+}
+
+/// Certifier eval on a (possibly reloaded) scene bundle — shared by 3v/3w.
+pub fn evaluate_scene_wm_bundle(bundle: &SceneWmBundle, seed: u64) -> SceneWmSeedResult {
+    let pin = bundle.encoder_fingerprint;
+    let pin_after = fp_mats(
+        &[&bundle.encoder.w1, &bundle.encoder.w2],
+        &[&bundle.encoder.b1, &bundle.encoder.b2],
+    );
+    let pin_stable = pin_after == pin && bundle.verify().is_ok();
+    let enc = &bundle.encoder;
+    let a_s = &bundle.energy_stable;
+    let a_l = &bundle.energy_slip;
+    let act_s = &bundle.act_stable;
+    let act_l = &bundle.act_slip;
+    let mut rng = StdRng::seed_from_u64(seed.wrapping_mul(91).wrapping_add(13));
+
     let mut region = 0usize;
     let mut margin = 0.0f32;
     let mut sel = 0.0f32;
@@ -555,8 +726,6 @@ pub fn run_phase3v_scene_seed(seed: u64) -> SceneWmSeedResult {
         margin += e_away - e_home;
     }
 
-    // Structure ablation: shuffling typed edges (poses fixed) should worsen next-step MSE
-    // if adapters used relational structure — not just layout geometry.
     let mut mse_clean = 0.0f32;
     let mut mse_shuf = 0.0f32;
     for _ in 0..n {
@@ -590,7 +759,6 @@ pub fn run_phase3v_scene_seed(seed: u64) -> SceneWmSeedResult {
     let regime_agreement = region as f32 / n as f32;
     let structure_ablation_drop = (mse_shuf - mse_clean) / n as f32;
 
-    // Acting returns (same start states for fair compare)
     let episodes = 48usize;
     let horizon = 6usize;
     let mut ret_wm = 0.0f32;
@@ -605,7 +773,7 @@ pub fn run_phase3v_scene_seed(seed: u64) -> SceneWmSeedResult {
         let mut g_v = g0.clone();
         for _ in 0..horizon {
             let z = enc.encode(&g);
-            let ad = if stable { &act_s } else { &act_l };
+            let ad = if stable { act_s } else { act_l };
             let (act, _) = plan_action(ad, &z, 1);
             let g1 = step_scene(&g, bi, act);
             ret_wm += goal_scene(&g, &g1);
@@ -649,6 +817,11 @@ pub fn run_phase3v_scene_seed(seed: u64) -> SceneWmSeedResult {
         encoder_fingerprint: pin,
         chat_metric_used: false,
     }
+}
+
+pub fn run_phase3v_scene_seed(seed: u64) -> SceneWmSeedResult {
+    let bundle = train_scene_wm_bundle(seed);
+    evaluate_scene_wm_bundle(&bundle, seed)
 }
 
 pub fn save_scene_bundle_fingerprint(path: &Path, fp: u64) -> Result<(), String> {

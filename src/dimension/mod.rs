@@ -12,6 +12,7 @@ pub mod wm_open;
 pub mod wm_act;
 pub mod wm_vjepa;
 pub mod wm_scene;
+pub mod wm_scene_host;
 pub mod action;
 pub mod action_classifier;
 pub mod codegen;
@@ -77,8 +78,14 @@ pub use wm_vjepa::{
     VjepaWmSeedResult,
 };
 pub use wm_scene::{
-    run_phase3v_scene_seed, sample_scene, step_scene, FrozenSceneEncoder, SceneGraph,
+    evaluate_scene_wm_bundle, goal_scene, pick_block, run_phase3v_scene_seed, sample_scene,
+    scene_act_step, scene_act_step_routed, scene_deploy_step, step_scene, train_scene_wm_bundle,
+    FrozenSceneEncoder, SceneActDecision, SceneGraph, SceneStepDecision, SceneWmBundle,
     SceneWmSeedResult,
+};
+pub use wm_scene_host::{
+    run_phase3w_scene_host_seed, SceneHostRequest, SceneHostResponse, SceneHostSeedResult,
+    SceneHostSession,
 };
 pub use action::{ActionJson, ActionType, action_from_routing};
 pub use codegen::{CodeGeneration, generate_code_from_action};

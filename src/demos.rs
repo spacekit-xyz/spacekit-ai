@@ -50,6 +50,7 @@ use growformer::dimension::{
     ActSeedResult,
     run_phase3u_vjepa_seed, VjepaWmSeedResult,
     run_phase3v_scene_seed, SceneWmSeedResult,
+    run_phase3w_scene_host_seed, SceneHostSeedResult,
 };
 
 use growformer::types::GroupId;
@@ -153,6 +154,9 @@ struct Args {
     /// Phase 3v: Spatial / SpaceTime scene-graph WM (objects + typed edges; structure ablation).
     #[arg(long)]
     phase3v_scene_wm: bool,
+    /// Phase 3w: SpaceKit scene-graph host (load/step/act/reload pin).
+    #[arg(long)]
+    phase3w_scene_host: bool,
     #[arg(long)]
     phase3f_analyze: bool,
     /// Conditional MI measurement: present-but-inaccessible formalization (Task E).
@@ -508,6 +512,8 @@ fn main() {
         demo_phase3u_vjepa_wm();
     } else if args.phase3v_scene_wm {
         demo_phase3v_scene_wm();
+    } else if args.phase3w_scene_host {
+        demo_phase3w_scene_host();
     } else if args.phase3f_competence {
         demo_phase3f_competence_routing();
     } else if args.phase3e_boundary_analyze {
@@ -11171,6 +11177,100 @@ fn demo_phase3u_vjepa_wm() {
             "OVERALL: Phase 3u INCONCLUSIVE."
         }
     );
+}
+
+fn demo_phase3w_scene_host() {
+    println!("--- Phase 3w: SpaceKit Scene-Graph Host (WORLD_MODELS spatial deploy) ---\n");
+    println!("load_scene / step / act / reload pin — not Luna/chat.\n");
+    const SEEDS: [u64; 8] = [42, 43, 44, 45, 46, 47, 48, 49];
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let work = std::env::temp_dir().join("growformer_phase3w_scene_host");
+    let _ = std::fs::create_dir_all(&work);
+    let mut all: Vec<SceneHostSeedResult> = Vec::new();
+    for &seed in &SEEDS {
+        print!("  seed {} ...", seed);
+        let _ = std::io::stdout().flush();
+        all.push(run_phase3w_scene_host_seed(seed, &work));
+        println!(" ok");
+    }
+    let mean = |g: fn(&SceneHostSeedResult) -> f32| {
+        all.iter().map(g).sum::<f32>() / all.len() as f32
+    };
+    let load_n = all.iter().filter(|r| r.load_ok).count();
+    let step_n = all.iter().filter(|r| r.step_ok).count();
+    let act_n = all.iter().filter(|r| r.act_ok).count();
+    let pin_n = all.iter().filter(|r| r.pin_stable_reload).count();
+    let reg = mean(|r| r.regime_via_host);
+    let ret = mean(|r| r.return_via_host);
+    let rr = mean(|r| r.return_random);
+    let chat = all.iter().any(|r| r.chat_metric_used);
+    let g = [
+        load_n == all.len(),
+        step_n == all.len(),
+        act_n == all.len(),
+        pin_n == all.len(),
+        !chat,
+        reg >= 0.60,
+        ret > rr,
+    ];
+    println!(
+        "\nLoad {}/{} | Step {}/{} | Act {}/{} | Pin reload {}/{}",
+        load_n,
+        all.len(),
+        step_n,
+        all.len(),
+        act_n,
+        all.len(),
+        pin_n,
+        all.len()
+    );
+    println!(
+        "Host regime {:.1}% | Return host {:.3} vs random {:.3}",
+        reg * 100.0,
+        ret,
+        rr
+    );
+    println!("\n=== VERDICT ===");
+    println!("[{}] load_scene all seeds", mark(g[0]));
+    println!("[{}] step all seeds", mark(g[1]));
+    println!("[{}] act all seeds", mark(g[2]));
+    println!("[{}] pin stable across reload", mark(g[3]));
+    println!("[{}] Chat metric unused", mark(g[4]));
+    println!("[{}] Host regime ≥ 60% ({:.1}%)", mark(g[5]), reg * 100.0);
+    println!("[{}] Host return > random ({:.3} > {:.3})", mark(g[6]), ret, rr);
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    let summary = if pass == g.len() {
+        "OVERALL: Phase 3w PASS — SpaceKit scene-graph host certified."
+    } else if !g[3] || chat || reg < 0.55 {
+        "OVERALL: Phase 3w KILL — pin/chat/regime collapse."
+    } else {
+        "OVERALL: Phase 3w INCONCLUSIVE — partial host progress."
+    };
+    println!("{}", summary);
+
+    let path = "phase3w_scene_host_results.txt";
+    if let Ok(mut f) = std::fs::File::create(path) {
+        let _ = writeln!(f, "Phase 3w SpaceKit scene-graph host");
+        let _ = writeln!(
+            f,
+            "load={}/{} step={}/{} act={}/{} pin={}/{} regime={:.4} ret_h={:.4} ret_r={:.4} chat={}",
+            load_n,
+            all.len(),
+            step_n,
+            all.len(),
+            act_n,
+            all.len(),
+            pin_n,
+            all.len(),
+            reg,
+            ret,
+            rr,
+            chat
+        );
+        let _ = writeln!(f, "gates={}/{} {}", pass, g.len(), summary);
+        println!("\nWrote {}", path);
+    }
 }
 
 fn demo_phase3v_scene_wm() {
