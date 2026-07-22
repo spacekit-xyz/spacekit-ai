@@ -5,6 +5,7 @@ pub mod composition;
 pub mod cone_router;
 pub mod jepa_adapters;
 pub mod energy_jepa;
+pub mod wm_frontier;
 pub mod action;
 pub mod action_classifier;
 pub mod codegen;
@@ -36,6 +37,11 @@ pub use jepa_adapters::{
 };
 pub use energy_jepa::{
     run_energy_wm_task_e_seed, EnergyAdapter, EnergyPromotionBundle, EnergyWmSeedResult,
+};
+pub use wm_frontier::{
+    geometric_energy, latent_interval, run_phase3k_geo_seed, run_phase3l_prob_seed,
+    run_phase3m_sym_seed, symbolic_energy, FrozenGeometricEncoder, GeoWmSeedResult,
+    ProbWmSeedResult, SymWmSeedResult, WorldRule,
 };
 pub use action::{ActionJson, ActionType, action_from_routing};
 pub use codegen::{CodeGeneration, generate_code_from_action};

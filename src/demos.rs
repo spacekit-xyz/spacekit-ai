@@ -37,6 +37,8 @@ use growformer::dimension::{
     route_language_embedding,
     AdjustableConeRouter, ConeConfig, ConeSample, LabelFreeStrategy, cone_features,
     run_wm_task_e_seed, WmSeedResult, run_energy_wm_task_e_seed, EnergyWmSeedResult,
+    run_phase3k_geo_seed, run_phase3l_prob_seed, run_phase3m_sym_seed,
+    GeoWmSeedResult, ProbWmSeedResult, SymWmSeedResult,
 };
 
 use growformer::types::GroupId;
@@ -104,6 +106,15 @@ struct Args {
     /// Phase 3j: energy-based JEPA adapters (EB-JEPA-style latent energy landscapes).
     #[arg(long)]
     phase3j_energy_wm: bool,
+    /// Phase 3k: geometric Clifford grade-1 latents + energy adapters.
+    #[arg(long)]
+    phase3k_geo_wm: bool,
+    /// Phase 3l: probabilistic energy ensemble + temperature abstain.
+    #[arg(long)]
+    phase3l_prob_wm: bool,
+    /// Phase 3m: neuro-symbolic rule constraints on energy.
+    #[arg(long)]
+    phase3m_sym_wm: bool,
     #[arg(long)]
     phase3f_analyze: bool,
     /// Conditional MI measurement: present-but-inaccessible formalization (Task E).
@@ -435,6 +446,12 @@ fn main() {
         demo_phase3i_jepa_wm();
     } else if args.phase3j_energy_wm {
         demo_phase3j_energy_wm();
+    } else if args.phase3k_geo_wm {
+        demo_phase3k_geo_wm();
+    } else if args.phase3l_prob_wm {
+        demo_phase3l_prob_wm();
+    } else if args.phase3m_sym_wm {
+        demo_phase3m_sym_wm();
     } else if args.phase3f_competence {
         demo_phase3f_competence_routing();
     } else if args.phase3e_boundary_analyze {
@@ -10234,6 +10251,242 @@ fn demo_phase3j_energy_wm() {
         println!("OVERALL: Phase 3j INCONCLUSIVE — partial lift; inspect FAIL rows.");
     }
     println!("\nNote: metabolic synapse energy_budget ≠ latent E(z,z'); see JEPA_ADAPTER_PROMOTION.md §8.");
+}
+
+fn demo_phase3k_geo_wm() {
+    println!("--- Phase 3k: Geometric Clifford Latents + Energy ---\n");
+    println!("Frozen Cl(1,7) grade-1 encoder (pinned). EnergyAdapters + geometric interval term.");
+    println!("Certifiers: regime agree, energy margin, geo sign agree, MSE vs VG/conf.\n");
+
+    const SEEDS: [u64; 20] = [
+        42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
+    ];
+    const SWEEP: [usize; 4] = [20, 30, 60, 120];
+    let mut all: Vec<GeoWmSeedResult> = Vec::new();
+    for &seed in &SEEDS {
+        print!("  seed {} ...", seed);
+        let _ = std::io::stdout().flush();
+        for &n in &SWEEP {
+            all.push(run_phase3k_geo_seed(seed, n));
+        }
+        println!(" ok");
+    }
+    let at = |n: usize| all.iter().filter(|r| r.train_n == n).collect::<Vec<_>>();
+    let mean = |rows: &[&GeoWmSeedResult], g: fn(&GeoWmSeedResult) -> f32| {
+        let v: Vec<f32> = rows.iter().map(|r| g(r)).collect();
+        v.iter().sum::<f32>() / v.len().max(1) as f32
+    };
+    let stdv = |rows: &[&GeoWmSeedResult], g: fn(&GeoWmSeedResult) -> f32| {
+        mean_std(&rows.iter().map(|r| g(r)).collect::<Vec<_>>()).1
+    };
+    println!("=== n-sweep ===\n| n | Cone MSE | Regime | GeoSign | Margin | Degen |");
+    println!("| - | -------- | ------ | ------- | ------ | ----- |");
+    for &n in &SWEEP {
+        let rows = at(n);
+        let degen = rows.iter().filter(|r| r.degenerate).count();
+        println!(
+            "| {} | {:.6} | {:.1}% | {:.1}% | {:.3} | {}/{} |",
+            n,
+            mean(&rows, |r| r.cone_mse),
+            mean(&rows, |r| r.regime_agreement) * 100.0,
+            mean(&rows, |r| r.geo_sign_agree) * 100.0,
+            mean(&rows, |r| r.energy_margin),
+            degen,
+            rows.len()
+        );
+    }
+    let rows = at(30);
+    let degen = rows.iter().filter(|r| r.degenerate).count();
+    let cone = mean(&rows, |r| r.cone_mse);
+    let vg = mean(&rows, |r| r.vg_mse);
+    let conf = mean(&rows, |r| r.conf_mse);
+    let reg = mean(&rows, |r| r.regime_agreement);
+    let geo = mean(&rows, |r| r.geo_sign_agree);
+    let mar = mean(&rows, |r| r.energy_margin);
+    let ra = |n: usize| mean(&at(n), |r| r.regime_agreement);
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let g = [
+        degen == 0,
+        cone < vg,
+        cone <= conf + 2e-5,
+        reg >= 0.60,
+        mar > 0.01,
+        geo >= 0.70,
+        ra(120) + 0.02 >= ra(20),
+    ];
+    println!("\n=== VERDICT (n=30) ===\n");
+    println!("[{}] 0 degenerate ({}/{})", mark(g[0]), degen, rows.len());
+    println!("[{}] Cone MSE < VG ({:.6} < {:.6})", mark(g[1]), cone, vg);
+    println!("[{}] Cone MSE ≤ conf (+2e-5) ({:.6} ≤ {:.6})", mark(g[2]), cone, conf);
+    println!("[{}] Regime agree ≥ 60% ({:.1}%)", mark(g[3]), reg * 100.0);
+    println!("[{}] Energy margin > 0.01 ({:.3})", mark(g[4]), mar);
+    println!("[{}] Geo energy home<away ≥ 70% ({:.1}%)", mark(g[5]), geo * 100.0);
+    println!("[{}] No regime decay 20→120 ({:.1}%→{:.1}%)", mark(g[6]), ra(20)*100.0, ra(120)*100.0);
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{} | ±std cone {:.6}", pass, g.len(), stdv(&rows, |r| r.cone_mse));
+    if pass == g.len() {
+        println!("OVERALL: Phase 3k PASS — geometric latents under energy + promote-freeze.");
+    } else if reg <= 0.55 {
+        println!("OVERALL: Phase 3k KILL.");
+    } else {
+        println!("OVERALL: Phase 3k INCONCLUSIVE.");
+    }
+}
+
+fn demo_phase3l_prob_wm() {
+    println!("--- Phase 3l: Probabilistic Energy Ensemble + Temperature Abstain ---\n");
+    println!("K=3 energy heads/regime; abstain when |affinity gap| < τ (wide cone).\n");
+
+    const SEEDS: [u64; 20] = [
+        42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
+    ];
+    const SWEEP: [usize; 4] = [20, 30, 60, 120];
+    let mut all: Vec<ProbWmSeedResult> = Vec::new();
+    for &seed in &SEEDS {
+        print!("  seed {} ...", seed);
+        let _ = std::io::stdout().flush();
+        for &n in &SWEEP {
+            all.push(run_phase3l_prob_seed(seed, n));
+        }
+        println!(" ok");
+    }
+    let at = |n: usize| all.iter().filter(|r| r.train_n == n).collect::<Vec<_>>();
+    let mean = |rows: &[&ProbWmSeedResult], g: fn(&ProbWmSeedResult) -> f32| {
+        let v: Vec<f32> = rows.iter().map(|r| g(r)).collect();
+        v.iter().sum::<f32>() / v.len().max(1) as f32
+    };
+    println!("=== n-sweep ===\n| n | Cone MSE | Regime | Abstain | Annulus|Abstain | Margin | Degen |");
+    println!("| - | -------- | ------ | ------- | -------------- | ------ | ----- |");
+    for &n in &SWEEP {
+        let rows = at(n);
+        let degen = rows.iter().filter(|r| r.degenerate).count();
+        println!(
+            "| {} | {:.6} | {:.1}% | {:.1}% | {:.1}% | {:.3} | {}/{} |",
+            n,
+            mean(&rows, |r| r.cone_mse),
+            mean(&rows, |r| r.regime_agreement) * 100.0,
+            mean(&rows, |r| r.abstain_rate) * 100.0,
+            mean(&rows, |r| r.abstain_annulus_frac) * 100.0,
+            mean(&rows, |r| r.energy_margin),
+            degen,
+            rows.len()
+        );
+    }
+    let rows = at(30);
+    let degen = rows.iter().filter(|r| r.degenerate).count();
+    let cone = mean(&rows, |r| r.cone_mse);
+    let vg = mean(&rows, |r| r.vg_mse);
+    let conf = mean(&rows, |r| r.conf_mse);
+    let reg = mean(&rows, |r| r.regime_agreement);
+    let mar = mean(&rows, |r| r.energy_margin);
+    let abst = mean(&rows, |r| r.abstain_rate);
+    let ann = mean(&rows, |r| r.abstain_annulus_frac);
+    let ra = |n: usize| mean(&at(n), |r| r.regime_agreement);
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let g = [
+        degen == 0,
+        cone < vg,
+        cone <= conf + 1e-7,
+        reg >= 0.60,
+        mar > 0.01,
+        abst > 0.02 && abst < 0.50,
+        ann >= 0.25 || abst < 0.05,
+        ra(120) + 0.02 >= ra(20),
+    ];
+    println!("\n=== VERDICT (n=30) ===\n");
+    println!("[{}] 0 degenerate ({}/{})", mark(g[0]), degen, rows.len());
+    println!("[{}] Cone MSE < VG ({:.6} < {:.6})", mark(g[1]), cone, vg);
+    println!("[{}] Cone MSE ≤ conf ({:.6} ≤ {:.6})", mark(g[2]), cone, conf);
+    println!("[{}] Regime agree ≥ 60% ({:.1}%)", mark(g[3]), reg * 100.0);
+    println!("[{}] Energy margin > 0.01 ({:.3})", mark(g[4]), mar);
+    println!("[{}] Abstain rate in (2%, 50%) ({:.1}%)", mark(g[5]), abst * 100.0);
+    println!("[{}] Abstains enriched in annulus or rare ({:.1}% annulus)", mark(g[6]), ann * 100.0);
+    println!("[{}] No regime decay 20→120 ({:.1}%→{:.1}%)", mark(g[7]), ra(20)*100.0, ra(120)*100.0);
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    if pass == g.len() {
+        println!("OVERALL: Phase 3l PASS — probabilistic energy + abstain under promote-freeze.");
+    } else if reg <= 0.55 {
+        println!("OVERALL: Phase 3l KILL.");
+    } else {
+        println!("OVERALL: Phase 3l INCONCLUSIVE.");
+    }
+}
+
+fn demo_phase3m_sym_wm() {
+    println!("--- Phase 3m: Neuro-Symbolic Rules on Energy ---\n");
+    println!("E_total = E_neural + λ·rule_penalty (InnerRotation / OuterRadial). Not a second reasoner.\n");
+
+    const SEEDS: [u64; 20] = [
+        42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
+    ];
+    const SWEEP: [usize; 4] = [20, 30, 60, 120];
+    let mut all: Vec<SymWmSeedResult> = Vec::new();
+    for &seed in &SEEDS {
+        print!("  seed {} ...", seed);
+        let _ = std::io::stdout().flush();
+        for &n in &SWEEP {
+            all.push(run_phase3m_sym_seed(seed, n));
+        }
+        println!(" ok");
+    }
+    let at = |n: usize| all.iter().filter(|r| r.train_n == n).collect::<Vec<_>>();
+    let mean = |rows: &[&SymWmSeedResult], g: fn(&SymWmSeedResult) -> f32| {
+        let v: Vec<f32> = rows.iter().map(|r| g(r)).collect();
+        v.iter().sum::<f32>() / v.len().max(1) as f32
+    };
+    println!("=== n-sweep ===\n| n | Cone MSE | Regime | Margin | RuleViol | Degen |");
+    println!("| - | -------- | ------ | ------ | -------- | ----- |");
+    for &n in &SWEEP {
+        let rows = at(n);
+        let degen = rows.iter().filter(|r| r.degenerate).count();
+        println!(
+            "| {} | {:.6} | {:.1}% | {:.3} | {:.1}% | {}/{} |",
+            n,
+            mean(&rows, |r| r.cone_mse),
+            mean(&rows, |r| r.regime_agreement) * 100.0,
+            mean(&rows, |r| r.energy_margin),
+            mean(&rows, |r| r.rule_violation_rate) * 100.0,
+            degen,
+            rows.len()
+        );
+    }
+    let rows = at(30);
+    let degen = rows.iter().filter(|r| r.degenerate).count();
+    let cone = mean(&rows, |r| r.cone_mse);
+    let vg = mean(&rows, |r| r.vg_mse);
+    let conf = mean(&rows, |r| r.conf_mse);
+    let reg = mean(&rows, |r| r.regime_agreement);
+    let mar = mean(&rows, |r| r.energy_margin);
+    let viol = mean(&rows, |r| r.rule_violation_rate);
+    let ra = |n: usize| mean(&at(n), |r| r.regime_agreement);
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let g = [
+        degen == 0,
+        cone < vg,
+        cone <= conf + 1e-7,
+        reg >= 0.60,
+        mar > 0.01,
+        viol < 0.50,
+        ra(120) + 0.02 >= ra(20),
+    ];
+    println!("\n=== VERDICT (n=30) ===\n");
+    println!("[{}] 0 degenerate ({}/{})", mark(g[0]), degen, rows.len());
+    println!("[{}] Cone MSE < VG ({:.6} < {:.6})", mark(g[1]), cone, vg);
+    println!("[{}] Cone MSE ≤ conf ({:.6} ≤ {:.6})", mark(g[2]), cone, conf);
+    println!("[{}] Regime agree ≥ 60% ({:.1}%)", mark(g[3]), reg * 100.0);
+    println!("[{}] Energy margin > 0.01 ({:.3})", mark(g[4]), mar);
+    println!("[{}] Rule violation rate < 50% ({:.1}%)", mark(g[5]), viol * 100.0);
+    println!("[{}] No regime decay 20→120 ({:.1}%→{:.1}%)", mark(g[6]), ra(20)*100.0, ra(120)*100.0);
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    if pass == g.len() {
+        println!("OVERALL: Phase 3m PASS — symbolic rules constrain energy under promote-freeze.");
+    } else if reg <= 0.55 {
+        println!("OVERALL: Phase 3m KILL.");
+    } else {
+        println!("OVERALL: Phase 3m INCONCLUSIVE.");
+    }
 }
 
 fn demo_phase3e_balanced_composite() {
