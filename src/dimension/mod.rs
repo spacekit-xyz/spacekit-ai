@@ -6,6 +6,8 @@ pub mod cone_router;
 pub mod jepa_adapters;
 pub mod energy_jepa;
 pub mod wm_frontier;
+pub mod wm_transfer;
+pub mod wm_proof;
 pub mod action;
 pub mod action_classifier;
 pub mod codegen;
@@ -42,6 +44,18 @@ pub use wm_frontier::{
     geometric_energy, latent_interval, run_phase3k_geo_seed, run_phase3l_prob_seed,
     run_phase3m_sym_seed, symbolic_energy, FrozenGeometricEncoder, GeoWmSeedResult,
     ProbWmSeedResult, SymWmSeedResult, WorldRule,
+};
+pub use wm_transfer::{
+    deploy_step, load_composed_bundle, plan_action, run_phase3n_action_seed,
+    run_phase3o_compose_seed, run_phase3p_hard_seed, run_phase3q_deploy_seed,
+    save_composed_bundle, step_dynamics_action, train_composed_bundle, ActionEnergyAdapter,
+    ActionWmSeedResult, ComposedWmBundle, ComposeWmSeedResult, DeployDecision, DeploySeedResult,
+    FrozenHardEncoder, HardWmSeedResult, WmAction, ACTION_DIM, HARD_OBS_DIM,
+};
+pub use wm_proof::{
+    ensure_frozen_encoder_file, run_phase3r_action_rank_seed, run_phase3r_foreign_seed,
+    run_phase3r_sim_loop, ActionRankSeedResult, ForeignDomainResult, ForeignProofSeedResult,
+    FrozenExternalEncoder, SimLoopResult, SimStepLog,
 };
 pub use action::{ActionJson, ActionType, action_from_routing};
 pub use codegen::{CodeGeneration, generate_code_from_action};

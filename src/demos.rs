@@ -39,6 +39,11 @@ use growformer::dimension::{
     run_wm_task_e_seed, WmSeedResult, run_energy_wm_task_e_seed, EnergyWmSeedResult,
     run_phase3k_geo_seed, run_phase3l_prob_seed, run_phase3m_sym_seed,
     GeoWmSeedResult, ProbWmSeedResult, SymWmSeedResult,
+    run_phase3n_action_seed, run_phase3o_compose_seed, run_phase3p_hard_seed,
+    run_phase3q_deploy_seed, ActionWmSeedResult, ComposeWmSeedResult, HardWmSeedResult,
+    DeploySeedResult,
+    run_phase3r_action_rank_seed, run_phase3r_foreign_seed, run_phase3r_sim_loop,
+    ActionRankSeedResult, ForeignProofSeedResult, SimLoopResult,
 };
 
 use growformer::types::GroupId;
@@ -115,6 +120,21 @@ struct Args {
     /// Phase 3m: neuro-symbolic rule constraints on energy.
     #[arg(long)]
     phase3m_sym_wm: bool,
+    /// Phase 3n: action-conditioned E(z,a,z') + rollout planner.
+    #[arg(long)]
+    phase3n_action_wm: bool,
+    /// Phase 3o: composed geometric + ensemble + rules stack.
+    #[arg(long)]
+    phase3o_compose_wm: bool,
+    /// Phase 3p: harder 8D / 3-regime transfer.
+    #[arg(long)]
+    phase3p_hard_wm: bool,
+    /// Phase 3q: deploy serialize + deploy_step contract.
+    #[arg(long)]
+    phase3q_deploy_wm: bool,
+    /// Phase 3r: beyond-toy proof — close E-rank, two foreign domains, sim loop logs.
+    #[arg(long)]
+    phase3r_beyond_toy: bool,
     #[arg(long)]
     phase3f_analyze: bool,
     /// Conditional MI measurement: present-but-inaccessible formalization (Task E).
@@ -452,6 +472,16 @@ fn main() {
         demo_phase3l_prob_wm();
     } else if args.phase3m_sym_wm {
         demo_phase3m_sym_wm();
+    } else if args.phase3n_action_wm {
+        demo_phase3n_action_wm();
+    } else if args.phase3o_compose_wm {
+        demo_phase3o_compose_wm();
+    } else if args.phase3p_hard_wm {
+        demo_phase3p_hard_wm();
+    } else if args.phase3q_deploy_wm {
+        demo_phase3q_deploy_wm();
+    } else if args.phase3r_beyond_toy {
+        demo_phase3r_beyond_toy();
     } else if args.phase3f_competence {
         demo_phase3f_competence_routing();
     } else if args.phase3e_boundary_analyze {
@@ -10487,6 +10517,349 @@ fn demo_phase3m_sym_wm() {
     } else {
         println!("OVERALL: Phase 3m INCONCLUSIVE.");
     }
+}
+
+fn demo_phase3n_action_wm() {
+    println!("--- Phase 3n: Action-Conditioned Energy + Rollout Planner ---\n");
+    println!("E(z,a,z'); planner picks argmin_a E; oracle = dynamics goal score.\n");
+    const SEEDS: [u64; 16] = [42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57];
+    let mut all: Vec<ActionWmSeedResult> = Vec::new();
+    for &seed in &SEEDS {
+        print!("  seed {} ...", seed);
+        let _ = std::io::stdout().flush();
+        all.push(run_phase3n_action_seed(seed));
+        println!(" ok");
+    }
+    let mean = |g: fn(&ActionWmSeedResult) -> f32| {
+        all.iter().map(g).sum::<f32>() / all.len() as f32
+    };
+    let degen = all.iter().filter(|r| r.degenerate).count();
+    let plan = mean(|r| r.plan_acc);
+    let rand = mean(|r| r.random_plan_acc);
+    let reg = mean(|r| r.regime_agreement);
+    let mar = mean(|r| r.energy_margin);
+    let rank = mean(|r| r.energy_rank_frac);
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let core = [
+        degen <= 1,
+        plan > rand + 0.08,
+        plan >= 0.40,
+        reg >= 0.60,
+    ];
+    let stretch = rank >= 0.55;
+    println!(
+        "\nPlan acc {:.1}% vs random {:.1}% | Regime {:.1}% | E-rank {:.1}% (meanΔ {:.4}) | Degen {}/{}",
+        plan * 100.0, rand * 100.0, reg * 100.0, rank * 100.0, mar, degen, all.len()
+    );
+    println!("\n=== VERDICT ===");
+    println!("[{}] ≤1 degenerate seed ({}/{})", mark(core[0]), degen, all.len());
+    println!("[{}] Plan ≫ random (+8pp) ({:.1}% vs {:.1}%)", mark(core[1]), plan * 100.0, rand * 100.0);
+    println!("[{}] Plan acc ≥ 40% ({:.1}%)", mark(core[2]), plan * 100.0);
+    println!("[{}] Regime agree ≥ 60% ({:.1}%)", mark(core[3]), reg * 100.0);
+    println!("[{}] STRETCH Oracle E-rank ≥ 55% ({:.1}%)", mark(stretch), rank * 100.0);
+    let pass = core.iter().filter(|b| **b).count();
+    println!("\nCore gates: {}/{} | Stretch: {}", pass, core.len(), mark(stretch));
+    println!(
+        "{}",
+        if pass == core.len() && stretch {
+            "OVERALL: Phase 3n PASS — action energy plans + ranked landscapes."
+        } else if pass == core.len() {
+            "OVERALL: Phase 3n PASS (qualified) — plans beat chance; energy ranking stretch not met."
+        } else if plan <= rand {
+            "OVERALL: Phase 3n KILL."
+        } else {
+            "OVERALL: Phase 3n INCONCLUSIVE."
+        }
+    );
+}
+
+fn demo_phase3o_compose_wm() {
+    println!("--- Phase 3o: Composed Geometric + Ensemble + Rules ---\n");
+    const SEEDS: [u64; 16] = [42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57];
+    let mut all: Vec<ComposeWmSeedResult> = Vec::new();
+    for &seed in &SEEDS {
+        print!("  seed {} ...", seed);
+        let _ = std::io::stdout().flush();
+        all.push(run_phase3o_compose_seed(seed));
+        println!(" ok");
+    }
+    let mean = |g: fn(&ComposeWmSeedResult) -> f32| {
+        all.iter().map(g).sum::<f32>() / all.len() as f32
+    };
+    let degen = all.iter().filter(|r| r.degenerate).count();
+    let reg = mean(|r| r.regime_agreement);
+    let mar = mean(|r| r.energy_margin);
+    let cone = mean(|r| r.cone_mse);
+    let vg = mean(|r| r.vg_mse);
+    let geo = mean(|r| r.geo_home_frac);
+    let abst = mean(|r| r.abstain_rate);
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let g = [
+        degen == 0,
+        cone < vg,
+        reg >= 0.60,
+        mar > 0.01,
+        geo >= 0.70,
+        abst > 0.01 && abst < 0.55,
+    ];
+    println!(
+        "\nRegime {:.1}% | Margin {:.3} | ConeMSE {:.6} < VG {:.6} | GeoHome {:.1}% | Abstain {:.1}%",
+        reg * 100.0, mar, cone, vg, geo * 100.0, abst * 100.0
+    );
+    println!("\n=== VERDICT ===");
+    for (i, label) in [
+        "0 degenerate",
+        "Cone MSE < VG",
+        "Regime ≥ 60%",
+        "Margin > 0.01",
+        "Geo home frac ≥ 70%",
+        "Abstain in (1%,55%)",
+    ]
+    .iter()
+    .enumerate()
+    {
+        println!("[{}] {}", mark(g[i]), label);
+    }
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    println!(
+        "{}",
+        if pass == g.len() {
+            "OVERALL: Phase 3o PASS — composed 3k+3ℓ+3m stack certified."
+        } else if reg <= 0.55 {
+            "OVERALL: Phase 3o KILL."
+        } else {
+            "OVERALL: Phase 3o INCONCLUSIVE."
+        }
+    );
+}
+
+fn demo_phase3p_hard_wm() {
+    println!("--- Phase 3p: Harder 8D / 3-Regime Transfer ---\n");
+    println!("Obs=[x,y,vx,vy,ox,oy,phase,clutter]; regimes inner/mid/outer.\n");
+    const SEEDS: [u64; 16] = [42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57];
+    let mut all: Vec<HardWmSeedResult> = Vec::new();
+    for &seed in &SEEDS {
+        print!("  seed {} ...", seed);
+        let _ = std::io::stdout().flush();
+        all.push(run_phase3p_hard_seed(seed));
+        println!(" ok");
+    }
+    let mean = |g: fn(&HardWmSeedResult) -> f32| {
+        all.iter().map(g).sum::<f32>() / all.len() as f32
+    };
+    let degen = all.iter().filter(|r| r.degenerate).count();
+    let reg = mean(|r| r.regime_agreement);
+    let mar = mean(|r| r.energy_margin);
+    let cone = mean(|r| r.cone_mse);
+    let vg = mean(|r| r.vg_mse);
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    // 3-way chance ≈ 33%; require clear lift. MSE: selected ≤ VG (soft; VG can win on ties).
+    let g = [degen == 0, reg >= 0.45, mar > 0.01, cone <= vg + 5e-4];
+    println!(
+        "\nRegime {:.1}% (chance~33%) | Margin {:.3} | SelMSE {:.6} vs VG {:.6} | Degen {}/{}",
+        reg * 100.0, mar, cone, vg, degen, all.len()
+    );
+    println!("\n=== VERDICT ===");
+    println!("[{}] 0 degenerate", mark(g[0]));
+    println!("[{}] Regime agree ≥ 45% ({:.1}%)", mark(g[1]), reg * 100.0);
+    println!("[{}] Energy margin > 0.01 ({:.3})", mark(g[2]), mar);
+    println!("[{}] Selected MSE ≤ VG+5e-4 ({:.6} ≤ {:.6})", mark(g[3]), cone, vg);
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    println!(
+        "{}",
+        if pass == g.len() {
+            "OVERALL: Phase 3p PASS — energy substrate transfers to harder 3-regime world."
+        } else if reg <= 0.38 {
+            "OVERALL: Phase 3p KILL — collapsed to chance."
+        } else {
+            "OVERALL: Phase 3p INCONCLUSIVE."
+        }
+    );
+}
+
+fn demo_phase3q_deploy_wm() {
+    println!("--- Phase 3q: Deployment Contract (serialize + deploy_step) ---\n");
+    println!("Not Luna. Pin-stable JSON bundle + inference-only step.\n");
+    const SEEDS: [u64; 12] = [42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53];
+    let dir = std::env::temp_dir().join("growformer_wm_deploy");
+    let _ = std::fs::create_dir_all(&dir);
+    let mut all: Vec<DeploySeedResult> = Vec::new();
+    for &seed in &SEEDS {
+        print!("  seed {} ...", seed);
+        let _ = std::io::stdout().flush();
+        let path = dir.join(format!("bundle_{seed}.json"));
+        all.push(run_phase3q_deploy_seed(seed, &path));
+        println!(" ok");
+    }
+    let mean = |g: fn(&DeploySeedResult) -> f32| {
+        all.iter().map(g).sum::<f32>() / all.len() as f32
+    };
+    let rt = all.iter().filter(|r| r.roundtrip_ok).count();
+    let agree = mean(|r| r.deploy_regime_agree);
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let g = [rt == all.len(), agree >= 0.60];
+    println!("\nRoundtrip {}/{} | Deploy regime agree {:.1}%", rt, all.len(), agree * 100.0);
+    println!("\n=== VERDICT ===");
+    println!("[{}] All bundles pin-stable roundtrip", mark(g[0]));
+    println!("[{}] deploy_step regime agree ≥ 60% ({:.1}%)", mark(g[1]), agree * 100.0);
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    println!(
+        "{}",
+        if pass == g.len() {
+            "OVERALL: Phase 3q PASS — deployment contract ready (sim/SpaceKit next, not chat)."
+        } else {
+            "OVERALL: Phase 3q FAIL — fix pin/serialize before external deploy."
+        }
+    );
+}
+
+fn demo_phase3r_beyond_toy() {
+    println!("--- Phase 3r: Beyond-Toy Proof (WORLD_MODELS §8 C–E) ---\n");
+    println!("Close E-rank · foreign bounce+central · frozen encoder file · sim JSONL logs.\n");
+    const SEEDS: [u64; 12] = [42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53];
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+
+    // --- A. Action rank close ---
+    println!("[A] True-next / propose E-rank close");
+    let mut ranks: Vec<ActionRankSeedResult> = Vec::new();
+    for &seed in &SEEDS {
+        print!("  rank seed {} ...", seed);
+        let _ = std::io::stdout().flush();
+        ranks.push(run_phase3r_action_rank_seed(seed));
+        println!(" ok");
+    }
+    let mean_r = |g: fn(&ActionRankSeedResult) -> f32| {
+        ranks.iter().map(g).sum::<f32>() / ranks.len() as f32
+    };
+    let true_rank = mean_r(|r| r.true_next_rank_frac);
+    let prop_rank = mean_r(|r| r.propose_rank_frac);
+    let plan = mean_r(|r| r.plan_acc);
+    let rand = mean_r(|r| r.random_acc);
+    let degen_r = ranks.iter().filter(|r| r.degenerate).count();
+    let g_a = [
+        degen_r <= 1,
+        prop_rank >= 0.55,
+        plan > rand + 0.15,
+        plan >= 0.55,
+    ];
+    println!(
+        "  Action-cond E-rank {:.1}% | Planning E-rank {:.1}% | Plan {:.1}% vs rand {:.1}% | Degen {}/{}",
+        true_rank * 100.0,
+        prop_rank * 100.0,
+        plan * 100.0,
+        rand * 100.0,
+        degen_r,
+        ranks.len()
+    );
+
+    // --- B. Foreign domains ---
+    println!("\n[B] Foreign dynamics (bounce + central), shared frozen encoder");
+    let mut foreign: Vec<ForeignProofSeedResult> = Vec::new();
+    for &seed in &SEEDS {
+        print!("  foreign seed {} ...", seed);
+        let _ = std::io::stdout().flush();
+        foreign.push(run_phase3r_foreign_seed(seed));
+        println!(" ok");
+    }
+    let mean_b = |g: fn(&ForeignProofSeedResult) -> f32| {
+        foreign.iter().map(g).sum::<f32>() / foreign.len() as f32
+    };
+    let bounce_reg = mean_b(|r| r.bounce.regime_agreement);
+    let bounce_mar = mean_b(|r| r.bounce.energy_margin);
+    let bounce_mse = mean_b(|r| r.bounce.selected_mse);
+    let bounce_vg = mean_b(|r| r.bounce.vg_mse);
+    let cent_reg = mean_b(|r| r.central.regime_agreement);
+    let cent_mar = mean_b(|r| r.central.energy_margin);
+    let cent_mse = mean_b(|r| r.central.selected_mse);
+    let cent_vg = mean_b(|r| r.central.vg_mse);
+    let degen_f = foreign
+        .iter()
+        .filter(|r| r.bounce.degenerate || r.central.degenerate)
+        .count();
+    let g_b = [
+        degen_f <= 1,
+        bounce_reg >= 0.60,
+        bounce_mar > 0.01,
+        bounce_mse <= bounce_vg + 5e-4,
+        cent_reg >= 0.60,
+        cent_mar > 0.01,
+        cent_mse <= cent_vg + 5e-4,
+    ];
+    println!(
+        "  Bounce: regime {:.1}% margin {:.3} MSE {:.6} vs VG {:.6}",
+        bounce_reg * 100.0, bounce_mar, bounce_mse, bounce_vg
+    );
+    println!(
+        "  Central: regime {:.1}% margin {:.3} MSE {:.6} vs VG {:.6}",
+        cent_reg * 100.0, cent_mar, cent_mse, cent_vg
+    );
+
+    // --- C. Sim loop ---
+    println!("\n[C] Deploy/sim loop (E / route / abstain JSONL)");
+    let dir = std::env::temp_dir().join("growformer_wm_sim");
+    let _ = std::fs::create_dir_all(&dir);
+    let mut sims: Vec<SimLoopResult> = Vec::new();
+    for &seed in &SEEDS[..8] {
+        print!("  sim seed {} ...", seed);
+        let _ = std::io::stdout().flush();
+        sims.push(run_phase3r_sim_loop(seed, &dir));
+        println!(" ok");
+    }
+    let pin_ok = sims.iter().filter(|r| r.pin_stable).count();
+    let sim_agree = sims.iter().map(|r| r.regime_agree).sum::<f32>() / sims.len() as f32;
+    let sim_abst = sims.iter().map(|r| r.abstain_rate).sum::<f32>() / sims.len() as f32;
+    let g_c = [
+        pin_ok == sims.len(),
+        sim_agree >= 0.55,
+        sim_abst > 0.0 && sim_abst < 0.80,
+    ];
+    println!(
+        "  Pin-stable {}/{} | Regime agree {:.1}% | Abstain {:.1}% | logs in {}",
+        pin_ok,
+        sims.len(),
+        sim_agree * 100.0,
+        sim_abst * 100.0,
+        dir.display()
+    );
+
+    println!("\n=== VERDICT ===");
+    println!("[A] Action rank (planning head)");
+    println!("  [{}] ≤1 degenerate", mark(g_a[0]));
+    println!("  [{}] Planning E-rank ≥ 55% ({:.1}%)", mark(g_a[1]), prop_rank * 100.0);
+    println!("  [{}] Plan ≫ random (+15pp)", mark(g_a[2]));
+    println!("  [{}] Plan acc ≥ 55% ({:.1}%)", mark(g_a[3]), plan * 100.0);
+    println!("[B] Foreign domains");
+    println!("  [{}] ≤1 degenerate seed", mark(g_b[0]));
+    println!("  [{}] Bounce regime ≥ 60%", mark(g_b[1]));
+    println!("  [{}] Bounce margin > 0.01", mark(g_b[2]));
+    println!("  [{}] Bounce MSE ≤ VG", mark(g_b[3]));
+    println!("  [{}] Central regime ≥ 60%", mark(g_b[4]));
+    println!("  [{}] Central margin > 0.01", mark(g_b[5]));
+    println!("  [{}] Central MSE ≤ VG", mark(g_b[6]));
+    println!("[C] Sim loop");
+    println!("  [{}] All pin-stable", mark(g_c[0]));
+    println!("  [{}] Regime agree ≥ 55%", mark(g_c[1]));
+    println!("  [{}] Abstain in (0%,80%)", mark(g_c[2]));
+
+    let pass_a = g_a.iter().filter(|b| **b).count();
+    let pass_b = g_b.iter().filter(|b| **b).count();
+    let pass_c = g_c.iter().filter(|b| **b).count();
+    let total = pass_a + pass_b + pass_c;
+    let need = g_a.len() + g_b.len() + g_c.len();
+    println!("\nGates: {}/{} (A {}/{} · B {}/{} · C {}/{})", total, need, pass_a, g_a.len(), pass_b, g_b.len(), pass_c, g_c.len());
+    println!(
+        "{}",
+        if total == need {
+            "OVERALL: Phase 3r PASS — beyond-toy rungs C–E green (real JEPA weights still open for D)."
+        } else if bounce_reg <= 0.55 || cent_reg <= 0.55 || true_rank < 0.50 {
+            "OVERALL: Phase 3r KILL — foreign transfer or ranking collapsed."
+        } else {
+            "OVERALL: Phase 3r INCONCLUSIVE — partial beyond-toy progress."
+        }
+    );
 }
 
 fn demo_phase3e_balanced_composite() {
