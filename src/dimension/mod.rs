@@ -4,6 +4,7 @@
 pub mod composition;
 pub mod cone_router;
 pub mod jepa_adapters;
+pub mod energy_jepa;
 pub mod action;
 pub mod action_classifier;
 pub mod codegen;
@@ -32,6 +33,9 @@ pub use jepa_adapters::{
     generate_transitions, run_wm_task_e_seed, step_dynamics, stratified_wm_split, FrozenJepaEncoder,
     JepaPromotionBundle, PredictorAdapter, WmSeedResult, WmTransition, WM_INNER_RADIUS,
     WM_LATENT_DIM, WM_OBS_DIM,
+};
+pub use energy_jepa::{
+    run_energy_wm_task_e_seed, EnergyAdapter, EnergyPromotionBundle, EnergyWmSeedResult,
 };
 pub use action::{ActionJson, ActionType, action_from_routing};
 pub use codegen::{CodeGeneration, generate_code_from_action};
