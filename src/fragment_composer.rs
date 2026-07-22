@@ -109,6 +109,16 @@ pub struct ComposeExcludes {
 
 impl ComposeExcludes {
     pub fn blocks_fragment(&self, intent: &str, fragment: &Fragment) -> bool {
+        self.blocks_fragment_ignoring_slots(intent, fragment, &[])
+    }
+
+    /// Like [`Self::blocks_fragment`], but skip body-slot excludes listed in `allow_slots`.
+    pub fn blocks_fragment_ignoring_slots(
+        &self,
+        intent: &str,
+        fragment: &Fragment,
+        allow_slots: &[&str],
+    ) -> bool {
         if fragment
             .intent_exclude
             .iter()
@@ -117,7 +127,8 @@ impl ComposeExcludes {
             return true;
         }
         if let Some(ref slot) = fragment.body_slot {
-            if self.body_slots.contains(slot) {
+            let allowed = allow_slots.iter().any(|a| *a == slot.as_str());
+            if !allowed && self.body_slots.contains(slot) {
                 return true;
             }
         }
@@ -171,6 +182,17 @@ impl Fragment {
     }
 
     fn is_eligible_for(&self, ctx: &ComposeContext, opener_strict: bool) -> bool {
+        self.is_eligible_for_allowing(ctx, opener_strict, &[])
+    }
+
+    /// Like [`Self::is_eligible_for`], but keep fragments whose `body_slot` is in
+    /// `allow_slots` even when that slot is listed in compose excludes (ask-backs).
+    fn is_eligible_for_allowing(
+        &self,
+        ctx: &ComposeContext,
+        opener_strict: bool,
+        allow_slots: &[&str],
+    ) -> bool {
         // Intent / anchor affinity.
         if !self.intent_affinity.is_empty() {
             if self.requires_lore_topic_anchor(ctx) {
@@ -214,7 +236,18 @@ impl Fragment {
                 _ => return false,
             }
         }
-        if ctx.excludes.blocks_fragment(&ctx.intent, self) {
+        if ctx
+            .excludes
+            .blocks_fragment_ignoring_slots(&ctx.intent, self, allow_slots)
+        {
+            return false;
+        }
+        // When answering a prior ask, only dedicated ack bodies (not generic bonding).
+        if self.role == SlotRole::Body
+            && self.body_slot.as_deref() == Some("bonding")
+            && ctx.graph_anchors.iter().any(|a| a == "reciprocal_reply")
+            && !self.intent_affinity.iter().any(|a| a == "reciprocal_reply")
+        {
             return false;
         }
         true
@@ -225,7 +258,14 @@ impl Fragment {
         let voice_w = self.voice.weight(&ctx.weights).max(0.0);
         let ocean_align = 0.5 + 0.5 * self.ocean_cosine(&ctx.ocean);
         // Keep a small floor so a near-zero voice weight still allows fallback.
-        self.weight.max(0.0) * ocean_align * (0.05 + voice_w)
+        let mut s = self.weight.max(0.0) * ocean_align * (0.05 + voice_w);
+        // Prefer dedicated ack shards when answering a prior reciprocal ask.
+        if ctx.graph_anchors.iter().any(|a| a == "reciprocal_reply")
+            && self.intent_affinity.iter().any(|a| a == "reciprocal_reply")
+        {
+            s *= 3.0;
+        }
+        s
     }
 
     /// Cosine between this fragment's OCEAN affinity and the agent profile.
@@ -352,6 +392,36 @@ impl FragmentComposer {
 
     pub fn is_empty(&self) -> bool {
         self.fragments.is_empty()
+    }
+
+    /// Pick a reciprocal ask-back fragment (`body_slot` match + intent affinity).
+    /// Prefer fragments that name the active intent over wildcard `*` affinity.
+    pub fn pick_reciprocal(
+        &self,
+        ctx: &ComposeContext,
+        slot: &str,
+        seed: u64,
+    ) -> Option<&Fragment> {
+        let eligible: Vec<&Fragment> = self
+            .fragments
+            .iter()
+            .filter(|f| f.role == SlotRole::Body || f.role == SlotRole::Coda)
+            .filter(|f| f.body_slot.as_deref() == Some(slot))
+            // Ask-backs intentionally use `slot` even when it is excluded from
+            // normal body sampling (see turn_taking.reciprocal_slot).
+            .filter(|f| f.is_eligible_for_allowing(ctx, false, &[slot]))
+            .collect();
+        if eligible.is_empty() {
+            return None;
+        }
+        let direct: Vec<&Fragment> = eligible
+            .iter()
+            .copied()
+            .filter(|f| f.intent_affinity.iter().any(|a| a == &ctx.intent))
+            .collect();
+        let pool = if direct.is_empty() { eligible } else { direct };
+        let mut rng = seed ^ 0x9e3779b97f4a7c15;
+        Self::sample(&pool, ctx, &mut rng)
     }
 
     /// Compose a response for the given turn. Returns `None` when no fragment is
@@ -771,6 +841,64 @@ mod tests {
     }
 
     #[test]
+    fn pick_reciprocal_prefers_intent_and_ignores_slot_exclude() {
+        let lib = FragmentComposer::new(vec![
+            {
+                let mut f = frag(
+                    "ask_age",
+                    Voice::Identity,
+                    SlotRole::Body,
+                    "How old are you?",
+                    &["lore_qa"],
+                    &[],
+                );
+                f.body_slot = Some("reciprocal".into());
+                f
+            },
+            {
+                let mut f = frag(
+                    "ask_miss",
+                    Voice::Identity,
+                    SlotRole::Body,
+                    "Miss me?",
+                    &["reunion_warm", "*"],
+                    &[],
+                );
+                f.body_slot = Some("reciprocal".into());
+                f
+            },
+        ]);
+        let mut c = ctx(&[("mood", 0.5)], 7);
+        c.intent = "lore_qa".into();
+        c.excludes.body_slots.insert("reciprocal".into());
+        let picked = lib.pick_reciprocal(&c, "reciprocal", 7).expect("ask");
+        assert_eq!(picked.fragment_id, "ask_age");
+    }
+
+    #[test]
+    fn luna_library_has_reciprocal_for_lore_qa() {
+        let path = "/Users/astor/Projects/2026/spacekit/spacekit-projects/companions/luna/data/luna_fragments_v2.jsonl";
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let (lib, _) = FragmentComposer::from_jsonl_str(&raw);
+        let mut c = ctx(&[("mood", 0.5), ("hunger", 0.3), ("energy", 0.6)], 11);
+        c.intent = "lore_qa".into();
+        c.archetype = Some("cheerful_companion".into());
+        c.excludes.body_slots.insert("reciprocal".into());
+        let picked = lib.pick_reciprocal(&c, "reciprocal", 11);
+        assert!(
+            picked.is_some(),
+            "expected reciprocal ask for lore_qa, library has {}",
+            lib.fragments
+                .iter()
+                .filter(|f| f.body_slot.as_deref() == Some("reciprocal"))
+                .count()
+        );
+        assert_eq!(picked.unwrap().fragment_id, "luna_ask_how_old");
+    }
+
+    #[test]
     fn compose_template_fills_body_slots() {
         let lib = FragmentComposer::new(vec![
             Fragment {
@@ -947,5 +1075,88 @@ mod tests {
         let out = lib.compose(&c).unwrap();
         assert!(out.text.contains("Sushi rolls"));
         assert!(!out.text.contains("nickname"));
+    }
+
+    #[test]
+    fn k_seeded_compositions_can_diverge_for_status_slots() {
+        let lib = FragmentComposer::new(vec![
+            Fragment {
+                fragment_id: "m1".into(),
+                voice: Voice::Identity,
+                text: "Mood: content. Whiskers soft.".into(),
+                role: SlotRole::Body,
+                intent_affinity: vec!["status_check".into()],
+                ocean_affinity: HashMap::new(),
+                state_gate: HashMap::new(),
+                vocalization: None,
+                archetype: None,
+                weight: 1.0,
+                body_slot: Some("mood".into()),
+                intent_exclude: Vec::new(),
+            },
+            Fragment {
+                fragment_id: "m2".into(),
+                voice: Voice::Identity,
+                text: "Soft. Slow blink ready.".into(),
+                role: SlotRole::Body,
+                intent_affinity: vec!["status_check".into()],
+                ocean_affinity: HashMap::new(),
+                state_gate: HashMap::new(),
+                vocalization: None,
+                archetype: None,
+                weight: 1.0,
+                body_slot: Some("mood".into()),
+                intent_exclude: Vec::new(),
+            },
+            Fragment {
+                fragment_id: "c1".into(),
+                voice: Voice::Activity,
+                text: "Cause: you are here.".into(),
+                role: SlotRole::Body,
+                intent_affinity: vec!["status_check".into()],
+                ocean_affinity: HashMap::new(),
+                state_gate: HashMap::new(),
+                vocalization: None,
+                archetype: None,
+                weight: 1.0,
+                body_slot: Some("cause".into()),
+                intent_exclude: Vec::new(),
+            },
+            Fragment {
+                fragment_id: "c2".into(),
+                voice: Voice::Activity,
+                text: "Cause: the window light and a moth.".into(),
+                role: SlotRole::Body,
+                intent_affinity: vec!["status_check".into()],
+                ocean_affinity: HashMap::new(),
+                state_gate: HashMap::new(),
+                vocalization: None,
+                archetype: None,
+                weight: 1.0,
+                body_slot: Some("cause".into()),
+                intent_exclude: Vec::new(),
+            },
+        ]);
+        let mut texts = std::collections::HashSet::new();
+        // Wide seed sweep — weighted sample is deterministic per seed.
+        for seed in (0..64u64).map(|i| i.wrapping_mul(0x9e3779b97f4a7c15)) {
+            let mut c = ctx(&[("mood", 0.7)], seed);
+            c.intent = "status_check".into();
+            c.graph_anchors = vec!["status_check".into()];
+            c.body_slots = Some(vec!["mood".into(), "cause".into()]);
+            c.min_bodies = 2;
+            c.use_opener = false;
+            if let Some(out) = lib.compose(&c) {
+                assert!(out.text.contains("Mood:") || out.text.contains("Soft."));
+                assert!(out.text.contains("Cause:"));
+                texts.insert(out.text);
+            }
+        }
+        assert!(
+            texts.len() >= 2,
+            "expected diverse K-seed compositions, got {} unique: {:?}",
+            texts.len(),
+            texts
+        );
     }
 }

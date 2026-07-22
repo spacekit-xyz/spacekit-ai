@@ -43,6 +43,23 @@ pub const GEN_COND_DIM: usize = 192;
 /// the entire hinted sub-lattice and fell back to global mealtime-dominant retrieval.
 pub const FORCED_TOPIC_SCORE_FLOOR: f32 = 0.02;
 
+/// WordNet / lookup brains store compact JSON with a `"center"` lemma field.
+pub fn lookup_json_center_matches(text: &str, lemma: &str) -> bool {
+    let lemma = lemma.trim().to_ascii_lowercase();
+    if lemma.is_empty() {
+        return false;
+    }
+    let underscored = lemma.replace(' ', "_");
+    for center in [lemma.as_str(), underscored.as_str()] {
+        if text.contains(&format!("\"center\":\"{center}\""))
+            || text.contains(&format!("\"center\": \"{center}\""))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// One lattice program after cosine+BM25+graph+lex-align scoring, before witness/hard-reject gates.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RawLatticeCandidate {
@@ -2780,6 +2797,96 @@ impl IndexedGenEnv {
         out
     }
 
+    /// EMA-augment topic centroids + causal fingerprints from new bridged embeddings.
+    /// Matches by `semantic_intent` / topic name. Lattices and programs are untouched.
+    /// Returns number of topics that received at least one sample.
+    pub fn augment_topic_fingerprints(
+        &mut self,
+        samples: &[(/* bridged */ &[f32], /* topic */ &str)],
+        alpha: f32,
+    ) -> usize {
+        let alpha = alpha.clamp(0.0, 1.0);
+        if samples.is_empty() || self.topic_subindex.is_empty() {
+            return 0;
+        }
+
+        let mut by_topic: HashMap<String, Vec<&[f32]>> = HashMap::new();
+        for (emb, topic) in samples {
+            by_topic.entry((*topic).to_string()).or_default().push(*emb);
+        }
+
+        let mut updated = 0usize;
+        for topic in &mut self.topic_subindex {
+            let Some(embs) = by_topic.get(&topic.topic_name) else {
+                continue;
+            };
+            if embs.is_empty() {
+                continue;
+            }
+
+            let dim = topic.centroid.len().max(embs[0].len());
+            let mut new_centroid = vec![0.0f32; dim];
+            let mut causal_sum = [0.0f32; BOOST_BIVECTOR_COUNT];
+            for emb in embs {
+                for (dst, src) in new_centroid.iter_mut().zip(emb.iter()) {
+                    *dst += *src;
+                }
+                let mv = embed_bridge_vector(emb);
+                let cfp = causal_fingerprint(&mv);
+                for (dst, src) in causal_sum.iter_mut().zip(cfp.iter()) {
+                    *dst += *src;
+                }
+            }
+            let n = embs.len() as f32;
+            for v in &mut new_centroid {
+                *v /= n;
+            }
+            let norm = new_centroid.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+            for v in &mut new_centroid {
+                *v /= norm;
+            }
+            let mut new_causal = [0.0f32; BOOST_BIVECTOR_COUNT];
+            for (i, v) in causal_sum.iter().enumerate() {
+                new_causal[i] = v / n;
+            }
+            let cnorm = new_causal.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+            for v in &mut new_causal {
+                *v /= cnorm;
+            }
+
+            // Resize centroid if needed, then EMA.
+            if topic.centroid.len() < new_centroid.len() {
+                topic.centroid.resize(new_centroid.len(), 0.0);
+            }
+            let n_c = topic.centroid.len().min(new_centroid.len());
+            for i in 0..n_c {
+                topic.centroid[i] =
+                    (1.0 - alpha) * topic.centroid[i] + alpha * new_centroid[i];
+            }
+            let cnorm2 = topic.centroid.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+            for v in &mut topic.centroid {
+                *v /= cnorm2;
+            }
+            for i in 0..BOOST_BIVECTOR_COUNT {
+                topic.causal_centroid[i] =
+                    (1.0 - alpha) * topic.causal_centroid[i] + alpha * new_causal[i];
+            }
+            let cn = topic
+                .causal_centroid
+                .iter()
+                .map(|x| x * x)
+                .sum::<f32>()
+                .sqrt()
+                .max(1e-8);
+            for v in &mut topic.causal_centroid {
+                *v /= cn;
+            }
+            topic.sample_count = topic.sample_count.saturating_add(embs.len());
+            updated += 1;
+        }
+        updated
+    }
+
     /// Build from training pairs in a single pass. No iterative training.
     ///
     /// 1. Build dictionary + codebook + Hopf table (algebraic indexing)
@@ -4221,9 +4328,10 @@ impl IndexedGenEnv {
                 .enumerate()
                 .map(|(di, &(idx, cos))| {
                     let base = cos + lambda * bm25_norm[di];
+                    let text = topic.lattice.programs[idx].display_text(&self.dictionary);
+                    let center_exact = query_terms.iter().any(|qt| lookup_json_center_matches(&text, qt));
                     let intent_mod = if !self.intent_action.is_empty() {
                         let (_, words) = &docs[di];
-                        let text = topic.lattice.programs[idx].display_text(&self.dictionary);
                         let has_code = retrieval_lex.program_has_code_markers_bm25(&text);
                         let action = self.intent_action.as_str();
                         if retrieval_lex.intent_prefers_code(action) && has_code {
@@ -4239,7 +4347,8 @@ impl IndexedGenEnv {
                     } else {
                         0.0
                     };
-                    (idx, base + intent_mod)
+                    let center_boost = if center_exact { 2.0 } else { 0.0 };
+                    (idx, base + intent_mod + center_boost)
                 })
                 .collect();
             combined.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));

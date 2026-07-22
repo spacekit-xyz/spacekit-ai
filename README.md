@@ -5,7 +5,7 @@
 | Doc | What it's for |
 |-----|---------------|
 | **This file** (`README.md`) | Overview, architecture, training/inference CLI, WASM, GLE milestones, latest results |
-| [`docs/GROWFORMER_WHITEPAPER.md`](docs/GROWFORMER_WHITEPAPER.md) | Preprint: parameter-isolated specialists, VirtualGroup composition, retention invariant; appendices for deployment stack & speculative algebra |
+| [`docs/GROWFORMER_WHITEPAPER.md`](docs/GROWFORMER_WHITEPAPER.md) | Preprint: parameter-isolated specialists, VirtualGroup negative, cone anti-collapse (qualified), retention invariant; appendices for deployment stack |
 | [`USE_CASES.md`](USE_CASES.md) | Where the substrate wins, emergent architectures, continual learning, edge deployment, explainability (uses “Neuro” naming for the same system) |
 | [`DOCKER.md`](DOCKER.md) | Linux amd64 builds (`build-linux.sh`), Docker image, cloud VM deployment |
 | [`src/category/README.md`](src/category/README.md) | Categorical DAG + Pythagoras trainer (`--features categorical`) |
@@ -125,6 +125,8 @@ These figures are **old-task test accuracy after sequential training on all five
 | **Avg** | | **97.7%** | **97.7%** | **0%** |
 
 Informal comparison (literature-scale EWC, not a matched benchmark row in this repo): EWC ~97% average, ~3% forgetting vs. Growformer **97.7%** average and **0%** measured forgetting **in this promote-and-freeze protocol**. The engineering invariant is **frozen promoted subgraphs receive zero further weight updates**; the empirical claim is the table above, extendable with full baseline sweeps as above.
+
+**Product companions / domain brains:** substrate promote-freeze is not yet the default `--train-brain` path. Use **interaction → label → fingerprint → certify** — see [`docs/CONTINUAL_PRODUCT_LOOP.md`](docs/CONTINUAL_PRODUCT_LOOP.md) (`scripts/luna_interaction_cycle.sh`, `--train-fingerprint-adapter`, `scripts/train_loop.sh`, multi-turn → fragments).
 
 ### Structural Interpretability
 

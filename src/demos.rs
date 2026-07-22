@@ -35,7 +35,7 @@ use growformer::dimension::{
     VirtualGroup, RoutingEntropyGuard, routing_entropy_bits, routing_entropy_degenerate,
     load_language_samples_jsonl, render_action_template, generate_code_from_action,
     route_language_embedding,
-    AdjustableConeRouter, ConeConfig, ConeSample, cone_features,
+    AdjustableConeRouter, ConeConfig, ConeSample, LabelFreeStrategy, cone_features,
 };
 
 use growformer::types::GroupId;
@@ -92,6 +92,10 @@ struct Args {
     /// against region-agreement / annulus / margin↔r across 20 seeds.
     #[arg(long)]
     phase3g_cone: bool,
+    /// Phase 3h: label-free *train* cone (no region/`r` in the loss); eval certifiers only.
+    /// Pre-registered in COMPETENCE_ROUTING_SPEC §10.5.
+    #[arg(long)]
+    phase3h_label_free: bool,
     #[arg(long)]
     phase3f_analyze: bool,
     /// Conditional MI measurement: present-but-inaccessible formalization (Task E).
@@ -417,6 +421,8 @@ fn main() {
         demo_phase3f_analyze_csv();
     } else if args.phase3g_cone {
         demo_phase3g_cone_router();
+    } else if args.phase3h_label_free {
+        demo_phase3h_label_free();
     } else if args.phase3f_competence {
         demo_phase3f_competence_routing();
     } else if args.phase3e_boundary_analyze {
@@ -9635,6 +9641,296 @@ fn demo_phase3g_cone_router() {
     } else {
         println!("OVERALL: anti-collapse NOT fully certified — inspect the FAIL rows above.");
     }
+}
+
+// =============================================================================
+// Phase 3h: Label-free train cone (oracle-free train + inference; eval labels only)
+// =============================================================================
+
+#[derive(Clone, Copy, Debug)]
+struct LabelFreeSeedResult {
+    train_n: usize,
+    strategy: LabelFreeStrategy,
+    vg_heldout: f32,
+    conf_argmax_heldout: f32,
+    cone_heldout: f32,
+    region_agreement: f32,
+    entropy_bits: f32,
+    cw_reliance: f32,
+    degenerate: bool,
+}
+
+fn run_phase3h_seed_all_strategies(seed: u64) -> Vec<LabelFreeSeedResult> {
+    const INNER_RADIUS: f32 = 0.4;
+    const N_SAMPLES: usize = 400;
+    const SWEEP: [usize; 4] = [20, 30, 60, 120];
+    const STRATEGIES: [LabelFreeStrategy; 3] = [
+        LabelFreeStrategy::CirclesThreshold,
+        LabelFreeStrategy::CirclesCluster,
+        LabelFreeStrategy::Bootstrap,
+    ];
+
+    let mut dm = DimensionManager::new(phase3_composition_config());
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut data_rng = StdRng::seed_from_u64(seed.wrapping_mul(97).wrapping_add(99));
+
+    let spiral_data = generate_spiral_data(400, &mut data_rng);
+    let circles_data = generate_concentric_circles_data(400, &mut data_rng);
+    let calibration_spiral: Vec<_> = spiral_data.iter().take(100).cloned().collect();
+    let calibration_circles: Vec<_> = circles_data.iter().take(100).cloned().collect();
+
+    let spiral_group = train_promoted_mirror(
+        &mut dm, "spiral", seed, &spiral_data, &calibration_spiral, &mut rng, false,
+    );
+    let circles_group = train_promoted_mirror(
+        &mut dm, "circles", seed.wrapping_add(1), &circles_data, &calibration_circles, &mut rng, false,
+    );
+
+    let task_e_data = generate_balanced_spiral_gated_circles_data(
+        &mut dm.main, spiral_group, circles_group, INNER_RADIUS, N_SAMPLES, &mut data_rng,
+    );
+
+    let mut out = Vec::with_capacity(SWEEP.len() * STRATEGIES.len());
+    for &train_n in &SWEEP {
+        let mut split_rng =
+            StdRng::seed_from_u64(seed.wrapping_mul(131).wrapping_add(train_n as u64));
+        let (train, heldout) =
+            stratified_composite_split(&task_e_data, INNER_RADIUS, train_n, &mut split_rng);
+
+        let (vg, _) = dm.train_composition_one_pass(&[spiral_group, circles_group], &train);
+        let vg_heldout = accuracy_virtual_group(&mut dm, &vg, &heldout);
+        let conf_argmax_heldout =
+            accuracy_confidence_argmax(&mut dm.main, spiral_group, circles_group, &heldout);
+
+        let pairs: Vec<(f32, f32)> = train
+            .iter()
+            .map(|(input, _)| {
+                let s = specialist_scalar(&mut dm.main, spiral_group, input);
+                let c = specialist_scalar(&mut dm.main, circles_group, input);
+                (s, c)
+            })
+            .collect();
+        let heldout_sc: Vec<(f32, f32, f32, f32, bool)> = heldout
+            .iter()
+            .map(|(input, target)| {
+                let s = specialist_scalar(&mut dm.main, spiral_group, input);
+                let c = specialist_scalar(&mut dm.main, circles_group, input);
+                let r = sample_radius(input);
+                (target[0], s, c, r, r < INNER_RADIUS)
+            })
+            .collect();
+
+        for &strategy in &STRATEGIES {
+            let cfg = ConeConfig {
+                seed,
+                inner_radius: INNER_RADIUS,
+                ..ConeConfig::default()
+            };
+            let router = AdjustableConeRouter::train_label_free(&pairs, cfg, strategy);
+
+            let mut correct = 0usize;
+            let mut route_choices: Vec<usize> = Vec::with_capacity(heldout_sc.len());
+            let mut region_hits = 0usize;
+            let mut cw_sum = 0.0f32;
+            let mut cw_n = 0usize;
+            for (target, s, c, _r, oracle_spiral) in &heldout_sc {
+                let feats = cone_features(*s, *c);
+                let decision = router.decide(&feats);
+                let blended = decision.spiral_weight * s + (1.0 - decision.spiral_weight) * c;
+                if scalar_matches_target(blended, *target) {
+                    correct += 1;
+                }
+                let route_idx = if decision.spiral_weight >= 0.5 { 0 } else { 1 };
+                route_choices.push(route_idx);
+                if (route_idx == 0) == *oracle_spiral {
+                    region_hits += 1;
+                }
+                let spiral_cw = (*s - 0.5).abs() > 0.4 && !scalar_matches_target(*s, *target);
+                let circles_cw = (*c - 0.5).abs() > 0.4 && !scalar_matches_target(*c, *target);
+                if spiral_cw {
+                    cw_sum += decision.spiral_weight;
+                    cw_n += 1;
+                }
+                if circles_cw {
+                    cw_sum += 1.0 - decision.spiral_weight;
+                    cw_n += 1;
+                }
+            }
+            let n = heldout_sc.len().max(1) as f32;
+            let region_agreement = region_hits as f32 / n;
+            let entropy_bits = routing_entropy_bits(&route_choices);
+            let degenerate = (region_agreement - 0.5).abs() < 0.01 || entropy_bits < 0.3;
+            out.push(LabelFreeSeedResult {
+                train_n,
+                strategy,
+                vg_heldout,
+                conf_argmax_heldout,
+                cone_heldout: correct as f32 / n,
+                region_agreement,
+                entropy_bits,
+                cw_reliance: if cw_n > 0 { cw_sum / cw_n as f32 } else { f32::NAN },
+                degenerate,
+            });
+        }
+    }
+    out
+}
+
+fn demo_phase3h_label_free() {
+    println!("--- Phase 3h: Label-Free Train Cone (COMPETENCE_ROUTING_SPEC §10.5) ---\n");
+    println!("Task E: same specialists / splits as Phase 3g.");
+    println!("TRAIN: no region / r in the loss (pseudo-labels from specialist scalars only).");
+    println!("INFERENCE: oracle-free cone features (unchanged).");
+    println!("EVAL: region labels used only for certifiers.\n");
+
+    const SEEDS: [u64; 20] = [
+        42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
+    ];
+    const STRATEGIES: [LabelFreeStrategy; 3] = [
+        LabelFreeStrategy::CirclesThreshold,
+        LabelFreeStrategy::CirclesCluster,
+        LabelFreeStrategy::Bootstrap,
+    ];
+    const HEADLINE_N: usize = 30;
+
+    let strategy_name = |s: LabelFreeStrategy| -> &'static str {
+        match s {
+            LabelFreeStrategy::CirclesThreshold => "circles_threshold",
+            LabelFreeStrategy::CirclesCluster => "circles_cluster",
+            LabelFreeStrategy::Bootstrap => "bootstrap",
+        }
+    };
+
+    let mut all: Vec<LabelFreeSeedResult> = Vec::new();
+    for &seed in &SEEDS {
+        println!("  seed {} ...", seed);
+        all.extend(run_phase3h_seed_all_strategies(seed));
+    }
+
+    let mut best_name = "";
+    let mut best_score = f32::NEG_INFINITY;
+    let mut best_strategy = LabelFreeStrategy::CirclesThreshold;
+
+    for &strategy in &STRATEGIES {
+        let at30: Vec<_> = all
+            .iter()
+            .filter(|r| r.train_n == HEADLINE_N && r.strategy == strategy)
+            .cloned()
+            .collect();
+        let mean = |g: fn(&LabelFreeSeedResult) -> f32| -> f32 {
+            let vals: Vec<f32> = at30.iter().map(g).filter(|v| v.is_finite()).collect();
+            if vals.is_empty() {
+                f32::NAN
+            } else {
+                vals.iter().sum::<f32>() / vals.len() as f32
+            }
+        };
+        let std = |g: fn(&LabelFreeSeedResult) -> f32| -> f32 {
+            mean_std(
+                &at30
+                    .iter()
+                    .map(g)
+                    .filter(|v| v.is_finite())
+                    .collect::<Vec<_>>(),
+            )
+            .1
+        };
+        let pct = |g: fn(&LabelFreeSeedResult) -> f32| {
+            format!("{:.1}% ± {:.1}%", mean(g) * 100.0, std(g) * 100.0)
+        };
+        let degen = at30.iter().filter(|r| r.degenerate).count();
+        let score = mean(|r| r.region_agreement) + 0.25 * mean(|r| r.cone_heldout)
+            - 0.5 * (degen as f32 / at30.len().max(1) as f32);
+
+        println!("=== Strategy: {} (n={}, {} seeds) ===", strategy_name(strategy), HEADLINE_N, at30.len());
+        println!("| Method | Held-out |");
+        println!("| ------ | -------- |");
+        println!("| VirtualGroup | {} |", pct(|r| r.vg_heldout));
+        println!("| Confidence argmax | {} |", pct(|r| r.conf_argmax_heldout));
+        println!("| **Label-free cone** | **{}** |", pct(|r| r.cone_heldout));
+        println!(
+            "Region agree {} | Degenerate {}/{} | Conf-wrong reliance {:.2} | Entropy (worst) {:.2}",
+            pct(|r| r.region_agreement),
+            degen,
+            at30.len(),
+            mean(|r| r.cw_reliance),
+            at30.iter()
+                .map(|r| r.entropy_bits)
+                .fold(f32::INFINITY, f32::min),
+        );
+        print!("n-sweep region agree:");
+        for &n in &[20usize, 30, 60, 120] {
+            let rs: Vec<_> = all
+                .iter()
+                .filter(|r| r.train_n == n && r.strategy == strategy)
+                .collect();
+            let m = rs.iter().map(|r| r.region_agreement).sum::<f32>() / rs.len().max(1) as f32;
+            print!(" n={n}:{:.1}%", m * 100.0);
+        }
+        println!("\n");
+
+        if score > best_score {
+            best_score = score;
+            best_name = strategy_name(strategy);
+            best_strategy = strategy;
+        }
+    }
+
+    let best_rows: Vec<_> = all
+        .iter()
+        .filter(|r| r.train_n == HEADLINE_N && r.strategy == best_strategy)
+        .cloned()
+        .collect();
+    let mean = |g: fn(&LabelFreeSeedResult) -> f32| -> f32 {
+        let vals: Vec<f32> = best_rows.iter().map(g).filter(|v| v.is_finite()).collect();
+        if vals.is_empty() {
+            f32::NAN
+        } else {
+            vals.iter().sum::<f32>() / vals.len() as f32
+        }
+    };
+    let degen = best_rows.iter().filter(|r| r.degenerate).count();
+    let cone_m = mean(|r| r.cone_heldout);
+    let vg_m = mean(|r| r.vg_heldout);
+    let conf_m = mean(|r| r.conf_argmax_heldout);
+    let region_m = mean(|r| r.region_agreement);
+    let cw_m = mean(|r| r.cw_reliance);
+    let ra_at = |n: usize| -> f32 {
+        let rs: Vec<_> = all
+            .iter()
+            .filter(|r| r.train_n == n && r.strategy == best_strategy)
+            .collect();
+        rs.iter().map(|r| r.region_agreement).sum::<f32>() / rs.len().max(1) as f32
+    };
+    let no_decay = ra_at(120) + 0.02 >= ra_at(20);
+
+    let g_degen = degen == 0;
+    let g_vg = cone_m > vg_m;
+    let g_conf = cone_m > conf_m;
+    let g_region = region_m >= 0.60;
+    let g_cw = cw_m < 0.50;
+    let g_sweep = no_decay;
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+
+    println!("=== VERDICT (best strategy: {}) ===\n", best_name);
+    println!("[{}] 0 degenerate seeds                         ({}/{})", mark(g_degen), degen, best_rows.len());
+    println!("[{}] Held-out acc > VirtualGroup                ({:.1}% > {:.1}%)", mark(g_vg), cone_m * 100.0, vg_m * 100.0);
+    println!("[{}] Held-out acc > confidence argmax           ({:.1}% > {:.1}%)", mark(g_conf), cone_m * 100.0, conf_m * 100.0);
+    println!("[{}] Region agreement ≥ 60%                     ({:.1}%)", mark(g_region), region_m * 100.0);
+    println!("[{}] Confident-wrong reliance < 0.50            ({:.2})", mark(g_cw), cw_m);
+    println!("[{}] No region-agree decay n=20→120             ({:.1}% → {:.1}%)", mark(g_sweep), ra_at(20) * 100.0, ra_at(120) * 100.0);
+
+    let gates = [g_degen, g_vg, g_conf, g_region, g_cw, g_sweep];
+    let pass_n = gates.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{} met.", pass_n, gates.len());
+    if pass_n == gates.len() {
+        println!("OVERALL: Phase 3h PASS — label-free train middle rung under §10.5.");
+    } else if region_m <= 0.55 && cone_m <= vg_m.max(conf_m) + 0.01 {
+        println!("OVERALL: Phase 3h KILL — stays at VG/confidence floor (finished negative under current features).");
+    } else {
+        println!("OVERALL: Phase 3h INCONCLUSIVE — partial lift; inspect FAIL rows (do not claim unsupervised solve).");
+    }
+    println!("\nNote: do not compare these region-agree numbers to Phase 3g's 80% supervised gate.");
 }
 
 fn demo_phase3e_balanced_composite() {

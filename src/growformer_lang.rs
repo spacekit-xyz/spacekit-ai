@@ -1052,9 +1052,22 @@ pub fn is_broad_query(text: &str) -> bool {
 /// This is finer-grained than `infer_concept` and is used as the `topic_hint` for
 /// within-group discrimination via topic sub-lattices.
 ///
-/// Delegates to [`TopicGraph`] (`data/knowledge_graph.toml` + optional overlay) when initialized.
-/// Otherwise uses [`infer_operation_topic_legacy`] and prints a **one-time** `eprintln` hint.
+/// Delegates to certified semantic-primary router when loaded (abstain = `None`,
+/// **no** keyword fallback). Otherwise uses [`TopicGraph`] / legacy keywords.
 pub fn infer_operation_topic(text: &str) -> Option<String> {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+    {
+        if crate::semantic_router::is_loaded() {
+            match crate::semantic_router::infer(text) {
+                Some(Ok(decision)) => return decision.topic,
+                Some(Err(e)) => {
+                    eprintln!("[growformer] semantic_router infer failed: {e}");
+                    return None;
+                }
+                None => {}
+            }
+        }
+    }
     if let Ok(guard) = TOPIC_GRAPH.read() {
         if let Some(graph) = guard.as_ref() {
             return graph.infer_topic(text);

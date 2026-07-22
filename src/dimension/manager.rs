@@ -200,7 +200,16 @@ impl DimensionManager {
     /// of its training embeddings' grade-2 bivector components in Cl(8).
     pub fn register_group_fingerprint(&mut self, group_idx: usize, raw_embeddings: &[&[f32]]) {
         if raw_embeddings.is_empty() { return; }
+        let mean_fp = Self::mean_structural_fingerprint(raw_embeddings);
+        self.group_fingerprints.insert(group_idx, mean_fp);
+    }
+
+    /// Mean grade-2 structural fingerprint over raw (or bridged) embeddings.
+    pub fn mean_structural_fingerprint(raw_embeddings: &[&[f32]]) -> Vec<f32> {
         let mut mean_fp = [0.0f32; 28];
+        if raw_embeddings.is_empty() {
+            return mean_fp.to_vec();
+        }
         for raw in raw_embeddings {
             let mv = embed_bridge_vector(raw);
             let fp = structural_fingerprint(&mv);
@@ -209,8 +218,55 @@ impl DimensionManager {
             }
         }
         let n = raw_embeddings.len() as f32;
-        for m in mean_fp.iter_mut() { *m /= n; }
-        self.group_fingerprints.insert(group_idx, mean_fp.to_vec());
+        for m in mean_fp.iter_mut() {
+            *m /= n;
+        }
+        mean_fp.to_vec()
+    }
+
+    /// EMA-blend a new mean fingerprint into an existing group fingerprint.
+    /// `alpha` in (0,1]: weight of the new observation (`fp_new = (1-α)·old + α·new`).
+    /// If no prior fingerprint exists, registers `new_fp` directly.
+    /// Does not touch lattices, routers, or topic programs — augment-only CL.
+    pub fn augment_group_fingerprint(
+        &mut self,
+        group_idx: usize,
+        new_fp: &[f32],
+        alpha: f32,
+    ) {
+        let alpha = alpha.clamp(0.0, 1.0);
+        if new_fp.is_empty() {
+            return;
+        }
+        match self.group_fingerprints.get_mut(&group_idx) {
+            Some(old) => {
+                let n = old.len().min(new_fp.len());
+                for i in 0..n {
+                    old[i] = (1.0 - alpha) * old[i] + alpha * new_fp[i];
+                }
+                if new_fp.len() > old.len() {
+                    old.extend_from_slice(&new_fp[old.len()..]);
+                }
+            }
+            None => {
+                self.group_fingerprints
+                    .insert(group_idx, new_fp.to_vec());
+            }
+        }
+    }
+
+    /// Compute mean fingerprint from embeddings and EMA-blend into the group.
+    pub fn augment_group_fingerprint_from_embeddings(
+        &mut self,
+        group_idx: usize,
+        raw_embeddings: &[&[f32]],
+        alpha: f32,
+    ) {
+        if raw_embeddings.is_empty() {
+            return;
+        }
+        let new_fp = Self::mean_structural_fingerprint(raw_embeddings);
+        self.augment_group_fingerprint(group_idx, &new_fp, alpha);
     }
 
     /// Route by structural similarity: embed the raw input into Cl(8), extract

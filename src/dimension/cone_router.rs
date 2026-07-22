@@ -64,6 +64,19 @@ pub struct ConeSample {
     pub r: f32,
 }
 
+/// Label-free training strategies (Phase 3h): no region / `r` in the loss.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LabelFreeStrategy {
+    /// Median-split on the circles specialist scalar (sign fixed by prior analysis:
+    /// `f_circles ↔ r ≈ +0.87`, so low circles ⇒ inner ⇒ route spiral).
+    CirclesThreshold,
+    /// 1-D 2-means on circles scalar; assign spiral to the low-circles centroid.
+    CirclesCluster,
+    /// CirclesThreshold warm-start, then one self-distill round from the router's
+    /// soft train predictions (still no `r`).
+    Bootstrap,
+}
+
 /// Hyperparameters for [`AdjustableConeRouter::train`].
 #[derive(Clone, Copy, Debug)]
 pub struct ConeConfig {
@@ -127,72 +140,103 @@ pub struct AdjustableConeRouter {
 impl AdjustableConeRouter {
     /// Train all three heads from oracle-free features + train-only `r`.
     pub fn train(samples: &[ConeSample], cfg: ConeConfig) -> Self {
-        let feat_dim = samples
-            .first()
-            .map(|s| s.features.len())
-            .unwrap_or(CONE_FEATURE_DIM);
-        let mut rng = StdRng::seed_from_u64(cfg.seed.wrapping_mul(2_654_435_761).wrapping_add(1));
-
-        // Per-sample derived training targets (train-time r allowed here).
         let near: Vec<bool> = samples
             .iter()
             .map(|s| (s.r - cfg.inner_radius).abs() < cfg.annulus_eps)
             .collect();
+        let routes: Vec<bool> = samples.iter().map(|s| s.route_spiral).collect();
+        let feats: Vec<&[f32]> = samples.iter().map(|s| s.features.as_slice()).collect();
+        Self::train_from_targets(&feats, &routes, &near, cfg)
+    }
 
-        // --- Boundary controller: features -> P(near annulus) ---
-        // Annulus points are rare (~20% of 30), so weight by inverse class prior.
+    /// Phase 3h: train with **no region / `r` in the loss**.
+    ///
+    /// `specialist_pairs` are `(spiral_scalar, circles_scalar)` per train point.
+    /// Pseudo route + near-boundary targets are derived only from those scalars.
+    pub fn train_label_free(
+        specialist_pairs: &[(f32, f32)],
+        cfg: ConeConfig,
+        strategy: LabelFreeStrategy,
+    ) -> Self {
+        let features: Vec<Vec<f32>> = specialist_pairs
+            .iter()
+            .map(|(s, c)| cone_features(*s, *c))
+            .collect();
+        let (mut routes, near) = label_free_pseudo_targets(specialist_pairs, strategy);
+
+        let feat_refs: Vec<&[f32]> = features.iter().map(|f| f.as_slice()).collect();
+        let mut router = Self::train_from_targets(&feat_refs, &routes, &near, cfg);
+
+        if strategy == LabelFreeStrategy::Bootstrap && !features.is_empty() {
+            // One self-distill round: hard labels from the warm-started router's train decisions.
+            for (i, f) in features.iter().enumerate() {
+                routes[i] = router.route_index(f) == 0;
+            }
+            // Keep the same near mask (still feature-only).
+            let feat_refs: Vec<&[f32]> = features.iter().map(|f| f.as_slice()).collect();
+            router = Self::train_from_targets(&feat_refs, &routes, &near, cfg);
+        }
+
+        router
+    }
+
+    fn train_from_targets(
+        features: &[&[f32]],
+        routes: &[bool],
+        near: &[bool],
+        cfg: ConeConfig,
+    ) -> Self {
+        assert_eq!(features.len(), routes.len());
+        assert_eq!(features.len(), near.len());
+        let feat_dim = features.first().map(|f| f.len()).unwrap_or(CONE_FEATURE_DIM);
+        let mut rng = StdRng::seed_from_u64(cfg.seed.wrapping_mul(2_654_435_761).wrapping_add(1));
+
         let n_near = near.iter().filter(|&&b| b).count().max(1);
-        let n_far = samples.len().saturating_sub(n_near).max(1);
-        let w_near = samples.len() as f32 / (2.0 * n_near as f32);
-        let w_far = samples.len() as f32 / (2.0 * n_far as f32);
+        let n_far = features.len().saturating_sub(n_near).max(1);
+        let w_near = features.len() as f32 / (2.0 * n_near as f32);
+        let w_far = features.len() as f32 / (2.0 * n_far as f32);
         let mut boundary = Mlp::new(feat_dim, cfg.hidden, &mut rng);
         for _ in 0..cfg.epochs {
             let mut grad = MlpGrad::zeros(feat_dim, cfg.hidden);
             let mut count = 0.0f32;
-            for (s, &is_near) in samples.iter().zip(near.iter()) {
-                let (a1, logit) = boundary.forward(&s.features);
+            for (f, &is_near) in features.iter().zip(near.iter()) {
+                let (a1, logit) = boundary.forward(f);
                 let p = sigmoid(logit);
                 let y = if is_near { 1.0 } else { 0.0 };
                 let w = if is_near { w_near } else { w_far };
-                boundary.accumulate(&s.features, &a1, w * (p - y), &mut grad);
+                boundary.accumulate(f, &a1, w * (p - y), &mut grad);
                 count += 1.0;
             }
             boundary.apply(&grad, cfg.lr / count.max(1.0), cfg.l2);
         }
 
-        // --- Fast gate (small cone): features -> P(route spiral) ---
-        // Plain BCE on the region label. No margin shaping (would contaminate margin↔r).
         let mut fast = Mlp::new(feat_dim, cfg.hidden, &mut rng);
         for _ in 0..cfg.epochs {
             let mut grad = MlpGrad::zeros(feat_dim, cfg.hidden);
             let mut count = 0.0f32;
-            for s in samples {
-                let (a1, logit) = fast.forward(&s.features);
+            for (f, &route_spiral) in features.iter().zip(routes.iter()) {
+                let (a1, logit) = fast.forward(f);
                 let p = sigmoid(logit);
-                let y = if s.route_spiral { 1.0 } else { 0.0 };
-                fast.accumulate(&s.features, &a1, p - y, &mut grad);
+                let y = if route_spiral { 1.0 } else { 0.0 };
+                fast.accumulate(f, &a1, p - y, &mut grad);
                 count += 1.0;
             }
             fast.apply(&grad, cfg.lr / count.max(1.0), cfg.l2);
         }
 
-        // --- Piecewise gate (wide cone): [features, P_near] -> blend weight ---
-        // Boundary-aware curriculum + cone-expansion balance + margin shaping.
         let pw_dim = feat_dim + 1;
         let mut piecewise = Mlp::new(pw_dim, cfg.hidden, &mut rng);
-        // Precompute augmented inputs once (P_near is fixed after boundary training).
-        let pw_inputs: Vec<Vec<f32>> = samples
+        let pw_inputs: Vec<Vec<f32>> = features
             .iter()
-            .map(|s| {
-                let p_near = sigmoid(boundary.forward(&s.features).1);
-                let mut f = s.features.clone();
-                f.push(p_near);
-                f
+            .map(|f| {
+                let p_near = sigmoid(boundary.forward(f).1);
+                let mut x = f.to_vec();
+                x.push(p_near);
+                x
             })
             .collect();
         for _ in 0..cfg.epochs {
             let mut grad = MlpGrad::zeros(pw_dim, cfg.hidden);
-            // Pre-pass: mean spiral-prob over the annulus subset for the balance term.
             let mut sum_p_annulus = 0.0f32;
             let mut n_annulus = 0.0f32;
             for (x, &is_near) in pw_inputs.iter().zip(near.iter()) {
@@ -207,17 +251,14 @@ impl AdjustableConeRouter {
                 0.5
             };
             let mut count = 0.0f32;
-            for ((x, s), &is_near) in pw_inputs.iter().zip(samples.iter()).zip(near.iter()) {
+            for ((x, &route_spiral), &is_near) in
+                pw_inputs.iter().zip(routes.iter()).zip(near.iter())
+            {
                 let (a1, logit) = piecewise.forward(x);
                 let p = sigmoid(logit);
-                let y = if s.route_spiral { 1.0 } else { 0.0 };
-                // Curriculum weight: upweight the sparse annulus band.
+                let y = if route_spiral { 1.0 } else { 0.0 };
                 let w = if is_near { 1.0 + cfg.curriculum_boost } else { 1.0 };
                 let mut dlogit = w * (p - y);
-                // Cone-expansion regularizer: push the annulus mean toward 0.5 so the
-                // boundary band cannot collapse to a constant specialist. (Note: this
-                // works *against* the annulus-localization certifier, so that certifier
-                // is adversarially clean — the loss does not optimize toward it passing.)
                 if is_near {
                     dlogit += cfg.balance_lambda * (mean_p_annulus - 0.5);
                 }
@@ -294,6 +335,87 @@ impl AdjustableConeRouter {
 
     pub fn feature_dim(&self) -> usize {
         self.feat_dim
+    }
+}
+
+/// Build (route_spiral, near_boundary) targets from specialist scalars only — no `r`.
+fn label_free_pseudo_targets(
+    pairs: &[(f32, f32)],
+    strategy: LabelFreeStrategy,
+) -> (Vec<bool>, Vec<bool>) {
+    if pairs.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let circles: Vec<f32> = pairs.iter().map(|(_, c)| *c).collect();
+    // Near-boundary proxy: high |s−c| disagreement (feature index 3 of cone_features).
+    let disagree: Vec<f32> = pairs
+        .iter()
+        .map(|(s, c)| ((s - 0.5) - (c - 0.5)).abs())
+        .collect();
+    let mut disagree_sorted = disagree.clone();
+    disagree_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let disagree_cut = percentile_sorted(&disagree_sorted, 0.70);
+
+    let routes = match strategy {
+        LabelFreeStrategy::CirclesThreshold | LabelFreeStrategy::Bootstrap => {
+            let mut sorted = circles.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let med = percentile_sorted(&sorted, 0.50);
+            // Prior: f_circles ↔ r ≈ +0.87 ⇒ low circles ⇒ inner ⇒ route spiral.
+            circles.iter().map(|&c| c < med).collect()
+        }
+        LabelFreeStrategy::CirclesCluster => {
+            let (lo, hi) = two_means_1d(&circles, 24);
+            let mid = 0.5 * (lo + hi);
+            // Spiral ← low-circles cluster.
+            circles.iter().map(|&c| c < mid).collect()
+        }
+    };
+    let near: Vec<bool> = disagree.iter().map(|&d| d >= disagree_cut).collect();
+    (routes, near)
+}
+
+fn percentile_sorted(sorted: &[f32], q: f32) -> f32 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = ((sorted.len() as f32 - 1.0) * q.clamp(0.0, 1.0)).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+fn two_means_1d(xs: &[f32], iters: usize) -> (f32, f32) {
+    if xs.is_empty() {
+        return (0.0, 1.0);
+    }
+    let mut sorted = xs.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut c0 = sorted[0];
+    let mut c1 = *sorted.last().unwrap();
+    for _ in 0..iters {
+        let mut s0 = 0.0f32;
+        let mut n0 = 0.0f32;
+        let mut s1 = 0.0f32;
+        let mut n1 = 0.0f32;
+        for &x in xs {
+            if (x - c0).abs() <= (x - c1).abs() {
+                s0 += x;
+                n0 += 1.0;
+            } else {
+                s1 += x;
+                n1 += 1.0;
+            }
+        }
+        if n0 > 0.0 {
+            c0 = s0 / n0;
+        }
+        if n1 > 0.0 {
+            c1 = s1 / n1;
+        }
+    }
+    if c0 <= c1 {
+        (c0, c1)
+    } else {
+        (c1, c0)
     }
 }
 
@@ -465,5 +587,34 @@ mod tests {
             ambiguous > decisive,
             "cone should widen on ambiguous experts: ambiguous={ambiguous} decisive={decisive}"
         );
+    }
+
+    #[test]
+    fn label_free_train_never_reads_r() {
+        // Build specialist pairs from synthetic stream but drop r from the train API.
+        let samples = synthetic_samples(5, 200);
+        let pairs: Vec<(f32, f32)> = samples
+            .iter()
+            .map(|s| {
+                // Recover approx specialists from features (s+0.5, c+0.5).
+                (s.features[0] + 0.5, s.features[1] + 0.5)
+            })
+            .collect();
+        let router = AdjustableConeRouter::train_label_free(
+            &pairs,
+            ConeConfig {
+                seed: 5,
+                ..ConeConfig::default()
+            },
+            LabelFreeStrategy::CirclesThreshold,
+        );
+        let test = synthetic_samples(6, 200);
+        let agree = test
+            .iter()
+            .filter(|s| (router.route_index(&s.features) == 0) == (s.r < 0.4))
+            .count();
+        let acc = agree as f32 / test.len() as f32;
+        // Looser than supervised train: label-free may be weaker, but must beat chance.
+        assert!(acc > 0.60, "label-free region agreement too low: {acc}");
     }
 }

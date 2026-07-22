@@ -9,6 +9,7 @@ src/.DS_Store
 
 docs
 agent-data/
+certify_artifacts/
 data/audio
 data/badwords
 data/

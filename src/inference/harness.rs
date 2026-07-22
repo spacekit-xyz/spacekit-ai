@@ -8,6 +8,7 @@ use crate::dimension::DimensionManager;
 use crate::growformer_lang::MetaConcept;
 use crate::micro_brain::MetaResult;
 
+use super::chat_policy::BleedHit;
 use super::manifest::{BrainPluginsManifest, InferenceThresholds};
 
 /// Short-circuit generation: plugin-produced text replaces lattice `generate_with_e8_for_topic`.
@@ -92,6 +93,40 @@ pub trait BrainInferencePlugin: Send + Sync {
     ) -> bool {
         let _ = (dm, header, manifest);
         false
+    }
+
+    /// Sentiment-lattice identity shortcut match (`[chat_policy]` patterns).
+    fn match_identity_query(&self, language_channel: Option<&str>, text: &str) -> bool {
+        let _ = (language_channel, text);
+        false
+    }
+
+    /// Sentiment-lattice greeting shortcut match (`[chat_policy]` patterns).
+    fn match_greeting(&self, language_channel: Option<&str>, text: &str) -> bool {
+        let _ = (language_channel, text);
+        false
+    }
+
+    /// Detect compose/lattice character-arc bleed for chat passthrough.
+    fn detect_compose_bleed(
+        &self,
+        language_channel: Option<&str>,
+        prompt: &str,
+        response: &str,
+    ) -> Option<BleedHit> {
+        let _ = (language_channel, prompt, response);
+        None
+    }
+
+    /// Fallback line after a bleed hit (locale-keyed TOML rows).
+    fn bleed_fallback(
+        &self,
+        language_channel: Option<&str>,
+        prompt: &str,
+        bleed: &BleedHit,
+    ) -> Option<(String, String)> {
+        let _ = (language_channel, prompt, bleed);
+        None
     }
 }
 
@@ -194,5 +229,45 @@ impl InferenceHarness {
         if !profile_owned {
             header.inference_profile = previous_inference_profile.map(|s| s.to_string());
         }
+    }
+
+    pub fn match_identity_query(&self, language_channel: Option<&str>, text: &str) -> bool {
+        self.plugins
+            .iter()
+            .any(|p| p.match_identity_query(language_channel, text))
+    }
+
+    pub fn match_greeting(&self, language_channel: Option<&str>, text: &str) -> bool {
+        self.plugins
+            .iter()
+            .any(|p| p.match_greeting(language_channel, text))
+    }
+
+    pub fn detect_compose_bleed(
+        &self,
+        language_channel: Option<&str>,
+        prompt: &str,
+        response: &str,
+    ) -> Option<BleedHit> {
+        for p in self.plugins.iter() {
+            if let Some(hit) = p.detect_compose_bleed(language_channel, prompt, response) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+
+    pub fn bleed_fallback(
+        &self,
+        language_channel: Option<&str>,
+        prompt: &str,
+        bleed: &BleedHit,
+    ) -> Option<(String, String)> {
+        for p in self.plugins.iter() {
+            if let Some(fb) = p.bleed_fallback(language_channel, prompt, bleed) {
+                return Some(fb);
+            }
+        }
+        None
     }
 }

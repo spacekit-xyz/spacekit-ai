@@ -49,6 +49,8 @@ pub mod dimension;
 pub mod growformer_lang;
 pub mod text_keywords;
 pub mod topic_graph;
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+pub mod semantic_router;
 pub mod micro_brain;
 pub mod understanding;
 pub mod environment;

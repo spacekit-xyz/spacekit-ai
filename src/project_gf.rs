@@ -16,6 +16,8 @@ pub struct GrowformerProjectFile {
     pub inference: Option<InferenceSection>,
     #[serde(default)]
     pub infer: Option<InferSection>,
+    #[serde(default)]
+    pub certified_routing: Option<CertifiedRoutingSection>,
 }
 
 fn schema_version_default() -> u32 {
@@ -56,6 +58,8 @@ pub struct InferenceSection {
     pub topic_graph: Option<String>,
     /// World grounding graph (e.g. `data/pet_world_grounding.toml`) for BM25 concept expansion.
     pub grounding_toml: Option<String>,
+    /// Compact lookup graph JSON (e.g. `data/wordnet_graph.json`) for exact lemma ego-network responses.
+    pub lookup_graph_json: Option<String>,
     /// Fragment library JSONL (e.g. `data/kitsu_fragments_v2.jsonl`). Overrides `[fragment_compose].library` when set.
     pub fragments_jsonl: Option<String>,
     /// Optional JSONL of extra `lexical_topic` / `lattice_misfire` guardrails (merged after TOML).
@@ -65,6 +69,35 @@ pub struct InferenceSection {
 #[derive(Debug, Deserialize)]
 pub struct InferSection {
     pub brain: Option<String>,
+}
+
+/// Certified semantic-primary routing (Python coder ship path).
+/// See spacekit-projects/coding/python/docs/GROWFORMER_SEMANTIC_ROUTER.md.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CertifiedRoutingSection {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_semantic_graph")]
+    pub semantic_graph: String,
+    #[serde(default = "default_thresholds")]
+    pub thresholds: String,
+    pub snippet_catalog: Option<String>,
+    pub verdict: Option<String>,
+    /// When false, serve curated snippets (no open codegen lattices).
+    #[serde(default)]
+    pub code_generation: bool,
+    #[serde(default)]
+    pub require_runtime_parity: bool,
+    #[serde(default)]
+    pub require_abstain_parity: bool,
+}
+
+fn default_semantic_graph() -> String {
+    "data/knowledge_graph_semantic.toml".into()
+}
+
+fn default_thresholds() -> String {
+    "agent/routing_thresholds.json".into()
 }
 
 pub fn read_project_file(path: &Path) -> Result<GrowformerProjectFile, String> {

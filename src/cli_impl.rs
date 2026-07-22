@@ -200,6 +200,26 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     overlay_brain: Option<PathBuf>,
 
+    /// Retrain only the LearnedRouter on an existing brain (lattices stay frozen), then re-export.
+    /// Use with `--brain` (base) + `--data-dir` / `--project` data + `--brain-output`.
+    /// Product CL path: fix routing without full retrain.
+    /// Companions with a single effective group auto-skip router retrain and fingerprint-augment instead.
+    #[arg(long)]
+    train_router_adapter: bool,
+
+    /// EMA-augment neural fingerprints (group structural + topic causal/centroids) without
+    /// retraining LearnedRouter or touching lattices. Preferred continual path for companions.
+    #[arg(long)]
+    train_fingerprint_adapter: bool,
+
+    /// EMA blend weight for fingerprint adapter / router-adapter fingerprint stage (default 0.25).
+    #[arg(long, default_value_t = 0.25)]
+    fingerprint_alpha: f32,
+
+    /// With `--train-router-adapter`, also retrain the ActionClassifier (still keeps gen lattices).
+    #[arg(long)]
+    also_classifier: bool,
+
     /// Disable stderr progress bars (plain logs only; use for CI and when capturing stderr).
     #[arg(long)]
     no_progress: bool,
@@ -207,6 +227,11 @@ struct Args {
     /// Verbose inference: routing traces, metacognition, topic graph, lattice shortcuts (`--infer` is quiet by default).
     #[arg(long, short = 'v')]
     verbose: bool,
+
+    /// Dump certified semantic-primary routing decisions for an eval JSONL (parity harness).
+    /// Writes one JSON object per line: task_id, gold, pred, declined, top1, margin.
+    #[arg(long, value_name = "EVAL_JSONL")]
+    dump_routing_decisions: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -221,8 +246,12 @@ struct GfOverlay {
     topic_graph: Option<std::path::PathBuf>,
     /// Resolved `[inference].grounding_toml` from *.gf.toml
     grounding_toml: Option<std::path::PathBuf>,
+    /// Resolved `[inference].lookup_graph_json` from *.gf.toml
+    lookup_graph_json: Option<std::path::PathBuf>,
     /// Resolved `[inference].fragments_jsonl` from *.gf.toml
     fragments_jsonl: Option<std::path::PathBuf>,
+    /// Resolved `[certified_routing]` from *.gf.toml
+    certified_routing: Option<crate::semantic_router::CertifiedRoutingPaths>,
 }
 
 /// Resolve `[fragment_compose].library` from an inference TOML next to the project manifest.
@@ -361,6 +390,16 @@ fn apply_gf_project(args: &mut Args, project_path: &Path) -> Result<GfOverlay, S
                 }
             }
         }
+        if overlay.lookup_graph_json.is_none() {
+            if let Some(t) = inf.lookup_graph_json.as_deref() {
+                overlay.lookup_graph_json = Some(crate::project_gf::resolve_against(&base, t));
+            } else {
+                let default = base.join("data/wordnet_graph.json");
+                if default.is_file() {
+                    overlay.lookup_graph_json = Some(default);
+                }
+            }
+        }
         if overlay.fragments_jsonl.is_none() {
             if let Some(t) = inf.fragments_jsonl.as_deref() {
                 overlay.fragments_jsonl = Some(crate::project_gf::resolve_against(&base, t));
@@ -380,6 +419,19 @@ fn apply_gf_project(args: &mut Args, project_path: &Path) -> Result<GfOverlay, S
                         .into_owned(),
                 );
             }
+        }
+    }
+
+    if overlay.certified_routing.is_none() {
+        if let Some(cr) = &gf.certified_routing {
+            overlay.certified_routing = Some(crate::semantic_router::paths_from_project(
+                &base,
+                cr.enabled,
+                &cr.semantic_graph,
+                &cr.thresholds,
+                cr.snippet_catalog.as_deref(),
+                cr.code_generation,
+            ));
         }
     }
 
@@ -471,6 +523,57 @@ fn resolve_infer_mode(args: &Args) -> Result<InferMode, String> {
         Some(p) => Ok(InferMode::Single(p.clone())),
         None => Ok(InferMode::Interactive),
     }
+}
+
+fn dump_certified_routing_decisions(eval_path: &Path) -> Result<(), String> {
+    if !crate::semantic_router::is_loaded() {
+        return Err(
+            "--dump-routing-decisions requires [certified_routing] enabled = true and a loaded semantic graph"
+                .into(),
+        );
+    }
+    let raw = std::fs::read_to_string(eval_path)
+        .map_err(|e| format!("read {}: {e}", eval_path.display()))?;
+    let mut rows: Vec<(String, String, String)> = Vec::new();
+    for (i, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| format!("{}:{}: {e}", eval_path.display(), i + 1))?;
+        let task_id = v
+            .get("task_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let gold = v
+            .get("semantic_intent")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let text = v
+            .get("text")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        rows.push((task_id, gold, text));
+    }
+    let texts: Vec<String> = rows.iter().map(|(_, _, t)| t.clone()).collect();
+    let decisions = crate::semantic_router::with_router(|r| r.infer_batch(&texts))
+        .ok_or_else(|| "semantic router not loaded".to_string())??;
+    for ((task_id, gold, _), d) in rows.iter().zip(decisions.iter()) {
+        let obj = serde_json::json!({
+            "task_id": task_id,
+            "gold": gold,
+            "pred": d.topic,
+            "declined": d.topic.is_none(),
+            "top1": d.top1,
+            "margin": d.margin,
+        });
+        println!("{}", obj);
+    }
+    Ok(())
 }
 
 fn pet_topic_overlay_paths(args: &Args, gf_overlay: Option<&GfOverlay>) -> Vec<std::path::PathBuf> {
@@ -595,6 +698,31 @@ where
     }
 
     if let Some(ref ov) = gf_overlay {
+        if let Some(ref cr) = ov.certified_routing {
+            if cr.enabled {
+                match crate::semantic_router::try_init_from_paths(cr) {
+                    Ok(()) => {
+                        if args.verbose || args.dump_routing_decisions.is_some() {
+                            println!(
+                                "Certified semantic router: loaded {} (code_generation={})",
+                                cr.semantic_graph.display(),
+                                cr.code_generation
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        return Err(format!("certified_routing enabled but failed to load: {e}"));
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(ref eval_path) = args.dump_routing_decisions {
+        return dump_certified_routing_decisions(eval_path);
+    }
+
+    if let Some(ref ov) = gf_overlay {
         if let Some(ref gpath) = ov.grounding_toml {
             if gpath.is_file() {
                 match std::fs::read_to_string(gpath) {
@@ -616,6 +744,33 @@ where
                     }
                     Err(e) => eprintln!(
                         "Warning: failed to read grounding graph {}: {}",
+                        gpath.display(),
+                        e
+                    ),
+                }
+            }
+        }
+    }
+
+    if let Some(ref ov) = gf_overlay {
+        if let Some(ref gpath) = ov.lookup_graph_json {
+            if gpath.is_file() {
+                match std::fs::read_to_string(gpath) {
+                    Ok(s) => {
+                        if let Err(e) =
+                            crate::inference::lookup_graph::load_lookup_graph_from_str(&s)
+                        {
+                            eprintln!(
+                                "Warning: failed to load lookup graph {}: {}",
+                                gpath.display(),
+                                e
+                            );
+                        } else if args.infer && args.verbose {
+                            println!("Lookup graph: loaded from {}", gpath.display());
+                        }
+                    }
+                    Err(e) => eprintln!(
+                        "Warning: failed to read lookup graph {}: {}",
                         gpath.display(),
                         e
                     ),
@@ -674,6 +829,59 @@ where
             args.brain_author.as_deref(),
             args.brain_plugins_toml.as_deref(),
         ).map_err(|e| format!("Retrain failed: {}", e))?;
+    } else if args.train_fingerprint_adapter {
+        crate::entitlement::require_capability(crate::entitlement::CAP_TRAIN)?;
+        println!("=============================================================");
+        println!("  Growformer — Fingerprint Adapter (augment, don't override)");
+        println!("=============================================================\n");
+        let out = args.brain_output.clone().unwrap_or_else(|| brain_out.clone());
+        let data_dir = args
+            .data_dir
+            .as_deref()
+            .ok_or_else(|| {
+                "--train-fingerprint-adapter requires --data-dir (or [train].data_dir via --project)"
+                    .to_string()
+            })?;
+        train_fingerprint_adapter(
+            &brain_path,
+            &out,
+            data_dir,
+            args.fingerprint_alpha,
+            args.brain_max_samples,
+            args.brain_name.as_deref(),
+            args.brain_description.as_deref(),
+            args.brain_author.as_deref(),
+            args.brain_plugins_toml.as_deref(),
+        )
+        .map_err(|e| format!("Fingerprint adapter failed: {}", e))?;
+    } else if args.train_router_adapter {
+        crate::entitlement::require_capability(crate::entitlement::CAP_TRAIN)?;
+        println!("=============================================================");
+        println!("  Growformer — Router Adapter (drop-in LearnedRouter)");
+        println!("=============================================================\n");
+        let out = args.brain_output.clone().unwrap_or_else(|| brain_out.clone());
+        let data_dir = args
+            .data_dir
+            .as_deref()
+            .ok_or_else(|| {
+                "--train-router-adapter requires --data-dir (or [train].data_dir via --project)"
+                    .to_string()
+            })?;
+        train_router_adapter(
+            &brain_path,
+            &out,
+            data_dir,
+            brain_epochs,
+            args.also_classifier,
+            auto,
+            args.brain_max_samples,
+            args.fingerprint_alpha,
+            args.brain_name.as_deref(),
+            args.brain_description.as_deref(),
+            args.brain_author.as_deref(),
+            args.brain_plugins_toml.as_deref(),
+        )
+        .map_err(|e| format!("Router adapter failed: {}", e))?;
     } else if args.merge_brain {
         crate::entitlement::require_capability(crate::entitlement::CAP_MERGE)?;
         let overlay_path = args.overlay_brain.clone()
@@ -826,6 +1034,424 @@ fn apply_brain_package_cli(
     }
     if let Some(d) = description {
         svc.set_brain_package_description(d);
+    }
+}
+
+fn train_fingerprint_adapter(
+    brain_path: &str,
+    output_path: &str,
+    data_dir: &str,
+    alpha: f32,
+    max_samples: usize,
+    brain_name: Option<&str>,
+    brain_description: Option<&str>,
+    brain_author: Option<&str>,
+    brain_plugins_toml: Option<&std::path::Path>,
+) -> Result<(), String> {
+    println!("=== Fingerprint Adapter Training ===\n");
+    println!("  Base brain: {}", brain_path);
+    println!("  Data dir:   {}", data_dir);
+    println!("  Output:     {}", output_path);
+    println!("  Lattices:   frozen (unchanged)");
+    println!("  Router:     unchanged");
+    println!("  Fingerprints: EMA-augmented (alpha={:.3})\n", alpha);
+
+    let mut svc = load_brain_for_adapter(
+        brain_path,
+        brain_name,
+        brain_description,
+        brain_author,
+        brain_plugins_toml,
+    )?;
+    let (samples, bridged_embeddings) =
+        load_adapter_samples_and_embeddings(&svc, data_dir, max_samples)?;
+
+    let report = augment_neural_fingerprints(&mut svc, &samples, &bridged_embeddings, alpha);
+    println!(
+        "  group fingerprints updated: {}; topic fingerprints updated: {}",
+        report.groups_updated, report.topics_updated
+    );
+
+    for env in svc.dm.group_gen_envs.values_mut() {
+        env.frozen = true;
+    }
+
+    write_adapted_brain(&mut svc, output_path, "Fingerprint-adapted")?;
+    println!("=== Fingerprint Adapter Complete ===");
+    println!("Next: run your frozen held-out / companion prompt matrix before shipping.");
+    Ok(())
+}
+
+fn train_router_adapter(
+    brain_path: &str,
+    output_path: &str,
+    data_dir: &str,
+    epochs: u32,
+    also_classifier: bool,
+    auto: bool,
+    max_samples: usize,
+    fingerprint_alpha: f32,
+    brain_name: Option<&str>,
+    brain_description: Option<&str>,
+    brain_author: Option<&str>,
+    brain_plugins_toml: Option<&std::path::Path>,
+) -> Result<(), String> {
+    use std::collections::HashMap;
+
+    println!("=== Router Adapter Training ===\n");
+    println!("  Base brain: {}", brain_path);
+    println!("  Data dir:   {}", data_dir);
+    println!("  Output:     {}", output_path);
+    println!("  Lattices:   frozen (unchanged)");
+    println!("  Router:     retrained when multi-class; else skipped");
+    println!(
+        "  Fingerprints: always EMA-augmented (alpha={:.3})\n",
+        fingerprint_alpha
+    );
+
+    let mut svc = load_brain_for_adapter(
+        brain_path,
+        brain_name,
+        brain_description,
+        brain_author,
+        brain_plugins_toml,
+    )?;
+
+    let num_groups = svc.dm.main.group_order.len();
+    let brain_group_names = brain_group_names(&svc);
+    println!("  Groups ({}): {:?}", num_groups, brain_group_names);
+    if num_groups == 0 {
+        return Err("brain has no groups — cannot train router".into());
+    }
+
+    let (samples, bridged_embeddings) =
+        load_adapter_samples_and_embeddings(&svc, data_dir, max_samples)?;
+
+    let group_lookup = build_group_lookup(&brain_group_names);
+    let group_map = |s: &LanguageSample| -> usize {
+        action_target_to_group(s.action_target.as_deref(), &group_lookup, num_groups)
+    };
+
+    // Stage 0: always augment neural fingerprints (does not override lattices / prior router).
+    println!("\n--- Stage 0: Neural fingerprint augment ---");
+    let report =
+        augment_neural_fingerprints(&mut svc, &samples, &bridged_embeddings, fingerprint_alpha);
+    println!(
+        "  group fingerprints updated: {}; topic fingerprints updated: {}",
+        report.groups_updated, report.topics_updated
+    );
+
+    // Stage 1: LearnedRouter — only when we have ≥2 effective classes.
+    println!("\n--- Stage 1: LearnedRouter (adapter) ---");
+    let router_samples_raw: Vec<(Vec<f32>, usize)> = bridged_embeddings
+        .iter()
+        .zip(samples.iter())
+        .map(|(emb, s)| (emb.clone(), group_map(s)))
+        .collect();
+    let mut class_counts: HashMap<usize, usize> = HashMap::new();
+    for (_, g) in &router_samples_raw {
+        *class_counts.entry(*g).or_default() += 1;
+    }
+
+    let matched_targets: usize = samples
+        .iter()
+        .filter(|s| {
+            s.action_target
+                .as_deref()
+                .map(|t| group_lookup.contains_key(t) || companion_target_alias(t).is_some())
+                .unwrap_or(false)
+        })
+        .count();
+    let unmatched = samples.len().saturating_sub(matched_targets);
+    if unmatched > 0 {
+        println!(
+            "  note: {} / {} samples had action_target not in brain groups {:?} \
+             (aliases: pet_chat/chat/converse → chat-like group). Check group naming.",
+            unmatched,
+            samples.len(),
+            brain_group_names
+        );
+    }
+
+    if class_counts.len() < 2 {
+        println!(
+            "  SKIP LearnedRouter retrain: only {} class(es) in labels ({:?}).\n  \
+             Retraining would overwrite a useful router with a near-random mono-class fit \
+             (seen as ~3% acc on companions). Fingerprint augment above is the safe CL path.",
+            class_counts.len(),
+            class_counts
+        );
+    } else {
+        let mut rng = StdRng::seed_from_u64(42);
+        let max_class_count = class_counts.values().copied().max().unwrap_or(1);
+        let mut router_samples: Vec<(Vec<f32>, usize)> = Vec::new();
+        let mut class_buckets: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (i, (_, g)) in router_samples_raw.iter().enumerate() {
+            class_buckets.entry(*g).or_default().push(i);
+        }
+        for (&gidx, indices) in &class_buckets {
+            let count = class_counts[&gidx];
+            let oversample = max_class_count / count.max(1);
+            let remainder = max_class_count % count.max(1);
+            for _ in 0..oversample {
+                for &i in indices {
+                    router_samples.push(router_samples_raw[i].clone());
+                }
+            }
+            for &i in indices.iter().take(remainder) {
+                router_samples.push(router_samples_raw[i].clone());
+            }
+        }
+        println!(
+            "  Router training: {} raw → {} after oversampling; class counts={:?}",
+            router_samples_raw.len(),
+            router_samples.len(),
+            class_counts
+        );
+
+        let router_epochs = if auto {
+            (epochs as usize).max(500)
+        } else {
+            (epochs as usize).max(200)
+        };
+        let (router_loss, router_acc) = svc.dm.train_language_router(
+            &router_samples,
+            router_epochs,
+            &mut rng,
+            brain_parallel_batch_size(),
+        );
+        println!(
+            "  Router loss={:.4} accuracy={:.1}% ({} programs)",
+            router_loss,
+            router_acc * 100.0,
+            svc.dm
+                .observer
+                .learned_router
+                .as_ref()
+                .map(|r| r.program_count())
+                .unwrap_or(0)
+        );
+    }
+
+    if also_classifier {
+        println!("\n--- Stage 2: ActionClassifier (adapter) ---");
+        let action_samples: Vec<(Vec<f32>, crate::dimension::action::ActionType)> =
+            bridged_embeddings
+                .iter()
+                .zip(samples.iter())
+                .map(|(emb, s)| {
+                    let at = action_target_to_type(s.action_target.as_deref().unwrap_or("coding"));
+                    (emb.clone(), at)
+                })
+                .collect();
+        let (clf_epochs, clf_lr) = if auto {
+            (500usize, 0.03f32)
+        } else {
+            ((epochs as usize).max(200), 0.03)
+        };
+        let (clf_loss, clf_acc) =
+            svc.dm
+                .train_action_classifier(&action_samples, clf_epochs, clf_lr);
+        println!(
+            "  Classifier loss={:.4} accuracy={:.1}%",
+            clf_loss,
+            clf_acc * 100.0
+        );
+    }
+
+    for env in svc.dm.group_gen_envs.values_mut() {
+        env.frozen = true;
+    }
+
+    write_adapted_brain(&mut svc, output_path, "Router-adapted")?;
+    println!("=== Router Adapter Complete ===");
+    println!("Next: run your frozen held-out / companion prompt matrix before shipping.");
+    Ok(())
+}
+
+struct FingerprintAugmentReport {
+    groups_updated: usize,
+    topics_updated: usize,
+}
+
+fn load_brain_for_adapter(
+    brain_path: &str,
+    brain_name: Option<&str>,
+    brain_description: Option<&str>,
+    brain_author: Option<&str>,
+    brain_plugins_toml: Option<&std::path::Path>,
+) -> Result<LanguageService, String> {
+    let data = std::fs::read(brain_path)
+        .map_err(|e| format!("Failed to read {}: {}", brain_path, e))?;
+    let mut svc = LanguageService::new_default()?;
+    svc.load_brain(&data)?;
+    apply_brain_package_cli(&mut svc, brain_name, brain_description, brain_author);
+    apply_optional_brain_plugins_toml(&mut svc, brain_plugins_toml)?;
+    println!("Loaded brain ({} KB)", data.len() / 1024);
+    Ok(svc)
+}
+
+fn brain_group_names(svc: &LanguageService) -> Vec<String> {
+    svc.dm
+        .main
+        .group_order
+        .iter()
+        .map(|gid| {
+            svc.dm
+                .main
+                .groups
+                .get(gid)
+                .map(|g| g.task_name.clone())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+fn load_adapter_samples_and_embeddings(
+    svc: &LanguageService,
+    data_dir: &str,
+    max_samples: usize,
+) -> Result<(Vec<LanguageSample>, Vec<Vec<f32>>), String> {
+    let path = std::path::Path::new(data_dir);
+    if !path.exists() {
+        return Err(format!("Data directory not found: {}", data_dir));
+    }
+    let mut samples = Vec::new();
+    append_language_samples_from_training_jsonl_dir(&mut samples, path)?;
+    println!("Loaded {} training samples", samples.len());
+    if samples.is_empty() {
+        return Err("no training samples in data dir".into());
+    }
+
+    let mut rng = StdRng::seed_from_u64(42);
+    if max_samples > 0 && samples.len() > max_samples {
+        samples.shuffle(&mut rng);
+        samples.truncate(max_samples);
+        println!("  truncated to {} samples", samples.len());
+    }
+
+    let multi_turn_n = samples
+        .iter()
+        .filter(|s| !s.history.is_empty() && s.conversation_turn > 1)
+        .count();
+    if multi_turn_n > 0 {
+        println!(
+            "  note: {} multi-turn samples present — adapters use bare user text \
+             (matches converse() routing); gen lattices keep prior history conditioning from base brain",
+            multi_turn_n
+        );
+    }
+
+    println!("\n--- Computing bridged embeddings ---");
+    let runtime = &svc.dm.language_runtime;
+    let results: Vec<_> = crate::maybe_par_iter!(samples)
+        .map(|s| runtime.encode_and_bridge(&s.text))
+        .collect();
+    let mut bridged_embeddings: Vec<Vec<f32>> = Vec::with_capacity(samples.len());
+    for res in results {
+        match res {
+            Ok((_raw, bridged)) => bridged_embeddings.push(bridged.routed_vector),
+            Err(_) => bridged_embeddings.push(vec![0.0; DEFAULT_BRIDGE_DIM]),
+        }
+    }
+    println!(
+        "  {} embeddings, dim={}",
+        bridged_embeddings.len(),
+        bridged_embeddings.first().map(|e| e.len()).unwrap_or(0)
+    );
+    Ok((samples, bridged_embeddings))
+}
+
+fn augment_neural_fingerprints(
+    svc: &mut LanguageService,
+    samples: &[LanguageSample],
+    bridged_embeddings: &[Vec<f32>],
+    alpha: f32,
+) -> FingerprintAugmentReport {
+    use std::collections::HashMap;
+
+    let num_groups = svc.dm.main.group_order.len().max(1);
+    let brain_names = brain_group_names(svc);
+    let group_lookup = build_group_lookup(&brain_names);
+
+    let mut by_group: HashMap<usize, Vec<&[f32]>> = HashMap::new();
+    for (emb, s) in bridged_embeddings.iter().zip(samples.iter()) {
+        let g = action_target_to_group(s.action_target.as_deref(), &group_lookup, num_groups);
+        by_group.entry(g).or_default().push(emb.as_slice());
+    }
+
+    let mut groups_updated = 0usize;
+    for (gidx, embs) in &by_group {
+        if embs.is_empty() {
+            continue;
+        }
+        let had = svc.dm.group_fingerprints.contains_key(gidx);
+        svc.dm
+            .augment_group_fingerprint_from_embeddings(*gidx, embs, alpha);
+        groups_updated += 1;
+        println!(
+            "  group {}: {} samples → fingerprint {} (α={:.3})",
+            gidx,
+            embs.len(),
+            if had { "EMA-blended" } else { "registered (no prior)" },
+            alpha
+        );
+    }
+
+    let topic_pairs: Vec<(&[f32], &str)> = bridged_embeddings
+        .iter()
+        .zip(samples.iter())
+        .map(|(emb, s)| (emb.as_slice(), s.semantic_intent.as_str()))
+        .collect();
+
+    let mut topics_updated = 0usize;
+    let group_ids: Vec<usize> = svc.dm.group_gen_envs.keys().copied().collect();
+    for gidx in group_ids {
+        if let Some(env) = svc.dm.group_gen_envs.get_mut(&gidx) {
+            topics_updated += env.augment_topic_fingerprints(&topic_pairs, alpha);
+        }
+    }
+    if topics_updated > 0 {
+        println!(
+            "  topic centroids/causal fingerprints EMA-updated on {} topics",
+            topics_updated
+        );
+    } else {
+        println!("  no matching topic names for fingerprint augment (intents may differ from brain topics)");
+    }
+
+    FingerprintAugmentReport {
+        groups_updated,
+        topics_updated,
+    }
+}
+
+fn write_adapted_brain(
+    svc: &mut LanguageService,
+    output_path: &str,
+    label: &str,
+) -> Result<(), String> {
+    let brain_bytes = svc.export_brain()?;
+    if let Some(parent) = std::path::Path::new(output_path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create output dir: {}", e))?;
+    }
+    std::fs::write(output_path, &brain_bytes)
+        .map_err(|e| format!("write {}: {}", output_path, e))?;
+    println!(
+        "\n  {} brain written to {} ({} bytes)",
+        label,
+        output_path,
+        brain_bytes.len()
+    );
+    Ok(())
+}
+
+/// Companion / chat action_target aliases → preferred brain group name hints.
+fn companion_target_alias(target: &str) -> Option<&'static str> {
+    match target {
+        "pet_chat" | "chat" | "converse" | "companion" | "pet" => Some("support"),
+        "pet_create" | "pet_questionnaire" => Some("support"),
+        _ => None,
     }
 }
 
@@ -1895,10 +2521,27 @@ fn build_group_lookup(group_names: &[String]) -> HashMap<String, usize> {
 }
 
 fn action_target_to_group(target: Option<&str>, lookup: &HashMap<String, usize>, num_groups: usize) -> usize {
-    target
-        .and_then(|t| lookup.get(t).copied())
-        .unwrap_or(0)
-        .min(num_groups.saturating_sub(1))
+    let Some(t) = target else {
+        return 0.min(num_groups.saturating_sub(1));
+    };
+    if let Some(&idx) = lookup.get(t) {
+        return idx.min(num_groups.saturating_sub(1));
+    }
+    // Companion / pet data often uses `pet_chat` while older brains still name group 0 `support`.
+    if let Some(alias) = companion_target_alias(t) {
+        if let Some(&idx) = lookup.get(alias) {
+            return idx.min(num_groups.saturating_sub(1));
+        }
+        // Prefer a group whose name looks chat-like.
+        for (name, &idx) in lookup {
+            let n = name.to_ascii_lowercase();
+            if n.contains("chat") || n.contains("pet") || n.contains("support") || n.contains("companion")
+            {
+                return idx.min(num_groups.saturating_sub(1));
+            }
+        }
+    }
+    0.min(num_groups.saturating_sub(1))
 }
 
 fn train_brain(
@@ -2759,18 +3402,32 @@ fn train_brain(
             });
             // Heuristic: if a non-sentiment group has >=5 distinct topics and most
             // responses are natural-language (not code), it's a chat/conversational brain.
+            let unique_topic_count = topic_names
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len();
             let is_chat_group = !is_sentiment_group
-                && topic_names.len() >= 5
+                && unique_topic_count >= 5
                 && training_pairs.iter().all(|(_, text, _)| !text.contains("fn ") && !text.contains("def "));
-            let effective_spawn = if is_sentiment_group {
+            let is_lookup_group = topic_names.iter().any(|t| {
+                t.eq_ignore_ascii_case("wordnet_lookup")
+                    || t.eq_ignore_ascii_case("auto_tag")
+                    || t.eq_ignore_ascii_case("summarize")
+                    || t.eq_ignore_ascii_case("link_suggest")
+            }) || training_pairs.iter().any(|(_, text, _)| {
+                text.starts_with("{\"center\":") || text.starts_with("[")
+            });
+            let effective_spawn = if is_lookup_group {
+                2.0 // never merge — each labeled row keeps its own program
+            } else if is_sentiment_group {
                 sentiment_spawn_threshold
             } else if is_chat_group {
                 chat_spawn_threshold
             } else {
                 spawn_threshold
             };
-            println!("  gen[g{}]: spawn_threshold={:.3} (sentiment={} chat={} topics={})",
-                gidx, effective_spawn, is_sentiment_group, is_chat_group, topic_names.iter().collect::<std::collections::HashSet<_>>().len());
+            println!("  gen[g{}]: spawn_threshold={:.3} (sentiment={} chat={} lookup={} topics={})",
+                gidx, effective_spawn, is_sentiment_group, is_chat_group, is_lookup_group, unique_topic_count);
             let mut env = IndexedGenEnv::from_tagged_parts(dict, cb, hopf, &training_pairs, effective_spawn);
             const TOPIC_AUTOGAMY_MERGE: f32 = 0.96;
             const SCENARIO_TOPIC_AUTOGAMY: f32 = 0.88;
@@ -2780,6 +3437,9 @@ fn train_brain(
                 "fee_complaint",
             ];
             for topic in &mut env.topic_subindex {
+                if is_lookup_group {
+                    continue; // skip autogamy — preserve per-row lookup programs
+                }
                 let merge = if SCENARIO_TOPICS
                     .iter()
                     .any(|&s| topic.topic_name.eq_ignore_ascii_case(s))

@@ -139,6 +139,9 @@ pub struct InferenceTomlDocument {
     pub validation: ValidationConfig,
     #[serde(default)]
     pub fragment_compose: FragmentComposeConfig,
+    /// Locale-keyed greeting / identity / compose-bleed policy (`[chat_policy]`).
+    #[serde(default)]
+    pub chat_policy: super::chat_policy::ChatPolicySection,
 }
 
 /// Configuration for the generation/decoding stage, parsed from `[generation]` in inference TOML.
@@ -322,6 +325,178 @@ pub struct FragmentComposeConfig {
     /// Negative affinity: fragments to suppress when a given intent is active.
     #[serde(default)]
     pub intent_excludes: Vec<IntentExcludeRuleToml>,
+    /// Multi-candidate compose → basal-ganglia select → chat-structure metacog.
+    #[serde(default)]
+    pub reasoning_pass: FragmentReasoningPassConfig,
+    /// Mood + intent gradients → blended OCEAN for fragment scoring.
+    #[serde(default)]
+    pub context_frame: super::context_frame::ContextFrameConfig,
+    /// Speech-act → body_slot graphs (preferred over intent templates when both match).
+    #[serde(default)]
+    pub act_templates: Vec<ActTemplateToml>,
+    /// Optional reciprocal question after answering (turn-taking).
+    #[serde(default)]
+    pub turn_taking: TurnTakingConfig,
+}
+
+/// `[fragment_compose.turn_taking]` — answer then optionally ask back.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TurnTakingConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Only ask back when the user turn looks like a question.
+    #[serde(default = "default_true_turn")]
+    pub require_user_question: bool,
+    /// Probability in \[0,1\] (seeded per turn).
+    #[serde(default = "default_ask_back_chance")]
+    pub ask_back_chance: f32,
+    /// Intents that may append a reciprocal ask. Empty = none.
+    #[serde(default)]
+    pub when_intents: Vec<String>,
+    /// Prefer fragments with this `body_slot` (default `reciprocal`).
+    #[serde(default = "default_reciprocal_slot")]
+    pub reciprocal_slot: String,
+}
+
+fn default_true_turn() -> bool {
+    true
+}
+fn default_ask_back_chance() -> f32 {
+    0.85
+}
+fn default_reciprocal_slot() -> String {
+    "reciprocal".into()
+}
+
+impl Default for TurnTakingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            require_user_question: true,
+            ask_back_chance: default_ask_back_chance(),
+            when_intents: Vec::new(),
+            reciprocal_slot: default_reciprocal_slot(),
+        }
+    }
+}
+
+impl TurnTakingConfig {
+    pub fn should_ask_back(&self, intent: &str, prompt: &str, seed: u64) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if !self.when_intents.is_empty() && !self.when_intents.iter().any(|i| i == intent) {
+            return false;
+        }
+        if self.require_user_question && !looks_like_user_question(prompt) {
+            return false;
+        }
+        let chance = self.ask_back_chance.clamp(0.0, 1.0);
+        if chance >= 1.0 {
+            return true;
+        }
+        if chance <= 0.0 {
+            return false;
+        }
+        // Deterministic unit interval from seed (high 32 bits of a mix).
+        let mixed = seed.wrapping_mul(0x9e3779b97f4a7c15);
+        let unit = ((mixed >> 32) as u32 as f32) / (u32::MAX as f32);
+        unit < chance
+    }
+}
+
+pub fn looks_like_user_question(prompt: &str) -> bool {
+    let t = prompt.trim();
+    if t.contains('?') {
+        return true;
+    }
+    let lower = t.to_ascii_lowercase();
+    lower.starts_with("how ")
+        || lower.starts_with("what ")
+        || lower.starts_with("why ")
+        || lower.starts_with("where ")
+        || lower.starts_with("when ")
+        || lower.starts_with("who ")
+        || lower.starts_with("do you ")
+        || lower.starts_with("are you ")
+        || lower.starts_with("is your ")
+        || lower.starts_with("what's ")
+        || lower.starts_with("whats ")
+}
+
+#[cfg(test)]
+mod turn_taking_tests {
+    use super::*;
+
+    #[test]
+    fn ask_back_only_for_listed_intents_and_questions() {
+        let cfg = TurnTakingConfig {
+            enabled: true,
+            require_user_question: true,
+            ask_back_chance: 1.0,
+            when_intents: vec!["lore_qa".into()],
+            reciprocal_slot: "reciprocal".into(),
+        };
+        assert!(cfg.should_ask_back("lore_qa", "how old are you?", 1));
+        assert!(!cfg.should_ask_back("mischief", "how old are you?", 1));
+        assert!(!cfg.should_ask_back("lore_qa", "good girl", 1));
+    }
+}
+
+/// `[fragment_compose.reasoning_pass]` — K compose candidates + BG select + structure gate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FragmentReasoningPassConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Number of seeded compositions to sample before BG selection.
+    #[serde(default = "default_reasoning_candidate_count")]
+    pub candidate_count: usize,
+    /// Max chat-structure metacog Retry loops after the first attempt.
+    #[serde(default = "default_reasoning_max_metacog_retries")]
+    pub max_metacog_retries: usize,
+    /// Intents that use the reasoning pass. Empty = all intents.
+    #[serde(default)]
+    pub when_intents: Vec<String>,
+    /// Reserved: minimum routing confidence (unused by compose path today).
+    #[serde(default)]
+    pub min_routing_confidence: f32,
+    /// Reserved: allow topic override from fragment intent (wired elsewhere).
+    #[serde(default)]
+    pub topic_override: bool,
+}
+
+fn default_reasoning_candidate_count() -> usize {
+    5
+}
+
+fn default_reasoning_max_metacog_retries() -> usize {
+    2
+}
+
+impl Default for FragmentReasoningPassConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            candidate_count: default_reasoning_candidate_count(),
+            max_metacog_retries: default_reasoning_max_metacog_retries(),
+            when_intents: Vec::new(),
+            min_routing_confidence: 0.0,
+            topic_override: false,
+        }
+    }
+}
+
+impl FragmentReasoningPassConfig {
+    /// Whether this intent should run K-compose + BG + chat metacog.
+    pub fn applies_to_intent(&self, intent: &str) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if self.when_intents.is_empty() {
+            return true;
+        }
+        self.when_intents.iter().any(|i| i == intent)
+    }
 }
 
 /// One row in `[[fragment_compose.compose_templates]]`.
@@ -334,6 +509,22 @@ pub struct ComposeTemplateToml {
     pub min_bodies: usize,
     #[serde(default = "default_require_distinct_voices")]
     pub require_distinct_voices: bool,
+}
+
+/// One row in `[[fragment_compose.act_templates]]` — structure driven by speech act.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActTemplateToml {
+    /// Speech-act key: greet, query, inform, express, comfort_seek, request, offer, refuse, assert.
+    pub act: String,
+    #[serde(default)]
+    pub body_slots: Vec<String>,
+    #[serde(default = "default_template_min_bodies")]
+    pub min_bodies: usize,
+    #[serde(default = "default_require_distinct_voices")]
+    pub require_distinct_voices: bool,
+    /// When set, only apply for these intents (empty = any intent with this act).
+    #[serde(default)]
+    pub when_intents: Vec<String>,
 }
 
 fn default_template_min_bodies() -> usize {
@@ -429,6 +620,10 @@ impl Default for FragmentComposeConfig {
             decompose: FragmentDecomposeConfig::default(),
             compose_templates: Vec::new(),
             intent_excludes: Vec::new(),
+            reasoning_pass: FragmentReasoningPassConfig::default(),
+            context_frame: super::context_frame::ContextFrameConfig::default(),
+            act_templates: Vec::new(),
+            turn_taking: TurnTakingConfig::default(),
         }
     }
 }
@@ -491,6 +686,33 @@ impl FragmentComposeConfig {
     /// Compose template for an intent, if configured.
     pub fn template_for_intent(&self, intent: &str) -> Option<&ComposeTemplateToml> {
         self.compose_templates.iter().find(|t| t.intent == intent)
+    }
+
+    /// Prefer speech-act template (optional intent filter), else intent template.
+    /// Returns `(body_slots, min_bodies, require_distinct_voices)`.
+    pub fn resolve_compose_slots(
+        &self,
+        speech_act: &str,
+        intent: &str,
+    ) -> Option<(Vec<String>, usize, bool)> {
+        if let Some(act_t) = self.act_templates.iter().find(|t| {
+            t.act.eq_ignore_ascii_case(speech_act)
+                && (t.when_intents.is_empty()
+                    || t.when_intents.iter().any(|i| i == intent))
+        }) {
+            return Some((
+                act_t.body_slots.clone(),
+                act_t.min_bodies,
+                act_t.require_distinct_voices,
+            ));
+        }
+        self.template_for_intent(intent).map(|t| {
+            (
+                t.body_slots.clone(),
+                t.min_bodies,
+                t.require_distinct_voices,
+            )
+        })
     }
 
     /// Merge negative-affinity rules for the active intent.
@@ -578,6 +800,21 @@ impl FragmentComposeConfig {
     }
 
     fn matches_greeting(&self, lower: &str, original: &str) -> bool {
+        // Defer to reunion / content rules when the line is more than a hello.
+        if lower.contains("i'm back")
+            || lower.contains("im back")
+            || lower.contains("i am back")
+            || lower.contains("i'm home")
+            || lower.contains("im home")
+            || lower.contains("i am home")
+            || lower.contains("how old")
+            || lower.contains("your age")
+            || lower.contains("where were you")
+            || lower.contains("favorite")
+            || lower.contains("favourite")
+        {
+            return false;
+        }
         let trimmed = lower.trim().trim_end_matches(|c: char| c.is_ascii_punctuation());
         let matched = self.greeting_exact.iter().any(|p| {
             let p = p.to_ascii_lowercase();
@@ -606,6 +843,22 @@ impl FragmentComposeConfig {
             return false;
         }
         if self.agent_name_greeting_max_len > 0 && lower.len() >= self.agent_name_greeting_max_len {
+            return false;
+        }
+        // "Have a tuna roll, Luna" is feeding, not a greeting.
+        const NOT_GREETING: &[&str] = &[
+            "tuna", "salmon", "sushi", "treat", "roll", "bowl", "food", "feed",
+            "play", "fancy feast", "kibble", "hungry",
+            "how old", "your age", "where were you", "favorite", "favourite",
+        ];
+        if NOT_GREETING.iter().any(|k| lower.contains(k)) {
+            return false;
+        }
+        if lower.contains("i'm back")
+            || lower.contains("im back")
+            || lower.contains("i'm home")
+            || lower.contains("im home")
+        {
             return false;
         }
         self.agent_name_prefixes.iter().any(|prefix| {
@@ -2961,6 +3214,8 @@ pub struct LoadedInferenceToml {
     pub validation: ValidationConfig,
     /// Typed fragment composition policy from `[fragment_compose]`.
     pub fragment_compose: FragmentComposeConfig,
+    /// Locale-keyed chat policy from `[chat_policy]`.
+    pub chat_policy: super::chat_policy::ChatPolicySection,
 }
 
 impl LoadedInferenceToml {
@@ -2978,6 +3233,9 @@ impl LoadedInferenceToml {
     }
     pub fn fragment_compose(&self) -> &FragmentComposeConfig {
         &self.fragment_compose
+    }
+    pub fn chat_policy(&self) -> &super::chat_policy::ChatPolicySection {
+        &self.chat_policy
     }
 }
 
@@ -3032,6 +3290,7 @@ fn build_native_default() -> Arc<LoadedInferenceToml> {
         response_shaping: file.response_shaping,
         validation: file.validation,
         fragment_compose: file.fragment_compose,
+        chat_policy: file.chat_policy,
     })
 }
 
@@ -3059,6 +3318,7 @@ pub fn reload_inference_toml_from_str(toml_str: &str) -> Result<(), String> {
         response_shaping: file.response_shaping,
         validation: file.validation,
         fragment_compose: file.fragment_compose,
+        chat_policy: file.chat_policy,
     });
     let mut guard = FULL.write().unwrap();
     *guard = Some(loaded);
@@ -3123,6 +3383,7 @@ fn build_default_loaded() -> Arc<LoadedInferenceToml> {
         response_shaping: file.response_shaping,
         validation: file.validation,
         fragment_compose: file.fragment_compose,
+        chat_policy: file.chat_policy,
     })
 }
 
@@ -3162,6 +3423,7 @@ pub fn reload_inference_toml_from_str(toml_str: &str) -> Result<(), String> {
         response_shaping: domain.response_shaping,
         validation: domain.validation,
         fragment_compose: domain.fragment_compose,
+        chat_policy: domain.chat_policy,
     });
     WASM_FULL.with(|cell| {
         *cell.borrow_mut() = Some(loaded);
@@ -3183,12 +3445,16 @@ pub fn replace_loaded_from_rules_section(
     let rules_section = section.clone();
     let rules = Arc::new(InferenceRulesRuntime::from_section(section));
     let guardrails = super::inference_guardrails::GuardrailsDiskSummary::default();
-    let fragment_compose = {
+    let (fragment_compose, chat_policy) = {
         #[cfg(not(target_arch = "wasm32"))]
         {
             FULL.read()
                 .ok()
-                .and_then(|g| g.as_ref().map(|l| l.fragment_compose.clone()))
+                .and_then(|g| {
+                    g.as_ref().map(|l| {
+                        (l.fragment_compose.clone(), l.chat_policy.clone())
+                    })
+                })
                 .unwrap_or_default()
         }
         #[cfg(target_arch = "wasm32")]
@@ -3196,7 +3462,7 @@ pub fn replace_loaded_from_rules_section(
             WASM_FULL.with(|cell| {
                 cell.borrow()
                     .as_ref()
-                    .map(|l| l.fragment_compose.clone())
+                    .map(|l| (l.fragment_compose.clone(), l.chat_policy.clone()))
                     .unwrap_or_default()
             })
         }
@@ -3210,6 +3476,7 @@ pub fn replace_loaded_from_rules_section(
         response_shaping: ResponseShapingConfig::default(),
         validation: ValidationConfig::default(),
         fragment_compose,
+        chat_policy,
     });
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -3348,6 +3615,38 @@ mod fragment_compose_tests {
         assert_eq!(cfg.classify_voice("I blink slow at you.", "body"), "identity");
         assert_eq!(cfg.classify_voice("Trill.", "coda"), "identity");
         assert!(cfg.is_opener("there you are, human"));
+    }
+
+    #[test]
+    fn parses_reasoning_pass_config() {
+        let raw = r#"
+[fragment_compose]
+enabled = true
+[fragment_compose.reasoning_pass]
+enabled = true
+candidate_count = 5
+max_metacog_retries = 2
+when_intents = ["status_check", "open_ended_chat"]
+min_routing_confidence = 0.88
+topic_override = true
+"#;
+        let doc: InferenceTomlDocument = toml::from_str(raw).expect("reasoning_pass TOML");
+        let rp = &doc.fragment_compose.reasoning_pass;
+        assert!(rp.enabled);
+        assert_eq!(rp.candidate_count, 5);
+        assert_eq!(rp.max_metacog_retries, 2);
+        assert!(rp.applies_to_intent("status_check"));
+        assert!(!rp.applies_to_intent("mealtime_request"));
+    }
+
+    #[test]
+    fn reasoning_pass_empty_when_intents_applies_to_all() {
+        let rp = FragmentReasoningPassConfig {
+            enabled: true,
+            when_intents: vec![],
+            ..Default::default()
+        };
+        assert!(rp.applies_to_intent("anything"));
     }
 
     #[test]
@@ -4374,5 +4673,34 @@ mod objective_fact_rules_tests {
         let h = "Russia Introduces Bill To Criminalize Unregistered Crypto Services";
         let result = rules.sentiment_lexical_topic_key(h);
         assert_eq!(result.as_deref(), Some("neutral"), "legislative bill should be neutral, got {:?}", result);
+    }
+}
+
+#[cfg(test)]
+mod luna_match_smoke {
+    use super::*;
+    #[test]
+    fn hey_luna_how_old_is_lore_not_greeting() {
+        let path = "/Users/astor/Projects/2026/spacekit/spacekit-projects/companions/luna/data/inference_pets.toml";
+        let raw = std::fs::read_to_string(path).expect("luna toml");
+        let cfg = FragmentComposeConfig::load_from_inference_toml_str(&raw).expect("parse");
+        assert!(cfg.turn_taking.enabled, "turn_taking should load");
+        let h = cfg.match_intent("hey luna how old are you?", "Luna");
+        assert_eq!(h.intent, "lore_qa", "got {}", h.intent);
+        let h2 = cfg.match_intent("how old are you?", "Luna");
+        assert_eq!(h2.intent, "lore_qa");
+        assert!(
+            cfg.turn_taking.when_intents.iter().any(|i| i == "lore_qa"),
+            "lore_qa should be eligible for ask-back"
+        );
+        // Chance is seeded; at least some seeds must ask back.
+        assert!(
+            (0u64..64).any(|s| cfg.turn_taking.should_ask_back("lore_qa", "how old are you?", s)),
+            "ask_back_chance should fire for some seeds"
+        );
+        assert!(
+            !cfg.turn_taking.should_ask_back("lore_qa", "I like tuna", 1),
+            "non-questions should not ask back when require_user_question"
+        );
     }
 }
