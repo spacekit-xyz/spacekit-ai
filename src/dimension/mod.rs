@@ -11,6 +11,7 @@ pub mod wm_proof;
 pub mod wm_open;
 pub mod wm_act;
 pub mod wm_vjepa;
+pub mod wm_scene;
 pub mod action;
 pub mod action_classifier;
 pub mod codegen;
@@ -74,6 +75,10 @@ pub use wm_act::{
 pub use wm_vjepa::{
     build_rust_mock_export, ensure_vjepa_export, run_phase3u_vjepa_seed, FrozenVjepaExport,
     VjepaWmSeedResult,
+};
+pub use wm_scene::{
+    run_phase3v_scene_seed, sample_scene, step_scene, FrozenSceneEncoder, SceneGraph,
+    SceneWmSeedResult,
 };
 pub use action::{ActionJson, ActionType, action_from_routing};
 pub use codegen::{CodeGeneration, generate_code_from_action};

@@ -49,6 +49,7 @@ use growformer::dimension::{
     run_phase3t_disk_act_seed, run_phase3t_visuomotor_act_seed, run_phase3t_host_act_seed,
     ActSeedResult,
     run_phase3u_vjepa_seed, VjepaWmSeedResult,
+    run_phase3v_scene_seed, SceneWmSeedResult,
 };
 
 use growformer::types::GroupId;
@@ -149,6 +150,9 @@ struct Args {
     /// Phase 3u: V-JEPA frozen export bridge (HF or mock bank); adapters only.
     #[arg(long)]
     phase3u_vjepa_wm: bool,
+    /// Phase 3v: Spatial / SpaceTime scene-graph WM (objects + typed edges; structure ablation).
+    #[arg(long)]
+    phase3v_scene_wm: bool,
     #[arg(long)]
     phase3f_analyze: bool,
     /// Conditional MI measurement: present-but-inaccessible formalization (Task E).
@@ -502,6 +506,8 @@ fn main() {
         demo_phase3t_act_wm();
     } else if args.phase3u_vjepa_wm {
         demo_phase3u_vjepa_wm();
+    } else if args.phase3v_scene_wm {
+        demo_phase3v_scene_wm();
     } else if args.phase3f_competence {
         demo_phase3f_competence_routing();
     } else if args.phase3e_boundary_analyze {
@@ -11165,6 +11171,90 @@ fn demo_phase3u_vjepa_wm() {
             "OVERALL: Phase 3u INCONCLUSIVE."
         }
     );
+}
+
+fn demo_phase3v_scene_wm() {
+    println!("--- Phase 3v: Spatial / SpaceTime Scene-Graph WM (WORLD_MODELS WM-1) ---\n");
+    println!("Frozen scene encoder; energy + action adapters; structure ablation; not chat.\n");
+    const SEEDS: [u64; 10] = [42, 43, 44, 45, 46, 47, 48, 49, 50, 51];
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let mut all: Vec<SceneWmSeedResult> = Vec::new();
+    for &seed in &SEEDS {
+        print!("  seed {} ...", seed);
+        let _ = std::io::stdout().flush();
+        all.push(run_phase3v_scene_seed(seed));
+        println!(" ok");
+    }
+    let mean = |g: fn(&SceneWmSeedResult) -> f32| {
+        all.iter().map(g).sum::<f32>() / all.len() as f32
+    };
+    let reg = mean(|r| r.regime_agreement);
+    let mar = mean(|r| r.energy_margin);
+    let mse = mean(|r| r.selected_mse);
+    let vg = mean(|r| r.vg_mse);
+    let ret = mean(|r| r.return_wm);
+    let rr = mean(|r| r.return_random);
+    let rv = mean(|r| r.return_vg);
+    let ab = mean(|r| r.structure_ablation_drop);
+    let pinned = all.iter().filter(|r| r.pin_stable).count();
+    let degen = all.iter().filter(|r| r.degenerate).count();
+    let chat = all.iter().any(|r| r.chat_metric_used);
+    let g = [
+        pinned == all.len(),
+        !chat,
+        degen <= 1,
+        reg >= 0.60,
+        mar > 0.01,
+        mse <= vg + 5e-4,
+        ret > rr,
+        ret > rv,
+        ab > 1e-4,
+    ];
+    println!(
+        "\nPin {}/{} | Regime {:.1}% | Margin {:.3} | MSE {:.6} vs VG {:.6}",
+        pinned,
+        all.len(),
+        reg * 100.0,
+        mar,
+        mse,
+        vg
+    );
+    println!(
+        "Return WM {:.3} vs random {:.3} / VG {:.3} | Structure ΔMSE {:.5}",
+        ret, rr, rv, ab
+    );
+    println!("\n=== VERDICT ===");
+    println!("[{}] Encoder pin stable all seeds", mark(g[0]));
+    println!("[{}] Chat metric unused", mark(g[1]));
+    println!("[{}] ≤1 degenerate", mark(g[2]));
+    println!("[{}] Regime ≥ 60% ({:.1}%)", mark(g[3]), reg * 100.0);
+    println!("[{}] Margin > 0.01 ({:.3})", mark(g[4]), mar);
+    println!("[{}] Selected MSE ≤ VG+5e-4", mark(g[5]));
+    println!("[{}] Return > random ({:.3} > {:.3})", mark(g[6]), ret, rr);
+    println!("[{}] Return > VG ({:.3} > {:.3})", mark(g[7]), ret, rv);
+    println!("[{}] Structure ablation ΔMSE > 1e-4 ({:.5})", mark(g[8]), ab);
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    let summary = if pass == g.len() {
+        "OVERALL: Phase 3v PASS — scene-graph WM certified (spatial objects + typed edges)."
+    } else if !g[0] || chat || reg < 0.55 {
+        "OVERALL: Phase 3v KILL — pin/chat/regime collapse."
+    } else {
+        "OVERALL: Phase 3v INCONCLUSIVE — partial spatial progress."
+    };
+    println!("{}", summary);
+
+    let path = "phase3v_scene_wm_results.txt";
+    if let Ok(mut f) = std::fs::File::create(path) {
+        let _ = writeln!(f, "Phase 3v scene-graph WM");
+        let _ = writeln!(
+            f,
+            "regime={:.4} margin={:.4} mse={:.6} vg={:.6} ret_wm={:.4} ret_rand={:.4} ret_vg={:.4} abl={:.6} pin={}/{} degen={} chat={}",
+            reg, mar, mse, vg, ret, rr, rv, ab, pinned, all.len(), degen, chat
+        );
+        let _ = writeln!(f, "gates={}/{} {}", pass, g.len(), summary);
+        println!("\nWrote {}", path);
+    }
 }
 
 fn demo_phase3e_balanced_composite() {
