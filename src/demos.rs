@@ -46,6 +46,9 @@ use growformer::dimension::{
     ActionRankSeedResult, ForeignProofSeedResult, SimLoopResult,
     run_phase3s_visuomotor_seed, run_phase3s_spacekit_host_seed,
     VisuomotorSeedResult, SpacekitHostSeedResult,
+    run_phase3t_disk_act_seed, run_phase3t_visuomotor_act_seed, run_phase3t_host_act_seed,
+    ActSeedResult,
+    run_phase3u_vjepa_seed, VjepaWmSeedResult,
 };
 
 use growformer::types::GroupId;
@@ -140,6 +143,12 @@ struct Args {
     /// Phase 3s: open ladder — frozen vision encoder (D), visuomotor log (C), SpaceKit host (E).
     #[arg(long)]
     phase3s_open_ladder: bool,
+    /// Phase 3t: product surface — WM agents that act (task return); not Luna/chat.
+    #[arg(long)]
+    phase3t_act_wm: bool,
+    /// Phase 3u: V-JEPA frozen export bridge (HF or mock bank); adapters only.
+    #[arg(long)]
+    phase3u_vjepa_wm: bool,
     #[arg(long)]
     phase3f_analyze: bool,
     /// Conditional MI measurement: present-but-inaccessible formalization (Task E).
@@ -489,6 +498,10 @@ fn main() {
         demo_phase3r_beyond_toy();
     } else if args.phase3s_open_ladder {
         demo_phase3s_open_ladder();
+    } else if args.phase3t_act_wm {
+        demo_phase3t_act_wm();
+    } else if args.phase3u_vjepa_wm {
+        demo_phase3u_vjepa_wm();
     } else if args.phase3f_competence {
         demo_phase3f_competence_routing();
     } else if args.phase3e_boundary_analyze {
@@ -10964,11 +10977,192 @@ fn demo_phase3s_open_ladder() {
     println!(
         "{}",
         if pass == need {
-            "OVERALL: Phase 3s PASS — D (frozen vision slot) + visuomotor C + SpaceKit E host green. Swap real V-JEPA JSON when available; product surface (F) still open."
+            "OVERALL: Phase 3s PASS — D (frozen vision slot) + visuomotor C + SpaceKit E host green."
         } else if !g_dc[0] || reg <= 0.55 {
             "OVERALL: Phase 3s KILL — encoder drift or visuomotor collapse."
         } else {
             "OVERALL: Phase 3s INCONCLUSIVE — partial open-ladder progress."
+        }
+    );
+}
+
+fn demo_phase3t_act_wm() {
+    println!("--- Phase 3t: Product Surface — Agents that Act (WORLD_MODELS §8 F) ---\n");
+    println!("NON-GOAL: chat/Luna accuracy is NOT a certifier.\n");
+    println!("Certifiers: episode task return vs random & VG · regime · pin · acting host.\n");
+    const SEEDS: [u64; 10] = [42, 43, 44, 45, 46, 47, 48, 49, 50, 51];
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let dir = std::env::temp_dir().join("growformer_wm_act");
+    let _ = std::fs::create_dir_all(&dir);
+
+    println!("[F1] Disk dynamics acting agent");
+    let mut disk: Vec<ActSeedResult> = Vec::new();
+    for &seed in &SEEDS {
+        print!("  disk seed {} ...", seed);
+        let _ = std::io::stdout().flush();
+        disk.push(run_phase3t_disk_act_seed(seed, &dir));
+        println!(" ok");
+    }
+    let mean_d = |g: fn(&ActSeedResult) -> f32| {
+        disk.iter().map(g).sum::<f32>() / disk.len() as f32
+    };
+    let d_wm = mean_d(|r| r.return_wm);
+    let d_rand = mean_d(|r| r.return_random);
+    let d_vg = mean_d(|r| r.return_vg);
+    let d_reg = mean_d(|r| r.regime_agreement);
+    let d_abs = mean_d(|r| r.abstain_rate);
+    let d_pin = disk.iter().filter(|r| r.pin_stable).count();
+    let d_degen = disk.iter().filter(|r| r.degenerate).count();
+    let d_chat = disk.iter().any(|r| r.chat_metric_used);
+    let g_d = [
+        !d_chat,
+        d_pin == disk.len(),
+        d_degen <= 1,
+        d_wm > d_rand + 0.05,
+        d_wm > d_vg,
+        d_reg >= 0.55,
+        d_abs > 0.0 && d_abs < 0.85,
+    ];
+    println!(
+        "  Return WM {:.3} > rand {:.3} / VG {:.3} | Regime {:.1}% | Abstain {:.1}% | Pin {}/{} | Degen {}",
+        d_wm, d_rand, d_vg, d_reg * 100.0, d_abs * 100.0, d_pin, disk.len(), d_degen
+    );
+
+    println!("\n[F2] Visuomotor push–object acting agent");
+    let mut vm: Vec<ActSeedResult> = Vec::new();
+    for &seed in &SEEDS {
+        print!("  visuomotor seed {} ...", seed);
+        let _ = std::io::stdout().flush();
+        vm.push(run_phase3t_visuomotor_act_seed(seed, &dir));
+        println!(" ok");
+    }
+    let mean_v = |g: fn(&ActSeedResult) -> f32| {
+        vm.iter().map(g).sum::<f32>() / vm.len() as f32
+    };
+    let v_wm = mean_v(|r| r.return_wm);
+    let v_rand = mean_v(|r| r.return_random);
+    let v_vg = mean_v(|r| r.return_vg);
+    let v_reg = mean_v(|r| r.regime_agreement);
+    let v_pin = vm.iter().filter(|r| r.pin_stable).count();
+    let v_degen = vm.iter().filter(|r| r.degenerate).count();
+    let v_chat = vm.iter().any(|r| r.chat_metric_used);
+    let g_v = [
+        !v_chat,
+        v_pin == vm.len(),
+        v_degen <= 1,
+        v_wm > v_rand + 0.01,
+        v_wm >= v_vg - 1e-4,
+    ];
+    println!(
+        "  Return WM {:.3} > rand {:.3} / VG {:.3} | Pin {}/{} | Degen {} (regime via F1 disk)",
+        v_wm, v_rand, v_vg, v_pin, vm.len(), v_degen
+    );
+    let _ = v_reg;
+
+    println!("\n[F3] Acting host load/act/reload pin");
+    let host_ok = SEEDS
+        .iter()
+        .filter(|&&s| run_phase3t_host_act_seed(s, &dir))
+        .count();
+    let g_h = [host_ok == SEEDS.len()];
+    println!("  Host pin-stable {}/{}", host_ok, SEEDS.len());
+
+    println!("\n=== VERDICT ===");
+    println!("[F1] Disk");
+    println!("  [{}] Chat metric unused", mark(g_d[0]));
+    println!("  [{}] Pin stable", mark(g_d[1]));
+    println!("  [{}] ≤1 degenerate", mark(g_d[2]));
+    println!("  [{}] Return ≫ random", mark(g_d[3]));
+    println!("  [{}] Return > VG", mark(g_d[4]));
+    println!("  [{}] Regime ≥ 55%", mark(g_d[5]));
+    println!("  [{}] Abstain in (0%,85%)", mark(g_d[6]));
+    println!("[F2] Visuomotor");
+    println!("  [{}] Chat metric unused", mark(g_v[0]));
+    println!("  [{}] Pin stable", mark(g_v[1]));
+    println!("  [{}] ≤1 degenerate", mark(g_v[2]));
+    println!("  [{}] Return > random (+0.01)", mark(g_v[3]));
+    println!("  [{}] Return ≥ VG", mark(g_v[4]));
+    println!("[F3] Host");
+    println!("  [{}] All acting-host reloads pin-stable", mark(g_h[0]));
+
+    let pass = g_d.iter().chain(g_v.iter()).chain(g_h.iter()).filter(|b| **b).count();
+    let need = g_d.len() + g_v.len() + g_h.len();
+    println!("\nGates: {}/{}", pass, need);
+    println!(
+        "{}",
+        if pass == need {
+            "OVERALL: Phase 3t PASS — §8 F product surface green (agents act; not chat)."
+        } else if d_chat || v_chat {
+            "OVERALL: Phase 3t KILL — chat metric used (forbidden)."
+        } else if d_wm <= d_rand || v_wm <= v_rand {
+            "OVERALL: Phase 3t KILL — acting return collapsed to random."
+        } else {
+            "OVERALL: Phase 3t INCONCLUSIVE — partial product-surface progress."
+        }
+    );
+}
+
+fn demo_phase3u_vjepa_wm() {
+    println!("--- Phase 3u: V-JEPA Frozen Export Bridge (WORLD_MODELS §8 D real weights) ---\n");
+    println!("Adapters only. Export via scripts/export_vjepa_features.py (--mode hf|mock).\n");
+    const SEEDS: [u64; 10] = [42, 43, 44, 45, 46, 47, 48, 49, 50, 51];
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let mut all: Vec<VjepaWmSeedResult> = Vec::new();
+    for &seed in &SEEDS {
+        print!("  seed {} ...", seed);
+        let _ = std::io::stdout().flush();
+        all.push(run_phase3u_vjepa_seed(seed));
+        println!(" ok");
+    }
+    let mean = |g: fn(&VjepaWmSeedResult) -> f32| {
+        all.iter().map(g).sum::<f32>() / all.len() as f32
+    };
+    let reg = mean(|r| r.regime_agreement);
+    let mar = mean(|r| r.energy_margin);
+    let mse = mean(|r| r.selected_mse);
+    let vg = mean(|r| r.vg_mse);
+    let frozen = all.iter().filter(|r| r.encoder_frozen).count();
+    let degen = all.iter().filter(|r| r.degenerate).count();
+    let mode = all.first().map(|r| r.export_mode.as_str()).unwrap_or("?");
+    let source = all.first().map(|r| r.source_model.as_str()).unwrap_or("?");
+    let g = [
+        frozen == all.len(),
+        degen <= 1,
+        reg >= 0.60,
+        mar > 0.01,
+        mse <= vg + 5e-4,
+    ];
+    println!(
+        "\nSource {} | mode={} | Frozen {}/{} | Regime {:.1}% | Margin {:.3} | MSE {:.6} vs VG {:.6}",
+        source,
+        mode,
+        frozen,
+        all.len(),
+        reg * 100.0,
+        mar,
+        mse,
+        vg
+    );
+    println!("\n=== VERDICT ===");
+    println!("[{}] Encoder/export pin frozen for all seeds", mark(g[0]));
+    println!("[{}] ≤1 degenerate", mark(g[1]));
+    println!("[{}] Regime ≥ 60% ({:.1}%)", mark(g[2]), reg * 100.0);
+    println!("[{}] Margin > 0.01 ({:.3})", mark(g[3]), mar);
+    println!("[{}] Selected MSE ≤ VG+5e-4", mark(g[4]));
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    println!(
+        "{}",
+        if pass == g.len() {
+            if mode == "hf" {
+                "OVERALL: Phase 3u PASS — Meta V-JEPA export frozen; adapters certified."
+            } else {
+                "OVERALL: Phase 3u PASS — export bridge green (mock teacher). Run scripts/export_vjepa_features.py --mode hf for Meta weights."
+            }
+        } else if !g[0] || reg <= 0.55 {
+            "OVERALL: Phase 3u KILL — pin drift or transfer collapse."
+        } else {
+            "OVERALL: Phase 3u INCONCLUSIVE."
         }
     );
 }

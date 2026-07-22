@@ -9,6 +9,8 @@ pub mod wm_frontier;
 pub mod wm_transfer;
 pub mod wm_proof;
 pub mod wm_open;
+pub mod wm_act;
+pub mod wm_vjepa;
 pub mod action;
 pub mod action_classifier;
 pub mod codegen;
@@ -63,6 +65,15 @@ pub use wm_open::{
     run_phase3s_visuomotor_seed, step_visuomotor, write_visuomotor_log, FrozenVisionEncoder,
     SpacekitHostSeedResult, VisuomotorSeedResult, WmHostRequest, WmHostResponse, WmHostSession,
     VISION_PIXELS, VISION_SIDE,
+};
+pub use wm_act::{
+    act_step_disk, run_phase3t_disk_act_seed, run_phase3t_host_act_seed,
+    run_phase3t_visuomotor_act_seed, train_disk_acting_bundle, ActDecision, ActSeedResult,
+    ActingHostRequest, ActingHostResponse, ActingHostSession, ActingWmBundle,
+};
+pub use wm_vjepa::{
+    build_rust_mock_export, ensure_vjepa_export, run_phase3u_vjepa_seed, FrozenVjepaExport,
+    VjepaWmSeedResult,
 };
 pub use action::{ActionJson, ActionType, action_from_routing};
 pub use codegen::{CodeGeneration, generate_code_from_action};
