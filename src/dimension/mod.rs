@@ -3,6 +3,7 @@
 
 pub mod composition;
 pub mod cone_router;
+pub mod jepa_adapters;
 pub mod action;
 pub mod action_classifier;
 pub mod codegen;
@@ -26,6 +27,11 @@ pub use composition::{EpisodicMemory, Episode, RoutingEntropyGuard, VirtualGroup
 pub use cone_router::{
     cone_features, AdjustableConeRouter, ConeConfig, ConeDecision, ConeSample, LabelFreeStrategy,
     CONE_FEATURE_DIM,
+};
+pub use jepa_adapters::{
+    generate_transitions, run_wm_task_e_seed, step_dynamics, stratified_wm_split, FrozenJepaEncoder,
+    JepaPromotionBundle, PredictorAdapter, WmSeedResult, WmTransition, WM_INNER_RADIUS,
+    WM_LATENT_DIM, WM_OBS_DIM,
 };
 pub use action::{ActionJson, ActionType, action_from_routing};
 pub use codegen::{CodeGeneration, generate_code_from_action};

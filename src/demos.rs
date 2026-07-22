@@ -36,6 +36,7 @@ use growformer::dimension::{
     load_language_samples_jsonl, render_action_template, generate_code_from_action,
     route_language_embedding,
     AdjustableConeRouter, ConeConfig, ConeSample, LabelFreeStrategy, cone_features,
+    run_wm_task_e_seed, WmSeedResult,
 };
 
 use growformer::types::GroupId;
@@ -96,6 +97,10 @@ struct Args {
     /// Pre-registered in COMPETENCE_ROUTING_SPEC §10.5.
     #[arg(long)]
     phase3h_label_free: bool,
+    /// Phase 3i: JEPA-like frozen encoder + promoted predictor adapters (world-model Task E toy).
+    /// See docs/JEPA_ADAPTER_PROMOTION.md and WORLD_MODELS.md §3.2.
+    #[arg(long)]
+    phase3i_jepa_wm: bool,
     #[arg(long)]
     phase3f_analyze: bool,
     /// Conditional MI measurement: present-but-inaccessible formalization (Task E).
@@ -423,6 +428,8 @@ fn main() {
         demo_phase3g_cone_router();
     } else if args.phase3h_label_free {
         demo_phase3h_label_free();
+    } else if args.phase3i_jepa_wm {
+        demo_phase3i_jepa_wm();
     } else if args.phase3f_competence {
         demo_phase3f_competence_routing();
     } else if args.phase3e_boundary_analyze {
@@ -9931,6 +9938,143 @@ fn demo_phase3h_label_free() {
         println!("OVERALL: Phase 3h INCONCLUSIVE — partial lift; inspect FAIL rows (do not claim unsupervised solve).");
     }
     println!("\nNote: do not compare these region-agree numbers to Phase 3g's 80% supervised gate.");
+}
+
+// =============================================================================
+// Phase 3i: JEPA-like frozen encoder + promoted predictor adapters (WM Task E)
+// =============================================================================
+
+fn demo_phase3i_jepa_wm() {
+    println!("--- Phase 3i: JEPA / World-Model Adapters (WM Task E toy) ---\n");
+    println!("Frozen JEPA-like encoder (hash-pinned). Two Mirror predictors promote to Main.");
+    println!("Inner regime: rotation dynamics. Outer: radial expand + shear.");
+    println!("Router: adjustable cone on affinity scalars (oracle-free at inference).");
+    println!("Certifiers: regime agreement, degeneracy, MSE vs VG / confidence argmax.\n");
+    println!("Contract: docs/JEPA_ADAPTER_PROMOTION.md\n");
+
+    const SEEDS: [u64; 20] = [
+        42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
+    ];
+    const SWEEP: [usize; 4] = [20, 30, 60, 120];
+    const HEADLINE_N: usize = 30;
+
+    let mut all: Vec<WmSeedResult> = Vec::new();
+    for &seed in &SEEDS {
+        print!("  seed {} ...", seed);
+        let _ = std::io::stdout().flush();
+        for &n in &SWEEP {
+            all.push(run_wm_task_e_seed(seed, n));
+        }
+        println!(" ok");
+    }
+
+    let at_n = |n: usize| -> Vec<&WmSeedResult> { all.iter().filter(|r| r.train_n == n).collect() };
+    let mean = |rows: &[&WmSeedResult], g: fn(&WmSeedResult) -> f32| -> f32 {
+        let vals: Vec<f32> = rows.iter().map(|r| g(r)).filter(|v| v.is_finite()).collect();
+        if vals.is_empty() {
+            f32::NAN
+        } else {
+            vals.iter().sum::<f32>() / vals.len() as f32
+        }
+    };
+    let std = |rows: &[&WmSeedResult], g: fn(&WmSeedResult) -> f32| -> f32 {
+        let vals: Vec<f32> = rows.iter().map(|r| g(r)).filter(|v| v.is_finite()).collect();
+        mean_std(&vals).1
+    };
+    let pct = |rows: &[&WmSeedResult], g: fn(&WmSeedResult) -> f32| {
+        format!("{:.1}% ± {:.1}%", mean(rows, g) * 100.0, std(rows, g) * 100.0)
+    };
+
+    println!("=== n-sweep (20 seeds each) ===\n");
+    println!("| train n | Cone MSE | VG MSE | Conf MSE | Regime agree | Degenerate |");
+    println!("| ------- | -------- | ------ | -------- | ------------ | ---------- |");
+    for &n in &SWEEP {
+        let rows = at_n(n);
+        let degen = rows.iter().filter(|r| r.degenerate).count();
+        println!(
+            "| {:>7} | {:.6} ± {:.6} | {:.6} ± {:.6} | {:.6} ± {:.6} | {} | {}/{} |",
+            n,
+            mean(&rows, |r| r.cone_mse),
+            std(&rows, |r| r.cone_mse),
+            mean(&rows, |r| r.vg_mse),
+            std(&rows, |r| r.vg_mse),
+            mean(&rows, |r| r.conf_mse),
+            std(&rows, |r| r.conf_mse),
+            pct(&rows, |r| r.regime_agreement),
+            degen,
+            rows.len(),
+        );
+    }
+
+    let rows = at_n(HEADLINE_N);
+    let degen = rows.iter().filter(|r| r.degenerate).count();
+    let cone_m = mean(&rows, |r| r.cone_mse);
+    let vg_m = mean(&rows, |r| r.vg_mse);
+    let conf_m = mean(&rows, |r| r.conf_mse);
+    let region_m = mean(&rows, |r| r.regime_agreement);
+    let ra_at = |n: usize| mean(&at_n(n), |r| r.regime_agreement);
+    let pin0 = rows.first().map(|r| r.encoder_fingerprint).unwrap_or(0);
+
+    println!("\n=== Headline (n={}, 20 seeds) ===\n", HEADLINE_N);
+    println!("| Method | Held-out next-latent MSE |");
+    println!("| ------ | ------------------------ |");
+    println!("| VirtualGroup (avg preds) | {:.6} ± {:.6} |", vg_m, std(&rows, |r| r.vg_mse));
+    println!(
+        "| Confidence argmax (affinity) | {:.6} ± {:.6} |",
+        conf_m,
+        std(&rows, |r| r.conf_mse)
+    );
+    println!(
+        "| **Cone-routed predictors** | **{:.6} ± {:.6}** |",
+        cone_m,
+        std(&rows, |r| r.cone_mse)
+    );
+    println!(
+        "\nRegime agree {} | Degenerate {}/{} | Encoder pin (seed 42 family) {:#x}",
+        pct(&rows, |r| r.regime_agreement),
+        degen,
+        rows.len(),
+        pin0
+    );
+    println!(
+        "n-sweep regime agree: n=20:{:.1}% n=30:{:.1}% n=60:{:.1}% n=120:{:.1}%",
+        ra_at(20) * 100.0,
+        ra_at(30) * 100.0,
+        ra_at(60) * 100.0,
+        ra_at(120) * 100.0
+    );
+
+    let g_degen = degen == 0;
+    let g_vg = cone_m < vg_m;
+    // Affinity argmax is already strong on this toy; require cone not worse (≤).
+    let g_conf = cone_m <= conf_m + 1e-7;
+    let g_region = region_m >= 0.60;
+    let g_sweep = ra_at(120) + 0.02 >= ra_at(20);
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+
+    println!("\n=== VERDICT (pre-registered WM Task E gates) ===\n");
+    println!("[{}] 0 degenerate seeds                         ({}/{})", mark(g_degen), degen, rows.len());
+    println!("[{}] Cone MSE < VirtualGroup                    ({:.6} < {:.6})", mark(g_vg), cone_m, vg_m);
+    println!("[{}] Cone MSE ≤ confidence argmax               ({:.6} ≤ {:.6})", mark(g_conf), cone_m, conf_m);
+    println!("[{}] Regime agreement ≥ 60%                     ({:.1}%)", mark(g_region), region_m * 100.0);
+    println!(
+        "[{}] No regime-agree decay n=20→120             ({:.1}% → {:.1}%)",
+        mark(g_sweep),
+        ra_at(20) * 100.0,
+        ra_at(120) * 100.0
+    );
+
+    let gates = [g_degen, g_vg, g_conf, g_region, g_sweep];
+    let pass_n = gates.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{} met.", pass_n, gates.len());
+    if pass_n == gates.len() {
+        println!("OVERALL: Phase 3i PASS — JEPA adapter promote-freeze + authenticated regime routing.");
+    } else if region_m <= 0.55 && cone_m + 1e-7 >= vg_m.min(conf_m) {
+        println!("OVERALL: Phase 3i KILL — predictors/routing stay at VG/conf floor.");
+    } else {
+        println!("OVERALL: Phase 3i INCONCLUSIVE — partial lift; inspect FAIL rows.");
+    }
+    println!("\nNote: encoder never trains; only predictor adapters promote (JEPA_ADAPTER_PROMOTION.md).");
 }
 
 fn demo_phase3e_balanced_composite() {
