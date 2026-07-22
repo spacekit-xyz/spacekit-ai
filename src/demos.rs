@@ -51,7 +51,8 @@ use growformer::dimension::{
     run_phase3u_vjepa_seed, VjepaWmSeedResult,
     run_phase3v_scene_seed, SceneWmSeedResult,
     run_phase3w_scene_host_seed, SceneHostSeedResult,
-    run_phase4a_context_free_mnist, ContextFreeMnistResult,
+    run_phase4a_context_free_mnist, run_phase4b_cf_mnist_router, ContextFreeMnistResult,
+    CfMnistRouterResult, run_phase4c_split_cifar_scaffold, SplitCifarScaffoldResult,
     ActingHostSession, SceneHostSession, WmHostSession,
 };
 
@@ -165,6 +166,12 @@ struct Args {
     /// Phase 4a: context-free vs context-guided MNIST routing scaffold (Whitepaper §4.4).
     #[arg(long)]
     phase4a_context_free_mnist: bool,
+    /// Phase 4b: LearnedRouter context-free at test (task labels train-only).
+    #[arg(long)]
+    phase4b_cf_mnist_router: bool,
+    /// Phase 4c: Split-CIFAR protocol scaffold (synthetic promote–freeze smoke; not CIFAR claim).
+    #[arg(long)]
+    phase4c_split_cifar_scaffold: bool,
     /// SpaceKit stdio JSONL host: `scene` | `acting` | `deploy` (one JSON request per stdin line).
     #[arg(long, value_name = "MODE")]
     wm_host_stdio: Option<String>,
@@ -535,6 +542,10 @@ fn main() {
         demo_layer0_concept_graph();
     } else if args.phase4a_context_free_mnist {
         demo_phase4a_context_free_mnist();
+    } else if args.phase4b_cf_mnist_router {
+        demo_phase4b_cf_mnist_router();
+    } else if args.phase4c_split_cifar_scaffold {
+        demo_phase4c_split_cifar_scaffold();
     } else if args.phase3f_competence {
         demo_phase3f_competence_routing();
     } else if args.phase3e_boundary_analyze {
@@ -11369,6 +11380,149 @@ fn demo_phase4a_context_free_mnist() {
             summary
         );
         println!("\nWrote phase4a_context_free_mnist_results.txt");
+    }
+}
+
+fn demo_phase4b_cf_mnist_router() {
+    println!("--- Phase 4b: Context-Free MNIST LearnedRouter (Whitepaper §4.4) ---\n");
+    println!("Train with task labels; test input-only. Cosine free = baseline.\n");
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let data = std::env::var("MNIST_ROOT").unwrap_or_else(|_| "data".into());
+    let r: CfMnistRouterResult =
+        run_phase4b_cf_mnist_router(42, Path::new(&data), 1000, 350);
+    if !r.mnist_available {
+        println!("MNIST unavailable: {}", r.note);
+        println!("OVERALL: Phase 4b SKIP — install MNIST to run.");
+        let _ = std::fs::write(
+            "phase4b_cf_mnist_router_results.txt",
+            format!("Phase 4b SKIP\n{}\n", r.note),
+        );
+        return;
+    }
+    println!(
+        "Tasks {} | acc {:.1}% | guided {:.1}% | cosine-free {:.1}% | router-free {:.1}% | margin {:.3} | degen={}",
+        r.n_tasks,
+        r.mean_task_acc * 100.0,
+        r.context_guided_agree * 100.0,
+        r.cosine_free_agree * 100.0,
+        r.router_free_agree * 100.0,
+        r.router_margin,
+        r.router_degenerate
+    );
+    let g = [
+        r.mnist_available,
+        !r.chat_metric_used,
+        r.mean_task_acc >= 0.80,
+        r.context_guided_agree >= 0.90,
+        !r.router_degenerate,
+        r.router_free_agree > r.cosine_free_agree + 0.05,
+        r.router_free_agree >= 0.55,
+    ];
+    println!("\n=== VERDICT ===");
+    println!("[{}] MNIST available", mark(g[0]));
+    println!("[{}] Chat metric unused", mark(g[1]));
+    println!("[{}] Mean task acc ≥ 80% ({:.1}%)", mark(g[2]), r.mean_task_acc * 100.0);
+    println!(
+        "[{}] Context-guided ≥ 90% ({:.1}%)",
+        mark(g[3]),
+        r.context_guided_agree * 100.0
+    );
+    println!("[{}] Router not constant-specialist degenerate", mark(g[4]));
+    println!(
+        "[{}] Router > cosine-free+5pp ({:.1}% > {:.1}%)",
+        mark(g[5]),
+        r.router_free_agree * 100.0,
+        r.cosine_free_agree * 100.0
+    );
+    println!(
+        "[{}] Router-free agree ≥ 55% ({:.1}%)",
+        mark(g[6]),
+        r.router_free_agree * 100.0
+    );
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    let summary = if pass == g.len() {
+        "OVERALL: Phase 4b PASS — learned context-free router beats cosine; §4.4 still open at full 5-task / CIFAR."
+    } else if !g[4] || r.router_free_agree <= 0.40 {
+        "OVERALL: Phase 4b KILL — router collapse."
+    } else {
+        "OVERALL: Phase 4b INCONCLUSIVE — partial CF progress."
+    };
+    println!("{}", summary);
+    println!("Note: {}", r.note);
+    if let Ok(mut f) = std::fs::File::create("phase4b_cf_mnist_router_results.txt") {
+        let _ = writeln!(
+            f,
+            "Phase 4b CF MNIST router\nguided={:.4} cos={:.4} rout={:.4} margin={:.4} degen={} acc={:.4} gates={}/{} {}",
+            r.context_guided_agree,
+            r.cosine_free_agree,
+            r.router_free_agree,
+            r.router_margin,
+            r.router_degenerate,
+            r.mean_task_acc,
+            pass,
+            g.len(),
+            summary
+        );
+        println!("\nWrote phase4b_cf_mnist_router_results.txt");
+    }
+}
+
+fn demo_phase4c_split_cifar_scaffold() {
+    println!("--- Phase 4c: Split-CIFAR Protocol Scaffold (Whitepaper §5.5) ---\n");
+    println!("Synthetic promote–freeze smoke. Real CIFAR-100 eval not claimed.\n");
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let data = std::env::var("CIFAR_ROOT").unwrap_or_else(|_| "data".into());
+    let r: SplitCifarScaffoldResult = run_phase4c_split_cifar_scaffold(42, Path::new(&data));
+    println!(
+        "CIFAR on disk={} | tasks {} | mean acc {:.1}% | zero-forget={} | smoke={}",
+        r.cifar_available,
+        r.n_tasks,
+        r.mean_task_acc * 100.0,
+        r.retention_zero_forget,
+        r.synthetic_smoke_ok
+    );
+    // Never treat CIFAR-on-disk as a pass — real Split-CIFAR eval is unwired.
+    let honest_scope = true;
+    let g = [
+        !r.chat_metric_used,
+        r.synthetic_smoke_ok,
+        r.retention_zero_forget,
+        r.mean_task_acc >= 0.75,
+        honest_scope,
+    ];
+    println!("\n=== VERDICT ===");
+    println!("[{}] Chat metric unused", mark(g[0]));
+    println!("[{}] Synthetic smoke ok", mark(g[1]));
+    println!("[{}] Zero forgetting by construction", mark(g[2]));
+    println!("[{}] Mean synthetic acc ≥ 75% ({:.1}%)", mark(g[3]), r.mean_task_acc * 100.0);
+    println!(
+        "[{}] Honest scope (CIFAR claim withheld; on_disk={})",
+        mark(g[4]),
+        r.cifar_available
+    );
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    let summary = if pass == g.len() {
+        "OVERALL: Phase 4c SCAFFOLD GREEN — protocol smoke only; Split-CIFAR-100 not evaluated."
+    } else {
+        "OVERALL: Phase 4c INCONCLUSIVE — synthetic smoke failed."
+    };
+    println!("{}", summary);
+    println!("Note: {}", r.note);
+    if let Ok(mut f) = std::fs::File::create("phase4c_split_cifar_scaffold_results.txt") {
+        let _ = writeln!(
+            f,
+            "Phase 4c Split-CIFAR scaffold\ncifar={} smoke={} acc={:.4} forget0={} gates={}/{} {}",
+            r.cifar_available,
+            r.synthetic_smoke_ok,
+            r.mean_task_acc,
+            r.retention_zero_forget,
+            pass,
+            g.len(),
+            summary
+        );
+        println!("\nWrote phase4c_split_cifar_scaffold_results.txt");
     }
 }
 

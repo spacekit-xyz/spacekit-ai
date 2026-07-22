@@ -14,6 +14,7 @@ pub mod wm_vjepa;
 pub mod wm_scene;
 pub mod wm_scene_host;
 pub mod context_free_mnist;
+pub mod split_cifar_scaffold;
 pub mod action;
 pub mod action_classifier;
 pub mod codegen;
@@ -88,7 +89,11 @@ pub use wm_scene_host::{
     run_phase3w_scene_host_seed, SceneHostRequest, SceneHostResponse, SceneHostSeedResult,
     SceneHostSession,
 };
-pub use context_free_mnist::{run_phase4a_context_free_mnist, ContextFreeMnistResult};
+pub use context_free_mnist::{
+    run_phase4a_context_free_mnist, run_phase4b_cf_mnist_router, CfMnistRouterResult,
+    ContextFreeMnistResult,
+};
+pub use split_cifar_scaffold::{run_phase4c_split_cifar_scaffold, SplitCifarScaffoldResult};
 pub use action::{ActionJson, ActionType, action_from_routing};
 pub use codegen::{CodeGeneration, generate_code_from_action};
 pub use generation::{GeneratedResponse, render_action_template};
