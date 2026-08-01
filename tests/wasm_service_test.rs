@@ -1,5 +1,5 @@
-use growformer::dimension::{ActionType, LanguageConfig};
 use growformer::dimension::action::ActionPayload;
+use growformer::dimension::{ActionType, LanguageConfig};
 use growformer::service::LanguageService;
 
 #[test]
@@ -15,7 +15,9 @@ fn test_wasm_compatible_service_lifecycle() {
         panic!("expected CodingAssist payload, got {:?}", action.payload);
     }
 
-    let (_action, response) = svc.generation("help me reset my password").expect("generation");
+    let (_action, response) = svc
+        .generation("help me reset my password")
+        .expect("generation");
     assert!(!response.text.is_empty(), "generation should produce text");
 
     let (_action, code) = svc.codegen("implement a rust web server").expect("codegen");

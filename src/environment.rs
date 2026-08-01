@@ -5,15 +5,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 use crate::neuron::Neuron;
-use crate::types::*;
 use crate::systems::{
-    geometry::{update_geometry, reaction_diffusion_inhibition, compute_geometric_spread},
-    growth::{grow_synapses, prune_dormant_synapses, prune_three_phase, potentiate_active_synapses},
+    geometry::{compute_geometric_spread, reaction_diffusion_inhibition, update_geometry},
+    growth::{
+        grow_synapses, potentiate_active_synapses, prune_dormant_synapses, prune_three_phase,
+    },
     metabolic::apply_metabolic_pressure,
     mirror::{apply_ifs_mirror_coupling, update_group_centroids},
     stdp::{get_fired_neurons, record_firing, update_stdp_layer},
     whorls::{detect_whorls, WhorlReport},
 };
+use crate::types::*;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NeuralEnvironment {
@@ -29,7 +31,7 @@ pub struct NeuralEnvironment {
     tick_count: u64,
     dropout_mask: HashMap<NeuronId, bool>,
     output_ids: HashSet<NeuronId>,
-    input_ids: HashSet<NeuronId>,   // neurons in input layer — their outgoing synapses are protected
+    input_ids: HashSet<NeuronId>, // neurons in input layer — their outgoing synapses are protected
 
     /// Group IDs that must receive zero gradient (continual learning: consolidated tasks).
     /// Set by Brain before each train_tick so backprop does not update these neurons' weights/synapses.
@@ -108,7 +110,13 @@ impl NeuralEnvironment {
     /// After loading a checkpoint, set next_neuron_id to max(ids)+1 so new growth
     /// does not reuse existing IDs.
     pub fn sync_next_neuron_id_from_neurons(&mut self) {
-        self.next_neuron_id = self.neurons.keys().max().copied().unwrap_or(0).wrapping_add(1);
+        self.next_neuron_id = self
+            .neurons
+            .keys()
+            .max()
+            .copied()
+            .unwrap_or(0)
+            .wrapping_add(1);
     }
 
     /// Number of neurons in the input layer (first layer), or `None` if no layers built.
@@ -149,10 +157,10 @@ impl NeuralEnvironment {
                 let n_layers = layer_sizes.len();
                 let is_hidden = layer_idx > 0 && layer_idx < n_layers - 1;
                 neuron.weight = if is_hidden {
-                    rng.gen_range(0.0_f32..0.4)  // moderate positive: warm-up phase handles early learning
-                    // no need for extreme +1.5 init — neurons learn before inhibition activates
+                    rng.gen_range(0.0_f32..0.4) // moderate positive: warm-up phase handles early learning
+                                                // no need for extreme +1.5 init — neurons learn before inhibition activates
                 } else {
-                    rng.gen_range(-0.1_f32..0.1)  // input/output: standard small random
+                    rng.gen_range(-0.1_f32..0.1) // input/output: standard small random
                 };
 
                 self.neurons.insert(id, neuron);
@@ -177,8 +185,8 @@ impl NeuralEnvironment {
 
             // Compensate for lateral inhibition attenuation on layer 1 output
             // attenuation ≈ (1 - lateral_inhibition * 0.7) based on empirical mean activation
-            let attenuation_compensation = if layer_idx == 0
-                && self.config.lateral_inhibition > 0.0 {
+            let attenuation_compensation = if layer_idx == 0 && self.config.lateral_inhibition > 0.0
+            {
                 1.0 / (1.0 - self.config.lateral_inhibition * 0.7).max(0.3)
             } else {
                 1.0
@@ -193,7 +201,12 @@ impl NeuralEnvironment {
                     let neuron = self.neurons.get_mut(&src).unwrap();
                     if n_branches > 1 && is_to_hidden {
                         let br = rng.gen_range(0..n_branches) as u8;
-                        neuron.add_synapse_to_branch(tgt, w, self.config.max_synapses_per_neuron, br);
+                        neuron.add_synapse_to_branch(
+                            tgt,
+                            w,
+                            self.config.max_synapses_per_neuron,
+                            br,
+                        );
                     } else {
                         neuron.add_synapse(tgt, w, self.config.max_synapses_per_neuron);
                     }
@@ -301,7 +314,9 @@ impl NeuralEnvironment {
         let mut group = NeuronGroup::new(id);
         group.members = member_ids.clone();
         for nid in &member_ids {
-            if let Some(n) = self.neurons.get_mut(nid) { n.group_id = Some(id); }
+            if let Some(n) = self.neurons.get_mut(nid) {
+                n.group_id = Some(id);
+            }
         }
         self.groups.insert(id, group);
         id
@@ -312,8 +327,12 @@ impl NeuralEnvironment {
         let members_a: Vec<NeuronId> = self.groups[&a].members.clone();
         let members_b: Vec<NeuronId> = self.groups[&b].members.clone();
         for (na, nb) in members_a.iter().zip(members_b.iter()) {
-            if let Some(n) = self.neurons.get_mut(na) { n.mirror_partner = Some(*nb); }
-            if let Some(n) = self.neurons.get_mut(nb) { n.mirror_partner = Some(*na); }
+            if let Some(n) = self.neurons.get_mut(na) {
+                n.mirror_partner = Some(*nb);
+            }
+            if let Some(n) = self.neurons.get_mut(nb) {
+                n.mirror_partner = Some(*na);
+            }
         }
     }
 
@@ -385,8 +404,8 @@ impl NeuralEnvironment {
 
         for layer_idx in 1..self.layers.len() {
             let prev_layer = self.layers[layer_idx - 1].clone();
-            let layer_ids  = self.layers[layer_idx].clone();
-            let is_output  = layer_idx == self.layers.len() - 1;
+            let layer_ids = self.layers[layer_idx].clone();
+            let is_output = layer_idx == self.layers.len() - 1;
 
             // Read-only snapshots for parallel sum (prev activations and outgoing synapses to this layer)
             let prev_act: HashMap<NeuronId, f32> = prev_layer
@@ -447,7 +466,9 @@ impl NeuralEnvironment {
                         let (best_branch, &best_sum) = branch_sums
                             .iter()
                             .enumerate()
-                            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                            .max_by(|a, b| {
+                                a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal)
+                            })
                             .unwrap_or((0, &0.0));
                         (nid, best_sum as f32, best_branch as u8)
                     }
@@ -461,10 +482,8 @@ impl NeuralEnvironment {
                 self.config.dropout_rate * 0.5
             };
             for (nid, sum, winning_br) in sums {
-                let would_drop = training
-                    && !is_output
-                    && dropout_rate > 0.0
-                    && rng.gen::<f32>() < dropout_rate;
+                let would_drop =
+                    training && !is_output && dropout_rate > 0.0 && rng.gen::<f32>() < dropout_rate;
                 let frozen = self.neurons.get(&nid).map_or(false, |n| n.frozen);
                 let dropped = would_drop && !frozen;
 
@@ -476,13 +495,17 @@ impl NeuralEnvironment {
                     }
                 } else if let Some(n) = self.neurons.get_mut(&nid) {
                     let field_bias = if !is_output && self.config.ephaptic_field_strength > 0.0 {
-                        self.ephaptic_fields.get(layer_idx)
+                        self.ephaptic_fields
+                            .get(layer_idx)
                             .and_then(|fv| {
                                 let idx = layer_ids.iter().position(|&id| id == nid)?;
                                 fv.get(idx).copied()
                             })
-                            .unwrap_or(0.0) * self.config.ephaptic_field_strength
-                    } else { 0.0 };
+                            .unwrap_or(0.0)
+                            * self.config.ephaptic_field_strength
+                    } else {
+                        0.0
+                    };
                     n.activate(sum + field_bias);
                     n.winning_branch = winning_br;
                     if n.activation > 0.6 {
@@ -527,9 +550,13 @@ impl NeuralEnvironment {
             // a gentle restoring force that prevents runaway negative drift.
             if training && !is_output {
                 for &nid in &layer_ids {
-                    if self.dropout_mask.get(&nid) == Some(&true) { continue; }
+                    if self.dropout_mask.get(&nid) == Some(&true) {
+                        continue;
+                    }
                     if let Some(n) = self.neurons.get_mut(&nid) {
-                        if n.frozen { continue; }
+                        if n.frozen {
+                            continue;
+                        }
                         // --- Mass update ---
                         if self.config.mass_growth > 0.0 {
                             n.mass *= 1.0 - self.config.mass_decay;
@@ -594,37 +621,47 @@ impl NeuralEnvironment {
                 // - only neurons surrounded by stronger neighbors are heavily suppressed
                 let suppression = self.config.kwta_suppression;
 
-                let snap: Vec<(NeuronId, f32, [f32; 3])> = layer_ids.iter()
+                let snap: Vec<(NeuronId, f32, [f32; 3])> = layer_ids
+                    .iter()
                     .filter(|id| self.dropout_mask.get(id) != Some(&true))
-                    .filter_map(|id| self.neurons.get(id).map(|n| (
-                        *id,
-                        n.activation,
-                        [n.geometry.x, n.geometry.y, n.geometry.z],
-                    )))
+                    .filter_map(|id| {
+                        self.neurons.get(id).map(|n| {
+                            (
+                                *id,
+                                n.activation,
+                                [n.geometry.x, n.geometry.y, n.geometry.z],
+                            )
+                        })
+                    })
                     .collect();
 
                 for &(nid, act, pos) in &snap {
                     let beaten = snap.iter().any(|&(other_id, other_act, other_pos)| {
-                        if other_id == nid { return false; }
+                        if other_id == nid {
+                            return false;
+                        }
                         let dx = pos[0] - other_pos[0];
                         let dy = pos[1] - other_pos[1];
                         let dz = pos[2] - other_pos[2];
-                        let dist = (dx*dx + dy*dy + dz*dz).sqrt();
+                        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
                         dist < kwta_r && other_act > act
                     });
                     if beaten {
                         if let Some(n) = self.neurons.get_mut(&nid) {
-                            n.activation *= suppression;  // soft: partial signal preserved
+                            n.activation *= suppression; // soft: partial signal preserved
                         }
                     }
                 }
             } else if k > 0 && !is_output {
                 // Global KWTA fallback
-                let mut acts: Vec<(NeuronId, f32)> = layer_ids.iter()
+                let mut acts: Vec<(NeuronId, f32)> = layer_ids
+                    .iter()
                     .filter(|id| self.dropout_mask.get(id) != Some(&true))
                     .filter_map(|id| self.neurons.get(id).map(|n| (*id, n.activation)))
                     .collect();
-                acts.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                acts.sort_unstable_by(|a, b| {
+                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                });
                 for (i, (nid, _)) in acts.iter().enumerate() {
                     if i >= k {
                         if let Some(n) = self.neurons.get_mut(nid) {
@@ -659,7 +696,10 @@ impl NeuralEnvironment {
         }
 
         let output_layer = self.layers.last().unwrap().clone();
-        output_layer.iter().map(|id| self.neurons[id].activation).collect()
+        output_layer
+            .iter()
+            .map(|id| self.neurons[id].activation)
+            .collect()
     }
 
     pub fn forward(&mut self, input: &[f32]) -> Vec<f32> {
@@ -734,14 +774,23 @@ impl NeuralEnvironment {
             };
             deltas.insert(nid, delta);
             if let Some(n) = self.neurons.get_mut(&nid) {
-                if n.frozen { continue; }
-                let is_consolidated = n.group_id.map_or(false, |gid| self.consolidated_group_ids.contains(&gid));
-                let mut eff_lr = if is_consolidated { 0.0 } else { self.current_lr };
+                if n.frozen {
+                    continue;
+                }
+                let is_consolidated = n
+                    .group_id
+                    .map_or(false, |gid| self.consolidated_group_ids.contains(&gid));
+                let mut eff_lr = if is_consolidated {
+                    0.0
+                } else {
+                    self.current_lr
+                };
                 if eff_lr > 0.0 && self.config.mass_consolidation_k > 0.0 {
                     eff_lr /= 1.0 + self.config.mass_consolidation_k * n.mass;
                 }
                 let upd = (eff_lr * delta).clamp(-1.0, 1.0);
-                n.weight = (n.weight * (1.0 - self.config.bias_decay) - upd).clamp(-self.config.weight_clamp, self.config.weight_clamp);
+                n.weight = (n.weight * (1.0 - self.config.bias_decay) - upd)
+                    .clamp(-self.config.weight_clamp, self.config.weight_clamp);
             }
         }
 
@@ -761,7 +810,10 @@ impl NeuralEnvironment {
 
         // Snapshot of winning branch per target neuron (for dendritic backprop gating)
         let winning_branches: HashMap<NeuronId, u8> = if n_branches_bp > 1 {
-            self.neurons.iter().map(|(&id, n)| (id, n.winning_branch)).collect()
+            self.neurons
+                .iter()
+                .map(|(&id, n)| (id, n.winning_branch))
+                .collect()
         } else {
             HashMap::new()
         };
@@ -773,7 +825,15 @@ impl NeuralEnvironment {
 
             // Snapshot: (src_id, src_act, mass, frozen, is_consolidated, weight, syn_snap)
             // syn_snap: (target, strength, consolidation, branch_id)
-            let snapshot: Vec<(NeuronId, f32, f32, bool, bool, f32, Vec<(NeuronId, f32, f32, u8)>)> = prev_layer
+            let snapshot: Vec<(
+                NeuronId,
+                f32,
+                f32,
+                bool,
+                bool,
+                f32,
+                Vec<(NeuronId, f32, f32, u8)>,
+            )> = prev_layer
                 .iter()
                 .filter(|id| dropout_mask.get(id) != Some(&true))
                 .filter_map(|&src_id| {
@@ -800,87 +860,89 @@ impl NeuralEnvironment {
                 .collect();
 
             type SynUpdate = (NeuronId, f32, bool);
-            let updates: Vec<(NeuronId, f32, Option<f32>, Vec<SynUpdate>)> = crate::maybe_par_iter!(snapshot)
-                .map(|(src_id, src_act, mass, frozen, is_cons, weight, syn_snap)| {
-                    let is_input = layer_of.get(src_id) == Some(&0);
-                    let eff_lr = if *frozen || *is_cons {
-                        0.0
-                    } else if mass_k > 0.0 {
-                        lr / (1.0 + mass_k * mass)
-                    } else {
-                        lr
-                    };
-                    // Gradient sum: only through winning branch synapses when dendritic
-                    let grad_sum: f32 = syn_snap
-                        .iter()
-                        .filter_map(|(tgt_id, str, _, branch_id)| {
-                            if dropout_mask.get(tgt_id) == Some(&true) {
-                                return None;
-                            }
-                            if n_branches_bp > 1 {
-                                let wb = winning_branches.get(tgt_id).copied().unwrap_or(0);
-                                if *branch_id != wb { return None; }
-                            }
-                            let d = deltas.get(tgt_id).copied().unwrap_or(0.0);
-                            Some(d * str)
-                        })
-                        .sum();
-                    let delta = if is_input {
-                        None
-                    } else {
-                        Some(
-                            (grad_sum * src_act * (1.0 - src_act)).clamp(-1.0, 1.0),
-                        )
-                    };
-                    let prev_delta_val =
-                        delta.unwrap_or_else(|| grad_sum.clamp(-1.0, 1.0));
-                    let new_bias = if let Some(d) = delta {
-                        if *frozen {
-                            *weight
-                        } else {
-                            (weight * (1.0 - bias_decay) - eff_lr * d)
-                                .clamp(-weight_clamp, weight_clamp)
-                        }
-                    } else {
-                        *weight
-                    };
-                    // Synapse weight updates: only update winning branch synapses
-                    let syn_updates: Vec<SynUpdate> = syn_snap
-                        .iter()
-                        .filter_map(|(tgt_id, str, consolidation, branch_id)| {
-                            if dropout_mask.get(tgt_id) == Some(&true) {
-                                return None;
-                            }
-                            if n_branches_bp > 1 {
-                                let wb = winning_branches.get(tgt_id).copied().unwrap_or(0);
-                                if *branch_id != wb {
-                                    return Some((*tgt_id, *str, false));
-                                }
-                            }
-                            let d = deltas.get(tgt_id).copied().unwrap_or(0.0);
-                            let clipped = (d * src_act).clamp(-1.0, 1.0);
-                            if *frozen {
-                                return Some((*tgt_id, *str, false));
-                            }
-                            let syn_eff_lr = if engram_enabled {
-                                eff_lr * (1.0 - engram_lr_scale * consolidation).max(0.2)
+            let updates: Vec<(NeuronId, f32, Option<f32>, Vec<SynUpdate>)> =
+                crate::maybe_par_iter!(snapshot)
+                    .map(
+                        |(src_id, src_act, mass, frozen, is_cons, weight, syn_snap)| {
+                            let is_input = layer_of.get(src_id) == Some(&0);
+                            let eff_lr = if *frozen || *is_cons {
+                                0.0
+                            } else if mass_k > 0.0 {
+                                lr / (1.0 + mass_k * mass)
                             } else {
-                                eff_lr
+                                lr
                             };
-                            let new_str = (str * (1.0 - weight_decay)
-                                - syn_eff_lr * clipped)
-                                .clamp(-weight_clamp, weight_clamp);
-                            Some((*tgt_id, new_str, clipped.abs() > 0.001))
-                        })
-                        .collect();
-                    (
-                        *src_id,
-                        prev_delta_val,
-                        if is_input { None } else { Some(new_bias) },
-                        syn_updates,
+                            // Gradient sum: only through winning branch synapses when dendritic
+                            let grad_sum: f32 = syn_snap
+                                .iter()
+                                .filter_map(|(tgt_id, str, _, branch_id)| {
+                                    if dropout_mask.get(tgt_id) == Some(&true) {
+                                        return None;
+                                    }
+                                    if n_branches_bp > 1 {
+                                        let wb = winning_branches.get(tgt_id).copied().unwrap_or(0);
+                                        if *branch_id != wb {
+                                            return None;
+                                        }
+                                    }
+                                    let d = deltas.get(tgt_id).copied().unwrap_or(0.0);
+                                    Some(d * str)
+                                })
+                                .sum();
+                            let delta = if is_input {
+                                None
+                            } else {
+                                Some((grad_sum * src_act * (1.0 - src_act)).clamp(-1.0, 1.0))
+                            };
+                            let prev_delta_val = delta.unwrap_or_else(|| grad_sum.clamp(-1.0, 1.0));
+                            let new_bias = if let Some(d) = delta {
+                                if *frozen {
+                                    *weight
+                                } else {
+                                    (weight * (1.0 - bias_decay) - eff_lr * d)
+                                        .clamp(-weight_clamp, weight_clamp)
+                                }
+                            } else {
+                                *weight
+                            };
+                            // Synapse weight updates: only update winning branch synapses
+                            let syn_updates: Vec<SynUpdate> = syn_snap
+                                .iter()
+                                .filter_map(|(tgt_id, str, consolidation, branch_id)| {
+                                    if dropout_mask.get(tgt_id) == Some(&true) {
+                                        return None;
+                                    }
+                                    if n_branches_bp > 1 {
+                                        let wb = winning_branches.get(tgt_id).copied().unwrap_or(0);
+                                        if *branch_id != wb {
+                                            return Some((*tgt_id, *str, false));
+                                        }
+                                    }
+                                    let d = deltas.get(tgt_id).copied().unwrap_or(0.0);
+                                    let clipped = (d * src_act).clamp(-1.0, 1.0);
+                                    if *frozen {
+                                        return Some((*tgt_id, *str, false));
+                                    }
+                                    let syn_eff_lr = if engram_enabled {
+                                        eff_lr * (1.0 - engram_lr_scale * consolidation).max(0.2)
+                                    } else {
+                                        eff_lr
+                                    };
+                                    let new_str = (str * (1.0 - weight_decay)
+                                        - syn_eff_lr * clipped)
+                                        .clamp(-weight_clamp, weight_clamp);
+                                    Some((*tgt_id, new_str, clipped.abs() > 0.001))
+                                })
+                                .collect();
+                            (
+                                *src_id,
+                                prev_delta_val,
+                                if is_input { None } else { Some(new_bias) },
+                                syn_updates,
+                            )
+                        },
                     )
-                })
-                .collect();
+                    .collect();
 
             for (src_id, prev_delta_val, new_bias_opt, syn_updates) in updates {
                 prev_deltas.insert(src_id, prev_delta_val);
@@ -926,7 +988,8 @@ impl NeuralEnvironment {
         let inc = self.config.engram_increment;
         let cap = self.config.engram_cap;
 
-        let fired: std::collections::HashSet<NeuronId> = self.neurons
+        let fired: std::collections::HashSet<NeuronId> = self
+            .neurons
             .iter()
             .filter(|(_, n)| n.activation >= thresh)
             .map(|(&id, _)| id)
@@ -966,9 +1029,7 @@ impl NeuralEnvironment {
     }
 
     #[cfg(feature = "training")]
-    pub fn train_tick(
-        &mut self, input: &[f32], target: &[f32], rng: &mut impl Rng,
-    ) -> TickResult {
+    pub fn train_tick(&mut self, input: &[f32], target: &[f32], rng: &mut impl Rng) -> TickResult {
         // Forward with dropout enabled
         let output = self.forward_pass(input, true, rng);
 
@@ -976,26 +1037,40 @@ impl NeuralEnvironment {
         // Must run before backprop so we use current activations.
         self.update_engram_consolidation();
 
-        let loss   = self.backprop(&output, target);
+        let loss = self.backprop(&output, target);
 
         let fired = get_fired_neurons(&self.neurons, 0.6);
         record_firing(&mut self.neurons, &fired, self.time);
 
         if self.config.stdp_enabled {
-            let pairs: Vec<(NeuronId, NeuronId)> = self.layers.windows(2)
-                .flat_map(|w| w[0].iter().flat_map(|&pre| w[1].iter().map(move |&post| (pre, post))))
+            let pairs: Vec<(NeuronId, NeuronId)> = self
+                .layers
+                .windows(2)
+                .flat_map(|w| {
+                    w[0].iter()
+                        .flat_map(|&pre| w[1].iter().map(move |&post| (pre, post)))
+                })
                 .collect();
             update_stdp_layer(&mut self.neurons, &pairs, self.time, &self.config);
         }
 
-        let pruned = apply_metabolic_pressure(&mut self.neurons, &self.config, &self.output_ids, &self.input_ids);
+        let pruned = apply_metabolic_pressure(
+            &mut self.neurons,
+            &self.config,
+            &self.output_ids,
+            &self.input_ids,
+        );
 
         let prune_interval = self.config.prune_interval.max(1) as u64;
         let prune_stop = self.config.prune_stop_tick;
         let pruning_active = prune_stop == 0 || self.tick_count < prune_stop;
         if pruning_active && self.tick_count % prune_interval == 0 {
             let (p1, p2, p3) = prune_three_phase(
-                &mut self.neurons, &self.config, self.tick_count, &self.output_ids, &self.input_ids
+                &mut self.neurons,
+                &self.config,
+                self.tick_count,
+                &self.output_ids,
+                &self.input_ids,
             );
             let _ = (p1, p2, p3);
             // Positive half of activity-dependent plasticity: strengthen well-used synapses.
@@ -1017,7 +1092,13 @@ impl NeuralEnvironment {
         self.tick_count += 1;
         self.time += 1.0;
 
-        TickResult { loss, output, synapses_pruned: pruned, synapses_grown: grown, neurons_fired: fired.len() }
+        TickResult {
+            loss,
+            output,
+            synapses_pruned: pruned,
+            synapses_grown: grown,
+            neurons_fired: fired.len(),
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -1050,7 +1131,13 @@ impl NeuralEnvironment {
 
     pub fn run_three_phase_pruning(&mut self) -> (usize, usize, usize) {
         let output_ids = self.output_ids.clone();
-        prune_three_phase(&mut self.neurons, &self.config, self.tick_count, &output_ids, &self.input_ids)
+        prune_three_phase(
+            &mut self.neurons,
+            &self.config,
+            self.tick_count,
+            &output_ids,
+            &self.input_ids,
+        )
     }
 
     /// Call at the start of each epoch to anneal the learning rate.
@@ -1059,18 +1146,21 @@ impl NeuralEnvironment {
     /// Enables aggressive early exploration and precise late convergence.
     pub fn set_epoch(&mut self, epoch: usize) {
         if self.config.lr_decay > 0.0 {
-            self.current_lr = self.config.learning_rate
-                * (-self.config.lr_decay * epoch as f32).exp();
+            self.current_lr =
+                self.config.learning_rate * (-self.config.lr_decay * epoch as f32).exp();
         }
     }
 
     /// Fraction of hidden neurons that actually fired on the last forward pass.
     /// Healthy range: 0.2–0.6. Near 1.0 = no sparsity, network is a homogeneous soup.
     pub fn firing_sparsity(&self) -> f32 {
-        let hidden: Vec<&Neuron> = self.layers[1..self.layers.len()-1]
-            .iter().flat_map(|l| l.iter().filter_map(|id| self.neurons.get(id)))
+        let hidden: Vec<&Neuron> = self.layers[1..self.layers.len() - 1]
+            .iter()
+            .flat_map(|l| l.iter().filter_map(|id| self.neurons.get(id)))
             .collect();
-        if hidden.is_empty() { return 0.0; }
+        if hidden.is_empty() {
+            return 0.0;
+        }
         let fired = hidden.iter().filter(|n| n.activation > 0.6).count();
         fired as f32 / hidden.len() as f32
     }
@@ -1079,10 +1169,13 @@ impl NeuralEnvironment {
     /// is suppressing too much (→ 0.0) or too little (→ 0.5+).
     /// Healthy range: 0.2–0.45 with reaction-diffusion inhibition active.
     pub fn mean_hidden_activation(&self) -> f32 {
-        let hidden: Vec<&Neuron> = self.layers[1..self.layers.len()-1]
-            .iter().flat_map(|l| l.iter().filter_map(|id| self.neurons.get(id)))
+        let hidden: Vec<&Neuron> = self.layers[1..self.layers.len() - 1]
+            .iter()
+            .flat_map(|l| l.iter().filter_map(|id| self.neurons.get(id)))
             .collect();
-        if hidden.is_empty() { return 0.0; }
+        if hidden.is_empty() {
+            return 0.0;
+        }
         hidden.iter().map(|n| n.activation).sum::<f32>() / hidden.len() as f32
     }
 
@@ -1097,10 +1190,13 @@ impl NeuralEnvironment {
     /// Winners gain mass, losers lose mass.
     /// Healthy: spread from ~0.5 (losers) to ~2.0 (hubs) after convergence.
     pub fn mean_hidden_mass(&self) -> f32 {
-        let hidden: Vec<&Neuron> = self.layers[1..self.layers.len()-1]
-            .iter().flat_map(|l| l.iter().filter_map(|id| self.neurons.get(id)))
+        let hidden: Vec<&Neuron> = self.layers[1..self.layers.len() - 1]
+            .iter()
+            .flat_map(|l| l.iter().filter_map(|id| self.neurons.get(id)))
             .collect();
-        if hidden.is_empty() { return 1.0; }
+        if hidden.is_empty() {
+            return 1.0;
+        }
         hidden.iter().map(|n| n.mass).sum::<f32>() / hidden.len() as f32
     }
 
@@ -1135,25 +1231,31 @@ pub struct TickResult {
 }
 
 pub fn mse_loss(output: &[f32], target: &[f32]) -> f32 {
-    output.iter().zip(target.iter())
+    output
+        .iter()
+        .zip(target.iter())
         .map(|(o, t)| (o - t).powi(2))
-        .sum::<f32>() / output.len() as f32
+        .sum::<f32>()
+        / output.len() as f32
 }
 
 pub fn bce_loss(output: &[f32], target: &[f32]) -> f32 {
-    output.iter().zip(target.iter())
+    output
+        .iter()
+        .zip(target.iter())
         .map(|(o, t)| {
             let p = o.clamp(1e-7, 1.0 - 1e-7);
             -(t * p.ln() + (1.0 - t) * (1.0 - p).ln())
         })
-        .sum::<f32>() / output.len() as f32
+        .sum::<f32>()
+        / output.len() as f32
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand::SeedableRng;
 
     #[test]
     fn test_insert_neuron_at_layer_adds_one_neuron_and_synapses() {
@@ -1174,12 +1276,23 @@ mod tests {
         assert_eq!(env.layer_of.get(&new_id), Some(&1));
 
         let n = &env.neurons[&new_id];
-        let incoming = env.layers[0].iter().filter(|&&src| {
-            env.neurons.get(&src).map_or(false, |s| s.synapses.iter().any(|syn| syn.target == new_id))
-        }).count();
+        let incoming = env.layers[0]
+            .iter()
+            .filter(|&&src| {
+                env.neurons
+                    .get(&src)
+                    .map_or(false, |s| s.synapses.iter().any(|syn| syn.target == new_id))
+            })
+            .count();
         let outgoing = n.synapses.len();
-        assert_eq!(incoming, 2, "new neuron should have 2 incoming synapses from input layer");
-        assert_eq!(outgoing, 1, "new neuron should have 1 outgoing synapse to output layer");
+        assert_eq!(
+            incoming, 2,
+            "new neuron should have 2 incoming synapses from input layer"
+        );
+        assert_eq!(
+            outgoing, 1,
+            "new neuron should have 1 outgoing synapse to output layer"
+        );
     }
 
     #[test]

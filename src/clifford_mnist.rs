@@ -17,12 +17,11 @@
 //! principled encoding that uses the same Cl(1,7) algebra as the language system.
 
 use crate::clifford::{
-    Multivector, embed_bridge_vector, minkowski_interval, classify_interval,
-    IntervalType, CL8_DIM, GRADE_DIMS, GRADE_OFFSETS,
-    Rotor, apply_group_rotor,
+    apply_group_rotor, classify_interval, embed_bridge_vector, minkowski_interval, IntervalType,
+    Multivector, Rotor, CL8_DIM, GRADE_DIMS, GRADE_OFFSETS,
 };
-use rand::Rng;
 use rand::rngs::StdRng;
+use rand::Rng;
 use rand::SeedableRng;
 
 pub const IMAGE_DIM: usize = 28 * 28;
@@ -78,9 +77,8 @@ impl CliffordImageEncoder {
 
         // Grade-aware damping: scale inversely with sqrt(grade_dim) to prevent
         // high-dimensional grades from overflowing during accumulation.
-        let grade_init_scale: [f32; 9] = std::array::from_fn(|g| {
-            1.0 / (GRADE_DIMS[g] as f32).sqrt().max(1.0)
-        });
+        let grade_init_scale: [f32; 9] =
+            std::array::from_fn(|g| 1.0 / (GRADE_DIMS[g] as f32).sqrt().max(1.0));
 
         for pixel_idx in 0..IMAGE_DIM {
             let mut row = [0.0f32; CL8_DIM];
@@ -98,7 +96,7 @@ impl CliffordImageEncoder {
             // center-of-mass, invariant to rotation. NOT normalized away
             // so the Minkowski metric can produce genuine timelike intervals.
             let g1s = grade_init_scale[1];
-            row[GRADE_OFFSETS[1]]     = r * g1s;
+            row[GRADE_OFFSETS[1]] = r * g1s;
             row[GRADE_OFFSETS[1] + 1] = cx * g1s;
             row[GRADE_OFFSETS[1] + 2] = cy * g1s;
             row[GRADE_OFFSETS[1] + 3] = cx * cy * g1s;
@@ -128,8 +126,7 @@ impl CliffordImageEncoder {
             for k in 0..GRADE_DIMS[3] {
                 let freq = (k as f32 + 1.0) * std::f32::consts::PI / 14.0;
                 let triple = (freq * cx).sin() * (freq * cy).cos() * r;
-                row[GRADE_OFFSETS[3] + k] = triple * g3s * 0.3
-                    + rng.gen_range(-0.02..0.02) * g3s;
+                row[GRADE_OFFSETS[3] + k] = triple * g3s * 0.3 + rng.gen_range(-0.02..0.02) * g3s;
             }
 
             // Grades 4-8: random structured initialization, grade-scaled.
@@ -156,9 +153,8 @@ impl CliffordImageEncoder {
         let mut rng = StdRng::seed_from_u64(seed);
         let mut projection = Vec::with_capacity(IMAGE_DIM);
 
-        let grade_init_scale: [f32; 9] = std::array::from_fn(|g| {
-            1.0 / (GRADE_DIMS[g] as f32).sqrt().max(1.0)
-        });
+        let grade_init_scale: [f32; 9] =
+            std::array::from_fn(|g| 1.0 / (GRADE_DIMS[g] as f32).sqrt().max(1.0));
         let norm = 1.0 / (IMAGE_DIM as f32).sqrt();
         let two_pi = 2.0 * std::f32::consts::PI;
         let pi = std::f32::consts::PI;
@@ -193,12 +189,10 @@ impl CliffordImageEncoder {
 
             // Grade 1 (8 components): Low-frequency Fourier — coarse texture
             let g1s = grade_init_scale[1] * norm;
-            let g1_uv: [(f32, f32); 4] = [
-                (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, -1.0),
-            ];
+            let g1_uv: [(f32, f32); 4] = [(1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, -1.0)];
             for (k, &(u, v)) in g1_uv.iter().enumerate() {
                 let phase = two_pi * (u * px + v * py) / 28.0;
-                row[GRADE_OFFSETS[1] + 2 * k]     = phase.cos() * g1s;
+                row[GRADE_OFFSETS[1] + 2 * k] = phase.cos() * g1s;
                 row[GRADE_OFFSETS[1] + 2 * k + 1] = phase.sin() * g1s;
             }
 
@@ -215,7 +209,7 @@ impl CliffordImageEncoder {
                     let phase = two_pi * freq * (px * dx + py * dy) / 28.0;
                     let base = ori * 4 + fi * 2;
                     if base + 1 < GRADE_DIMS[2] {
-                        row[GRADE_OFFSETS[2] + base]     = phase.cos() * g2s;
+                        row[GRADE_OFFSETS[2] + base] = phase.cos() * g2s;
                         row[GRADE_OFFSETS[2] + base + 1] = phase.sin() * g2s;
                     }
                 }
@@ -227,7 +221,7 @@ impl CliffordImageEncoder {
                 let phase = two_pi * (u * px + v * py) / 28.0;
                 let base = 2 * k;
                 if base + 1 < GRADE_DIMS[3] {
-                    row[GRADE_OFFSETS[3] + base]     = phase.cos() * g3s;
+                    row[GRADE_OFFSETS[3] + base] = phase.cos() * g3s;
                     row[GRADE_OFFSETS[3] + base + 1] = phase.sin() * g3s;
                 }
             }
@@ -238,7 +232,7 @@ impl CliffordImageEncoder {
                 let phase = two_pi * (u * px + v * py) / 28.0;
                 let base = 2 * k;
                 if base + 1 < GRADE_DIMS[4] {
-                    row[GRADE_OFFSETS[4] + base]     = phase.cos() * g4s;
+                    row[GRADE_OFFSETS[4] + base] = phase.cos() * g4s;
                     row[GRADE_OFFSETS[4] + base + 1] = phase.sin() * g4s;
                 }
             }
@@ -266,7 +260,9 @@ impl CliffordImageEncoder {
     pub fn encode(&self, image: &[f32]) -> Multivector {
         let mut mv = Multivector::zero();
         for (i, &pixel) in image.iter().enumerate().take(IMAGE_DIM) {
-            if pixel.abs() < 1e-6 { continue; }
+            if pixel.abs() < 1e-6 {
+                continue;
+            }
             let row = &self.projection[i];
             for j in 0..CL8_DIM {
                 mv.components[j] += pixel * row[j];
@@ -290,7 +286,10 @@ impl CliffordImageEncoder {
             let start = GRADE_OFFSETS[g];
             let dim = GRADE_DIMS[g];
             let norm: f32 = mv.components[start..start + dim]
-                .iter().map(|x| x * x).sum::<f32>().sqrt();
+                .iter()
+                .map(|x| x * x)
+                .sum::<f32>()
+                .sqrt();
             if norm > MAX_GRADE_NORM {
                 let scale = MAX_GRADE_NORM / norm;
                 for k in 0..dim {
@@ -306,7 +305,9 @@ impl CliffordImageEncoder {
     /// norm across samples is approximately 1.0.
     pub fn calibrate_scales(&mut self, samples: &[(Vec<f32>, u8)]) {
         let n = samples.len().min(500) as f32;
-        if n < 2.0 { return; }
+        if n < 2.0 {
+            return;
+        }
         // Reset scales to 1.0 before measuring raw norms
         self.grade_scales = [1.0; 9];
         let mut grade_norms = [0.0f32; 9];
@@ -330,13 +331,7 @@ impl CliffordImageEncoder {
     /// Contrastive training step using full spacetime distance.
     /// Adaptive margin scaled to actual distance range. Only fires on
     /// samples where the margin is violated (misclassified or near boundary).
-    pub fn train_step(
-        &mut self,
-        image: &[f32],
-        label: u8,
-        centroids: &[Multivector; 10],
-        lr: f32,
-    ) {
+    pub fn train_step(&mut self, image: &[f32], label: u8, centroids: &[Multivector; 10], lr: f32) {
         let mv = self.encode(image);
         let correct_centroid = &centroids[label as usize];
         let correct_dist = spacetime_distance(&mv, correct_centroid);
@@ -345,27 +340,37 @@ impl CliffordImageEncoder {
         let mut hardest_neg_dist = f32::MAX;
         let mut hardest_neg_idx = 0;
         for d in 0..10 {
-            if d == label as usize { continue; }
-            if centroids[d].components.iter().all(|x| x.abs() < 1e-12) { continue; }
+            if d == label as usize {
+                continue;
+            }
+            if centroids[d].components.iter().all(|x| x.abs() < 1e-12) {
+                continue;
+            }
             let dist = spacetime_distance(&mv, &centroids[d]);
             if dist < hardest_neg_dist {
                 hardest_neg_dist = dist;
                 hardest_neg_idx = d;
             }
         }
-        if hardest_neg_dist == f32::MAX { return; }
+        if hardest_neg_dist == f32::MAX {
+            return;
+        }
 
         // Triplet margin loss: we want correct_dist < hardest_neg_dist - margin
         // Only update when margin is violated (sample is misclassified or near boundary).
         let margin = 0.1;
         let violation = correct_dist - hardest_neg_dist + margin;
-        if violation <= 0.0 { return; }
+        if violation <= 0.0 {
+            return;
+        }
 
         let neg_centroid = &centroids[hardest_neg_idx];
         let loss_scale = violation.min(2.0);
 
         for (i, &pixel) in image.iter().enumerate().take(IMAGE_DIM) {
-            if pixel.abs() < 0.01 { continue; }
+            if pixel.abs() < 0.01 {
+                continue;
+            }
             let row = &mut self.projection[i];
 
             for g in 0..=8 {
@@ -424,15 +429,27 @@ pub struct CliffordDiracEncoder {
 }
 
 fn img_at(image: &[f32], x: usize, y: usize) -> f32 {
-    if x < DIRAC_W && y < DIRAC_H { image[y * DIRAC_W + x] } else { 0.0 }
+    if x < DIRAC_W && y < DIRAC_H {
+        image[y * DIRAC_W + x]
+    } else {
+        0.0
+    }
 }
 
 fn compute_gradient_x(image: &[f32]) -> [f32; IMAGE_DIM] {
     let mut out = [0.0f32; IMAGE_DIM];
     for y in 0..DIRAC_H {
         for x in 0..DIRAC_W {
-            let left = if x > 0 { img_at(image, x - 1, y) } else { img_at(image, x, y) };
-            let right = if x < DIRAC_W - 1 { img_at(image, x + 1, y) } else { img_at(image, x, y) };
+            let left = if x > 0 {
+                img_at(image, x - 1, y)
+            } else {
+                img_at(image, x, y)
+            };
+            let right = if x < DIRAC_W - 1 {
+                img_at(image, x + 1, y)
+            } else {
+                img_at(image, x, y)
+            };
             out[y * DIRAC_W + x] = (right - left) * 0.5;
         }
     }
@@ -443,8 +460,16 @@ fn compute_gradient_y(image: &[f32]) -> [f32; IMAGE_DIM] {
     let mut out = [0.0f32; IMAGE_DIM];
     for y in 0..DIRAC_H {
         for x in 0..DIRAC_W {
-            let up = if y > 0 { img_at(image, x, y - 1) } else { img_at(image, x, y) };
-            let down = if y < DIRAC_H - 1 { img_at(image, x, y + 1) } else { img_at(image, x, y) };
+            let up = if y > 0 {
+                img_at(image, x, y - 1)
+            } else {
+                img_at(image, x, y)
+            };
+            let down = if y < DIRAC_H - 1 {
+                img_at(image, x, y + 1)
+            } else {
+                img_at(image, x, y)
+            };
             out[y * DIRAC_W + x] = (down - up) * 0.5;
         }
     }
@@ -457,9 +482,17 @@ fn compute_laplacian(image: &[f32]) -> [f32; IMAGE_DIM] {
         for x in 0..DIRAC_W {
             let c = img_at(image, x, y);
             let l = if x > 0 { img_at(image, x - 1, y) } else { c };
-            let r = if x < DIRAC_W - 1 { img_at(image, x + 1, y) } else { c };
+            let r = if x < DIRAC_W - 1 {
+                img_at(image, x + 1, y)
+            } else {
+                c
+            };
             let u = if y > 0 { img_at(image, x, y - 1) } else { c };
-            let d = if y < DIRAC_H - 1 { img_at(image, x, y + 1) } else { c };
+            let d = if y < DIRAC_H - 1 {
+                img_at(image, x, y + 1)
+            } else {
+                c
+            };
             out[y * DIRAC_W + x] = l + r + u + d - 4.0 * c;
         }
     }
@@ -492,28 +525,41 @@ fn compute_local_variance(image: &[f32]) -> [f32; IMAGE_DIM] {
     out
 }
 
-fn channel_to_vector(
-    channel: &[f32],
-    proj: &[f32; 8],
-) -> Multivector {
+fn channel_to_vector(channel: &[f32], proj: &[f32; 8]) -> Multivector {
     let mut sums = [0.0f32; 8];
     for &v in channel.iter() {
-        if v.abs() < 1e-7 { continue; }
-        for k in 0..8 { sums[k] += v * proj[k]; }
+        if v.abs() < 1e-7 {
+            continue;
+        }
+        for k in 0..8 {
+            sums[k] += v * proj[k];
+        }
     }
     Multivector::vector(&sums)
 }
 
 fn img_at_dyn(image: &[f32], x: usize, y: usize, w: usize, h: usize) -> f32 {
-    if x < w && y < h { image[y * w + x] } else { 0.0 }
+    if x < w && y < h {
+        image[y * w + x]
+    } else {
+        0.0
+    }
 }
 
 fn compute_gradient_x_dyn(image: &[f32], w: usize, h: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; w * h];
     for y in 0..h {
         for x in 0..w {
-            let left = if x > 0 { img_at_dyn(image, x - 1, y, w, h) } else { img_at_dyn(image, x, y, w, h) };
-            let right = if x < w - 1 { img_at_dyn(image, x + 1, y, w, h) } else { img_at_dyn(image, x, y, w, h) };
+            let left = if x > 0 {
+                img_at_dyn(image, x - 1, y, w, h)
+            } else {
+                img_at_dyn(image, x, y, w, h)
+            };
+            let right = if x < w - 1 {
+                img_at_dyn(image, x + 1, y, w, h)
+            } else {
+                img_at_dyn(image, x, y, w, h)
+            };
             out[y * w + x] = (right - left) * 0.5;
         }
     }
@@ -524,8 +570,16 @@ fn compute_gradient_y_dyn(image: &[f32], w: usize, h: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; w * h];
     for y in 0..h {
         for x in 0..w {
-            let up = if y > 0 { img_at_dyn(image, x, y - 1, w, h) } else { img_at_dyn(image, x, y, w, h) };
-            let down = if y < h - 1 { img_at_dyn(image, x, y + 1, w, h) } else { img_at_dyn(image, x, y, w, h) };
+            let up = if y > 0 {
+                img_at_dyn(image, x, y - 1, w, h)
+            } else {
+                img_at_dyn(image, x, y, w, h)
+            };
+            let down = if y < h - 1 {
+                img_at_dyn(image, x, y + 1, w, h)
+            } else {
+                img_at_dyn(image, x, y, w, h)
+            };
             out[y * w + x] = (down - up) * 0.5;
         }
     }
@@ -537,10 +591,26 @@ fn compute_laplacian_dyn(image: &[f32], w: usize, h: usize) -> Vec<f32> {
     for y in 0..h {
         for x in 0..w {
             let c = img_at_dyn(image, x, y, w, h);
-            let l = if x > 0 { img_at_dyn(image, x - 1, y, w, h) } else { c };
-            let r = if x < w - 1 { img_at_dyn(image, x + 1, y, w, h) } else { c };
-            let u = if y > 0 { img_at_dyn(image, x, y - 1, w, h) } else { c };
-            let d = if y < h - 1 { img_at_dyn(image, x, y + 1, w, h) } else { c };
+            let l = if x > 0 {
+                img_at_dyn(image, x - 1, y, w, h)
+            } else {
+                c
+            };
+            let r = if x < w - 1 {
+                img_at_dyn(image, x + 1, y, w, h)
+            } else {
+                c
+            };
+            let u = if y > 0 {
+                img_at_dyn(image, x, y - 1, w, h)
+            } else {
+                c
+            };
+            let d = if y < h - 1 {
+                img_at_dyn(image, x, y + 1, w, h)
+            } else {
+                c
+            };
             out[y * w + x] = l + r + u + d - 4.0 * c;
         }
     }
@@ -601,9 +671,8 @@ impl CliffordDiracEncoder {
         channel_proj[3][0] = 0.2;
 
         let norm = 1.0 / (image_dim as f32).sqrt();
-        let grade_init_scale: [f32; 9] = std::array::from_fn(|g| {
-            1.0 / (GRADE_DIMS[g] as f32).sqrt().max(1.0)
-        });
+        let grade_init_scale: [f32; 9] =
+            std::array::from_fn(|g| 1.0 / (GRADE_DIMS[g] as f32).sqrt().max(1.0));
         let two_pi = 2.0 * std::f32::consts::PI;
         let fw = w as f32;
         let fh = h as f32;
@@ -623,7 +692,7 @@ impl CliffordDiracEncoder {
                     let phase = two_pi * freq * (px * dx / fw + py * dy / fh);
                     let base = ori * 4 + fi * 2;
                     if base + 1 < GRADE_DIMS[2] {
-                        row[GRADE_OFFSETS[2] + base]     = phase.cos() * g2s;
+                        row[GRADE_OFFSETS[2] + base] = phase.cos() * g2s;
                         row[GRADE_OFFSETS[2] + base + 1] = phase.sin() * g2s;
                     }
                 }
@@ -655,10 +724,10 @@ impl CliffordDiracEncoder {
         let lap = compute_laplacian_dyn(image, w, h);
         let lvar = compute_local_variance_dyn(image, w, h);
 
-        let v_i   = channel_to_vector(image, &self.channel_proj[0]);
-        let v_dx  = channel_to_vector(&dx,   &self.channel_proj[1]);
-        let v_dy  = channel_to_vector(&dy,   &self.channel_proj[2]);
-        let v_lap = channel_to_vector(&lap,  &self.channel_proj[3]);
+        let v_i = channel_to_vector(image, &self.channel_proj[0]);
+        let v_dx = channel_to_vector(&dx, &self.channel_proj[1]);
+        let v_dy = channel_to_vector(&dy, &self.channel_proj[2]);
+        let v_lap = channel_to_vector(&lap, &self.channel_proj[3]);
 
         // Geometric products → nonlinear even-grade features
         // v_dx * v_dy produces grade-0 (dot product: gradient energy)
@@ -670,7 +739,9 @@ impl CliffordDiracEncoder {
         // Linear texture features from local variance
         let mut texture_mv = Multivector::zero();
         for (i, &v) in lvar.iter().enumerate() {
-            if v.abs() < 1e-6 { continue; }
+            if v.abs() < 1e-6 {
+                continue;
+            }
             let row = &self.texture_proj[i];
             for j in 0..CL8_DIM {
                 texture_mv.components[j] += v * row[j];
@@ -680,8 +751,7 @@ impl CliffordDiracEncoder {
         // Combine: linear vectors + nonlinear products + texture
         let mut result = Multivector::zero();
         for i in 0..CL8_DIM {
-            result.components[i] =
-                0.5 * v_i.components[i]
+            result.components[i] = 0.5 * v_i.components[i]
                 + 0.3 * v_dx.components[i]
                 + 0.3 * v_dy.components[i]
                 + 0.2 * v_lap.components[i]
@@ -705,10 +775,15 @@ impl CliffordDiracEncoder {
             let start = GRADE_OFFSETS[g];
             let dim = GRADE_DIMS[g];
             let norm: f32 = result.components[start..start + dim]
-                .iter().map(|x| x * x).sum::<f32>().sqrt();
+                .iter()
+                .map(|x| x * x)
+                .sum::<f32>()
+                .sqrt();
             if norm > MAX_GRADE_NORM {
                 let s = MAX_GRADE_NORM / norm;
-                for k in 0..dim { result.components[start + k] *= s; }
+                for k in 0..dim {
+                    result.components[start + k] *= s;
+                }
             }
         }
         result
@@ -716,14 +791,18 @@ impl CliffordDiracEncoder {
 
     pub fn calibrate_scales(&mut self, samples: &[(Vec<f32>, u8)]) {
         let n = samples.len().min(500) as f32;
-        if n < 2.0 { return; }
+        if n < 2.0 {
+            return;
+        }
         self.grade_scales = [1.0; 9];
         let mut grade_norms = [0.0f32; 9];
         for (img, _) in samples.iter().take(500) {
             let mv = self.encode(img);
             for g in 0..=8 {
                 let gnorm: f32 = mv.grade(g).iter().map(|x| x * x).sum::<f32>().sqrt();
-                if gnorm.is_finite() { grade_norms[g] += gnorm / n; }
+                if gnorm.is_finite() {
+                    grade_norms[g] += gnorm / n;
+                }
             }
         }
         for g in 0..=8 {
@@ -800,7 +879,9 @@ impl TrainableDiracChannel {
         let response = self.apply_kernel(image);
         let mut mv = Multivector::zero();
         for (i, &v) in response.iter().enumerate() {
-            if v.abs() < 1e-6 { continue; }
+            if v.abs() < 1e-6 {
+                continue;
+            }
             let row = &self.projection[i];
             for j in 0..CL8_DIM {
                 mv.components[j] += v * row[j];
@@ -818,14 +899,18 @@ impl TrainableDiracChannel {
 
     pub fn calibrate_scales(&mut self, images: &[Vec<f32>]) {
         let n = images.len().min(500) as f32;
-        if n < 2.0 { return; }
+        if n < 2.0 {
+            return;
+        }
         self.grade_scales = [1.0; 9];
         let mut grade_norms = [0.0f32; 9];
         for img in images.iter().take(500) {
             let mv = self.encode(img);
             for g in 0..=8 {
                 let gnorm: f32 = mv.grade(g).iter().map(|x| x * x).sum::<f32>().sqrt();
-                if gnorm.is_finite() { grade_norms[g] += gnorm / n; }
+                if gnorm.is_finite() {
+                    grade_norms[g] += gnorm / n;
+                }
             }
         }
         for g in 0..=8 {
@@ -851,17 +936,18 @@ impl TrainableDiracChannel {
         let max_per_class = 1000;
 
         for epoch in 0..max_epochs {
-            let (ca, cb, bv_norm) = self.compute_pair_bivector(
-                images, labels, class_a, class_b, max_per_class,
-            );
+            let (ca, cb, bv_norm) =
+                self.compute_pair_bivector(images, labels, class_a, class_b, max_per_class);
             let _ = (ca, cb);
 
             if epoch % 10 == 0 || bv_norm >= target_bv_norm {
                 println!("      epoch {:>3}: |B|={:.4}", epoch, bv_norm);
             }
             if bv_norm >= target_bv_norm {
-                println!("      target reached at epoch {} (|B|={:.4} >= {:.3})",
-                    epoch, bv_norm, target_bv_norm);
+                println!(
+                    "      target reached at epoch {} (|B|={:.4} >= {:.3})",
+                    epoch, bv_norm, target_bv_norm
+                );
                 return bv_norm;
             }
 
@@ -869,13 +955,11 @@ impl TrainableDiracChannel {
             for ky in 0..3 {
                 for kx in 0..3 {
                     self.kernel[ky][kx] += eps;
-                    let (_, _, bv_plus) = self.compute_pair_bivector(
-                        images, labels, class_a, class_b, max_per_class,
-                    );
+                    let (_, _, bv_plus) =
+                        self.compute_pair_bivector(images, labels, class_a, class_b, max_per_class);
                     self.kernel[ky][kx] -= 2.0 * eps;
-                    let (_, _, bv_minus) = self.compute_pair_bivector(
-                        images, labels, class_a, class_b, max_per_class,
-                    );
+                    let (_, _, bv_minus) =
+                        self.compute_pair_bivector(images, labels, class_a, class_b, max_per_class);
                     self.kernel[ky][kx] += eps;
 
                     let grad = (bv_plus - bv_minus) / (2.0 * eps);
@@ -892,13 +976,11 @@ impl TrainableDiracChannel {
                     let pj: usize = proj_rng.gen_range(0..CL8_DIM);
 
                     self.projection[pi][pj] += eps;
-                    let (_, _, bv_plus) = self.compute_pair_bivector(
-                        images, labels, class_a, class_b, max_per_class,
-                    );
+                    let (_, _, bv_plus) =
+                        self.compute_pair_bivector(images, labels, class_a, class_b, max_per_class);
                     self.projection[pi][pj] -= 2.0 * eps;
-                    let (_, _, bv_minus) = self.compute_pair_bivector(
-                        images, labels, class_a, class_b, max_per_class,
-                    );
+                    let (_, _, bv_minus) =
+                        self.compute_pair_bivector(images, labels, class_a, class_b, max_per_class);
                     self.projection[pi][pj] += eps;
 
                     let grad = (bv_plus - bv_minus) / (2.0 * eps);
@@ -907,9 +989,7 @@ impl TrainableDiracChannel {
             }
         }
 
-        let (_, _, final_bv) = self.compute_pair_bivector(
-            images, labels, class_a, class_b, 1000,
-        );
+        let (_, _, final_bv) = self.compute_pair_bivector(images, labels, class_a, class_b, 1000);
         final_bv
     }
 
@@ -928,17 +1008,31 @@ impl TrainableDiracChannel {
         for (img, &l) in images.iter().zip(labels.iter()) {
             if l == class_a && n_a < max_per_class {
                 let mv = self.encode(img);
-                for j in 0..CL8_DIM { sum_a.components[j] += mv.components[j]; }
+                for j in 0..CL8_DIM {
+                    sum_a.components[j] += mv.components[j];
+                }
                 n_a += 1;
             } else if l == class_b && n_b < max_per_class {
                 let mv = self.encode(img);
-                for j in 0..CL8_DIM { sum_b.components[j] += mv.components[j]; }
+                for j in 0..CL8_DIM {
+                    sum_b.components[j] += mv.components[j];
+                }
                 n_b += 1;
             }
-            if n_a >= max_per_class && n_b >= max_per_class { break; }
+            if n_a >= max_per_class && n_b >= max_per_class {
+                break;
+            }
         }
-        if n_a > 0 { for j in 0..CL8_DIM { sum_a.components[j] /= n_a as f32; } }
-        if n_b > 0 { for j in 0..CL8_DIM { sum_b.components[j] /= n_b as f32; } }
+        if n_a > 0 {
+            for j in 0..CL8_DIM {
+                sum_a.components[j] /= n_a as f32;
+            }
+        }
+        if n_b > 0 {
+            for j in 0..CL8_DIM {
+                sum_b.components[j] /= n_b as f32;
+            }
+        }
 
         let bv = confusion_bivector(&sum_a, &sum_b);
         let bv_norm: f32 = bv.grade(2).iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -962,11 +1056,17 @@ pub fn diagnose_pair_learnability(
         for (img, &l) in rgb_images.iter().zip(labels.iter()) {
             if l as usize == c && n < max_samples {
                 let mv = rgb_enc.encode(img);
-                for j in 0..CL8_DIM { sum.components[j] += mv.components[j]; }
+                for j in 0..CL8_DIM {
+                    sum.components[j] += mv.components[j];
+                }
                 n += 1;
             }
         }
-        if n > 0 { for j in 0..CL8_DIM { sum.components[j] /= n as f32; } }
+        if n > 0 {
+            for j in 0..CL8_DIM {
+                sum.components[j] /= n as f32;
+            }
+        }
         centroids.push(sum);
     }
 
@@ -975,7 +1075,7 @@ pub fn diagnose_pair_learnability(
     let mut degenerate = Vec::new();
 
     for i in 0..n_classes {
-        for j in (i+1)..n_classes {
+        for j in (i + 1)..n_classes {
             let bv = confusion_bivector(&centroids[i], &centroids[j]);
             let bv_norm: f32 = bv.grade(2).iter().map(|x| x * x).sum::<f32>().sqrt();
             bv_matrix[i][j] = bv_norm;
@@ -1021,9 +1121,8 @@ impl CliffordRGBEncoder {
         let mut rng = StdRng::seed_from_u64(seed);
         let mut projection = Vec::with_capacity(rgb_dim);
 
-        let grade_init_scale: [f32; 9] = std::array::from_fn(|g| {
-            1.0 / (GRADE_DIMS[g] as f32).sqrt().max(1.0)
-        });
+        let grade_init_scale: [f32; 9] =
+            std::array::from_fn(|g| 1.0 / (GRADE_DIMS[g] as f32).sqrt().max(1.0));
         let norm = 1.0 / (rgb_dim as f32).sqrt();
         let two_pi = 2.0 * std::f32::consts::PI;
         let pi = std::f32::consts::PI;
@@ -1053,12 +1152,10 @@ impl CliffordRGBEncoder {
 
             // Grade 1: Fourier features (texture at different scales)
             let g1s = grade_init_scale[1] * norm * channel_weight[1];
-            let g1_uv: [(f32, f32); 4] = [
-                (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, -1.0),
-            ];
+            let g1_uv: [(f32, f32); 4] = [(1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, -1.0)];
             for (k, &(u, v)) in g1_uv.iter().enumerate() {
                 let phase = two_pi * (u * px / fw + v * py / fh);
-                row[GRADE_OFFSETS[1] + 2 * k]     = phase.cos() * g1s;
+                row[GRADE_OFFSETS[1] + 2 * k] = phase.cos() * g1s;
                 row[GRADE_OFFSETS[1] + 2 * k + 1] = phase.sin() * g1s;
             }
 
@@ -1072,7 +1169,7 @@ impl CliffordRGBEncoder {
                     let phase = two_pi * freq * (px * dx / fw + py * dy / fh);
                     let base = ori * 4 + fi * 2;
                     if base + 1 < GRADE_DIMS[2] {
-                        row[GRADE_OFFSETS[2] + base]     = phase.cos() * g2s;
+                        row[GRADE_OFFSETS[2] + base] = phase.cos() * g2s;
                         row[GRADE_OFFSETS[2] + base + 1] = phase.sin() * g2s;
                     }
                 }
@@ -1086,8 +1183,7 @@ impl CliffordRGBEncoder {
                     let freq = freq_offset + k as f32 * 0.5;
                     let angle = k as f32 * pi / GRADE_DIMS[g] as f32;
                     let phase = two_pi * freq * (px * angle.cos() / fw + py * angle.sin() / fh);
-                    row[GRADE_OFFSETS[g] + k] = phase.cos() * gs
-                        + rng.gen_range(-0.02..0.02) * gs;
+                    row[GRADE_OFFSETS[g] + k] = phase.cos() * gs + rng.gen_range(-0.02..0.02) * gs;
                 }
             }
 
@@ -1114,7 +1210,9 @@ impl CliffordRGBEncoder {
         let mut mv = Multivector::zero();
         let n = rgb.len().min(self.projection.len());
         for (i, &val) in rgb.iter().enumerate().take(n) {
-            if val.abs() < 1e-6 { continue; }
+            if val.abs() < 1e-6 {
+                continue;
+            }
             let row = &self.projection[i];
             for j in 0..CL8_DIM {
                 mv.components[j] += val * row[j];
@@ -1134,10 +1232,15 @@ impl CliffordRGBEncoder {
             let start = GRADE_OFFSETS[g];
             let dim = GRADE_DIMS[g];
             let norm: f32 = mv.components[start..start + dim]
-                .iter().map(|x| x * x).sum::<f32>().sqrt();
+                .iter()
+                .map(|x| x * x)
+                .sum::<f32>()
+                .sqrt();
             if norm > MAX_GRADE_NORM {
                 let s = MAX_GRADE_NORM / norm;
-                for k in 0..dim { mv.components[start + k] *= s; }
+                for k in 0..dim {
+                    mv.components[start + k] *= s;
+                }
             }
         }
         mv
@@ -1145,14 +1248,18 @@ impl CliffordRGBEncoder {
 
     pub fn calibrate_scales(&mut self, samples: &[(Vec<f32>, u8)]) {
         let n = samples.len().min(500) as f32;
-        if n < 2.0 { return; }
+        if n < 2.0 {
+            return;
+        }
         self.grade_scales = [1.0; 9];
         let mut grade_norms = [0.0f32; 9];
         for (img, _) in samples.iter().take(500) {
             let mv = self.encode(img);
             for g in 0..=8 {
                 let gnorm: f32 = mv.grade(g).iter().map(|x| x * x).sum::<f32>().sqrt();
-                if gnorm.is_finite() { grade_norms[g] += gnorm / n; }
+                if gnorm.is_finite() {
+                    grade_norms[g] += gnorm / n;
+                }
             }
         }
         for g in 0..=8 {
@@ -1163,13 +1270,7 @@ impl CliffordRGBEncoder {
     }
 
     /// Contrastive training step. Takes a centroid slice (any length).
-    pub fn train_step(
-        &mut self,
-        rgb: &[f32],
-        label: u8,
-        centroids: &[Multivector],
-        lr: f32,
-    ) {
+    pub fn train_step(&mut self, rgb: &[f32], label: u8, centroids: &[Multivector], lr: f32) {
         let mv = self.encode(rgb);
         let n_classes = centroids.len();
         let correct_centroid = &centroids[label as usize];
@@ -1178,26 +1279,36 @@ impl CliffordRGBEncoder {
         let mut hardest_neg_dist = f32::MAX;
         let mut hardest_neg_idx = 0;
         for d in 0..n_classes {
-            if d == label as usize { continue; }
-            if centroids[d].components.iter().all(|x| x.abs() < 1e-12) { continue; }
+            if d == label as usize {
+                continue;
+            }
+            if centroids[d].components.iter().all(|x| x.abs() < 1e-12) {
+                continue;
+            }
             let dist = spacetime_distance(&mv, &centroids[d]);
             if dist < hardest_neg_dist {
                 hardest_neg_dist = dist;
                 hardest_neg_idx = d;
             }
         }
-        if hardest_neg_dist == f32::MAX { return; }
+        if hardest_neg_dist == f32::MAX {
+            return;
+        }
 
         let margin = 0.1;
         let violation = correct_dist - hardest_neg_dist + margin;
-        if violation <= 0.0 { return; }
+        if violation <= 0.0 {
+            return;
+        }
 
         let neg_centroid = &centroids[hardest_neg_idx];
         let loss_scale = violation.min(2.0);
 
         let n = rgb.len().min(self.projection.len());
         for (i, &pixel) in rgb.iter().enumerate().take(n) {
-            if pixel.abs() < 0.01 { continue; }
+            if pixel.abs() < 0.01 {
+                continue;
+            }
             let row = &mut self.projection[i];
             for g in 0..=8 {
                 let glr = lr / (GRADE_DIMS[g] as f32).sqrt().max(1.0);
@@ -1233,7 +1344,9 @@ impl PathClassifier {
 
     pub fn accumulate(&mut self, mv: &Multivector, label: u8) {
         let d = label as usize;
-        if d >= self.n_classes { return; }
+        if d >= self.n_classes {
+            return;
+        }
         self.counts[d] += 1;
         let n = self.counts[d] as f32;
         let alpha = 1.0 / n;
@@ -1247,9 +1360,14 @@ impl PathClassifier {
         let mut best = 0u8;
         let mut best_dist = f32::MAX;
         for d in 0..self.n_classes {
-            if self.counts[d] == 0 { continue; }
+            if self.counts[d] == 0 {
+                continue;
+            }
             let dist = spacetime_distance(mv, &self.centroids[d]);
-            if dist < best_dist { best_dist = dist; best = d as u8; }
+            if dist < best_dist {
+                best_dist = dist;
+                best = d as u8;
+            }
         }
         (best, best_dist)
     }
@@ -1257,12 +1375,20 @@ impl PathClassifier {
     pub fn classify_binary(&self, mv: &Multivector, a: u8, b: u8) -> (u8, f32) {
         let da = spacetime_distance(mv, &self.centroids[a as usize]);
         let db = spacetime_distance(mv, &self.centroids[b as usize]);
-        if da <= db { (a, da) } else { (b, db) }
+        if da <= db {
+            (a, da)
+        } else {
+            (b, db)
+        }
     }
 
     pub fn grade_discriminability(&self) -> [f32; 9] {
-        let active: Vec<usize> = (0..self.n_classes).filter(|&d| self.counts[d] > 0).collect();
-        if active.len() < 2 { return [0.0; 9]; }
+        let active: Vec<usize> = (0..self.n_classes)
+            .filter(|&d| self.counts[d] > 0)
+            .collect();
+        if active.len() < 2 {
+            return [0.0; 9];
+        }
         let mut disc = [0.0f32; 9];
         let mut npairs = 0u32;
         for i in 0..active.len() {
@@ -1272,14 +1398,20 @@ impl PathClassifier {
                 for g in 0..=8 {
                     let ga = ca.grade(g);
                     let gb = cb.grade(g);
-                    let d2: f32 = ga.iter().zip(gb.iter()).map(|(a, b)| (a - b) * (a - b)).sum();
+                    let d2: f32 = ga
+                        .iter()
+                        .zip(gb.iter())
+                        .map(|(a, b)| (a - b) * (a - b))
+                        .sum();
                     disc[g] += d2;
                 }
                 npairs += 1;
             }
         }
         if npairs > 0 {
-            for g in 0..=8 { disc[g] /= npairs as f32; }
+            for g in 0..=8 {
+                disc[g] /= npairs as f32;
+            }
         }
         disc
     }
@@ -1302,14 +1434,15 @@ impl CliffordClassifier {
     /// Accumulate a sample into the running centroid for its class.
     pub fn accumulate(&mut self, mv: &Multivector, label: u8) {
         let d = label as usize;
-        if d >= 10 { return; }
+        if d >= 10 {
+            return;
+        }
         self.counts[d] += 1;
         let n = self.counts[d] as f32;
         let alpha = 1.0 / n;
         for i in 0..CL8_DIM {
             self.centroids[d].components[i] =
-                (1.0 - alpha) * self.centroids[d].components[i]
-                + alpha * mv.components[i];
+                (1.0 - alpha) * self.centroids[d].components[i] + alpha * mv.components[i];
         }
     }
 
@@ -1323,7 +1456,9 @@ impl CliffordClassifier {
         let mut best_label = 0u8;
         let mut best_dist = f32::MAX;
         for d in 0..10 {
-            if self.counts[d] == 0 { continue; }
+            if self.counts[d] == 0 {
+                continue;
+            }
             let dist = spacetime_distance(mv, &self.centroids[d]);
             if dist < best_dist {
                 best_dist = dist;
@@ -1337,7 +1472,11 @@ impl CliffordClassifier {
     pub fn classify_binary(&self, mv: &Multivector, digit_a: u8, digit_b: u8) -> (u8, f32) {
         let da = spacetime_distance(mv, &self.centroids[digit_a as usize]);
         let db = spacetime_distance(mv, &self.centroids[digit_b as usize]);
-        if da < db { (digit_a, da) } else { (digit_b, db) }
+        if da < db {
+            (digit_a, da)
+        } else {
+            (digit_b, db)
+        }
     }
 
     /// Per-grade discriminability: how well each grade separates classes.
@@ -1345,14 +1484,21 @@ impl CliffordClassifier {
         let mut disc = [0.0f32; 9];
         let mut count = 0u32;
         for a in 0..10 {
-            if self.counts[a] == 0 { continue; }
-            for b in (a+1)..10 {
-                if self.counts[b] == 0 { continue; }
+            if self.counts[a] == 0 {
+                continue;
+            }
+            for b in (a + 1)..10 {
+                if self.counts[b] == 0 {
+                    continue;
+                }
                 for g in 0..=8 {
                     let ga = self.centroids[a].grade(g);
                     let gb = self.centroids[b].grade(g);
-                    let dist_sq: f32 = ga.iter().zip(gb.iter())
-                        .map(|(x, y)| (x - y) * (x - y)).sum();
+                    let dist_sq: f32 = ga
+                        .iter()
+                        .zip(gb.iter())
+                        .map(|(x, y)| (x - y) * (x - y))
+                        .sum();
                     if dist_sq.is_finite() {
                         disc[g] += dist_sq;
                     }
@@ -1361,7 +1507,9 @@ impl CliffordClassifier {
             }
         }
         if count > 0 {
-            for g in 0..=8 { disc[g] /= count as f32; }
+            for g in 0..=8 {
+                disc[g] /= count as f32;
+            }
         }
         disc
     }
@@ -1417,7 +1565,9 @@ impl MultiTaskClassifier {
             n += 1;
         }
         if n > 0 {
-            for g in 0..=8 { disc[g] /= n as f32; }
+            for g in 0..=8 {
+                disc[g] /= n as f32;
+            }
         }
         disc
     }
@@ -1435,7 +1585,9 @@ pub fn weighted_spacetime_distance(
     let mut dist = 0.0f32;
     for g in 0..=8 {
         let w = grade_weights[g];
-        if w < 1e-10 { continue; }
+        if w < 1e-10 {
+            continue;
+        }
         let ga = a.grade(g);
         let gb = b.grade(g);
         if g == 1 {
@@ -1461,7 +1613,9 @@ pub fn weighted_spacetime_distance(
 /// Higher discriminability → higher weight. Normalizes so max weight = 1.0.
 pub fn discriminability_weights(disc: &[f32; 9]) -> [f32; 9] {
     let max_d = disc.iter().cloned().fold(0.0f32, f32::max);
-    if max_d < 1e-10 { return [1.0; 9]; }
+    if max_d < 1e-10 {
+        return [1.0; 9];
+    }
     std::array::from_fn(|g| disc[g] / max_d)
 }
 
@@ -1519,7 +1673,9 @@ impl CliffordMicroBrain {
 
         for i in 0..n {
             let c = labels[i] as usize;
-            if c >= n_classes { continue; }
+            if c >= n_classes {
+                continue;
+            }
             counts[c] += 1;
             for j in 0..CL8_DIM {
                 centroids_rgb[c].components[j] += rgb_mvs[i].components[j];
@@ -1585,13 +1741,16 @@ impl CliffordMicroBrain {
         let mut best_score = f32::MAX;
 
         for &c in candidates {
-            if c >= self.n_classes || self.counts[c] == 0 { continue; }
+            if c >= self.n_classes || self.counts[c] == 0 {
+                continue;
+            }
 
-            let rgb_score = interval_augmented_score(
-                rgb_mv, &self.centroids_rgb[c], &self.grade_weights_rgb,
-            );
+            let rgb_score =
+                interval_augmented_score(rgb_mv, &self.centroids_rgb[c], &self.grade_weights_rgb);
             let dirac_score = interval_augmented_score(
-                dirac_mv, &self.centroids_dirac[c], &self.grade_weights_dirac,
+                dirac_mv,
+                &self.centroids_dirac[c],
+                &self.grade_weights_dirac,
             );
 
             let score = rgb_score + dirac_score;
@@ -1613,13 +1772,19 @@ impl CliffordMicroBrain {
 /// Sign factor for component j in the grade-weighted distance.
 /// Minkowski signature: grade-1 k=0 is timelike (-1), everything else +1.
 fn distance_sign(j: usize) -> f32 {
-    if j >= GRADE_OFFSETS[1] && j < GRADE_OFFSETS[1] + 1 { -1.0 } else { 1.0 }
+    if j >= GRADE_OFFSETS[1] && j < GRADE_OFFSETS[1] + 1 {
+        -1.0
+    } else {
+        1.0
+    }
 }
 
 /// Map a flat multivector component index to its grade.
 fn component_grade(j: usize) -> usize {
     for g in (0..=8).rev() {
-        if j >= GRADE_OFFSETS[g] { return g; }
+        if j >= GRADE_OFFSETS[g] {
+            return g;
+        }
     }
     0
 }
@@ -1687,26 +1852,40 @@ pub fn generate_pairs(
     n_pairs: usize,
     rng: &mut StdRng,
 ) -> Vec<ContrastivePair> {
-    let indices_a: Vec<usize> = labels.iter().enumerate()
-        .filter(|(_, &l)| l == class_a).map(|(i, _)| i).collect();
-    let indices_b: Vec<usize> = labels.iter().enumerate()
-        .filter(|(_, &l)| l == class_b).map(|(i, _)| i).collect();
+    let indices_a: Vec<usize> = labels
+        .iter()
+        .enumerate()
+        .filter(|(_, &l)| l == class_a)
+        .map(|(i, _)| i)
+        .collect();
+    let indices_b: Vec<usize> = labels
+        .iter()
+        .enumerate()
+        .filter(|(_, &l)| l == class_b)
+        .map(|(i, _)| i)
+        .collect();
 
-    if indices_a.len() < 2 || indices_b.is_empty() { return Vec::new(); }
+    if indices_a.len() < 2 || indices_b.is_empty() {
+        return Vec::new();
+    }
 
-    (0..n_pairs).map(|_| {
-        let ai = rng.gen_range(0..indices_a.len());
-        let mut pi = rng.gen_range(0..indices_a.len());
-        while pi == ai && indices_a.len() > 1 { pi = rng.gen_range(0..indices_a.len()); }
-        let ni = rng.gen_range(0..indices_b.len());
-        ContrastivePair {
-            anchor_idx: indices_a[ai],
-            positive_idx: indices_a[pi],
-            negative_idx: indices_b[ni],
-            class_a,
-            class_b,
-        }
-    }).collect()
+    (0..n_pairs)
+        .map(|_| {
+            let ai = rng.gen_range(0..indices_a.len());
+            let mut pi = rng.gen_range(0..indices_a.len());
+            while pi == ai && indices_a.len() > 1 {
+                pi = rng.gen_range(0..indices_a.len());
+            }
+            let ni = rng.gen_range(0..indices_b.len());
+            ContrastivePair {
+                anchor_idx: indices_a[ai],
+                positive_idx: indices_a[pi],
+                negative_idx: indices_b[ni],
+                class_a,
+                class_b,
+            }
+        })
+        .collect()
 }
 
 /// Compute triplet loss and update RGB encoder projection via analytical gradients.
@@ -1753,7 +1932,9 @@ pub fn contrastive_train_rgb_batch(
 
         let loss = (d_pos - d_neg + config.margin).max(0.0);
         total_loss += loss;
-        if loss <= 0.0 { continue; }
+        if loss <= 0.0 {
+            continue;
+        }
         active_count += 1;
 
         // Analytical gradient of triplet loss w.r.t. projection[i][j]
@@ -1764,7 +1945,9 @@ pub fn contrastive_train_rgb_batch(
             let vp = if i < x_p.len() { x_p[i] } else { 0.0 };
             let vn = if i < x_n.len() { x_n[i] } else { 0.0 };
 
-            if va.abs() < 1e-4 && vp.abs() < 1e-4 && vn.abs() < 1e-4 { continue; }
+            if va.abs() < 1e-4 && vp.abs() < 1e-4 && vn.abs() < 1e-4 {
+                continue;
+            }
 
             let row = &mut enc.projection[i];
             for j in 0..CL8_DIM {
@@ -1822,7 +2005,9 @@ pub fn contrastive_train_dirac_batch(
 
         let loss = (d_pos - d_neg + config.margin).max(0.0);
         total_loss += loss;
-        if loss <= 0.0 { continue; }
+        if loss <= 0.0 {
+            continue;
+        }
 
         // For Dirac, the texture_proj contribution is:
         //   texture_mv[j] = sum_i texture_proj[i][j] * local_var[i]
@@ -1839,7 +2024,9 @@ pub fn contrastive_train_dirac_batch(
             let vp = lvar_p[i];
             let vn = lvar_n[i];
 
-            if va.abs() < 1e-4 && vp.abs() < 1e-4 && vn.abs() < 1e-4 { continue; }
+            if va.abs() < 1e-4 && vp.abs() < 1e-4 && vn.abs() < 1e-4 {
+                continue;
+            }
 
             let row = &mut enc.texture_proj[i];
             for j in 0..CL8_DIM {
@@ -1874,20 +2061,34 @@ pub fn generate_hard_negative_pairs(
     n_pairs: usize,
     max_per_class: usize,
 ) -> Vec<ContrastivePair> {
-    let indices_a: Vec<usize> = labels.iter().enumerate()
-        .filter(|(_, &l)| l == class_a).map(|(i, _)| i)
-        .take(max_per_class).collect();
-    let indices_b: Vec<usize> = labels.iter().enumerate()
-        .filter(|(_, &l)| l == class_b).map(|(i, _)| i)
-        .take(max_per_class).collect();
+    let indices_a: Vec<usize> = labels
+        .iter()
+        .enumerate()
+        .filter(|(_, &l)| l == class_a)
+        .map(|(i, _)| i)
+        .take(max_per_class)
+        .collect();
+    let indices_b: Vec<usize> = labels
+        .iter()
+        .enumerate()
+        .filter(|(_, &l)| l == class_b)
+        .map(|(i, _)| i)
+        .take(max_per_class)
+        .collect();
 
-    if indices_a.len() < 2 || indices_b.is_empty() { return Vec::new(); }
+    if indices_a.len() < 2 || indices_b.is_empty() {
+        return Vec::new();
+    }
 
     // Encode all samples from both classes
-    let emb_a: Vec<Multivector> = indices_a.iter()
-        .map(|&i| rgb_enc.encode(&rgb_images[i])).collect();
-    let emb_b: Vec<Multivector> = indices_b.iter()
-        .map(|&i| rgb_enc.encode(&rgb_images[i])).collect();
+    let emb_a: Vec<Multivector> = indices_a
+        .iter()
+        .map(|&i| rgb_enc.encode(&rgb_images[i]))
+        .collect();
+    let emb_b: Vec<Multivector> = indices_b
+        .iter()
+        .map(|&i| rgb_enc.encode(&rgb_images[i]))
+        .collect();
 
     let mut pairs = Vec::with_capacity(n_pairs);
     let mut rng = StdRng::seed_from_u64(42);
@@ -1902,12 +2103,17 @@ pub fn generate_hard_negative_pairs(
                 let diff = a_emb.components[j] - b_emb.components[j];
                 d += diff * diff;
             }
-            if d < best_dist { best_dist = d; best_bi = bi; }
+            if d < best_dist {
+                best_dist = d;
+                best_bi = bi;
+            }
         }
 
         // Positive: random other sample from class_a
         let mut pi = rng.gen_range(0..indices_a.len());
-        while pi == ai && indices_a.len() > 1 { pi = rng.gen_range(0..indices_a.len()); }
+        while pi == ai && indices_a.len() > 1 {
+            pi = rng.gen_range(0..indices_a.len());
+        }
 
         pairs.push(ContrastivePair {
             anchor_idx: indices_a[ai],
@@ -1917,12 +2123,16 @@ pub fn generate_hard_negative_pairs(
             class_b,
         });
 
-        if pairs.len() >= n_pairs { break; }
+        if pairs.len() >= n_pairs {
+            break;
+        }
     }
 
     // Also generate reverse pairs (class_b anchors, class_a hard negatives)
     for (bi, b_emb) in emb_b.iter().enumerate() {
-        if pairs.len() >= n_pairs { break; }
+        if pairs.len() >= n_pairs {
+            break;
+        }
 
         let mut best_dist = f32::MAX;
         let mut best_ai = 0usize;
@@ -1932,11 +2142,16 @@ pub fn generate_hard_negative_pairs(
                 let diff = b_emb.components[j] - a_emb.components[j];
                 d += diff * diff;
             }
-            if d < best_dist { best_dist = d; best_ai = ai; }
+            if d < best_dist {
+                best_dist = d;
+                best_ai = ai;
+            }
         }
 
         let mut pi = rng.gen_range(0..indices_b.len());
-        while pi == bi && indices_b.len() > 1 { pi = rng.gen_range(0..indices_b.len()); }
+        while pi == bi && indices_b.len() > 1 {
+            pi = rng.gen_range(0..indices_b.len());
+        }
 
         pairs.push(ContrastivePair {
             anchor_idx: indices_b[bi],
@@ -1966,15 +2181,21 @@ pub fn measure_class_distance(
     for (img, &l) in rgb_images.iter().zip(labels.iter()) {
         if l == class_a && (n_a as usize) < max_samples {
             let mv = rgb_enc.encode(img);
-            for j in 0..CL8_DIM { sum_a.components[j] += mv.components[j]; }
+            for j in 0..CL8_DIM {
+                sum_a.components[j] += mv.components[j];
+            }
             n_a += 1;
         } else if l == class_b && (n_b as usize) < max_samples {
             let mv = rgb_enc.encode(img);
-            for j in 0..CL8_DIM { sum_b.components[j] += mv.components[j]; }
+            for j in 0..CL8_DIM {
+                sum_b.components[j] += mv.components[j];
+            }
             n_b += 1;
         }
     }
-    if n_a == 0 || n_b == 0 { return 0.0; }
+    if n_a == 0 || n_b == 0 {
+        return 0.0;
+    }
     for j in 0..CL8_DIM {
         sum_a.components[j] /= n_a as f32;
         sum_b.components[j] /= n_b as f32;
@@ -2026,7 +2247,9 @@ pub fn separation_rotor_full(confusion_bv: &Multivector) -> Rotor {
     let mut bv = [0.0f32; 28];
     if norm > 0.5 {
         let scale = 0.5 / norm;
-        for i in 0..28 { bv[i] = bv_slice[i] * scale; }
+        for i in 0..28 {
+            bv[i] = bv_slice[i] * scale;
+        }
     } else {
         bv.copy_from_slice(bv_slice);
     }
@@ -2094,8 +2317,12 @@ pub fn train_projection_for_bv(
 
     let mut all_classes: Vec<u8> = Vec::new();
     for &(a, b) in target_pairs {
-        if !all_classes.contains(&a) { all_classes.push(a); }
-        if !all_classes.contains(&b) { all_classes.push(b); }
+        if !all_classes.contains(&a) {
+            all_classes.push(a);
+        }
+        if !all_classes.contains(&b) {
+            all_classes.push(b);
+        }
     }
 
     let mut class_means: std::collections::HashMap<u8, Vec<f32>> = std::collections::HashMap::new();
@@ -2103,8 +2330,12 @@ pub fn train_projection_for_bv(
         let mut mean = vec![0.0f32; input_dim];
         let mut count = 0usize;
         for (img, &lbl) in images.iter().zip(labels.iter()) {
-            if lbl != c { continue; }
-            if count >= samples_per_class { break; }
+            if lbl != c {
+                continue;
+            }
+            if count >= samples_per_class {
+                break;
+            }
             for (j, &v) in img.iter().enumerate().take(input_dim) {
                 mean[j] += v;
             }
@@ -2112,7 +2343,9 @@ pub fn train_projection_for_bv(
         }
         if count > 0 {
             let n = count as f32;
-            for v in mean.iter_mut() { *v /= n; }
+            for v in mean.iter_mut() {
+                *v /= n;
+            }
         }
         class_means.insert(c, mean);
     }
@@ -2120,12 +2353,16 @@ pub fn train_projection_for_bv(
     let eps = 1e-4f32;
     let max_grad_norm = 1.0f32;
 
-    let grade_of: Vec<usize> = (0..CL8_DIM).map(|k| {
-        for g in (0..=8).rev() {
-            if k >= GRADE_OFFSETS[g] { return g; }
-        }
-        0
-    }).collect();
+    let grade_of: Vec<usize> = (0..CL8_DIM)
+        .map(|k| {
+            for g in (0..=8).rev() {
+                if k >= GRADE_OFFSETS[g] {
+                    return g;
+                }
+            }
+            0
+        })
+        .collect();
 
     for step in 0..n_steps {
         let mut total_grad = vec![[0.0f32; CL8_DIM]; input_dim];
@@ -2143,7 +2380,9 @@ pub fn train_projection_for_bv(
             let bv_norm: f32 = bv.grade(2).iter().map(|x| x * x).sum::<f32>().sqrt();
             step_bvs.push((ca, cb, bv_norm));
 
-            if bv_norm >= target_bv { continue; }
+            if bv_norm >= target_bv {
+                continue;
+            }
             all_above_target = false;
 
             let mut grad_ca = [0.0f32; CL8_DIM];
@@ -2166,7 +2405,9 @@ pub fn train_projection_for_bv(
             for j in 0..input_dim {
                 let ma = mean_a[j];
                 let mb = mean_b[j];
-                if ma.abs() < 1e-6 && mb.abs() < 1e-6 { continue; }
+                if ma.abs() < 1e-6 && mb.abs() < 1e-6 {
+                    continue;
+                }
                 for k in 0..CL8_DIM {
                     let gs = encoder.grade_scales[grade_of[k]];
                     total_grad[j][k] += (ma * grad_ca[k] + mb * grad_cb[k]) * gs;
@@ -2175,7 +2416,10 @@ pub fn train_projection_for_bv(
         }
 
         if all_above_target {
-            print!("    Step {:>4}: ALL PAIRS ABOVE TARGET ({:.1})", step, target_bv);
+            print!(
+                "    Step {:>4}: ALL PAIRS ABOVE TARGET ({:.1})",
+                step, target_bv
+            );
             for &(ca, cb, bv) in &step_bvs {
                 print!("  |B|({},{})={:.4}", ca, cb, bv);
             }
@@ -2188,7 +2432,9 @@ pub fn train_projection_for_bv(
             let row_norm: f32 = total_grad[j].iter().map(|x| x * x).sum::<f32>().sqrt();
             if row_norm > max_grad_norm {
                 let scale = max_grad_norm / row_norm;
-                for k in 0..CL8_DIM { total_grad[j][k] *= scale; }
+                for k in 0..CL8_DIM {
+                    total_grad[j][k] *= scale;
+                }
             }
         }
 
@@ -2259,17 +2505,25 @@ pub fn clifford_single_pass(
         for (img, &l) in rgb_images.iter().zip(labels.iter()) {
             if l == ca && n_a < max_samples_per_class {
                 let mv = rgb_enc.encode(img);
-                for j in 0..CL8_DIM { sum_a.components[j] += mv.components[j]; }
+                for j in 0..CL8_DIM {
+                    sum_a.components[j] += mv.components[j];
+                }
                 n_a += 1;
             } else if l == cb && n_b < max_samples_per_class {
                 let mv = rgb_enc.encode(img);
-                for j in 0..CL8_DIM { sum_b.components[j] += mv.components[j]; }
+                for j in 0..CL8_DIM {
+                    sum_b.components[j] += mv.components[j];
+                }
                 n_b += 1;
             }
-            if n_a >= max_samples_per_class && n_b >= max_samples_per_class { break; }
+            if n_a >= max_samples_per_class && n_b >= max_samples_per_class {
+                break;
+            }
         }
 
-        if n_a == 0 || n_b == 0 { continue; }
+        if n_a == 0 || n_b == 0 {
+            continue;
+        }
         for j in 0..CL8_DIM {
             sum_a.components[j] /= n_a as f32;
             sum_b.components[j] /= n_b as f32;
@@ -2283,8 +2537,10 @@ pub fn clifford_single_pass(
         if bv_norm < 1e-10 {
             println!("    {} ↔ {}: already orthogonal (|B|≈0)", ca, cb);
             results.push(CliffordSeparationResult {
-                class_a: ca, class_b: cb,
-                distance_before: dist_before, distance_after: dist_before,
+                class_a: ca,
+                class_b: cb,
+                distance_before: dist_before,
+                distance_after: dist_before,
                 bivector_norm: bv_norm,
             });
             continue;
@@ -2302,27 +2558,41 @@ pub fn clifford_single_pass(
         for (img, &l) in rgb_images.iter().zip(labels.iter()) {
             if l == ca && n_a2 < max_samples_per_class {
                 let mv = rgb_enc.encode(img);
-                for j in 0..CL8_DIM { sum_a2.components[j] += mv.components[j]; }
+                for j in 0..CL8_DIM {
+                    sum_a2.components[j] += mv.components[j];
+                }
                 n_a2 += 1;
             } else if l == cb && n_b2 < max_samples_per_class {
                 let mv = rgb_enc.encode(img);
-                for j in 0..CL8_DIM { sum_b2.components[j] += mv.components[j]; }
+                for j in 0..CL8_DIM {
+                    sum_b2.components[j] += mv.components[j];
+                }
                 n_b2 += 1;
             }
-            if n_a2 >= max_samples_per_class && n_b2 >= max_samples_per_class { break; }
+            if n_a2 >= max_samples_per_class && n_b2 >= max_samples_per_class {
+                break;
+            }
         }
         for j in 0..CL8_DIM {
-            if n_a2 > 0 { sum_a2.components[j] /= n_a2 as f32; }
-            if n_b2 > 0 { sum_b2.components[j] /= n_b2 as f32; }
+            if n_a2 > 0 {
+                sum_a2.components[j] /= n_a2 as f32;
+            }
+            if n_b2 > 0 {
+                sum_b2.components[j] /= n_b2 as f32;
+            }
         }
         let dist_after = centroid_distance(&sum_a2, &sum_b2);
 
-        println!("    {} ↔ {}: |B|={:.4}  d={:.3} → {:.3}  (one pass)",
-            ca, cb, bv_norm, dist_before, dist_after);
+        println!(
+            "    {} ↔ {}: |B|={:.4}  d={:.3} → {:.3}  (one pass)",
+            ca, cb, bv_norm, dist_before, dist_after
+        );
 
         results.push(CliffordSeparationResult {
-            class_a: ca, class_b: cb,
-            distance_before: dist_before, distance_after: dist_after,
+            class_a: ca,
+            class_b: cb,
+            distance_before: dist_before,
+            distance_after: dist_after,
             bivector_norm: bv_norm,
         });
     }
@@ -2362,8 +2632,15 @@ pub fn run_clifford_mnist(
     train_limit: Option<usize>,
     max_epochs: u32,
 ) -> CliffordMnistResult {
-    run_clifford_mnist_inner(train_images, train_labels, test_images, test_labels,
-        train_limit, max_epochs, 2)
+    run_clifford_mnist_inner(
+        train_images,
+        train_labels,
+        test_images,
+        test_labels,
+        train_limit,
+        max_epochs,
+        2,
+    )
 }
 
 pub fn run_clifford_mnist_progress(
@@ -2374,8 +2651,15 @@ pub fn run_clifford_mnist_progress(
     train_limit: Option<usize>,
     max_epochs: u32,
 ) -> CliffordMnistResult {
-    run_clifford_mnist_inner(train_images, train_labels, test_images, test_labels,
-        train_limit, max_epochs, 1)
+    run_clifford_mnist_inner(
+        train_images,
+        train_labels,
+        test_images,
+        test_labels,
+        train_limit,
+        max_epochs,
+        1,
+    )
 }
 
 pub fn run_clifford_mnist_quiet(
@@ -2386,8 +2670,15 @@ pub fn run_clifford_mnist_quiet(
     train_limit: Option<usize>,
     max_epochs: u32,
 ) -> CliffordMnistResult {
-    run_clifford_mnist_inner(train_images, train_labels, test_images, test_labels,
-        train_limit, max_epochs, 0)
+    run_clifford_mnist_inner(
+        train_images,
+        train_labels,
+        test_images,
+        test_labels,
+        train_limit,
+        max_epochs,
+        0,
+    )
 }
 
 fn run_clifford_mnist_inner(
@@ -2419,7 +2710,10 @@ fn run_clifford_mnist_inner(
     let mut correct_intervals = Vec::new();
     let mut incorrect_intervals = Vec::new();
 
-    progress!("--- Phase 1-2: Binary pair training ({} epochs each) ---", max_epochs);
+    progress!(
+        "--- Phase 1-2: Binary pair training ({} epochs each) ---",
+        max_epochs
+    );
     for (t, (d1, d2)) in TASKS.iter().enumerate() {
         let train_pairs = filter_digit_pair_raw(train_images, train_labels, *d1, *d2);
         let test_pairs = filter_digit_pair_raw(test_images, test_labels, *d1, *d2);
@@ -2430,12 +2724,20 @@ fn run_clifford_mnist_inner(
             train_pairs
         };
 
-        progress!("  Task {} ({} vs {}): {} train, {} test",
-            t, d1, d2, train_subset.len(), test_pairs.len());
+        progress!(
+            "  Task {} ({} vs {}): {} train, {} test",
+            t,
+            d1,
+            d2,
+            train_subset.len(),
+            test_pairs.len()
+        );
 
         // Phase 1: Build initial centroids
         let mut task_classifier = CliffordClassifier::new();
-        let calibration: Vec<_> = train_subset.iter().take(200)
+        let calibration: Vec<_> = train_subset
+            .iter()
+            .take(200)
             .map(|(img, lbl)| (img.clone(), *lbl))
             .collect();
         encoder.calibrate_scales(&calibration);
@@ -2480,14 +2782,15 @@ fn run_clifford_mnist_inner(
             }
 
             if epoch % 5 == 0 || epoch == max_epochs - 1 {
-                let test_acc = evaluate_binary(
-                    &encoder, &task_classifier, &test_pairs, *d1, *d2,
-                );
-                progress!("    epoch {}: acc={:.1}%",
-                    epoch, test_acc * 100.0);
+                let test_acc = evaluate_binary(&encoder, &task_classifier, &test_pairs, *d1, *d2);
+                progress!("    epoch {}: acc={:.1}%", epoch, test_acc * 100.0);
 
                 if test_acc >= 0.98 {
-                    progress!("    Converged at epoch {} ({:.1}%)", epoch, test_acc * 100.0);
+                    progress!(
+                        "    Converged at epoch {} ({:.1}%)",
+                        epoch,
+                        test_acc * 100.0
+                    );
                     break;
                 }
                 if test_acc > best_test_acc + 0.001 {
@@ -2513,7 +2816,13 @@ fn run_clifford_mnist_inner(
         // Final evaluation
         let test_acc = evaluate_binary(&encoder, &task_classifier, &test_pairs, *d1, *d2);
         task_accuracies.push(test_acc);
-        progress!("  Task {} ({} vs {}) final: {:.1}%\n", t, d1, d2, test_acc * 100.0);
+        progress!(
+            "  Task {} ({} vs {}) final: {:.1}%\n",
+            t,
+            d1,
+            d2,
+            test_acc * 100.0
+        );
 
         // Collect interval stats (both grade-1 Minkowski and full spacetime distance)
         for (img, lbl) in &test_pairs {
@@ -2534,7 +2843,10 @@ fn run_clifford_mnist_inner(
     // Phase 3: 10-class refinement.
     // Binary tasks taught within-pair discrimination. Now refine the encoder
     // against ALL classes so cross-pair confusions (e.g. 0 vs 6) are resolved.
-    progress!("\n--- Phase 3: 10-class refinement ({} epochs) ---", max_epochs);
+    progress!(
+        "\n--- Phase 3: 10-class refinement ({} epochs) ---",
+        max_epochs
+    );
     let mut global_classifier = CliffordClassifier::new();
     for (img, &lbl) in train_images.iter().zip(train_labels.iter()) {
         let mv = encoder.encode(img);
@@ -2542,18 +2854,29 @@ fn run_clifford_mnist_inner(
     }
 
     let global_train: Vec<_> = if let Some(lim) = train_limit {
-        train_images.iter().zip(train_labels.iter())
-            .take(lim * 5).map(|(img, &lbl)| (img.clone(), lbl)).collect()
+        train_images
+            .iter()
+            .zip(train_labels.iter())
+            .take(lim * 5)
+            .map(|(img, &lbl)| (img.clone(), lbl))
+            .collect()
     } else {
-        train_images.iter().zip(train_labels.iter())
-            .map(|(img, &lbl)| (img.clone(), lbl)).collect()
+        train_images
+            .iter()
+            .zip(train_labels.iter())
+            .map(|(img, &lbl)| (img.clone(), lbl))
+            .collect()
     };
 
     let refinement_epochs = max_epochs;
     let mut best_refinement_acc = 0.0f32;
     let mut refinement_stale = 0u32;
     for epoch in 0..refinement_epochs {
-        let lr = if epoch < 5 { 0.005 } else { 0.005 * (-0.02 * (epoch as f32 - 5.0)).exp() };
+        let lr = if epoch < 5 {
+            0.005
+        } else {
+            0.005 * (-0.02 * (epoch as f32 - 5.0)).exp()
+        };
 
         for (img, lbl) in &global_train {
             encoder.train_step(img, *lbl, &global_classifier.centroids, lr);
@@ -2574,11 +2897,12 @@ fn run_clifford_mnist_inner(
             for (img, &lbl) in test_images.iter().zip(test_labels.iter()).take(2000) {
                 let mv = encoder.encode(img);
                 let (pred, _) = global_classifier.classify(&mv);
-                if pred == lbl { rc += 1; }
+                if pred == lbl {
+                    rc += 1;
+                }
             }
             let racc = rc as f32 / rt.max(1) as f32;
-            progress!("    epoch {}: 10-class acc={:.1}%",
-                epoch, racc * 100.0);
+            progress!("    epoch {}: 10-class acc={:.1}%", epoch, racc * 100.0);
             if racc > best_refinement_acc + 0.002 {
                 best_refinement_acc = racc;
                 refinement_stale = 0;
@@ -2611,16 +2935,26 @@ fn run_clifford_mnist_inner(
         for (img, lbl) in &test_pairs {
             let mv = encoder.encode(img);
             let (pred, _) = global_classifier.classify_binary(&mv, *d1, *d2);
-            if pred == *lbl { task_correct += 1; }
+            if pred == *lbl {
+                task_correct += 1;
+            }
         }
         let acc = task_correct as f32 / total.max(1) as f32;
-        vprint!("  Task {} ({} vs {}): {:.1}% (global)",
-            t, d1, d2, acc * 100.0);
+        vprint!(
+            "  Task {} ({} vs {}): {:.1}% (global)",
+            t,
+            d1,
+            d2,
+            acc * 100.0
+        );
         cross_task_total += total;
         cross_task_correct += task_correct;
     }
     let cross_task_acc = cross_task_correct as f32 / cross_task_total.max(1) as f32;
-    vprint!("  Overall cross-task binary: {:.1}%", cross_task_acc * 100.0);
+    vprint!(
+        "  Overall cross-task binary: {:.1}%",
+        cross_task_acc * 100.0
+    );
 
     let full_total = test_images.len() as u32;
     let grade_disc = global_classifier.grade_discriminability();
@@ -2629,13 +2963,24 @@ fn run_clifford_mnist_inner(
     let gw = discriminability_weights(&grade_disc);
     vprint!("\n--- Data-driven grade weights ---");
     let grade_names = [
-        "scalar (intensity)", "vector (gradients)", "bivector (edges)",
-        "trivector (junctions)", "quadvector (topology)", "grade-5", "grade-6",
-        "grade-7", "pseudoscalar (orientation)",
+        "scalar (intensity)",
+        "vector (gradients)",
+        "bivector (edges)",
+        "trivector (junctions)",
+        "quadvector (topology)",
+        "grade-5",
+        "grade-6",
+        "grade-7",
+        "pseudoscalar (orientation)",
     ];
     for g in 0..=8 {
-        vprint!("  grade {}: disc={:.1}, weight={:.3} — {}",
-            g, grade_disc[g], gw[g], grade_names[g]);
+        vprint!(
+            "  grade {}: disc={:.1}, weight={:.3} — {}",
+            g,
+            grade_disc[g],
+            gw[g],
+            grade_names[g]
+        );
     }
 
     // --- Classifier comparison: 3 methods on the same encoder + centroids ---
@@ -2645,36 +2990,62 @@ fn run_clifford_mnist_inner(
     let mut per_digit_accuracy = [0.0f32; 10];
     {
         let classifiers: [(&str, Box<dyn Fn(&Multivector) -> (u8, f32)>); 3] = [
-            ("flat spacetime distance", Box::new(|mv: &Multivector| {
-                let mut best_label = 0u8;
-                let mut best_dist = f32::MAX;
-                for d in 0..10 {
-                    if global_classifier.counts[d] == 0 { continue; }
-                    let dist = spacetime_distance(mv, &global_classifier.centroids[d]);
-                    if dist < best_dist { best_dist = dist; best_label = d as u8; }
-                }
-                (best_label, best_dist)
-            })),
-            ("discriminability-weighted", Box::new(|mv: &Multivector| {
-                let mut best_label = 0u8;
-                let mut best_dist = f32::MAX;
-                for d in 0..10 {
-                    if global_classifier.counts[d] == 0 { continue; }
-                    let dist = weighted_spacetime_distance(mv, &global_classifier.centroids[d], &gw);
-                    if dist < best_dist { best_dist = dist; best_label = d as u8; }
-                }
-                (best_label, best_dist)
-            })),
-            ("interval-augmented", Box::new(|mv: &Multivector| {
-                let mut best_label = 0u8;
-                let mut best_dist = f32::MAX;
-                for d in 0..10 {
-                    if global_classifier.counts[d] == 0 { continue; }
-                    let dist = interval_augmented_score(mv, &global_classifier.centroids[d], &gw);
-                    if dist < best_dist { best_dist = dist; best_label = d as u8; }
-                }
-                (best_label, best_dist)
-            })),
+            (
+                "flat spacetime distance",
+                Box::new(|mv: &Multivector| {
+                    let mut best_label = 0u8;
+                    let mut best_dist = f32::MAX;
+                    for d in 0..10 {
+                        if global_classifier.counts[d] == 0 {
+                            continue;
+                        }
+                        let dist = spacetime_distance(mv, &global_classifier.centroids[d]);
+                        if dist < best_dist {
+                            best_dist = dist;
+                            best_label = d as u8;
+                        }
+                    }
+                    (best_label, best_dist)
+                }),
+            ),
+            (
+                "discriminability-weighted",
+                Box::new(|mv: &Multivector| {
+                    let mut best_label = 0u8;
+                    let mut best_dist = f32::MAX;
+                    for d in 0..10 {
+                        if global_classifier.counts[d] == 0 {
+                            continue;
+                        }
+                        let dist =
+                            weighted_spacetime_distance(mv, &global_classifier.centroids[d], &gw);
+                        if dist < best_dist {
+                            best_dist = dist;
+                            best_label = d as u8;
+                        }
+                    }
+                    (best_label, best_dist)
+                }),
+            ),
+            (
+                "interval-augmented",
+                Box::new(|mv: &Multivector| {
+                    let mut best_label = 0u8;
+                    let mut best_dist = f32::MAX;
+                    for d in 0..10 {
+                        if global_classifier.counts[d] == 0 {
+                            continue;
+                        }
+                        let dist =
+                            interval_augmented_score(mv, &global_classifier.centroids[d], &gw);
+                        if dist < best_dist {
+                            best_dist = dist;
+                            best_label = d as u8;
+                        }
+                    }
+                    (best_label, best_dist)
+                }),
+            ),
         ];
 
         for (ci, (name, classify_fn)) in classifiers.iter().enumerate() {
@@ -2692,17 +3063,27 @@ fn run_clifford_mnist_inner(
                 }
             }
             let full_acc = full_correct as f32 / full_total.max(1) as f32;
-            vprint!("  Overall: {:.1}% ({}/{})", full_acc * 100.0, full_correct, full_total);
+            vprint!(
+                "  Overall: {:.1}% ({}/{})",
+                full_acc * 100.0,
+                full_correct,
+                full_total
+            );
             for d in 0..10 {
                 let acc = per_digit_correct[d] as f32 / per_digit_total[d].max(1) as f32;
-                vprint!("    digit {}: {:.1}% ({}/{})", d, acc * 100.0,
-                    per_digit_correct[d], per_digit_total[d]);
+                vprint!(
+                    "    digit {}: {:.1}% ({}/{})",
+                    d,
+                    acc * 100.0,
+                    per_digit_correct[d],
+                    per_digit_total[d]
+                );
             }
             if ci == 0 || full_acc > ten_class_accuracy {
                 ten_class_accuracy = full_acc;
                 for d in 0..10 {
-                    per_digit_accuracy[d] = per_digit_correct[d] as f32
-                        / per_digit_total[d].max(1) as f32;
+                    per_digit_accuracy[d] =
+                        per_digit_correct[d] as f32 / per_digit_total[d].max(1) as f32;
                 }
             }
         }
@@ -2724,33 +3105,68 @@ fn run_clifford_mnist_inner(
         }
     }
 
-    let correct_mean = if correct_intervals.is_empty() { 0.0 }
-        else { correct_intervals.iter().sum::<f32>() / correct_intervals.len() as f32 };
-    let incorrect_mean = if incorrect_intervals.is_empty() { 0.0 }
-        else { incorrect_intervals.iter().sum::<f32>() / incorrect_intervals.len() as f32 };
-    let timelike_correct = correct_intervals.iter()
+    let correct_mean = if correct_intervals.is_empty() {
+        0.0
+    } else {
+        correct_intervals.iter().sum::<f32>() / correct_intervals.len() as f32
+    };
+    let incorrect_mean = if incorrect_intervals.is_empty() {
+        0.0
+    } else {
+        incorrect_intervals.iter().sum::<f32>() / incorrect_intervals.len() as f32
+    };
+    let timelike_correct = correct_intervals
+        .iter()
         .filter(|&&i| classify_interval(i) == IntervalType::Timelike)
-        .count() as f32 / correct_intervals.len().max(1) as f32;
+        .count() as f32
+        / correct_intervals.len().max(1) as f32;
 
     vprint!("\n--- Minkowski interval statistics (post-refinement) ---");
-    vprint!("  Correct classifications:   mean interval = {:.6}", correct_mean);
-    vprint!("  Incorrect classifications: mean interval = {:.6}", incorrect_mean);
+    vprint!(
+        "  Correct classifications:   mean interval = {:.6}",
+        correct_mean
+    );
+    vprint!(
+        "  Incorrect classifications: mean interval = {:.6}",
+        incorrect_mean
+    );
     if correct_mean.abs() > 1e-8 {
-        vprint!("  Ratio (incorrect/correct): {:.1}x", incorrect_mean / correct_mean);
+        vprint!(
+            "  Ratio (incorrect/correct): {:.1}x",
+            incorrect_mean / correct_mean
+        );
     }
-    vprint!("  Correct that are timelike:   {:.1}%", timelike_correct * 100.0);
-    let timelike_incorrect = incorrect_intervals.iter()
+    vprint!(
+        "  Correct that are timelike:   {:.1}%",
+        timelike_correct * 100.0
+    );
+    let timelike_incorrect = incorrect_intervals
+        .iter()
         .filter(|&&i| classify_interval(i) == IntervalType::Timelike)
-        .count() as f32 / incorrect_intervals.len().max(1) as f32;
-    vprint!("  Incorrect that are timelike: {:.1}% (should be low)", timelike_incorrect * 100.0);
-    let spacelike_correct = correct_intervals.iter()
+        .count() as f32
+        / incorrect_intervals.len().max(1) as f32;
+    vprint!(
+        "  Incorrect that are timelike: {:.1}% (should be low)",
+        timelike_incorrect * 100.0
+    );
+    let spacelike_correct = correct_intervals
+        .iter()
         .filter(|&&i| classify_interval(i) == IntervalType::Spacelike)
-        .count() as f32 / correct_intervals.len().max(1) as f32;
-    vprint!("  Correct that are spacelike:  {:.1}%", spacelike_correct * 100.0);
-    let lightlike_correct = correct_intervals.iter()
+        .count() as f32
+        / correct_intervals.len().max(1) as f32;
+    vprint!(
+        "  Correct that are spacelike:  {:.1}%",
+        spacelike_correct * 100.0
+    );
+    let lightlike_correct = correct_intervals
+        .iter()
         .filter(|&&i| classify_interval(i) == IntervalType::Lightlike)
-        .count() as f32 / correct_intervals.len().max(1) as f32;
-    vprint!("  Correct that are lightlike:  {:.1}%", lightlike_correct * 100.0);
+        .count() as f32
+        / correct_intervals.len().max(1) as f32;
+    vprint!(
+        "  Correct that are lightlike:  {:.1}%",
+        lightlike_correct * 100.0
+    );
 
     CliffordMnistResult {
         task_accuracies,
@@ -2780,10 +3196,14 @@ fn evaluate_binary(
     for (img, lbl) in test_pairs {
         let mv = encoder.encode(img);
         let (pred, _) = classifier.classify_binary(&mv, digit_a, digit_b);
-        if pred == *lbl { correct += 1; }
+        if pred == *lbl {
+            correct += 1;
+        }
         total += 1;
     }
-    if total == 0 { return 0.0; }
+    if total == 0 {
+        return 0.0;
+    }
     correct as f32 / total as f32
 }
 
@@ -2811,7 +3231,9 @@ impl CliffordDecoder {
         verbosity: u8,
     ) -> Self {
         let d = DECODER_INPUT_DIM;
-        if verbosity >= 1 { println!("  Accumulating {} samples...", images.len()); }
+        if verbosity >= 1 {
+            println!("  Accumulating {} samples...", images.len());
+        }
 
         // Accumulate Z^T Z (d×d) and Z^T Y (d×784) in a single pass
         let mut ztz = vec![vec![0.0f64; d]; d];
@@ -2820,11 +3242,15 @@ impl CliffordDecoder {
         for (idx, img) in images.iter().enumerate() {
             let mv = encoder.encode(img);
             let mut z = [0.0f64; DECODER_INPUT_DIM];
-            for i in 0..CL8_DIM { z[i] = mv.components[i] as f64; }
+            for i in 0..CL8_DIM {
+                z[i] = mv.components[i] as f64;
+            }
             z[CL8_DIM] = 1.0; // bias
 
             for i in 0..d {
-                if z[i].abs() < 1e-12 { continue; }
+                if z[i].abs() < 1e-12 {
+                    continue;
+                }
                 for j in i..d {
                     ztz[i][j] += z[i] * z[j];
                 }
@@ -2850,7 +3276,9 @@ impl CliffordDecoder {
             ztz[i][i] += lambda as f64;
         }
 
-        if verbosity >= 1 { println!("  Solving {}×{} normal equations...", d, d); }
+        if verbosity >= 1 {
+            println!("  Solving {}×{} normal equations...", d, d);
+        }
         let inv = invert_symmetric(ztz);
 
         // W = inv(Z^T Z) * Z^T Y
@@ -2864,7 +3292,9 @@ impl CliffordDecoder {
                 weights[i][j] = s as f32;
             }
         }
-        if verbosity >= 1 { println!("  Decoder solved."); }
+        if verbosity >= 1 {
+            println!("  Decoder solved.");
+        }
 
         CliffordDecoder { weights }
     }
@@ -2888,13 +3318,18 @@ impl CliffordDecoder {
 fn invert_symmetric(m: Vec<Vec<f64>>) -> Vec<Vec<f64>> {
     let n = m.len();
     // Augmented [M | I]
-    let mut a: Vec<Vec<f64>> = m.into_iter().map(|row| {
-        let mut aug = Vec::with_capacity(2 * n);
-        aug.extend_from_slice(&row);
-        aug.resize(2 * n, 0.0);
-        aug
-    }).collect();
-    for i in 0..n { a[i][n + i] = 1.0; }
+    let mut a: Vec<Vec<f64>> = m
+        .into_iter()
+        .map(|row| {
+            let mut aug = Vec::with_capacity(2 * n);
+            aug.extend_from_slice(&row);
+            aug.resize(2 * n, 0.0);
+            aug
+        })
+        .collect();
+    for i in 0..n {
+        a[i][n + i] = 1.0;
+    }
 
     for col in 0..n {
         // Partial pivot
@@ -2902,19 +3337,30 @@ fn invert_symmetric(m: Vec<Vec<f64>>) -> Vec<Vec<f64>> {
         let mut pivot_row = col;
         for row in (col + 1)..n {
             let v = a[row][col].abs();
-            if v > best { best = v; pivot_row = row; }
+            if v > best {
+                best = v;
+                pivot_row = row;
+            }
         }
         a.swap(col, pivot_row);
 
         let pivot = a[col][col];
-        if pivot.abs() < 1e-30 { continue; }
+        if pivot.abs() < 1e-30 {
+            continue;
+        }
         let inv_pivot = 1.0 / pivot;
-        for j in 0..(2 * n) { a[col][j] *= inv_pivot; }
+        for j in 0..(2 * n) {
+            a[col][j] *= inv_pivot;
+        }
 
         for row in 0..n {
-            if row == col { continue; }
+            if row == col {
+                continue;
+            }
             let factor = a[row][col];
-            if factor.abs() < 1e-30 { continue; }
+            if factor.abs() < 1e-30 {
+                continue;
+            }
             for j in 0..(2 * n) {
                 a[row][j] -= factor * a[col][j];
             }
@@ -2928,7 +3374,7 @@ fn invert_symmetric(m: Vec<Vec<f64>>) -> Vec<Vec<f64>> {
 /// Maps 256D Cl(1,7) multivector → n_classes logits.
 /// W = (Z^T Z + λI)^{-1} Z^T Y where Y is one-hot labels.
 pub struct LinearClassifier {
-    weights: Vec<Vec<f32>>,  // DECODER_INPUT_DIM × n_classes
+    weights: Vec<Vec<f32>>, // DECODER_INPUT_DIM × n_classes
     pub n_classes: usize,
 }
 
@@ -2943,7 +3389,12 @@ impl LinearClassifier {
     ) -> Self {
         let d = DECODER_INPUT_DIM;
         let n = images.len();
-        if verbosity >= 1 { println!("  Fitting {}-class classifier on {} samples...", n_classes, n); }
+        if verbosity >= 1 {
+            println!(
+                "  Fitting {}-class classifier on {} samples...",
+                n_classes, n
+            );
+        }
 
         let mut ztz = vec![vec![0.0f64; d]; d];
         let mut zty = vec![vec![0.0f64; n_classes]; d];
@@ -2951,13 +3402,17 @@ impl LinearClassifier {
         for idx in 0..n {
             let mv = encoder.encode(&images[idx]);
             let mut z = vec![0.0f64; d];
-            for i in 0..CL8_DIM { z[i] = mv.components[i] as f64; }
+            for i in 0..CL8_DIM {
+                z[i] = mv.components[i] as f64;
+            }
             z[CL8_DIM] = 1.0;
 
             let c = labels[idx] as usize;
 
             for i in 0..d {
-                if z[i].abs() < 1e-12 { continue; }
+                if z[i].abs() < 1e-12 {
+                    continue;
+                }
                 for j in i..d {
                     ztz[i][j] += z[i] * z[j];
                 }
@@ -2970,21 +3425,33 @@ impl LinearClassifier {
             }
         }
 
-        for i in 0..d { for j in 0..i { ztz[i][j] = ztz[j][i]; } }
-        for i in 0..d { ztz[i][i] += lambda as f64; }
+        for i in 0..d {
+            for j in 0..i {
+                ztz[i][j] = ztz[j][i];
+            }
+        }
+        for i in 0..d {
+            ztz[i][i] += lambda as f64;
+        }
 
-        if verbosity >= 1 { println!("  Solving {}×{} normal equations...", d, d); }
+        if verbosity >= 1 {
+            println!("  Solving {}×{} normal equations...", d, d);
+        }
         let inv = invert_symmetric(ztz);
 
         let mut weights = vec![vec![0.0f32; n_classes]; d];
         for i in 0..d {
             for c in 0..n_classes {
                 let mut s = 0.0f64;
-                for k in 0..d { s += inv[i][k] * zty[k][c]; }
+                for k in 0..d {
+                    s += inv[i][k] * zty[k][c];
+                }
                 weights[i][c] = s as f32;
             }
         }
-        if verbosity >= 1 { println!("  Classifier solved."); }
+        if verbosity >= 1 {
+            println!("  Classifier solved.");
+        }
 
         LinearClassifier { weights, n_classes }
     }
@@ -2999,13 +3466,27 @@ impl LinearClassifier {
     ) -> Self {
         let d = DECODER_INPUT_DIM;
         let n = embeddings.len();
-        if verbosity >= 1 { println!("  Fitting {}-class classifier on {} embeddings...", n_classes, n); }
+        if verbosity >= 1 {
+            println!(
+                "  Fitting {}-class classifier on {} embeddings...",
+                n_classes, n
+            );
+        }
 
         // Inverse-frequency class weights: w_c = N / (K * count_c)
         let mut counts = vec![0.0f64; n_classes];
-        for &l in labels { counts[l as usize] += 1.0; }
-        let class_weights: Vec<f64> = counts.iter()
-            .map(|&c| if c > 0.0 { n as f64 / (n_classes as f64 * c) } else { 1.0 })
+        for &l in labels {
+            counts[l as usize] += 1.0;
+        }
+        let class_weights: Vec<f64> = counts
+            .iter()
+            .map(|&c| {
+                if c > 0.0 {
+                    n as f64 / (n_classes as f64 * c)
+                } else {
+                    1.0
+                }
+            })
             .collect();
 
         if verbosity >= 1 {
@@ -3028,11 +3509,15 @@ impl LinearClassifier {
             let sw = w.sqrt();
 
             let mut z = vec![0.0f64; d];
-            for i in 0..CL8_DIM { z[i] = mv.components[i] as f64 * sw; }
+            for i in 0..CL8_DIM {
+                z[i] = mv.components[i] as f64 * sw;
+            }
             z[CL8_DIM] = sw;
 
             for i in 0..d {
-                if z[i].abs() < 1e-12 { continue; }
+                if z[i].abs() < 1e-12 {
+                    continue;
+                }
                 for j in i..d {
                     ztz[i][j] += z[i] * z[j];
                 }
@@ -3045,21 +3530,33 @@ impl LinearClassifier {
             }
         }
 
-        for i in 0..d { for j in 0..i { ztz[i][j] = ztz[j][i]; } }
-        for i in 0..d { ztz[i][i] += lambda as f64; }
+        for i in 0..d {
+            for j in 0..i {
+                ztz[i][j] = ztz[j][i];
+            }
+        }
+        for i in 0..d {
+            ztz[i][i] += lambda as f64;
+        }
 
-        if verbosity >= 1 { println!("  Solving {}×{} normal equations...", d, d); }
+        if verbosity >= 1 {
+            println!("  Solving {}×{} normal equations...", d, d);
+        }
         let inv = invert_symmetric(ztz);
 
         let mut weights = vec![vec![0.0f32; n_classes]; d];
         for i in 0..d {
             for c in 0..n_classes {
                 let mut s = 0.0f64;
-                for k in 0..d { s += inv[i][k] * zty[k][c]; }
+                for k in 0..d {
+                    s += inv[i][k] * zty[k][c];
+                }
                 weights[i][c] = s as f32;
             }
         }
-        if verbosity >= 1 { println!("  Classifier solved."); }
+        if verbosity >= 1 {
+            println!("  Classifier solved.");
+        }
 
         LinearClassifier { weights, n_classes }
     }
@@ -3070,7 +3567,10 @@ impl LinearClassifier {
         let mut best = 0;
         let mut best_val = f32::NEG_INFINITY;
         for c in 0..self.n_classes {
-            if logits[c] > best_val { best_val = logits[c]; best = c; }
+            if logits[c] > best_val {
+                best_val = logits[c];
+                best = c;
+            }
         }
         (best as u8, best_val)
     }
@@ -3101,14 +3601,25 @@ impl LinearClassifier {
         let raw_dim = features[0].len();
         let d = raw_dim + 1; // +1 bias
         if verbosity >= 1 {
-            println!("  Fitting {}-class classifier on {} samples, {}D features (+bias={}D)...",
-                n_classes, n, raw_dim, d);
+            println!(
+                "  Fitting {}-class classifier on {} samples, {}D features (+bias={}D)...",
+                n_classes, n, raw_dim, d
+            );
         }
 
         let mut counts = vec![0.0f64; n_classes];
-        for &l in labels { counts[l as usize] += 1.0; }
-        let class_weights: Vec<f64> = counts.iter()
-            .map(|&c| if c > 0.0 { n as f64 / (n_classes as f64 * c) } else { 1.0 })
+        for &l in labels {
+            counts[l as usize] += 1.0;
+        }
+        let class_weights: Vec<f64> = counts
+            .iter()
+            .map(|&c| {
+                if c > 0.0 {
+                    n as f64 / (n_classes as f64 * c)
+                } else {
+                    1.0
+                }
+            })
             .collect();
 
         if verbosity >= 1 {
@@ -3129,11 +3640,15 @@ impl LinearClassifier {
             let sw = w.sqrt();
 
             let mut z = vec![0.0f64; d];
-            for i in 0..raw_dim { z[i] = feat[i] as f64 * sw; }
+            for i in 0..raw_dim {
+                z[i] = feat[i] as f64 * sw;
+            }
             z[raw_dim] = sw; // bias
 
             for i in 0..d {
-                if z[i].abs() < 1e-12 { continue; }
+                if z[i].abs() < 1e-12 {
+                    continue;
+                }
                 for j in i..d {
                     ztz[i][j] += z[i] * z[j];
                 }
@@ -3145,21 +3660,33 @@ impl LinearClassifier {
             }
         }
 
-        for i in 0..d { for j in 0..i { ztz[i][j] = ztz[j][i]; } }
-        for i in 0..d { ztz[i][i] += lambda as f64; }
+        for i in 0..d {
+            for j in 0..i {
+                ztz[i][j] = ztz[j][i];
+            }
+        }
+        for i in 0..d {
+            ztz[i][i] += lambda as f64;
+        }
 
-        if verbosity >= 1 { println!("  Solving {}×{} normal equations...", d, d); }
+        if verbosity >= 1 {
+            println!("  Solving {}×{} normal equations...", d, d);
+        }
         let inv = invert_symmetric(ztz);
 
         let mut weights = vec![vec![0.0f32; n_classes]; d];
         for i in 0..d {
             for c in 0..n_classes {
                 let mut s = 0.0f64;
-                for k in 0..d { s += inv[i][k] * zty[k][c]; }
+                for k in 0..d {
+                    s += inv[i][k] * zty[k][c];
+                }
                 weights[i][c] = s as f32;
             }
         }
-        if verbosity >= 1 { println!("  Classifier solved."); }
+        if verbosity >= 1 {
+            println!("  Classifier solved.");
+        }
 
         LinearClassifier { weights, n_classes }
     }
@@ -3174,7 +3701,10 @@ impl LinearClassifier {
             for i in 0..raw_dim {
                 s += self.weights[i][c] * features[i];
             }
-            if s > best_val { best_val = s; best = c; }
+            if s > best_val {
+                best_val = s;
+                best = c;
+            }
         }
         (best as u8, best_val)
     }
@@ -3182,11 +3712,15 @@ impl LinearClassifier {
     /// Return per-class logits from an arbitrary-width feature vector.
     pub fn logits_features(&self, features: &[f32]) -> Vec<f32> {
         let raw_dim = self.weights.len() - 1;
-        (0..self.n_classes).map(|c| {
-            let mut s = self.weights[raw_dim][c];
-            for i in 0..raw_dim { s += self.weights[i][c] * features[i]; }
-            s
-        }).collect()
+        (0..self.n_classes)
+            .map(|c| {
+                let mut s = self.weights[raw_dim][c];
+                for i in 0..raw_dim {
+                    s += self.weights[i][c] * features[i];
+                }
+                s
+            })
+            .collect()
     }
 }
 
@@ -3197,8 +3731,12 @@ fn compute_ssim(a: &[f32], b: &[f32]) -> f32 {
     let mu_b: f32 = b.iter().sum::<f32>() / n;
     let var_a: f32 = a.iter().map(|x| (x - mu_a) * (x - mu_a)).sum::<f32>() / n;
     let var_b: f32 = b.iter().map(|x| (x - mu_b) * (x - mu_b)).sum::<f32>() / n;
-    let cov: f32 = a.iter().zip(b.iter())
-        .map(|(x, y)| (x - mu_a) * (y - mu_b)).sum::<f32>() / n;
+    let cov: f32 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - mu_a) * (y - mu_b))
+        .sum::<f32>()
+        / n;
     let c1 = 0.0001f32;
     let c2 = 0.0009f32;
     let num = (2.0 * mu_a * mu_b + c1) * (2.0 * cov + c2);
@@ -3253,14 +3791,20 @@ pub fn run_clifford_autoencoder(
         let mv = encoder.encode(img);
         let recon = decoder.decode(&mv);
 
-        let mse: f32 = recon.iter().zip(img.iter())
-            .map(|(r, t)| (r - t) * (r - t)).sum::<f32>() / IMAGE_DIM as f32;
+        let mse: f32 = recon
+            .iter()
+            .zip(img.iter())
+            .map(|(r, t)| (r - t) * (r - t))
+            .sum::<f32>()
+            / IMAGE_DIM as f32;
         total_mse += mse;
         total_ssim += compute_ssim(&recon, img);
 
         let recon_mv = encoder.encode(&recon);
         let (pred, _) = classifier.classify(&recon_mv);
-        if pred == lbl { recon_correct += 1; }
+        if pred == lbl {
+            recon_correct += 1;
+        }
 
         if !seen[lbl as usize] {
             seen[lbl as usize] = true;
@@ -3292,7 +3836,9 @@ pub fn render_ascii(pixels: &[f32], width: usize) -> String {
     for (i, &p) in pixels.iter().enumerate() {
         let idx = ((p.clamp(0.0, 1.0)) * (chars.len() - 1) as f32).round() as usize;
         out.push(chars[idx.min(chars.len() - 1)]);
-        if (i + 1) % width == 0 { out.push('\n'); }
+        if (i + 1) % width == 0 {
+            out.push('\n');
+        }
     }
     out
 }
@@ -3308,8 +3854,10 @@ mod tests {
         let mv = encoder.encode(&image);
         let norm: f32 = mv.components.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!(norm > 0.0, "encoded image should have nonzero norm");
-        assert!(mv.grade(1).iter().any(|&x| x.abs() > 1e-6),
-            "grade-1 should have content");
+        assert!(
+            mv.grade(1).iter().any(|&x| x.abs() > 1e-6),
+            "grade-1 should have content"
+        );
     }
 
     #[test]
@@ -3320,7 +3868,10 @@ mod tests {
         let mv_a = encoder.encode(&img_a);
         let mv_b = encoder.encode(&img_b);
         let interval = minkowski_interval(&mv_a, &mv_b);
-        assert!(interval.abs() > 1e-6, "different images should have nonzero interval");
+        assert!(
+            interval.abs() > 1e-6,
+            "different images should have nonzero interval"
+        );
     }
 
     #[test]

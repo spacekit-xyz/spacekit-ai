@@ -119,104 +119,448 @@ struct ConnectorRule {
 /// within the same length tier, but we always prefer longer phrases.
 const CONNECTOR_RULES: &[ConnectorRule] = &[
     // --- Retrospective (check first — often co-occurs with other connectors) ---
-    ConnectorRule { phrase: "in retrospect", relation: CausalRelation::Retrospective, confidence: 1.0 },
-    ConnectorRule { phrase: "looking back", relation: CausalRelation::Retrospective, confidence: 1.0 },
-    ConnectorRule { phrase: "it turned out", relation: CausalRelation::Retrospective, confidence: 1.0 },
-    ConnectorRule { phrase: "turned out", relation: CausalRelation::Retrospective, confidence: 0.95 },
-    ConnectorRule { phrase: "in hindsight", relation: CausalRelation::Retrospective, confidence: 1.0 },
-    ConnectorRule { phrase: "ended up being", relation: CausalRelation::Retrospective, confidence: 0.9 },
-    ConnectorRule { phrase: "now i realize", relation: CausalRelation::Retrospective, confidence: 0.9 },
-    ConnectorRule { phrase: "now i realise", relation: CausalRelation::Retrospective, confidence: 0.9 },
+    ConnectorRule {
+        phrase: "in retrospect",
+        relation: CausalRelation::Retrospective,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: "looking back",
+        relation: CausalRelation::Retrospective,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: "it turned out",
+        relation: CausalRelation::Retrospective,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: "turned out",
+        relation: CausalRelation::Retrospective,
+        confidence: 0.95,
+    },
+    ConnectorRule {
+        phrase: "in hindsight",
+        relation: CausalRelation::Retrospective,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: "ended up being",
+        relation: CausalRelation::Retrospective,
+        confidence: 0.9,
+    },
+    ConnectorRule {
+        phrase: "now i realize",
+        relation: CausalRelation::Retrospective,
+        confidence: 0.9,
+    },
+    ConnectorRule {
+        phrase: "now i realise",
+        relation: CausalRelation::Retrospective,
+        confidence: 0.9,
+    },
     // --- Counterfactual ---
-    ConnectorRule { phrase: " would have ", relation: CausalRelation::Counterfactual, confidence: 0.9 },
-    ConnectorRule { phrase: " would've ", relation: CausalRelation::Counterfactual, confidence: 0.9 },
-    ConnectorRule { phrase: " wouldn't have ", relation: CausalRelation::Counterfactual, confidence: 0.95 },
-    ConnectorRule { phrase: " wouldnt have ", relation: CausalRelation::Counterfactual, confidence: 0.95 },
-    ConnectorRule { phrase: "if the ", relation: CausalRelation::Counterfactual, confidence: 0.7 },
-    ConnectorRule { phrase: "if they ", relation: CausalRelation::Counterfactual, confidence: 0.7 },
-    ConnectorRule { phrase: "if we ", relation: CausalRelation::Counterfactual, confidence: 0.7 },
-    ConnectorRule { phrase: "without the ", relation: CausalRelation::Counterfactual, confidence: 0.85 },
-    ConnectorRule { phrase: "had they ", relation: CausalRelation::Counterfactual, confidence: 0.9 },
-    ConnectorRule { phrase: "had we ", relation: CausalRelation::Counterfactual, confidence: 0.9 },
-    ConnectorRule { phrase: "should the ", relation: CausalRelation::Counterfactual, confidence: 0.8 },
+    ConnectorRule {
+        phrase: " would have ",
+        relation: CausalRelation::Counterfactual,
+        confidence: 0.9,
+    },
+    ConnectorRule {
+        phrase: " would've ",
+        relation: CausalRelation::Counterfactual,
+        confidence: 0.9,
+    },
+    ConnectorRule {
+        phrase: " wouldn't have ",
+        relation: CausalRelation::Counterfactual,
+        confidence: 0.95,
+    },
+    ConnectorRule {
+        phrase: " wouldnt have ",
+        relation: CausalRelation::Counterfactual,
+        confidence: 0.95,
+    },
+    ConnectorRule {
+        phrase: "if the ",
+        relation: CausalRelation::Counterfactual,
+        confidence: 0.7,
+    },
+    ConnectorRule {
+        phrase: "if they ",
+        relation: CausalRelation::Counterfactual,
+        confidence: 0.7,
+    },
+    ConnectorRule {
+        phrase: "if we ",
+        relation: CausalRelation::Counterfactual,
+        confidence: 0.7,
+    },
+    ConnectorRule {
+        phrase: "without the ",
+        relation: CausalRelation::Counterfactual,
+        confidence: 0.85,
+    },
+    ConnectorRule {
+        phrase: "had they ",
+        relation: CausalRelation::Counterfactual,
+        confidence: 0.9,
+    },
+    ConnectorRule {
+        phrase: "had we ",
+        relation: CausalRelation::Counterfactual,
+        confidence: 0.9,
+    },
+    ConnectorRule {
+        phrase: "should the ",
+        relation: CausalRelation::Counterfactual,
+        confidence: 0.8,
+    },
     // --- Concessive (check before compensatory — "yet somehow" is concessive, not compensatory) ---
-    ConnectorRule { phrase: " yet somehow ", relation: CausalRelation::Concessive, confidence: 1.0 },
-    ConnectorRule { phrase: " but somehow ", relation: CausalRelation::Concessive, confidence: 1.0 },
-    ConnectorRule { phrase: " but still ", relation: CausalRelation::Concessive, confidence: 0.95 },
-    ConnectorRule { phrase: "; still, ", relation: CausalRelation::Concessive, confidence: 0.95 },
-    ConnectorRule { phrase: "; still ", relation: CausalRelation::Concessive, confidence: 0.9 },
-    ConnectorRule { phrase: " somehow ", relation: CausalRelation::Concessive, confidence: 0.7 },
-    ConnectorRule { phrase: " nevertheless ", relation: CausalRelation::Concessive, confidence: 0.95 },
+    ConnectorRule {
+        phrase: " yet somehow ",
+        relation: CausalRelation::Concessive,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: " but somehow ",
+        relation: CausalRelation::Concessive,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: " but still ",
+        relation: CausalRelation::Concessive,
+        confidence: 0.95,
+    },
+    ConnectorRule {
+        phrase: "; still, ",
+        relation: CausalRelation::Concessive,
+        confidence: 0.95,
+    },
+    ConnectorRule {
+        phrase: "; still ",
+        relation: CausalRelation::Concessive,
+        confidence: 0.9,
+    },
+    ConnectorRule {
+        phrase: " somehow ",
+        relation: CausalRelation::Concessive,
+        confidence: 0.7,
+    },
+    ConnectorRule {
+        phrase: " nevertheless ",
+        relation: CausalRelation::Concessive,
+        confidence: 0.95,
+    },
     // --- Contrastive ---
-    ConnectorRule { phrase: " even though ", relation: CausalRelation::Contrastive, confidence: 1.0 },
-    ConnectorRule { phrase: " despite ", relation: CausalRelation::Contrastive, confidence: 1.0 },
-    ConnectorRule { phrase: " although ", relation: CausalRelation::Contrastive, confidence: 0.95 },
-    ConnectorRule { phrase: ", though ", relation: CausalRelation::Contrastive, confidence: 0.85 },
-    ConnectorRule { phrase: " though ", relation: CausalRelation::Contrastive, confidence: 0.75 },
+    ConnectorRule {
+        phrase: " even though ",
+        relation: CausalRelation::Contrastive,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: " despite ",
+        relation: CausalRelation::Contrastive,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: " although ",
+        relation: CausalRelation::Contrastive,
+        confidence: 0.95,
+    },
+    ConnectorRule {
+        phrase: ", though ",
+        relation: CausalRelation::Contrastive,
+        confidence: 0.85,
+    },
+    ConnectorRule {
+        phrase: " though ",
+        relation: CausalRelation::Contrastive,
+        confidence: 0.75,
+    },
     // --- Compensatory ---
-    ConnectorRule { phrase: " at least ", relation: CausalRelation::Compensatory, confidence: 0.95 },
-    ConnectorRule { phrase: " however ", relation: CausalRelation::Compensatory, confidence: 0.9 },
+    ConnectorRule {
+        phrase: " at least ",
+        relation: CausalRelation::Compensatory,
+        confidence: 0.95,
+    },
+    ConnectorRule {
+        phrase: " however ",
+        relation: CausalRelation::Compensatory,
+        confidence: 0.9,
+    },
     // --- Inferential ---
-    ConnectorRule { phrase: " which suggests ", relation: CausalRelation::Inferential, confidence: 1.0 },
-    ConnectorRule { phrase: " which means ", relation: CausalRelation::Inferential, confidence: 1.0 },
-    ConnectorRule { phrase: " which implies ", relation: CausalRelation::Inferential, confidence: 1.0 },
-    ConnectorRule { phrase: ", implying ", relation: CausalRelation::Inferential, confidence: 1.0 },
-    ConnectorRule { phrase: ", suggesting ", relation: CausalRelation::Inferential, confidence: 0.95 },
-    ConnectorRule { phrase: ", meaning ", relation: CausalRelation::Inferential, confidence: 0.95 },
-    ConnectorRule { phrase: " meaning ", relation: CausalRelation::Inferential, confidence: 0.85 },
-    ConnectorRule { phrase: " implying ", relation: CausalRelation::Inferential, confidence: 0.9 },
-    ConnectorRule { phrase: " suggesting ", relation: CausalRelation::Inferential, confidence: 0.85 },
+    ConnectorRule {
+        phrase: " which suggests ",
+        relation: CausalRelation::Inferential,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: " which means ",
+        relation: CausalRelation::Inferential,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: " which implies ",
+        relation: CausalRelation::Inferential,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: ", implying ",
+        relation: CausalRelation::Inferential,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: ", suggesting ",
+        relation: CausalRelation::Inferential,
+        confidence: 0.95,
+    },
+    ConnectorRule {
+        phrase: ", meaning ",
+        relation: CausalRelation::Inferential,
+        confidence: 0.95,
+    },
+    ConnectorRule {
+        phrase: " meaning ",
+        relation: CausalRelation::Inferential,
+        confidence: 0.85,
+    },
+    ConnectorRule {
+        phrase: " implying ",
+        relation: CausalRelation::Inferential,
+        confidence: 0.9,
+    },
+    ConnectorRule {
+        phrase: " suggesting ",
+        relation: CausalRelation::Inferential,
+        confidence: 0.85,
+    },
     // --- Explanatory ---
-    ConnectorRule { phrase: " because ", relation: CausalRelation::Explanatory, confidence: 1.0 },
-    ConnectorRule { phrase: " since ", relation: CausalRelation::Explanatory, confidence: 0.8 },
-    ConnectorRule { phrase: "given that ", relation: CausalRelation::Explanatory, confidence: 0.9 },
-    ConnectorRule { phrase: " given that ", relation: CausalRelation::Explanatory, confidence: 0.9 },
+    ConnectorRule {
+        phrase: " because ",
+        relation: CausalRelation::Explanatory,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: " since ",
+        relation: CausalRelation::Explanatory,
+        confidence: 0.8,
+    },
+    ConnectorRule {
+        phrase: "given that ",
+        relation: CausalRelation::Explanatory,
+        confidence: 0.9,
+    },
+    ConnectorRule {
+        phrase: " given that ",
+        relation: CausalRelation::Explanatory,
+        confidence: 0.9,
+    },
     // --- Contrastive (while / whereas — check before direct to avoid "while" ambiguity) ---
-    ConnectorRule { phrase: "while ", relation: CausalRelation::Contrastive, confidence: 0.7 },
-    ConnectorRule { phrase: " while ", relation: CausalRelation::Contrastive, confidence: 0.7 },
-    ConnectorRule { phrase: "whereas ", relation: CausalRelation::Contrastive, confidence: 0.95 },
-    ConnectorRule { phrase: " whereas ", relation: CausalRelation::Contrastive, confidence: 0.95 },
+    ConnectorRule {
+        phrase: "while ",
+        relation: CausalRelation::Contrastive,
+        confidence: 0.7,
+    },
+    ConnectorRule {
+        phrase: " while ",
+        relation: CausalRelation::Contrastive,
+        confidence: 0.7,
+    },
+    ConnectorRule {
+        phrase: "whereas ",
+        relation: CausalRelation::Contrastive,
+        confidence: 0.95,
+    },
+    ConnectorRule {
+        phrase: " whereas ",
+        relation: CausalRelation::Contrastive,
+        confidence: 0.95,
+    },
     // --- Direct (participial and explicit connectors) ---
-    ConnectorRule { phrase: " triggered ", relation: CausalRelation::Direct, confidence: 1.0 },
-    ConnectorRule { phrase: ", triggering ", relation: CausalRelation::Direct, confidence: 1.0 },
-    ConnectorRule { phrase: " triggering ", relation: CausalRelation::Direct, confidence: 0.95 },
-    ConnectorRule { phrase: " caused ", relation: CausalRelation::Direct, confidence: 1.0 },
-    ConnectorRule { phrase: " causing ", relation: CausalRelation::Direct, confidence: 1.0 },
-    ConnectorRule { phrase: ", pushing ", relation: CausalRelation::Direct, confidence: 0.95 },
-    ConnectorRule { phrase: " pushing ", relation: CausalRelation::Direct, confidence: 0.85 },
-    ConnectorRule { phrase: " resulted in ", relation: CausalRelation::Direct, confidence: 1.0 },
-    ConnectorRule { phrase: ", resulting in ", relation: CausalRelation::Direct, confidence: 1.0 },
-    ConnectorRule { phrase: " resulting in ", relation: CausalRelation::Direct, confidence: 0.95 },
-    ConnectorRule { phrase: " led to ", relation: CausalRelation::Direct, confidence: 1.0 },
-    ConnectorRule { phrase: " lead to ", relation: CausalRelation::Direct, confidence: 0.95 },
-    ConnectorRule { phrase: ", leading to ", relation: CausalRelation::Direct, confidence: 1.0 },
-    ConnectorRule { phrase: " leading to ", relation: CausalRelation::Direct, confidence: 0.95 },
-    ConnectorRule { phrase: " thereby ", relation: CausalRelation::Direct, confidence: 0.95 },
-    ConnectorRule { phrase: " therefore ", relation: CausalRelation::Direct, confidence: 1.0 },
-    ConnectorRule { phrase: " so that ", relation: CausalRelation::Direct, confidence: 0.9 },
-    ConnectorRule { phrase: ", so ", relation: CausalRelation::Direct, confidence: 0.9 },
-    ConnectorRule { phrase: ". so ", relation: CausalRelation::Direct, confidence: 0.9 },
-    ConnectorRule { phrase: "; so ", relation: CausalRelation::Direct, confidence: 0.9 },
-    ConnectorRule { phrase: " thus ", relation: CausalRelation::Direct, confidence: 0.9 },
+    ConnectorRule {
+        phrase: " triggered ",
+        relation: CausalRelation::Direct,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: ", triggering ",
+        relation: CausalRelation::Direct,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: " triggering ",
+        relation: CausalRelation::Direct,
+        confidence: 0.95,
+    },
+    ConnectorRule {
+        phrase: " caused ",
+        relation: CausalRelation::Direct,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: " causing ",
+        relation: CausalRelation::Direct,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: ", pushing ",
+        relation: CausalRelation::Direct,
+        confidence: 0.95,
+    },
+    ConnectorRule {
+        phrase: " pushing ",
+        relation: CausalRelation::Direct,
+        confidence: 0.85,
+    },
+    ConnectorRule {
+        phrase: " resulted in ",
+        relation: CausalRelation::Direct,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: ", resulting in ",
+        relation: CausalRelation::Direct,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: " resulting in ",
+        relation: CausalRelation::Direct,
+        confidence: 0.95,
+    },
+    ConnectorRule {
+        phrase: " led to ",
+        relation: CausalRelation::Direct,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: " lead to ",
+        relation: CausalRelation::Direct,
+        confidence: 0.95,
+    },
+    ConnectorRule {
+        phrase: ", leading to ",
+        relation: CausalRelation::Direct,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: " leading to ",
+        relation: CausalRelation::Direct,
+        confidence: 0.95,
+    },
+    ConnectorRule {
+        phrase: " thereby ",
+        relation: CausalRelation::Direct,
+        confidence: 0.95,
+    },
+    ConnectorRule {
+        phrase: " therefore ",
+        relation: CausalRelation::Direct,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: " so that ",
+        relation: CausalRelation::Direct,
+        confidence: 0.9,
+    },
+    ConnectorRule {
+        phrase: ", so ",
+        relation: CausalRelation::Direct,
+        confidence: 0.9,
+    },
+    ConnectorRule {
+        phrase: ". so ",
+        relation: CausalRelation::Direct,
+        confidence: 0.9,
+    },
+    ConnectorRule {
+        phrase: "; so ",
+        relation: CausalRelation::Direct,
+        confidence: 0.9,
+    },
+    ConnectorRule {
+        phrase: " thus ",
+        relation: CausalRelation::Direct,
+        confidence: 0.9,
+    },
     // --- Direct (result phrases — multi-word, high confidence) ---
-    ConnectorRule { phrase: ". as a result, ", relation: CausalRelation::Direct, confidence: 1.0 },
-    ConnectorRule { phrase: ". as a result ", relation: CausalRelation::Direct, confidence: 0.95 },
-    ConnectorRule { phrase: ", as a result ", relation: CausalRelation::Direct, confidence: 0.95 },
-    ConnectorRule { phrase: ". consequently, ", relation: CausalRelation::Direct, confidence: 1.0 },
-    ConnectorRule { phrase: ". consequently ", relation: CausalRelation::Direct, confidence: 0.95 },
-    ConnectorRule { phrase: " consequently ", relation: CausalRelation::Direct, confidence: 0.85 },
+    ConnectorRule {
+        phrase: ". as a result, ",
+        relation: CausalRelation::Direct,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: ". as a result ",
+        relation: CausalRelation::Direct,
+        confidence: 0.95,
+    },
+    ConnectorRule {
+        phrase: ", as a result ",
+        relation: CausalRelation::Direct,
+        confidence: 0.95,
+    },
+    ConnectorRule {
+        phrase: ". consequently, ",
+        relation: CausalRelation::Direct,
+        confidence: 1.0,
+    },
+    ConnectorRule {
+        phrase: ". consequently ",
+        relation: CausalRelation::Direct,
+        confidence: 0.95,
+    },
+    ConnectorRule {
+        phrase: " consequently ",
+        relation: CausalRelation::Direct,
+        confidence: 0.85,
+    },
     // --- Direct (temporal-causal — "after X, Y happened") ---
-    ConnectorRule { phrase: "after the ", relation: CausalRelation::Direct, confidence: 0.7 },
-    ConnectorRule { phrase: "once the ", relation: CausalRelation::Direct, confidence: 0.7 },
-    ConnectorRule { phrase: "once ", relation: CausalRelation::Direct, confidence: 0.6 },
-    ConnectorRule { phrase: "following the ", relation: CausalRelation::Direct, confidence: 0.75 },
-    ConnectorRule { phrase: " on top of ", relation: CausalRelation::Direct, confidence: 0.85 },
+    ConnectorRule {
+        phrase: "after the ",
+        relation: CausalRelation::Direct,
+        confidence: 0.7,
+    },
+    ConnectorRule {
+        phrase: "once the ",
+        relation: CausalRelation::Direct,
+        confidence: 0.7,
+    },
+    ConnectorRule {
+        phrase: "once ",
+        relation: CausalRelation::Direct,
+        confidence: 0.6,
+    },
+    ConnectorRule {
+        phrase: "following the ",
+        relation: CausalRelation::Direct,
+        confidence: 0.75,
+    },
+    ConnectorRule {
+        phrase: " on top of ",
+        relation: CausalRelation::Direct,
+        confidence: 0.85,
+    },
     // --- Contrastive / Concessive fallback for bare "yet" / "but" ---
     // "yet" without "somehow"/"still" is contrastive, not concessive.
-    ConnectorRule { phrase: " yet ", relation: CausalRelation::Contrastive, confidence: 0.8 },
-    ConnectorRule { phrase: ", yet ", relation: CausalRelation::Contrastive, confidence: 0.85 },
-    ConnectorRule { phrase: " but ", relation: CausalRelation::Compensatory, confidence: 0.7 },
-    ConnectorRule { phrase: ", but ", relation: CausalRelation::Compensatory, confidence: 0.75 },
+    ConnectorRule {
+        phrase: " yet ",
+        relation: CausalRelation::Contrastive,
+        confidence: 0.8,
+    },
+    ConnectorRule {
+        phrase: ", yet ",
+        relation: CausalRelation::Contrastive,
+        confidence: 0.85,
+    },
+    ConnectorRule {
+        phrase: " but ",
+        relation: CausalRelation::Compensatory,
+        confidence: 0.7,
+    },
+    ConnectorRule {
+        phrase: ", but ",
+        relation: CausalRelation::Compensatory,
+        confidence: 0.75,
+    },
 ];
 
 /// Detect the causal relation type from surface connectors in `intent_text`.
@@ -305,23 +649,57 @@ pub struct CausalSentimentResult {
 /// output to NEGATIVE rather than letting causal structure neutralize it.
 fn has_financial_harm_language(clause: &str) -> bool {
     const HARM_PHRASES: &[&str] = &[
-        "slashed", "tripled", "doubled", "halted", "priced out",
-        "down thirty", "down 30", "plunged", "crashed", "collapsed",
-        "rejected", "denied", "expired", "missed", "failed",
-        "pulled", "walked", "spiked", "nightmare", "destroyed",
-        "lost", "underwater", "bleeding", "hemorrhag", "insolven",
-        "default", "covenant", "breach", "penalty",
-        "awful", "terrible", "worst", "furious", "angry",
-        "stressed", "nightmare", "no upside",
+        "slashed",
+        "tripled",
+        "doubled",
+        "halted",
+        "priced out",
+        "down thirty",
+        "down 30",
+        "plunged",
+        "crashed",
+        "collapsed",
+        "rejected",
+        "denied",
+        "expired",
+        "missed",
+        "failed",
+        "pulled",
+        "walked",
+        "spiked",
+        "nightmare",
+        "destroyed",
+        "lost",
+        "underwater",
+        "bleeding",
+        "hemorrhag",
+        "insolven",
+        "default",
+        "covenant",
+        "breach",
+        "penalty",
+        "awful",
+        "terrible",
+        "worst",
+        "furious",
+        "angry",
+        "stressed",
+        "nightmare",
+        "no upside",
     ];
     HARM_PHRASES.iter().any(|p| clause.contains(p))
 }
 
 fn polarity_to_coarse(topic: &str) -> &'static str {
-    if topic.starts_with("positive") { "positive" }
-    else if topic.starts_with("negative") { "negative" }
-    else if topic == "mixed" { "mixed" }
-    else { "neutral" }
+    if topic.starts_with("positive") {
+        "positive"
+    } else if topic.starts_with("negative") {
+        "negative"
+    } else if topic == "mixed" {
+        "mixed"
+    } else {
+        "neutral"
+    }
 }
 
 fn sentiment_display_label(coarse: &str) -> &'static str {
@@ -337,9 +715,7 @@ fn sentiment_display_label(coarse: &str) -> &'static str {
 /// lexical machinery, then combine based on the causal relation type.
 ///
 /// Returns `Some(CausalSentimentResult)` when the relation is non-None.
-pub fn score_with_relation(
-    intent_text: &str,
-) -> Option<CausalSentimentResult> {
+pub fn score_with_relation(intent_text: &str) -> Option<CausalSentimentResult> {
     let cr = detect(intent_text)?;
 
     let rules = super::inference_toml::inference_rules_runtime();
@@ -349,12 +725,14 @@ pub fn score_with_relation(
     let c1 = clause1_raw.to_ascii_lowercase();
     let c2 = clause2_raw.to_ascii_lowercase();
 
-    let pol1 = rules.lexical_polarity_signal(&c1)
+    let pol1 = rules
+        .lexical_polarity_signal(&c1)
         .map(|k| rules.apply_degree_modifiers(&c1, &k));
     let pol2 = if c2.is_empty() {
         None
     } else {
-        rules.lexical_polarity_signal(&c2)
+        rules
+            .lexical_polarity_signal(&c2)
             .map(|k| rules.apply_degree_modifiers(&c2, &k))
     };
 
@@ -365,15 +743,14 @@ pub fn score_with_relation(
     let full_contrast = rules.has_contrastive_marker(&lower_full);
     let full_bipolar = rules.has_bipolar_lexicon(&lower_full);
 
-    let combined = if coarse1 != coarse2
-        && coarse1 != "neutral"
-        && coarse2 != "neutral"
-    {
+    let combined = if coarse1 != coarse2 && coarse1 != "neutral" && coarse2 != "neutral" {
         "mixed"
     } else if full_contrast && full_bipolar {
         "mixed"
-    } else if matches!(cr.relation, CausalRelation::Contrastive | CausalRelation::Concessive)
-        && ((coarse1 != "neutral") ^ (coarse2 != "neutral"))
+    } else if matches!(
+        cr.relation,
+        CausalRelation::Contrastive | CausalRelation::Concessive
+    ) && ((coarse1 != "neutral") ^ (coarse2 != "neutral"))
     {
         // Contrastive/Concessive structure with only one scorable clause: the
         // speaker explicitly hedged via "but" / "yet" / "although", so the
@@ -415,7 +792,10 @@ pub fn score_with_relation(
             let key = pol1
                 .as_deref()
                 .filter(|p| polarity_to_coarse(p) == "positive")
-                .or_else(|| pol2.as_deref().filter(|p| polarity_to_coarse(p) == "positive"))
+                .or_else(|| {
+                    pol2.as_deref()
+                        .filter(|p| polarity_to_coarse(p) == "positive")
+                })
                 .unwrap_or("positive_mild");
             match rules.anchor_phrase(&lower_full, key) {
                 Some(a) => format!("{}. The overall tone reads as positive", a),
@@ -426,7 +806,10 @@ pub fn score_with_relation(
             let key = pol1
                 .as_deref()
                 .filter(|p| polarity_to_coarse(p) == "negative")
-                .or_else(|| pol2.as_deref().filter(|p| polarity_to_coarse(p) == "negative"))
+                .or_else(|| {
+                    pol2.as_deref()
+                        .filter(|p| polarity_to_coarse(p) == "negative")
+                })
                 .unwrap_or("negative_mild");
             match rules.anchor_phrase(&lower_full, key) {
                 Some(a) => format!("{}. The overall tone reads as negative", a),
@@ -447,10 +830,7 @@ pub fn score_with_relation(
 }
 
 /// Format the final output line combining causal relation + sentiment.
-pub fn format_causal_sentiment_line(
-    r: &CausalSentimentResult,
-    intent_text: &str,
-) -> String {
+pub fn format_causal_sentiment_line(r: &CausalSentimentResult, intent_text: &str) -> String {
     let excerpt = {
         let trimmed = intent_text.trim();
         if trimmed.chars().count() > 200 {
@@ -505,7 +885,9 @@ mod tests {
 
     #[test]
     fn contrastive_yet() {
-        let r = detect("The company announced mass layoffs yet the stock closed at an all-time high.").unwrap();
+        let r =
+            detect("The company announced mass layoffs yet the stock closed at an all-time high.")
+                .unwrap();
         assert_eq!(r.relation, CausalRelation::Contrastive);
         assert!(r.connector.contains("yet"));
     }
@@ -558,20 +940,25 @@ mod tests {
 
     #[test]
     fn direct_pushing() {
-        let r = detect("Copper futures spiked, pushing manufacturing input costs to a five-year high.").unwrap();
+        let r =
+            detect("Copper futures spiked, pushing manufacturing input costs to a five-year high.")
+                .unwrap();
         assert_eq!(r.relation, CausalRelation::Direct);
         assert!(r.connector.contains("pushing"));
     }
 
     #[test]
     fn contrastive_even_though() {
-        let r = detect("Customer satisfaction improved even though response times got worse.").unwrap();
+        let r =
+            detect("Customer satisfaction improved even though response times got worse.").unwrap();
         assert_eq!(r.relation, CausalRelation::Contrastive);
     }
 
     #[test]
     fn concessive_but_still() {
-        let r = detect("Budget was slashed across the board but still engineering shipped on time.").unwrap();
+        let r =
+            detect("Budget was slashed across the board but still engineering shipped on time.")
+                .unwrap();
         assert_eq!(r.relation, CausalRelation::Concessive);
     }
 }

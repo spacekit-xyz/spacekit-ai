@@ -239,8 +239,7 @@ impl GenerationHead {
             let idx = if temperature <= GREEDY_TEMP_EPS {
                 Self::argmax(&logits)
             } else {
-                let scaled: Vec<f32> =
-                    logits.iter().map(|&l| l / temperature.max(0.01)).collect();
+                let scaled: Vec<f32> = logits.iter().map(|&l| l / temperature.max(0.01)).collect();
                 let probs = Self::softmax(&scaled);
                 Self::sample_top_k_p(&probs, TOP_K, TOP_P, &mut rng_state)
             };
@@ -292,8 +291,7 @@ impl GenerationHead {
     /// Sample an index from `probs` after restricting to the top-k highest
     /// probabilities and the smallest nucleus whose cumulative mass ≥ `top_p`.
     fn sample_top_k_p(probs: &[f32], top_k: usize, top_p: f32, rng_state: &mut u64) -> usize {
-        let mut ranked: Vec<(usize, f32)> =
-            probs.iter().copied().enumerate().collect();
+        let mut ranked: Vec<(usize, f32)> = probs.iter().copied().enumerate().collect();
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         ranked.truncate(top_k.max(1));
 
@@ -428,7 +426,10 @@ mod tests {
         // Same cond + same temperature must yield identical output (seeded RNG).
         let a = head.generate(&cond, 24, 0.8);
         let b = head.generate(&cond, 24, 0.8);
-        assert_eq!(a, b, "sampling should be reproducible for a fixed conditioning");
+        assert_eq!(
+            a, b,
+            "sampling should be reproducible for a fixed conditioning"
+        );
     }
 
     #[test]

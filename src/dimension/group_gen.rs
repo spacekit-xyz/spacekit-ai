@@ -26,14 +26,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 use crate::clifford::{
-    embed_bridge_vector, causal_fingerprint, spatial_fingerprint,
-    BOOST_BIVECTOR_COUNT,
+    causal_fingerprint, embed_bridge_vector, spatial_fingerprint, BOOST_BIVECTOR_COUNT,
 };
 use crate::cloze;
 use crate::environment::NeuralEnvironment;
 use crate::spectral::{
-    TokenDictionary, hamming_parity_bits, hamming_encode, hamming_decode,
-    tokenize, syntax_role, structural_signature, SyntaxRole, E8Lattice, from_gray,
+    from_gray, hamming_decode, hamming_encode, hamming_parity_bits, structural_signature,
+    syntax_role, tokenize, E8Lattice, SyntaxRole, TokenDictionary,
 };
 use crate::types::EnvironmentConfig;
 
@@ -180,7 +179,11 @@ pub mod gen_stats {
     pub fn conditioning_collapse(conds: &[Vec<f32>]) -> CollapseStats {
         let n = conds.len();
         if n < 2 {
-            return CollapseStats { n, mean_pairwise_cosine: 0.0, max_pairwise_cosine: 0.0 };
+            return CollapseStats {
+                n,
+                mean_pairwise_cosine: 0.0,
+                max_pairwise_cosine: 0.0,
+            };
         }
         let norms: Vec<f32> = conds
             .iter()
@@ -211,7 +214,11 @@ pub mod gen_stats {
         }
         CollapseStats {
             n,
-            mean_pairwise_cosine: if pairs == 0 { 0.0 } else { (sum / pairs as f64) as f32 },
+            mean_pairwise_cosine: if pairs == 0 {
+                0.0
+            } else {
+                (sum / pairs as f64) as f32
+            },
             max_pairwise_cosine: max,
         }
     }
@@ -245,7 +252,11 @@ pub mod gen_stats {
 
         #[test]
         fn fallback_rate_arithmetic() {
-            let snap = GenStatsSnapshot { total: 10, verbatim_fallbacks: 4, composed: 6 };
+            let snap = GenStatsSnapshot {
+                total: 10,
+                verbatim_fallbacks: 4,
+                composed: 6,
+            };
             assert!((snap.fallback_rate() - 0.4).abs() < 1e-6);
         }
     }
@@ -295,7 +306,9 @@ pub fn hex_neurons_per_token(bpt: usize) -> usize {
 
 /// Bits needed to represent `n` distinct values.
 fn bits_for_count(n: usize) -> usize {
-    if n <= 1 { return 1; }
+    if n <= 1 {
+        return 1;
+    }
     (usize::BITS - (n - 1).leading_zeros()) as usize
 }
 
@@ -304,7 +317,9 @@ fn bits_for_count(n: usize) -> usize {
 /// below threshold, that's the content boundary (bits past this point are
 /// noise from untrained trailing archetype positions).
 fn output_content_boundary(output: &[f32]) -> usize {
-    if output.is_empty() { return 0; }
+    if output.is_empty() {
+        return 0;
+    }
     let chunk_size = 8;
     let threshold = 0.06;
     let mut last_decisive_end = 0;
@@ -313,9 +328,8 @@ fn output_content_boundary(output: &[f32]) -> usize {
     for start in (0..output.len()).step_by(chunk_size) {
         let end = (start + chunk_size).min(output.len());
         let chunk = &output[start..end];
-        let avg_decisiveness: f32 = chunk.iter()
-            .map(|&v| (v - 0.5).abs())
-            .sum::<f32>() / chunk.len() as f32;
+        let avg_decisiveness: f32 =
+            chunk.iter().map(|&v| (v - 0.5).abs()).sum::<f32>() / chunk.len() as f32;
 
         if avg_decisiveness > threshold {
             last_decisive_end = end;
@@ -342,13 +356,19 @@ fn truncate_at_sentence(text: &str, max_tokens: usize) -> String {
     let search_region = &text[..text.len().min(approx_char_limit + 100)];
     let mut last_boundary = 0;
     for (i, _) in search_region.match_indices(". ") {
-        if i <= approx_char_limit { last_boundary = i + 1; }
+        if i <= approx_char_limit {
+            last_boundary = i + 1;
+        }
     }
     for (i, _) in search_region.match_indices("! ") {
-        if i <= approx_char_limit && i + 1 > last_boundary { last_boundary = i + 1; }
+        if i <= approx_char_limit && i + 1 > last_boundary {
+            last_boundary = i + 1;
+        }
     }
     for (i, _) in search_region.match_indices("? ") {
-        if i <= approx_char_limit && i + 1 > last_boundary { last_boundary = i + 1; }
+        if i <= approx_char_limit && i + 1 > last_boundary {
+            last_boundary = i + 1;
+        }
     }
     if last_boundary > 0 {
         text[..last_boundary].trim().to_string()
@@ -361,14 +381,19 @@ fn gen_cosine_sim(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na < 1e-12 || nb < 1e-12 { return 0.0; }
+    if na < 1e-12 || nb < 1e-12 {
+        return 0.0;
+    }
     dot / (na * nb)
 }
 
 /// Deduplicate BM25 query terms (same string from multiple alias expansions), first occurrence wins.
 fn dedup_lowercase_query_terms(terms: Vec<String>) -> Vec<String> {
     let mut seen = HashSet::new();
-    terms.into_iter().filter(|t| seen.insert(t.clone())).collect()
+    terms
+        .into_iter()
+        .filter(|t| seen.insert(t.clone()))
+        .collect()
 }
 
 /// A variable position in a response archetype.
@@ -423,24 +448,35 @@ impl AlgebraicCodebook {
     /// Clusters responses into archetypes, extracts fixed/variable positions.
     /// When `embeddings` is provided (parallel to `texts`), computes per-archetype
     /// prototype centroids for embedding-based archetype selection at inference.
-    pub fn build(texts: &[&str], dictionary: &TokenDictionary, max_archetypes: usize, embeddings: Option<&[&[f32]]>) -> Self {
+    pub fn build(
+        texts: &[&str],
+        dictionary: &TokenDictionary,
+        max_archetypes: usize,
+        embeddings: Option<&[&[f32]]>,
+    ) -> Self {
         let seqs: Vec<Vec<u16>> = texts.iter().map(|t| dictionary.encode(t)).collect();
         if seqs.is_empty() {
             return Self::empty();
         }
 
         let max_len = seqs.iter().map(|s| s.len()).max().unwrap_or(0);
-        let padded: Vec<Vec<u16>> = seqs.iter().map(|s| {
-            let mut p = s.clone();
-            p.resize(max_len, 0);
-            p
-        }).collect();
+        let padded: Vec<Vec<u16>> = seqs
+            .iter()
+            .map(|s| {
+                let mut p = s.clone();
+                p.resize(max_len, 0);
+                p
+            })
+            .collect();
 
         let clusters = Self::cluster_responses(&padded, max_archetypes.min(padded.len()));
-        let archetypes: Vec<ResponseArchetype> = clusters.iter().map(|indices| {
-            let cluster_seqs: Vec<&Vec<u16>> = indices.iter().map(|&i| &padded[i]).collect();
-            Self::extract_archetype(&cluster_seqs, max_len)
-        }).collect();
+        let archetypes: Vec<ResponseArchetype> = clusters
+            .iter()
+            .map(|indices| {
+                let cluster_seqs: Vec<&Vec<u16>> = indices.iter().map(|&i| &padded[i]).collect();
+                Self::extract_archetype(&cluster_seqs, max_len)
+            })
+            .collect();
 
         let archetype_bits = bits_for_count(archetypes.len().max(1));
         let max_slot_count = archetypes.iter().map(|a| a.slots.len()).max().unwrap_or(0);
@@ -452,7 +488,9 @@ impl AlgebraicCodebook {
             }
         }
         for bw in slot_bit_widths.iter_mut() {
-            if *bw > 0 { *bw += 1; }
+            if *bw > 0 {
+                *bw += 1;
+            }
         }
 
         let slot_only_bits: usize = slot_bit_widths.iter().sum();
@@ -460,17 +498,34 @@ impl AlgebraicCodebook {
 
         let archetype_prototypes = Self::compute_prototypes(&clusters, embeddings);
 
-        Self { archetypes, archetype_bits, max_slot_count, slot_bit_widths, total_bits, archetype_prototypes, slot_only_bits }
+        Self {
+            archetypes,
+            archetype_bits,
+            max_slot_count,
+            slot_bit_widths,
+            total_bits,
+            archetype_prototypes,
+            slot_only_bits,
+        }
     }
 
     pub fn empty() -> Self {
-        Self { archetypes: vec![], archetype_bits: 1, max_slot_count: 0, slot_bit_widths: vec![], total_bits: 1, archetype_prototypes: vec![], slot_only_bits: 0 }
+        Self {
+            archetypes: vec![],
+            archetype_bits: 1,
+            max_slot_count: 0,
+            slot_bit_widths: vec![],
+            total_bits: 1,
+            archetype_prototypes: vec![],
+            slot_only_bits: 0,
+        }
     }
 
     /// Returns true if this codebook has prototype embeddings for embedding-based
     /// archetype selection (slot-only mode).
     pub fn has_prototypes(&self) -> bool {
-        !self.archetype_prototypes.is_empty() && self.archetype_prototypes.len() == self.archetypes.len()
+        !self.archetype_prototypes.is_empty()
+            && self.archetype_prototypes.len() == self.archetypes.len()
     }
 
     /// Encode a token sequence into algebraic bits.
@@ -518,7 +573,11 @@ impl AlgebraicCodebook {
         for (slot_idx, slot) in arch.slots.iter().enumerate() {
             let sbits = self.slot_bit_widths.get(slot_idx).copied().unwrap_or(0);
             let end = (offset + sbits).min(bits.len());
-            let slot_bits = if offset < bits.len() { &bits[offset..end] } else { &[] as &[f32] };
+            let slot_bits = if offset < bits.len() {
+                &bits[offset..end]
+            } else {
+                &[] as &[f32]
+            };
             let val = Self::soft_decode_index(slot_bits, slot.vocab.len());
             if slot.position < tokens.len() && val < slot.vocab.len() {
                 tokens[slot.position] = slot.vocab[val];
@@ -539,7 +598,9 @@ impl AlgebraicCodebook {
     /// best match per nibble independently. O(nibbles × 16) vs O(num_options).
     /// Errors in one nibble are contained and don't cascade.
     pub fn soft_decode_index(bits: &[f32], num_options: usize) -> usize {
-        if num_options <= 1 { return 0; }
+        if num_options <= 1 {
+            return 0;
+        }
         let nbits = bits_for_count(num_options);
         let n_nib = nibbles_for_bits(nbits);
         let mut composite = 0usize;
@@ -595,10 +656,17 @@ impl AlgebraicCodebook {
         }
 
         let arch = &self.archetypes[best_arch];
-        let mut slot_values: Vec<usize> = arch.slots.iter().map(|slot| {
-            let actual_tok = token_ids.get(slot.position).copied().unwrap_or(0);
-            slot.vocab.iter().position(|&t| t == actual_tok).unwrap_or(0)
-        }).collect();
+        let mut slot_values: Vec<usize> = arch
+            .slots
+            .iter()
+            .map(|slot| {
+                let actual_tok = token_ids.get(slot.position).copied().unwrap_or(0);
+                slot.vocab
+                    .iter()
+                    .position(|&t| t == actual_tok)
+                    .unwrap_or(0)
+            })
+            .collect();
         slot_values.resize(self.max_slot_count, 0);
 
         (best_arch, slot_values)
@@ -607,7 +675,9 @@ impl AlgebraicCodebook {
     /// Greedy clustering by positional token overlap.
     fn cluster_responses(padded: &[Vec<u16>], max_k: usize) -> Vec<Vec<usize>> {
         let n = padded.len();
-        if n == 0 { return vec![]; }
+        if n == 0 {
+            return vec![];
+        }
         let max_k = max_k.min(n).max(1);
         if max_k == 1 || n <= 3 {
             return vec![(0..n).collect()];
@@ -619,15 +689,23 @@ impl AlgebraicCodebook {
             let mut best_idx = 0;
             let mut best_min_dist = 0usize;
             for i in 0..n {
-                if medoids.contains(&i) { continue; }
-                let min_overlap = medoids.iter().map(|&m| Self::overlap(&padded[i], &padded[m])).min().unwrap_or(0);
+                if medoids.contains(&i) {
+                    continue;
+                }
+                let min_overlap = medoids
+                    .iter()
+                    .map(|&m| Self::overlap(&padded[i], &padded[m]))
+                    .min()
+                    .unwrap_or(0);
                 let dist = padded[i].len().saturating_sub(min_overlap);
                 if dist > best_min_dist {
                     best_min_dist = dist;
                     best_idx = i;
                 }
             }
-            if best_min_dist == 0 { break; }
+            if best_min_dist == 0 {
+                break;
+            }
             medoids.push(best_idx);
         }
 
@@ -649,7 +727,10 @@ impl AlgebraicCodebook {
     }
 
     fn overlap(a: &[u16], b: &[u16]) -> usize {
-        a.iter().zip(b.iter()).filter(|(x, y)| x == y && **x != 0).count()
+        a.iter()
+            .zip(b.iter())
+            .filter(|(x, y)| x == y && **x != 0)
+            .count()
     }
 
     /// Compute per-archetype prototype embeddings by averaging the bridged
@@ -660,31 +741,34 @@ impl AlgebraicCodebook {
             _ => return vec![],
         };
         let dim = embs[0].len();
-        clusters.iter().map(|indices| {
-            let mut centroid = vec![0.0f32; dim];
-            let mut n = 0usize;
-            for &idx in indices {
-                if let Some(emb) = embs.get(idx) {
-                    for (c, &v) in centroid.iter_mut().zip(emb.iter()) {
-                        *c += v;
+        clusters
+            .iter()
+            .map(|indices| {
+                let mut centroid = vec![0.0f32; dim];
+                let mut n = 0usize;
+                for &idx in indices {
+                    if let Some(emb) = embs.get(idx) {
+                        for (c, &v) in centroid.iter_mut().zip(emb.iter()) {
+                            *c += v;
+                        }
+                        n += 1;
                     }
-                    n += 1;
                 }
-            }
-            if n > 0 {
-                for c in &mut centroid {
-                    *c /= n as f32;
+                if n > 0 {
+                    for c in &mut centroid {
+                        *c /= n as f32;
+                    }
                 }
-            }
-            // L2-normalize the centroid for cosine similarity
-            let norm = centroid.iter().map(|v| v * v).sum::<f32>().sqrt();
-            if norm > 1e-8 {
-                for c in &mut centroid {
-                    *c /= norm;
+                // L2-normalize the centroid for cosine similarity
+                let norm = centroid.iter().map(|v| v * v).sum::<f32>().sqrt();
+                if norm > 1e-8 {
+                    for c in &mut centroid {
+                        *c /= norm;
+                    }
                 }
-            }
-            centroid
-        }).collect()
+                centroid
+            })
+            .collect()
     }
 
     /// Select the best archetype for an input embedding.
@@ -812,9 +896,15 @@ impl AlgebraicCodebook {
         for (slot_idx, slot) in arch.slots.iter().enumerate() {
             let sbits = self.slot_bit_widths.get(slot_idx).copied().unwrap_or(0);
             let end = (offset + sbits).min(slot_bits.len());
-            let s_bits = if offset < slot_bits.len() { &slot_bits[offset..end] } else { &[] as &[f32] };
+            let s_bits = if offset < slot_bits.len() {
+                &slot_bits[offset..end]
+            } else {
+                &[] as &[f32]
+            };
 
-            let decisiveness: f32 = if s_bits.is_empty() { 0.0 } else {
+            let decisiveness: f32 = if s_bits.is_empty() {
+                0.0
+            } else {
                 s_bits.iter().map(|&v| (v - 0.5).abs()).sum::<f32>() / s_bits.len() as f32
             };
 
@@ -847,7 +937,8 @@ impl AlgebraicCodebook {
         };
         let truncate_at = slot_bound.min(median_bound).min(arch.length);
 
-        tokens.into_iter()
+        tokens
+            .into_iter()
             .take(truncate_at)
             .take_while(|&t| t != 0)
             .collect()
@@ -858,18 +949,27 @@ impl AlgebraicCodebook {
     /// identifiers/literals replaced with role placeholders). Keywords and
     /// structural punctuation are auto-fixed; only identifiers and literals
     /// become slots. Dramatically reduces slot count for code.
-    pub fn build_syntax_aware(texts: &[&str], dictionary: &TokenDictionary, max_archetypes: usize, embeddings: Option<&[&[f32]]>) -> Self {
+    pub fn build_syntax_aware(
+        texts: &[&str],
+        dictionary: &TokenDictionary,
+        max_archetypes: usize,
+        embeddings: Option<&[&[f32]]>,
+    ) -> Self {
         if texts.is_empty() {
             return Self::empty();
         }
 
         // Tokenize raw text to get syntax roles alongside dictionary encoding
         let raw_tokens: Vec<Vec<String>> = texts.iter().map(|t| tokenize(t)).collect();
-        let signatures: Vec<Vec<String>> = raw_tokens.iter().map(|toks| structural_signature(toks)).collect();
+        let signatures: Vec<Vec<String>> = raw_tokens
+            .iter()
+            .map(|toks| structural_signature(toks))
+            .collect();
         let seqs: Vec<Vec<u16>> = texts.iter().map(|t| dictionary.encode(t)).collect();
-        let roles: Vec<Vec<SyntaxRole>> = raw_tokens.iter().map(|toks| {
-            toks.iter().map(|t| syntax_role(t)).collect()
-        }).collect();
+        let roles: Vec<Vec<SyntaxRole>> = raw_tokens
+            .iter()
+            .map(|toks| toks.iter().map(|t| syntax_role(t)).collect())
+            .collect();
 
         // Cluster by structural signature similarity
         let sig_strings: Vec<String> = signatures.iter().map(|s| s.join(" ")).collect();
@@ -900,11 +1000,15 @@ impl AlgebraicCodebook {
         let max_len = seqs.iter().map(|s| s.len()).max().unwrap_or(0);
 
         // Extract archetypes using syntax roles
-        let archetypes: Vec<ResponseArchetype> = cluster_list.iter().map(|indices| {
-            let cluster_seqs: Vec<&Vec<u16>> = indices.iter().map(|&i| &seqs[i]).collect();
-            let cluster_roles: Vec<&Vec<SyntaxRole>> = indices.iter().map(|&i| &roles[i]).collect();
-            Self::extract_archetype_syntax(&cluster_seqs, &cluster_roles, max_len)
-        }).collect();
+        let archetypes: Vec<ResponseArchetype> = cluster_list
+            .iter()
+            .map(|indices| {
+                let cluster_seqs: Vec<&Vec<u16>> = indices.iter().map(|&i| &seqs[i]).collect();
+                let cluster_roles: Vec<&Vec<SyntaxRole>> =
+                    indices.iter().map(|&i| &roles[i]).collect();
+                Self::extract_archetype_syntax(&cluster_seqs, &cluster_roles, max_len)
+            })
+            .collect();
 
         let archetype_bits = bits_for_count(archetypes.len().max(1));
         let max_slot_count = archetypes.iter().map(|a| a.slots.len()).max().unwrap_or(0);
@@ -916,7 +1020,9 @@ impl AlgebraicCodebook {
             }
         }
         for bw in slot_bit_widths.iter_mut() {
-            if *bw > 0 { *bw += 1; }
+            if *bw > 0 {
+                *bw += 1;
+            }
         }
 
         let slot_only_bits: usize = slot_bit_widths.iter().sum();
@@ -924,7 +1030,15 @@ impl AlgebraicCodebook {
 
         let archetype_prototypes = Self::compute_prototypes(&cluster_list, embeddings);
 
-        Self { archetypes, archetype_bits, max_slot_count, slot_bit_widths, total_bits, archetype_prototypes, slot_only_bits }
+        Self {
+            archetypes,
+            archetype_bits,
+            max_slot_count,
+            slot_bit_widths,
+            total_bits,
+            archetype_prototypes,
+            slot_only_bits,
+        }
     }
 
     /// Extract an archetype using syntax role awareness. Keywords and structural
@@ -936,9 +1050,12 @@ impl AlgebraicCodebook {
         max_len: usize,
     ) -> ResponseArchetype {
         let n = seqs.len().max(1);
-        let length = seqs.iter().map(|s| {
-            s.iter().rposition(|&t| t != 0).map(|p| p + 1).unwrap_or(0)
-        }).max().unwrap_or(0).min(max_len);
+        let length = seqs
+            .iter()
+            .map(|s| s.iter().rposition(|&t| t != 0).map(|p| p + 1).unwrap_or(0))
+            .max()
+            .unwrap_or(0)
+            .min(max_len);
 
         let mut fixed = Vec::new();
         let mut slots = Vec::new();
@@ -962,7 +1079,9 @@ impl AlgebraicCodebook {
             // Keywords and structure are ALWAYS fixed if they appear in majority
             let is_structural = matches!(
                 dominant_role,
-                Some(SyntaxRole::Keyword) | Some(SyntaxRole::Structure) | Some(SyntaxRole::Operator)
+                Some(SyntaxRole::Keyword)
+                    | Some(SyntaxRole::Structure)
+                    | Some(SyntaxRole::Operator)
             );
 
             if is_structural && count as f32 / n as f32 > 0.3 && most_common != 0 {
@@ -975,13 +1094,24 @@ impl AlgebraicCodebook {
                 let mut vocab: Vec<u16> = freq.keys().copied().filter(|&t| t != 0).collect();
                 vocab.sort();
                 vocab.dedup();
-                if vocab.is_empty() { continue; }
+                if vocab.is_empty() {
+                    continue;
+                }
                 let bits = bits_for_count(vocab.len().max(2));
-                slots.push(ArchetypeSlot { position: pos, vocab, bits });
+                slots.push(ArchetypeSlot {
+                    position: pos,
+                    vocab,
+                    bits,
+                });
             }
         }
 
-        ResponseArchetype { fixed, slots, length, median_content_length: length }
+        ResponseArchetype {
+            fixed,
+            slots,
+            length,
+            median_content_length: length,
+        }
     }
 
     /// Extract an archetype from a cluster of aligned token sequences.
@@ -989,9 +1119,10 @@ impl AlgebraicCodebook {
     /// samples doesn't pollute the archetype with irrelevant fixed tokens.
     fn extract_archetype(seqs: &[&Vec<u16>], max_len: usize) -> ResponseArchetype {
         let n = seqs.len().max(1);
-        let mut lengths: Vec<usize> = seqs.iter().map(|s| {
-            s.iter().rposition(|&t| t != 0).map(|p| p + 1).unwrap_or(0)
-        }).collect();
+        let mut lengths: Vec<usize> = seqs
+            .iter()
+            .map(|s| s.iter().rposition(|&t| t != 0).map(|p| p + 1).unwrap_or(0))
+            .collect();
         lengths.sort();
         let length = lengths[lengths.len() / 2].min(max_len);
 
@@ -1013,14 +1144,25 @@ impl AlgebraicCodebook {
                 let mut vocab: Vec<u16> = freq.keys().copied().filter(|&t| t != 0).collect();
                 vocab.sort();
                 vocab.dedup();
-                if vocab.is_empty() { continue; }
+                if vocab.is_empty() {
+                    continue;
+                }
                 let bits = bits_for_count(vocab.len().max(2));
-                slots.push(ArchetypeSlot { position: pos, vocab, bits });
+                slots.push(ArchetypeSlot {
+                    position: pos,
+                    vocab,
+                    bits,
+                });
             }
         }
 
         let median_content_length = length;
-        ResponseArchetype { fixed, slots, length, median_content_length }
+        ResponseArchetype {
+            fixed,
+            slots,
+            length,
+            median_content_length,
+        }
     }
 }
 
@@ -1090,7 +1232,9 @@ impl HopfCompositionTable {
         num_segments: usize,
     ) -> Self {
         let num_segments = num_segments.max(2);
-        let response_length = codebook.archetypes.iter()
+        let response_length = codebook
+            .archetypes
+            .iter()
             .map(|a| a.length)
             .max()
             .unwrap_or(0);
@@ -1114,14 +1258,20 @@ impl HopfCompositionTable {
             for seg in 0..num_segments {
                 let start = seg * seg_size;
                 let end = ((seg + 1) * seg_size).min(response_length);
-                if start >= end { continue; }
+                if start >= end {
+                    continue;
+                }
 
-                let fixed: Vec<(usize, u16)> = arch.fixed.iter()
+                let fixed: Vec<(usize, u16)> = arch
+                    .fixed
+                    .iter()
                     .filter(|&&(pos, _)| pos >= start && pos < end)
                     .copied()
                     .collect();
 
-                let slot_indices: Vec<usize> = arch.slots.iter()
+                let slot_indices: Vec<usize> = arch
+                    .slots
+                    .iter()
                     .enumerate()
                     .filter(|(_, s)| s.position >= start && s.position < end)
                     .map(|(i, _)| i)
@@ -1150,11 +1300,15 @@ impl HopfCompositionTable {
                             }
                         }
                         if n > 0 {
-                            for c in &mut centroid { *c /= n as f32; }
+                            for c in &mut centroid {
+                                *c /= n as f32;
+                            }
                         }
                         let norm = centroid.iter().map(|v| v * v).sum::<f32>().sqrt();
                         if norm > 1e-8 {
-                            for c in &mut centroid { *c /= norm; }
+                            for c in &mut centroid {
+                                *c /= norm;
+                            }
                         }
                         fragment_prototypes[seg].push(centroid);
                     } else {
@@ -1180,15 +1334,21 @@ impl HopfCompositionTable {
 
             for (a_idx, frag_a) in fragments[seg].iter().enumerate() {
                 let boundary = frag_a.token_range.1;
-                let a_tail: Vec<u16> = frag_a.fixed.iter()
-                    .filter(|&&(pos, _)| pos >= boundary.saturating_sub(boundary_window) && pos < boundary)
+                let a_tail: Vec<u16> = frag_a
+                    .fixed
+                    .iter()
+                    .filter(|&&(pos, _)| {
+                        pos >= boundary.saturating_sub(boundary_window) && pos < boundary
+                    })
                     .map(|&(_, tok)| tok)
                     .collect();
 
                 let proto_a = codebook.archetype_prototypes.get(frag_a.archetype_idx);
 
                 for (b_idx, frag_b) in fragments[seg + 1].iter().enumerate() {
-                    let b_head: Vec<u16> = frag_b.fixed.iter()
+                    let b_head: Vec<u16> = frag_b
+                        .fixed
+                        .iter()
                         .filter(|&&(pos, _)| pos < frag_b.token_range.0 + boundary_window)
                         .map(|&(_, tok)| tok)
                         .collect();
@@ -1196,15 +1356,26 @@ impl HopfCompositionTable {
                     // E8 lattice compatibility score: uses root inner product
                     // between archetype prototypes quantized to E8 subspaces.
                     // Returns [0, 3] with algebraically exact structure.
-                    let compatibility = match (proto_a, codebook.archetype_prototypes.get(frag_b.archetype_idx)) {
+                    let compatibility = match (
+                        proto_a,
+                        codebook.archetype_prototypes.get(frag_b.archetype_idx),
+                    ) {
                         (Some(pa), Some(pb)) if !pa.is_empty() && !pb.is_empty() => {
                             E8Lattice::compatibility_score(pa, pb)
                         }
                         _ => 0.5,
                     };
 
-                    let same_arch_bonus = if frag_a.archetype_idx == frag_b.archetype_idx { 0.3 } else { 0.0 };
-                    let has_content = if !a_tail.is_empty() && !b_head.is_empty() { 0.3 } else { 0.15 };
+                    let same_arch_bonus = if frag_a.archetype_idx == frag_b.archetype_idx {
+                        0.3
+                    } else {
+                        0.0
+                    };
+                    let has_content = if !a_tail.is_empty() && !b_head.is_empty() {
+                        0.3
+                    } else {
+                        0.15
+                    };
 
                     scores[a_idx][b_idx] = compatibility + same_arch_bonus + has_content;
                 }
@@ -1212,7 +1383,13 @@ impl HopfCompositionTable {
             transition.push(scores);
         }
 
-        Self { num_segments, fragments, fragment_prototypes, transition, response_length }
+        Self {
+            num_segments,
+            fragments,
+            fragment_prototypes,
+            transition,
+            response_length,
+        }
     }
 
     /// Select the best fragment for each segment using embedding similarity
@@ -1233,18 +1410,29 @@ impl HopfCompositionTable {
         let beam_width = 3usize;
 
         // Score all fragments by embedding similarity
-        let seg_scores: Vec<Vec<f32>> = self.fragment_prototypes.iter()
+        let seg_scores: Vec<Vec<f32>> = self
+            .fragment_prototypes
+            .iter()
             .map(|seg_protos| {
-                seg_protos.iter().map(|proto| {
-                    if proto.is_empty() || norm < 1e-8 { return 0.0; }
-                    let dot: f32 = embedding.iter().zip(proto.iter()).map(|(a, b)| a * b).sum();
-                    dot / norm
-                }).collect()
-            }).collect();
+                seg_protos
+                    .iter()
+                    .map(|proto| {
+                        if proto.is_empty() || norm < 1e-8 {
+                            return 0.0;
+                        }
+                        let dot: f32 = embedding.iter().zip(proto.iter()).map(|(a, b)| a * b).sum();
+                        dot / norm
+                    })
+                    .collect()
+            })
+            .collect();
 
         // Beam search: track (total_score, fragment_indices)
-        let mut beam: Vec<(f32, Vec<usize>)> = if !seg_scores.is_empty() && !seg_scores[0].is_empty() {
-            let mut candidates: Vec<(f32, usize)> = seg_scores[0].iter()
+        let mut beam: Vec<(f32, Vec<usize>)> = if !seg_scores.is_empty()
+            && !seg_scores[0].is_empty()
+        {
+            let mut candidates: Vec<(f32, usize)> = seg_scores[0]
+                .iter()
                 .enumerate()
                 .map(|(i, &s)| (s, i))
                 .collect();
@@ -1263,13 +1451,15 @@ impl HopfCompositionTable {
                 let prev_frag = *prev_path.last().unwrap_or(&0);
 
                 for frag_idx in 0..n_frags {
-                    let emb_score = seg_scores.get(seg)
+                    let emb_score = seg_scores
+                        .get(seg)
                         .and_then(|s| s.get(frag_idx))
                         .copied()
                         .unwrap_or(0.0);
 
                     let trans_score = if seg > 0 {
-                        self.transition.get(seg - 1)
+                        self.transition
+                            .get(seg - 1)
                             .and_then(|t| t.get(prev_frag))
                             .and_then(|row| row.get(frag_idx))
                             .copied()
@@ -1281,10 +1471,14 @@ impl HopfCompositionTable {
                     // OCEAN personality modulation: openness boosts cross-archetype,
                     // conscientiousness boosts same-archetype transitions.
                     let personality_mod = if seg > 0 {
-                        let prev_arch = self.fragments.get(seg - 1)
+                        let prev_arch = self
+                            .fragments
+                            .get(seg - 1)
                             .and_then(|f| f.get(prev_frag))
                             .map(|f| f.archetype_idx);
-                        let curr_arch = self.fragments.get(seg)
+                        let curr_arch = self
+                            .fragments
+                            .get(seg)
                             .and_then(|f| f.get(frag_idx))
                             .map(|f| f.archetype_idx);
                         match (prev_arch, curr_arch) {
@@ -1323,9 +1517,11 @@ impl HopfCompositionTable {
     /// Merges fixed tokens from each fragment and maps slot indices.
     /// Returns (fixed_tokens, slot_map) where slot_map[composed_slot_idx] =
     /// (archetype_idx, original_slot_idx).
-    pub fn assemble(&self, fragment_indices: &[usize], _codebook: &AlgebraicCodebook)
-        -> (Vec<(usize, u16)>, Vec<(usize, usize)>)
-    {
+    pub fn assemble(
+        &self,
+        fragment_indices: &[usize],
+        _codebook: &AlgebraicCodebook,
+    ) -> (Vec<(usize, u16)>, Vec<(usize, usize)>) {
         let mut fixed = Vec::new();
         let mut slot_map = Vec::new();
 
@@ -1380,7 +1576,11 @@ impl HopfCompositionTable {
                 if let Some(slot) = arch.slots.get(slot_idx) {
                     let sbits = codebook.slot_bit_widths.get(slot_idx).copied().unwrap_or(0);
                     let end = (offset + sbits).min(slot_bits.len());
-                    let s_bits = if offset < slot_bits.len() { &slot_bits[offset..end] } else { &[] as &[f32] };
+                    let s_bits = if offset < slot_bits.len() {
+                        &slot_bits[offset..end]
+                    } else {
+                        &[] as &[f32]
+                    };
                     let val = AlgebraicCodebook::soft_decode_index(s_bits, slot.vocab.len());
                     if slot.position < tokens.len() && val < slot.vocab.len() {
                         tokens[slot.position] = slot.vocab[val];
@@ -1395,7 +1595,11 @@ impl HopfCompositionTable {
         let mut total_sim = 0.0f32;
         let mut count = 0;
         for (seg, &frag_idx) in frag_indices.iter().enumerate() {
-            if let Some(proto) = self.fragment_prototypes.get(seg).and_then(|s| s.get(frag_idx)) {
+            if let Some(proto) = self
+                .fragment_prototypes
+                .get(seg)
+                .and_then(|s| s.get(frag_idx))
+            {
                 if !proto.is_empty() && norm > 1e-8 {
                     let dot: f32 = embedding.iter().zip(proto.iter()).map(|(a, b)| a * b).sum();
                     total_sim += dot / norm;
@@ -1403,7 +1607,11 @@ impl HopfCompositionTable {
                 }
             }
         }
-        let confidence = if count > 0 { (total_sim / count as f32).max(0.0) } else { 0.0 };
+        let confidence = if count > 0 {
+            (total_sim / count as f32).max(0.0)
+        } else {
+            0.0
+        };
 
         let result = tokens.into_iter().take_while(|&t| t != 0).collect();
         (result, confidence)
@@ -1412,15 +1620,25 @@ impl HopfCompositionTable {
     /// Check whether composition would actually produce different results
     /// from single-archetype selection by comparing fragment sources.
     pub fn is_composed(&self, fragment_indices: &[usize]) -> bool {
-        if fragment_indices.len() < 2 { return false; }
-        let first_arch = self.fragments.get(0)
+        if fragment_indices.len() < 2 {
+            return false;
+        }
+        let first_arch = self
+            .fragments
+            .get(0)
             .and_then(|s| s.get(fragment_indices[0]))
             .map(|f| f.archetype_idx);
-        fragment_indices.iter().enumerate().skip(1).any(|(seg, &frag_idx)| {
-            self.fragments.get(seg)
-                .and_then(|s| s.get(frag_idx))
-                .map(|f| f.archetype_idx) != first_arch
-        })
+        fragment_indices
+            .iter()
+            .enumerate()
+            .skip(1)
+            .any(|(seg, &frag_idx)| {
+                self.fragments
+                    .get(seg)
+                    .and_then(|s| s.get(frag_idx))
+                    .map(|f| f.archetype_idx)
+                    != first_arch
+            })
     }
 }
 
@@ -1452,7 +1670,9 @@ pub struct MemorizeSnapshot {
 /// NeuralEnvironment for generation, which requires thousands of backprop
 /// epochs. `IndexedGenEnv` uses a Paramecium lattice for one-pass indexing
 /// and achieves ~85% token overlap with zero iterative training.
-#[deprecated(note = "Use IndexedGenEnv (Paramecium lattice) instead — zero backprop, one-pass indexing")]
+#[deprecated(
+    note = "Use IndexedGenEnv (Paramecium lattice) instead — zero backprop, one-pass indexing"
+)]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct GroupGenEnv {
     pub env: NeuralEnvironment,
@@ -1498,7 +1718,11 @@ impl GroupGenEnv {
         Self::new_with_overrides(dictionary, &GenEnvOverrides::default(), rng)
     }
 
-    pub fn new_with_overrides(dictionary: TokenDictionary, ov: &GenEnvOverrides, rng: &mut impl Rng) -> Self {
+    pub fn new_with_overrides(
+        dictionary: TokenDictionary,
+        ov: &GenEnvOverrides,
+        rng: &mut impl Rng,
+    ) -> Self {
         let hidden = ov.hidden.unwrap_or(GEN_HIDDEN);
         let k = ov.k.unwrap_or(GEN_K);
         let cond_dim = ov.cond_dim.unwrap_or(GEN_COND_DIM);
@@ -1521,10 +1745,18 @@ impl GroupGenEnv {
 
         let mut config = gen_env_config();
         config.competitive_k = k;
-        if let Some(ms) = ov.max_synapses { config.max_synapses_per_neuron = ms; }
-        if let Some(eb) = ov.energy_budget { config.energy_budget_per_neuron = eb; }
-        if let Some(a)  = ov.ephaptic_alpha { config.ephaptic_field_alpha = a; }
-        if let Some(s)  = ov.ephaptic_strength { config.ephaptic_field_strength = s; }
+        if let Some(ms) = ov.max_synapses {
+            config.max_synapses_per_neuron = ms;
+        }
+        if let Some(eb) = ov.energy_budget {
+            config.energy_budget_per_neuron = eb;
+        }
+        if let Some(a) = ov.ephaptic_alpha {
+            config.ephaptic_field_alpha = a;
+        }
+        if let Some(s) = ov.ephaptic_strength {
+            config.ephaptic_field_strength = s;
+        }
         let mut env = NeuralEnvironment::new(config);
         env.build_layers(&[cond_dim, hidden, hidden, output_dim], rng);
         Self {
@@ -1571,10 +1803,18 @@ impl GroupGenEnv {
         let coded_bits_per_token = bits_per_token;
         let mut config = gen_env_config();
         config.competitive_k = k.min(hidden / 2);
-        if let Some(ms) = ov.max_synapses { config.max_synapses_per_neuron = ms; }
-        if let Some(eb) = ov.energy_budget { config.energy_budget_per_neuron = eb; }
-        if let Some(a)  = ov.ephaptic_alpha { config.ephaptic_field_alpha = a; }
-        if let Some(s)  = ov.ephaptic_strength { config.ephaptic_field_strength = s; }
+        if let Some(ms) = ov.max_synapses {
+            config.max_synapses_per_neuron = ms;
+        }
+        if let Some(eb) = ov.energy_budget {
+            config.energy_budget_per_neuron = eb;
+        }
+        if let Some(a) = ov.ephaptic_alpha {
+            config.ephaptic_field_alpha = a;
+        }
+        if let Some(s) = ov.ephaptic_strength {
+            config.ephaptic_field_strength = s;
+        }
         let mut env = NeuralEnvironment::new(config);
         env.build_layers(&[cond_dim, hidden, hidden, output_dim], rng);
         Self {
@@ -1834,7 +2074,9 @@ impl GroupGenEnv {
             let min_tokens = 3;
             for pos in 0..max_tok {
                 let offset = pos * npt;
-                if offset + npt > output.len() { break; }
+                if offset + npt > output.len() {
+                    break;
+                }
                 let slot = &output[offset..offset + npt];
 
                 // Confidence: max activation in any nibble group
@@ -1842,16 +2084,23 @@ impl GroupGenEnv {
                 let max_confidence = (0..n_nib)
                     .map(|nib| {
                         let no = nib * 16;
-                        (0..16).map(|v| slot.get(no + v).copied().unwrap_or(0.0))
+                        (0..16)
+                            .map(|v| slot.get(no + v).copied().unwrap_or(0.0))
                             .fold(0.0f32, f32::max)
                     })
                     .fold(0.0f32, f32::max);
 
-                if pos >= min_tokens && max_confidence < 0.15 { break; }
+                if pos >= min_tokens && max_confidence < 0.15 {
+                    break;
+                }
 
                 let id = Self::hex_to_id(slot, &self.dictionary, dict_size, bpt);
-                if pos >= min_tokens && id == 0 { break; }
-                if id > 0 { ids.push(id); }
+                if pos >= min_tokens && id == 0 {
+                    break;
+                }
+                if id > 0 {
+                    ids.push(id);
+                }
             }
             return self.dictionary.decode(&ids);
         }
@@ -1870,15 +2119,15 @@ impl GroupGenEnv {
             }
             let slot = &output[offset..offset + cbpt];
 
-            let max_confidence = slot
-                .iter()
-                .map(|&v| (v - 0.5).abs())
-                .fold(0.0f32, f32::max);
+            let max_confidence = slot.iter().map(|&v| (v - 0.5).abs()).fold(0.0f32, f32::max);
             if pos >= min_tokens && max_confidence < 0.05 {
                 break;
             }
 
-            let hard_bits: Vec<u8> = slot.iter().map(|&v| if v > 0.5 { 1u8 } else { 0u8 }).collect();
+            let hard_bits: Vec<u8> = slot
+                .iter()
+                .map(|&v| if v > 0.5 { 1u8 } else { 0u8 })
+                .collect();
             let corrected_data = hamming_decode(&hard_bits, bpt);
             let corrected_soft: Vec<f32> = corrected_data.iter().map(|&b| b as f32).collect();
             let id = Self::nibbles_to_id(&corrected_soft, &self.dictionary, dict_size, bpt);
@@ -1982,7 +2231,10 @@ impl GroupGenEnv {
                 if effective_conf < 0.9 {
                     if let Some(ref hopf) = self.hopf_table {
                         let (ids, comp_confidence) = hopf.compose_and_decode_with_personality(
-                            cond, &output, cb, self.diversity_bonus
+                            cond,
+                            &output,
+                            cb,
+                            self.diversity_bonus,
                         );
                         let text = self.dictionary.decode(&ids);
                         self.last_selected_archetype = None;
@@ -2008,8 +2260,12 @@ impl GroupGenEnv {
     /// Generate using a pre-selected archetype index from the ArchetypeBrain,
     /// bypassing the codebook's cosine similarity selection.
     pub fn generate_with_archetype(
-        &mut self, cond: &[f32], arch_idx: usize, arch_conf: f32,
-        _max_len: usize, _temperature: f32,
+        &mut self,
+        cond: &[f32],
+        arch_idx: usize,
+        arch_conf: f32,
+        _max_len: usize,
+        _temperature: f32,
     ) -> (String, f32) {
         let input_dim = self.env.input_layer_size().unwrap_or(GEN_COND_DIM);
         let mut input = vec![0.0f32; input_dim];
@@ -2036,7 +2292,10 @@ impl GroupGenEnv {
     /// The contribution vector captures the group's "semantic direction" for
     /// this input in the E8 lattice — used for algebraic group blending.
     pub fn generate_with_e8(
-        &mut self, cond: &[f32], _max_len: usize, _temperature: f32,
+        &mut self,
+        cond: &[f32],
+        _max_len: usize,
+        _temperature: f32,
     ) -> (String, f32, [f32; 8]) {
         let (text, conf) = self.generate(cond, _max_len, _temperature);
 
@@ -2186,7 +2445,8 @@ pub fn compute_q(input_embedding: &[f32], contributions: &[E8Contribution]) -> f
     let input_e8 = E8Lattice::nearest_point(&raw);
 
     // Compute compatibility with each contribution
-    let scores: Vec<f32> = contributions.iter()
+    let scores: Vec<f32> = contributions
+        .iter()
         .map(|c| E8Lattice::compatibility_score_8d(&input_e8, &c.lattice_point))
         .collect();
 
@@ -2212,11 +2472,7 @@ pub fn compute_q(input_embedding: &[f32], contributions: &[E8Contribution]) -> f
 /// When q>1: R(a,b) > R(b,a) for the preferred contribution a
 ///
 /// The R-matrix is derived from E8 root inner products deformed by q.
-pub fn r_matrix(
-    a: &E8Contribution,
-    b: &E8Contribution,
-    q: f32,
-) -> f32 {
+pub fn r_matrix(a: &E8Contribution, b: &E8Contribution, q: f32) -> f32 {
     let compat = E8Lattice::compatibility_score_8d(&a.lattice_point, &b.lattice_point);
     // Classical compatibility scaled by q-deformation:
     // when q > 1, contribution a (the "leader") gets boosted
@@ -2231,10 +2487,7 @@ pub fn r_matrix(
 /// Quantum-deformed E8 blend: non-commutative composition of group
 /// contributions. The R-matrix determines how much each group leads
 /// the final blend based on the deformation parameter q.
-pub fn e8_blend_quantum(
-    contributions: &[E8Contribution],
-    q: f32,
-) -> [f32; 8] {
+pub fn e8_blend_quantum(contributions: &[E8Contribution], q: f32) -> [f32; 8] {
     if contributions.is_empty() {
         return [0.0f32; 8];
     }
@@ -2247,7 +2500,9 @@ pub fn e8_blend_quantum(
     let mut weights = vec![0.0f32; contributions.len()];
     for (i, ci) in contributions.iter().enumerate() {
         for (j, cj) in contributions.iter().enumerate() {
-            if i == j { continue; }
+            if i == j {
+                continue;
+            }
             weights[i] += r_matrix(ci, cj, q);
         }
     }
@@ -2280,10 +2535,13 @@ pub fn e8_contribution_scores(
     blended: &[f32; 8],
     contributions: &[E8Contribution],
 ) -> Vec<(usize, f32)> {
-    contributions.iter().map(|c| {
-        let score = E8Lattice::compatibility_score_8d(blended, &c.lattice_point);
-        (c.group_idx, score)
-    }).collect()
+    contributions
+        .iter()
+        .map(|c| {
+            let score = E8Lattice::compatibility_score_8d(blended, &c.lattice_point);
+            (c.group_idx, score)
+        })
+        .collect()
 }
 
 /// Select the best text from contributions based on E8 compatibility
@@ -2292,10 +2550,13 @@ pub fn e8_select_best(
     blended: &[f32; 8],
     contributions: &[E8Contribution],
 ) -> Option<(String, f32, usize)> {
-    if contributions.is_empty() { return None; }
+    if contributions.is_empty() {
+        return None;
+    }
 
     let scores = e8_contribution_scores(blended, contributions);
-    scores.iter()
+    scores
+        .iter()
         .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
         .map(|&(gidx, score)| {
             let c = contributions.iter().find(|c| c.group_idx == gidx).unwrap();
@@ -2323,7 +2584,9 @@ pub fn e8_compose_sentences_quantum(
     max_sentences: usize,
     q: f32,
 ) -> (String, f32) {
-    if contributions.is_empty() { return (String::new(), 0.0); }
+    if contributions.is_empty() {
+        return (String::new(), 0.0);
+    }
 
     #[derive(Clone)]
     struct ScoredSentence {
@@ -2337,12 +2600,16 @@ pub fn e8_compose_sentences_quantum(
     let mut group_weights: Vec<f32> = vec![0.0; contributions.len()];
     for (i, ci) in contributions.iter().enumerate() {
         for (j, cj) in contributions.iter().enumerate() {
-            if i == j { continue; }
+            if i == j {
+                continue;
+            }
             group_weights[i] += r_matrix(ci, cj, q);
         }
     }
     let total_w: f32 = group_weights.iter().sum::<f32>().max(0.01);
-    for w in &mut group_weights { *w /= total_w; }
+    for w in &mut group_weights {
+        *w /= total_w;
+    }
 
     let mut all_sentences: Vec<ScoredSentence> = Vec::new();
 
@@ -2353,15 +2620,12 @@ pub fn e8_compose_sentences_quantum(
         // precedes them) before splitting into sentences. Without this, a
         // contribution built from a lattice row with intact witness layout
         // can leak the training prompt string into the composed output.
-        let clean_text = crate::dimension::language::strip_sentiment_lattice_witness_for_display(
-            &c.text,
-        );
+        let clean_text =
+            crate::dimension::language::strip_sentiment_lattice_witness_for_display(&c.text);
         for (pos, sent) in clean_text.split(". ").enumerate() {
             let trimmed = sent.trim();
             if trimmed.len() > 10
-                && !trimmed.contains(
-                    crate::dimension::language::SENTIMENT_LATTICE_WITNESS_CORE,
-                )
+                && !trimmed.contains(crate::dimension::language::SENTIMENT_LATTICE_WITNESS_CORE)
             {
                 let alpha_count = trimmed.chars().filter(|ch| ch.is_alphabetic()).count();
                 let alpha_ratio = alpha_count as f32 / trimmed.len().max(1) as f32;
@@ -2381,7 +2645,11 @@ pub fn e8_compose_sentences_quantum(
         }
     }
 
-    all_sentences.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    all_sentences.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let selected: Vec<&ScoredSentence> = all_sentences.iter().take(max_sentences).collect();
     if selected.is_empty() {
@@ -2391,16 +2659,27 @@ pub fn e8_compose_sentences_quantum(
     // Order selected sentences: leader group's sentences first (by position),
     // then follower group's sentences (by position). This is the non-commutative
     // braiding — the leader sets the structure, the follower fills in details.
-    let leader_group = contributions.iter()
+    let leader_group = contributions
+        .iter()
         .enumerate()
-        .max_by(|(i, _), (j, _)| group_weights[*i].partial_cmp(&group_weights[*j]).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|(i, _), (j, _)| {
+            group_weights[*i]
+                .partial_cmp(&group_weights[*j])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .map(|(_, c)| c.group_idx)
         .unwrap_or(0);
 
-    let mut leader_sents: Vec<&ScoredSentence> = selected.iter()
-        .filter(|s| s.group == leader_group).copied().collect();
-    let mut follower_sents: Vec<&ScoredSentence> = selected.iter()
-        .filter(|s| s.group != leader_group).copied().collect();
+    let mut leader_sents: Vec<&ScoredSentence> = selected
+        .iter()
+        .filter(|s| s.group == leader_group)
+        .copied()
+        .collect();
+    let mut follower_sents: Vec<&ScoredSentence> = selected
+        .iter()
+        .filter(|s| s.group != leader_group)
+        .copied()
+        .collect();
 
     leader_sents.sort_by_key(|s| s.position);
     follower_sents.sort_by_key(|s| s.position);
@@ -2470,7 +2749,9 @@ impl ProgramGraph {
         }
 
         // Decode all programs to tokenized word bags
-        let docs: Vec<Vec<String>> = lattice.programs.iter()
+        let docs: Vec<Vec<String>> = lattice
+            .programs
+            .iter()
             .map(|p| {
                 let text = p.display_text(dictionary);
                 text.to_ascii_lowercase()
@@ -2501,18 +2782,26 @@ impl ProgramGraph {
         let mut signatures: Vec<Vec<DiscriminativeKeyword>> = Vec::with_capacity(n);
         for words in &docs {
             let unique: HashSet<&str> = words.iter().map(|s| s.as_str()).collect();
-            let mut sig: Vec<DiscriminativeKeyword> = unique.iter()
+            let mut sig: Vec<DiscriminativeKeyword> = unique
+                .iter()
                 .filter_map(|w: &&str| {
                     let doc_freq = df.get(*w).copied().unwrap_or(0) as f32;
                     let specificity = (n_f / (doc_freq + 1.0)).ln() + 1.0;
                     if specificity > specificity_threshold {
-                        Some(DiscriminativeKeyword { keyword: w.to_string(), specificity })
+                        Some(DiscriminativeKeyword {
+                            keyword: w.to_string(),
+                            specificity,
+                        })
                     } else {
                         None
                     }
                 })
                 .collect();
-            sig.sort_by(|a, b| b.specificity.partial_cmp(&a.specificity).unwrap_or(std::cmp::Ordering::Equal));
+            sig.sort_by(|a, b| {
+                b.specificity
+                    .partial_cmp(&a.specificity)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             sig.truncate(max_sig_size);
             signatures.push(sig);
         }
@@ -2521,19 +2810,35 @@ impl ProgramGraph {
         let mut adjacency: Vec<Vec<ProgramEdge>> = vec![Vec::new(); n];
         for i in 0..n {
             for j in (i + 1)..n {
-                let sim = gen_cosine_sim(&lattice.programs[i].ema_centroid, &lattice.programs[j].ema_centroid);
+                let sim = gen_cosine_sim(
+                    &lattice.programs[i].ema_centroid,
+                    &lattice.programs[j].ema_centroid,
+                );
                 if sim > 0.5 {
-                    let shared = docs[i].iter()
+                    let shared = docs[i]
+                        .iter()
                         .collect::<HashSet<_>>()
                         .intersection(&docs[j].iter().collect())
                         .count();
-                    adjacency[i].push(ProgramEdge { target_idx: j, cosine_sim: sim, shared_terms: shared as u16 });
-                    adjacency[j].push(ProgramEdge { target_idx: i, cosine_sim: sim, shared_terms: shared as u16 });
+                    adjacency[i].push(ProgramEdge {
+                        target_idx: j,
+                        cosine_sim: sim,
+                        shared_terms: shared as u16,
+                    });
+                    adjacency[j].push(ProgramEdge {
+                        target_idx: i,
+                        cosine_sim: sim,
+                        shared_terms: shared as u16,
+                    });
                 }
             }
         }
 
-        let mut graph = ProgramGraph { signatures, adjacency, keyword_index: HashMap::new() };
+        let mut graph = ProgramGraph {
+            signatures,
+            adjacency,
+            keyword_index: HashMap::new(),
+        };
         graph.rebuild_keyword_index();
         graph
     }
@@ -2543,7 +2848,10 @@ impl ProgramGraph {
         self.keyword_index.clear();
         for (prog_idx, sig) in self.signatures.iter().enumerate() {
             for dk in sig {
-                self.keyword_index.entry(dk.keyword.clone()).or_default().push(prog_idx);
+                self.keyword_index
+                    .entry(dk.keyword.clone())
+                    .or_default()
+                    .push(prog_idx);
             }
         }
     }
@@ -2577,7 +2885,8 @@ impl ProgramGraph {
             let qk_lower = qk.to_ascii_lowercase();
             if let Some(prog_indices) = self.keyword_index.get(&qk_lower) {
                 for &pidx in prog_indices {
-                    let specificity = self.signatures[pidx].iter()
+                    let specificity = self.signatures[pidx]
+                        .iter()
                         .find(|dk| dk.keyword == qk_lower)
                         .map(|dk| dk.specificity)
                         .unwrap_or(1.0);
@@ -2586,7 +2895,9 @@ impl ProgramGraph {
             }
             // Substring match for compound terms
             for (kw, prog_indices) in &self.keyword_index {
-                if kw != &qk_lower && (kw.contains(qk_lower.as_str()) || qk_lower.contains(kw.as_str())) {
+                if kw != &qk_lower
+                    && (kw.contains(qk_lower.as_str()) || qk_lower.contains(kw.as_str()))
+                {
                     for &pidx in prog_indices {
                         *scores.entry(pidx).or_default() += 0.5;
                     }
@@ -2600,7 +2911,11 @@ impl ProgramGraph {
 
     /// Check if a neighbor of `program_idx` has a significantly better
     /// keyword match for the query. Returns the neighbor index if so.
-    pub fn neighbor_redirect(&self, program_idx: usize, query_keywords: &[String]) -> Option<usize> {
+    pub fn neighbor_redirect(
+        &self,
+        program_idx: usize,
+        query_keywords: &[String],
+    ) -> Option<usize> {
         if program_idx >= self.adjacency.len() || query_keywords.is_empty() {
             return None;
         }
@@ -2608,7 +2923,9 @@ impl ProgramGraph {
         // Only redirect if the neighbor is overwhelmingly better (3x) and
         // the current program has near-zero match. This prevents false
         // redirects like Strategy → State when both have partial matches.
-        if own_score > 1.0 { return None; } // current match is decent, don't redirect
+        if own_score > 1.0 {
+            return None;
+        } // current match is decent, don't redirect
         let mut best: Option<(usize, f32)> = None;
         for edge in &self.adjacency[program_idx] {
             let neighbor_score = self.signature_score(edge.target_idx, query_keywords);
@@ -2736,7 +3053,10 @@ impl IndexedGenEnv {
         }
         let mut by_topic: HashMap<String, Vec<(Vec<f32>, String)>> = HashMap::new();
         for (cond, text, topic) in training_triples {
-            by_topic.entry(topic.clone()).or_default().push((cond.clone(), text.clone()));
+            by_topic
+                .entry(topic.clone())
+                .or_default()
+                .push((cond.clone(), text.clone()));
         }
 
         let mut out = Vec::with_capacity(by_topic.len());
@@ -2769,7 +3089,12 @@ impl IndexedGenEnv {
             for (i, v) in causal_sum.iter().enumerate() {
                 causal_centroid[i] = v / n;
             }
-            let cnorm = causal_centroid.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+            let cnorm = causal_centroid
+                .iter()
+                .map(|x| x * x)
+                .sum::<f32>()
+                .sqrt()
+                .max(1e-8);
             for v in &mut causal_centroid {
                 *v /= cnorm;
             }
@@ -2783,8 +3108,13 @@ impl IndexedGenEnv {
             );
             let n_edges: usize = graph.adjacency.iter().map(|a| a.len()).sum();
             let n_sigs: usize = graph.signatures.iter().map(|s| s.len()).sum();
-            println!("    [program-graph] '{}': {} nodes, {} edges, {} signature keywords",
-                topic_name, lattice.programs.len(), n_edges / 2, n_sigs);
+            println!(
+                "    [program-graph] '{}': {} nodes, {} edges, {} signature keywords",
+                topic_name,
+                lattice.programs.len(),
+                n_edges / 2,
+                n_sigs
+            );
             out.push(TopicSubIndex {
                 topic_name,
                 centroid,
@@ -2841,7 +3171,12 @@ impl IndexedGenEnv {
             for v in &mut new_centroid {
                 *v /= n;
             }
-            let norm = new_centroid.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+            let norm = new_centroid
+                .iter()
+                .map(|x| x * x)
+                .sum::<f32>()
+                .sqrt()
+                .max(1e-8);
             for v in &mut new_centroid {
                 *v /= norm;
             }
@@ -2849,7 +3184,12 @@ impl IndexedGenEnv {
             for (i, v) in causal_sum.iter().enumerate() {
                 new_causal[i] = v / n;
             }
-            let cnorm = new_causal.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+            let cnorm = new_causal
+                .iter()
+                .map(|x| x * x)
+                .sum::<f32>()
+                .sqrt()
+                .max(1e-8);
             for v in &mut new_causal {
                 *v /= cnorm;
             }
@@ -2860,10 +3200,15 @@ impl IndexedGenEnv {
             }
             let n_c = topic.centroid.len().min(new_centroid.len());
             for i in 0..n_c {
-                topic.centroid[i] =
-                    (1.0 - alpha) * topic.centroid[i] + alpha * new_centroid[i];
+                topic.centroid[i] = (1.0 - alpha) * topic.centroid[i] + alpha * new_centroid[i];
             }
-            let cnorm2 = topic.centroid.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+            let cnorm2 = topic
+                .centroid
+                .iter()
+                .map(|x| x * x)
+                .sum::<f32>()
+                .sqrt()
+                .max(1e-8);
             for v in &mut topic.centroid {
                 *v /= cnorm2;
             }
@@ -2908,13 +3253,17 @@ impl IndexedGenEnv {
             for (i, text) in texts.iter().enumerate() {
                 let ids = dict.encode(text);
                 let (arch, _) = cb.match_best(&ids);
-                if arch < c.len() { c[arch].push(i); }
+                if arch < c.len() {
+                    c[arch].push(i);
+                }
             }
             c
         };
         let hopf = HopfCompositionTable::build(&cb, Some(&emb_refs), &clusters, 3);
 
-        let pairs: Vec<(Vec<f32>, String)> = embeddings.iter().zip(texts.iter())
+        let pairs: Vec<(Vec<f32>, String)> = embeddings
+            .iter()
+            .zip(texts.iter())
             .map(|(e, t)| (e.to_vec(), t.to_string()))
             .collect();
         let mut lattice = InfraciliaryLattice::new(dict.clone());
@@ -2994,10 +3343,12 @@ impl IndexedGenEnv {
         training_triples: &[(Vec<f32>, String, String)],
         spawn_threshold: f32,
     ) -> Self {
-        let training_pairs: Vec<(Vec<f32>, String)> = training_triples.iter()
+        let training_pairs: Vec<(Vec<f32>, String)> = training_triples
+            .iter()
             .map(|(cond, text, _topic)| (cond.clone(), text.clone()))
             .collect();
-        let topic_subindex = Self::build_topic_subindex(&dictionary, training_triples, spawn_threshold);
+        let topic_subindex =
+            Self::build_topic_subindex(&dictionary, training_triples, spawn_threshold);
         let output_dim = codebook.slot_only_bits;
         let mut lattice = InfraciliaryLattice::new(dictionary.clone());
         lattice.develop(&training_pairs, spawn_threshold);
@@ -3054,7 +3405,10 @@ impl IndexedGenEnv {
     /// Finds positions that are invariant across similar programs (fixed)
     /// vs positions that vary (slots), enabling template-based generation.
     pub fn build_schemas(&mut self) {
-        let programs: Vec<(Vec<u16>, f32)> = self.lattice.programs.iter()
+        let programs: Vec<(Vec<u16>, f32)> = self
+            .lattice
+            .programs
+            .iter()
             .map(|p| (p.token_sequence.clone(), p.quality_score))
             .collect();
         self.schemas = crate::predictive_coder::extract_schemas(&programs, 2, 0.35);
@@ -3103,29 +3457,46 @@ impl IndexedGenEnv {
         gen_stats::record_generation_attempt();
         let codec = self.chunk_codec.as_ref()?;
 
-        let topic = self.topic_subindex.iter()
+        let topic = self
+            .topic_subindex
+            .iter()
             .find(|t| t.topic_name == topic_name)?;
 
-        if topic.lattice.programs.len() < 2 { return None; }
+        if topic.lattice.programs.len() < 2 {
+            return None;
+        }
 
         let k = 4.min(topic.lattice.programs.len());
-        let mut scored: Vec<(usize, f32)> = topic.lattice.programs.iter()
+        let mut scored: Vec<(usize, f32)> = topic
+            .lattice
+            .programs
+            .iter()
             .enumerate()
             .map(|(i, p)| {
-                let dot: f32 = cond.iter().zip(p.ema_centroid.iter())
-                    .map(|(a, b)| a * b).sum();
+                let dot: f32 = cond
+                    .iter()
+                    .zip(p.ema_centroid.iter())
+                    .map(|(a, b)| a * b)
+                    .sum();
                 let na: f32 = cond.iter().map(|x| x * x).sum::<f32>().sqrt();
                 let nb: f32 = p.ema_centroid.iter().map(|x| x * x).sum::<f32>().sqrt();
-                let sim = if na > 1e-8 && nb > 1e-8 { dot / (na * nb) } else { 0.0 };
+                let sim = if na > 1e-8 && nb > 1e-8 {
+                    dot / (na * nb)
+                } else {
+                    0.0
+                };
                 (i, sim)
             })
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(k);
 
-        if scored.is_empty() || scored[0].1 < 0.1 { return None; }
+        if scored.is_empty() || scored[0].1 < 0.1 {
+            return None;
+        }
 
-        let source_seqs: Vec<(crate::text_autoencoder::ChunkSequence, f32)> = scored.iter()
+        let source_seqs: Vec<(crate::text_autoencoder::ChunkSequence, f32)> = scored
+            .iter()
             .map(|&(idx, sim)| {
                 let toks = &topic.lattice.programs[idx].token_sequence;
                 let wb = self.dictionary.infer_word_boundaries(toks);
@@ -3135,13 +3506,16 @@ impl IndexedGenEnv {
             .collect();
 
         let target_chunks = source_seqs[0].0.num_chunks();
-        if target_chunks == 0 { return None; }
+        if target_chunks == 0 {
+            return None;
+        }
 
         // Propagator-based composition: build SpacetimeChunk trajectories
         // from program centroids (semantically-rich grade structure) rather
         // than CDMA chunks (quasi-random grades).  CDMA chunks are only used
         // for the final token decode step.
-        let st_sources: Vec<(Vec<crate::text_autoencoder::SpacetimeChunk>, f32)> = scored.iter()
+        let st_sources: Vec<(Vec<crate::text_autoencoder::SpacetimeChunk>, f32)> = scored
+            .iter()
             .map(|&(idx, sim)| {
                 let centroid = &topic.lattice.programs[idx].ema_centroid;
                 let st = crate::text_autoencoder::SpacetimeChunk::from_centroid(centroid);
@@ -3152,9 +3526,7 @@ impl IndexedGenEnv {
         let has_multi_chunk = st_sources.iter().any(|(t, _)| t.len() >= 2);
         let composed = if has_multi_chunk {
             // Use propagator composition for richer semantic blending
-            let mass = crate::text_autoencoder::trajectory_mass(
-                &st_sources[0].0
-            );
+            let mass = crate::text_autoencoder::trajectory_mass(&st_sources[0].0);
             let propagator = crate::text_autoencoder::SemanticPropagator::new(mass, 0.4);
             propagator.compose_trajectories(&st_sources, target_chunks)
         } else {
@@ -3165,24 +3537,31 @@ impl IndexedGenEnv {
         // Propagator-based extension: predict additional chunks via
         // Dirac-style rotor propagation with semantic inertia.
         let mut extended = composed;
-        let max_chunks = (max_tokens + crate::text_autoencoder::CHUNK_K - 1)
-            / crate::text_autoencoder::CHUNK_K;
+        let max_chunks =
+            (max_tokens + crate::text_autoencoder::CHUNK_K - 1) / crate::text_autoencoder::CHUNK_K;
         if extended.len() >= 2 && extended.len() < max_chunks {
-            let st_trajectory: Vec<crate::text_autoencoder::SpacetimeChunk> = extended.iter()
+            let st_trajectory: Vec<crate::text_autoencoder::SpacetimeChunk> = extended
+                .iter()
                 .map(|c| crate::text_autoencoder::SpacetimeChunk::from_centroid(c))
                 .collect();
             let mass = crate::text_autoencoder::trajectory_mass(&st_trajectory);
             let mut propagator = crate::text_autoencoder::SemanticPropagator::from_trajectory(
-                &st_trajectory, mass, 0.4,
+                &st_trajectory,
+                mass,
+                0.4,
             );
 
             let extra = 2.min(max_chunks - extended.len());
             for _ in 0..extra {
                 if let Some((next_chunk, _interval, confidence)) = propagator.predict_next() {
-                    if confidence < 0.1 { break; }
-                    let next_st = crate::text_autoencoder::SpacetimeChunk::from_centroid(&next_chunk);
+                    if confidence < 0.1 {
+                        break;
+                    }
+                    let next_st =
+                        crate::text_autoencoder::SpacetimeChunk::from_centroid(&next_chunk);
                     // Coherence check: predicted chunk should be semantically related
-                    if st_trajectory.last()
+                    if st_trajectory
+                        .last()
                         .map(|last| next_st.semantic_similarity(last) > 0.2)
                         .unwrap_or(false)
                     {
@@ -3201,10 +3580,12 @@ impl IndexedGenEnv {
         // This gives fine-grained control over which aspects of generation
         // are varied vs deterministic.
         let grade_temp = crate::text_autoencoder::GradeTemperature::default();
-        let tempered: Vec<[f32; crate::text_autoencoder::CATA_DIM]> = extended.iter()
+        let tempered: Vec<[f32; crate::text_autoencoder::CATA_DIM]> = extended
+            .iter()
             .enumerate()
             .map(|(i, chunk)| {
-                let seed = (i as u64).wrapping_mul(0x517cc1b727220a95)
+                let seed = (i as u64)
+                    .wrapping_mul(0x517cc1b727220a95)
                     .wrapping_add(topic_name.len() as u64);
                 crate::text_autoencoder::apply_grade_temperature(chunk, &grade_temp, seed)
             })
@@ -3213,7 +3594,9 @@ impl IndexedGenEnv {
         let chunk_lengths: Vec<usize> = source_seqs[0].0.chunk_lengths.clone();
         let mut all_tokens = Vec::new();
         for (i, chunk) in tempered.iter().enumerate() {
-            let len = chunk_lengths.get(i).copied()
+            let len = chunk_lengths
+                .get(i)
+                .copied()
                 .unwrap_or(crate::text_autoencoder::CHUNK_K);
             let tokens = codec.decode_chunk(chunk, len);
             all_tokens.extend_from_slice(&tokens);
@@ -3262,18 +3645,30 @@ impl IndexedGenEnv {
     ) -> Option<(String, f32)> {
         gen_stats::record_generation_attempt();
         let codec = self.chunk_codec.as_ref()?;
-        if self.lattice.programs.len() < 2 { return None; }
+        if self.lattice.programs.len() < 2 {
+            return None;
+        }
 
         // Retrieve top-k nearest programs by conditioning similarity
         let k = 4.min(self.lattice.programs.len());
-        let mut scored: Vec<(usize, f32)> = self.lattice.programs.iter()
+        let mut scored: Vec<(usize, f32)> = self
+            .lattice
+            .programs
+            .iter()
             .enumerate()
             .map(|(i, p)| {
-                let dot: f32 = cond.iter().zip(p.ema_centroid.iter())
-                    .map(|(a, b)| a * b).sum();
+                let dot: f32 = cond
+                    .iter()
+                    .zip(p.ema_centroid.iter())
+                    .map(|(a, b)| a * b)
+                    .sum();
                 let na: f32 = cond.iter().map(|x| x * x).sum::<f32>().sqrt();
                 let nb: f32 = p.ema_centroid.iter().map(|x| x * x).sum::<f32>().sqrt();
-                let sim = if na > 1e-8 && nb > 1e-8 { dot / (na * nb) } else { 0.0 };
+                let sim = if na > 1e-8 && nb > 1e-8 {
+                    dot / (na * nb)
+                } else {
+                    0.0
+                };
                 let bias = self.lattice.retrieval_bias(i);
                 (i, sim * bias)
             })
@@ -3281,10 +3676,13 @@ impl IndexedGenEnv {
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(k);
 
-        if scored.is_empty() || scored[0].1 < 0.1 { return None; }
+        if scored.is_empty() || scored[0].1 < 0.1 {
+            return None;
+        }
 
         // Encode each program's tokens into chunk sequences (word-aligned)
-        let source_seqs: Vec<(crate::text_autoencoder::ChunkSequence, f32)> = scored.iter()
+        let source_seqs: Vec<(crate::text_autoencoder::ChunkSequence, f32)> = scored
+            .iter()
             .map(|&(idx, sim)| {
                 let toks = &self.lattice.programs[idx].token_sequence;
                 let wb = self.dictionary.infer_word_boundaries(toks);
@@ -3295,18 +3693,20 @@ impl IndexedGenEnv {
 
         // Determine target number of chunks from the best program's length
         let target_chunks = source_seqs[0].0.num_chunks();
-        if target_chunks == 0 { return None; }
+        if target_chunks == 0 {
+            return None;
+        }
 
         // Compose trajectories: weighted blend of chunk sequences
-        let composed = crate::text_autoencoder::compose_trajectories(
-            &source_seqs, target_chunks,
-        );
+        let composed = crate::text_autoencoder::compose_trajectories(&source_seqs, target_chunks);
 
         // Decode composed chunks back to tokens
         let chunk_lengths: Vec<usize> = source_seqs[0].0.chunk_lengths.clone();
         let mut all_tokens = Vec::new();
         for (i, chunk) in composed.iter().enumerate() {
-            let len = chunk_lengths.get(i).copied()
+            let len = chunk_lengths
+                .get(i)
+                .copied()
                 .unwrap_or(crate::text_autoencoder::CHUNK_K);
             let tokens = codec.decode_chunk(chunk, len);
             all_tokens.extend_from_slice(&tokens);
@@ -3314,7 +3714,9 @@ impl IndexedGenEnv {
         all_tokens.truncate(max_tokens);
 
         let text = self.dictionary.decode(&all_tokens);
-        if text.len() < 5 { return None; }
+        if text.len() < 5 {
+            return None;
+        }
 
         gen_stats::record_composed_output();
         let confidence = scored[0].1.min(0.95);
@@ -3361,7 +3763,11 @@ impl IndexedGenEnv {
         for (i, prog) in lattice.programs.iter().enumerate() {
             // Use effective centroid (base + session drift) for in-context adaptation
             let effective = lattice.effective_centroid(i);
-            let centroid = if effective.is_empty() { &prog.ema_centroid } else { &effective };
+            let centroid = if effective.is_empty() {
+                &prog.ema_centroid
+            } else {
+                &effective
+            };
 
             let cosine = gen_cosine_sim(cond, centroid);
 
@@ -3369,26 +3775,42 @@ impl IndexedGenEnv {
             let prog_spatial = spatial_fingerprint(&prog_mv);
             let prog_causal = causal_fingerprint(&prog_mv);
 
-            let sp_dot: f32 = input_spatial.iter().zip(prog_spatial.iter())
-                .map(|(a, b)| a * b).sum();
+            let sp_dot: f32 = input_spatial
+                .iter()
+                .zip(prog_spatial.iter())
+                .map(|(a, b)| a * b)
+                .sum();
             let sp_na: f32 = input_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
             let sp_nb: f32 = prog_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
-            let spatial_align = if sp_na < 1e-8 || sp_nb < 1e-8 { 0.0 }
-                else { (sp_dot / (sp_na * sp_nb)).clamp(-1.0, 1.0) };
+            let spatial_align = if sp_na < 1e-8 || sp_nb < 1e-8 {
+                0.0
+            } else {
+                (sp_dot / (sp_na * sp_nb)).clamp(-1.0, 1.0)
+            };
 
-            let ca_dot: f32 = input_causal.iter().zip(prog_causal.iter())
-                .map(|(a, b)| a * b).sum();
+            let ca_dot: f32 = input_causal
+                .iter()
+                .zip(prog_causal.iter())
+                .map(|(a, b)| a * b)
+                .sum();
             let ca_na: f32 = input_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
             let ca_nb: f32 = prog_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
-            let causal_align = if ca_na < 1e-8 || ca_nb < 1e-8 { 0.0 }
-                else { (ca_dot / (ca_na * ca_nb)).clamp(-1.0, 1.0) };
+            let causal_align = if ca_na < 1e-8 || ca_nb < 1e-8 {
+                0.0
+            } else {
+                (ca_dot / (ca_na * ca_nb)).clamp(-1.0, 1.0)
+            };
 
-            let disp_norm_sq: f32 = cond.iter()
+            let disp_norm_sq: f32 = cond
+                .iter()
                 .zip(centroid.iter())
                 .map(|(a, b)| (a - b) * (a - b))
                 .sum();
-            let proximity = if disp_norm_sq < 1e-8 { 1.0 }
-                else { (1.0 / disp_norm_sq).min(100.0).sqrt() / 10.0 };
+            let proximity = if disp_norm_sq < 1e-8 {
+                1.0
+            } else {
+                (1.0 / disp_norm_sq).min(100.0).sqrt() / 10.0
+            };
 
             // Base equivariant score
             let base_score = 0.30 * cosine.max(0.0)
@@ -3429,32 +3851,55 @@ impl IndexedGenEnv {
         let input_spatial = spatial_fingerprint(&input_mv);
         let input_causal = causal_fingerprint(&input_mv);
 
-        let mut scored: Vec<(usize, f32)> = lattice.programs.iter().enumerate()
+        let mut scored: Vec<(usize, f32)> = lattice
+            .programs
+            .iter()
+            .enumerate()
             .map(|(i, prog)| {
                 let effective = lattice.effective_centroid(i);
-                let centroid = if effective.is_empty() { &prog.ema_centroid } else { &effective };
+                let centroid = if effective.is_empty() {
+                    &prog.ema_centroid
+                } else {
+                    &effective
+                };
                 let cosine = gen_cosine_sim(cond, centroid);
                 let prog_mv = embed_bridge_vector(centroid);
                 let prog_spatial = spatial_fingerprint(&prog_mv);
                 let prog_causal = causal_fingerprint(&prog_mv);
-                let sp_dot: f32 = input_spatial.iter().zip(prog_spatial.iter())
-                    .map(|(a, b)| a * b).sum();
+                let sp_dot: f32 = input_spatial
+                    .iter()
+                    .zip(prog_spatial.iter())
+                    .map(|(a, b)| a * b)
+                    .sum();
                 let sp_na: f32 = input_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
                 let sp_nb: f32 = prog_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
-                let spatial_align = if sp_na < 1e-8 || sp_nb < 1e-8 { 0.0 }
-                    else { (sp_dot / (sp_na * sp_nb)).clamp(-1.0, 1.0) };
-                let ca_dot: f32 = input_causal.iter().zip(prog_causal.iter())
-                    .map(|(a, b)| a * b).sum();
+                let spatial_align = if sp_na < 1e-8 || sp_nb < 1e-8 {
+                    0.0
+                } else {
+                    (sp_dot / (sp_na * sp_nb)).clamp(-1.0, 1.0)
+                };
+                let ca_dot: f32 = input_causal
+                    .iter()
+                    .zip(prog_causal.iter())
+                    .map(|(a, b)| a * b)
+                    .sum();
                 let ca_na: f32 = input_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
                 let ca_nb: f32 = prog_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
-                let causal_align = if ca_na < 1e-8 || ca_nb < 1e-8 { 0.0 }
-                    else { (ca_dot / (ca_na * ca_nb)).clamp(-1.0, 1.0) };
-                let disp_norm_sq: f32 = cond.iter()
+                let causal_align = if ca_na < 1e-8 || ca_nb < 1e-8 {
+                    0.0
+                } else {
+                    (ca_dot / (ca_na * ca_nb)).clamp(-1.0, 1.0)
+                };
+                let disp_norm_sq: f32 = cond
+                    .iter()
                     .zip(centroid.iter())
                     .map(|(a, b)| (a - b) * (a - b))
                     .sum();
-                let proximity = if disp_norm_sq < 1e-8 { 1.0 }
-                    else { (1.0 / disp_norm_sq).min(100.0).sqrt() / 10.0 };
+                let proximity = if disp_norm_sq < 1e-8 {
+                    1.0
+                } else {
+                    (1.0 / disp_norm_sq).min(100.0).sqrt() / 10.0
+                };
                 let base_score = 0.30 * cosine.max(0.0)
                     + 0.35 * (spatial_align + 1.0) / 2.0
                     + 0.20 * (causal_align + 1.0) / 2.0
@@ -3473,7 +3918,8 @@ impl IndexedGenEnv {
 
         let effective_temp = temperature.max(0.01);
         let max_score = top[0].1;
-        let weights: Vec<f32> = top.iter()
+        let weights: Vec<f32> = top
+            .iter()
             .map(|(_, s)| ((s - max_score) / effective_temp).exp())
             .collect();
         let sum: f32 = weights.iter().sum();
@@ -3482,15 +3928,15 @@ impl IndexedGenEnv {
         // Deterministic-seeded sampling using a hash of the conditioning vector
         // PLUS a monotonically increasing session counter so that even identical
         // conditioning produces different samples on consecutive calls.
-        let seed: u64 = cond.iter().enumerate()
+        let seed: u64 = cond
+            .iter()
+            .enumerate()
             .fold(0x517cc1b727220a95u64, |acc, (i, &v)| {
                 acc.wrapping_mul(6364136223846793005)
                     .wrapping_add(((v * 1000.0) as u64).wrapping_add(i as u64))
             });
         // Mix in the call counter AND per-program retrieval counts for turn-level variation
-        let call_mix: u64 = lattice.programs.iter()
-            .map(|p| p.total_retrievals)
-            .sum();
+        let call_mix: u64 = lattice.programs.iter().map(|p| p.total_retrievals).sum();
         let mixed_seed = seed
             .wrapping_add(call_mix.wrapping_mul(0x9E3779B97F4A7C15))
             .wrapping_add(call_counter.wrapping_mul(0x6C62272E07BB0142));
@@ -3529,7 +3975,8 @@ impl IndexedGenEnv {
         let top: Vec<(usize, f32)> = scored.iter().take(k).copied().collect();
         let effective_temp = self.retrieval_temperature.max(0.01);
         let max_score = top[0].1;
-        let weights: Vec<f32> = top.iter()
+        let weights: Vec<f32> = top
+            .iter()
             .map(|&(idx, s)| {
                 let bias = lattice.retrieval_bias(idx);
                 ((s * bias - max_score) / effective_temp).exp()
@@ -3541,11 +3988,16 @@ impl IndexedGenEnv {
         }
         let probs: Vec<f32> = weights.iter().map(|w| w / sum).collect();
 
-        let seed: u64 = top.iter().enumerate()
-            .fold(self.session_call_counter.wrapping_mul(0x6C62272E07BB0142), |acc, (i, &(idx, s))| {
-                acc.wrapping_mul(6364136223846793005)
-                    .wrapping_add((idx as u64).wrapping_add((s * 1000.0) as u64).wrapping_add(i as u64))
-            });
+        let seed: u64 = top.iter().enumerate().fold(
+            self.session_call_counter.wrapping_mul(0x6C62272E07BB0142),
+            |acc, (i, &(idx, s))| {
+                acc.wrapping_mul(6364136223846793005).wrapping_add(
+                    (idx as u64)
+                        .wrapping_add((s * 1000.0) as u64)
+                        .wrapping_add(i as u64),
+                )
+            },
+        );
         let uniform = ((seed >> 11) as f64) / ((1u64 << 53) as f64);
 
         let mut cumulative = 0.0f64;
@@ -3613,7 +4065,11 @@ impl IndexedGenEnv {
     fn nearest_response(&self, cond: &[f32]) -> (String, usize, f32) {
         if self.stochastic_retrieval && self.retrieval_temperature > 0.01 {
             self.stochastic_nearest_response_in_lattice(
-                &self.lattice, cond, self.retrieval_temperature, 4, self.session_call_counter,
+                &self.lattice,
+                cond,
+                self.retrieval_temperature,
+                4,
+                self.session_call_counter,
             )
         } else {
             self.nearest_response_in_lattice(&self.lattice, cond)
@@ -3713,28 +4169,55 @@ impl IndexedGenEnv {
         let input_spatial = spatial_fingerprint(&input_mv);
         let input_causal = causal_fingerprint(&input_mv);
 
-        let mut scored: Vec<(usize, f32)> = lattice.programs.iter().enumerate()
+        let mut scored: Vec<(usize, f32)> = lattice
+            .programs
+            .iter()
+            .enumerate()
             .map(|(i, prog)| {
                 let effective = lattice.effective_centroid(i);
-                let centroid = if effective.is_empty() { &prog.ema_centroid } else { &effective };
+                let centroid = if effective.is_empty() {
+                    &prog.ema_centroid
+                } else {
+                    &effective
+                };
                 let cosine = gen_cosine_sim(cond, centroid);
                 let prog_mv = embed_bridge_vector(centroid);
                 let prog_spatial = spatial_fingerprint(&prog_mv);
                 let prog_causal = causal_fingerprint(&prog_mv);
-                let sp_dot: f32 = input_spatial.iter().zip(prog_spatial.iter()).map(|(a, b)| a * b).sum();
+                let sp_dot: f32 = input_spatial
+                    .iter()
+                    .zip(prog_spatial.iter())
+                    .map(|(a, b)| a * b)
+                    .sum();
                 let sp_na: f32 = input_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
                 let sp_nb: f32 = prog_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
-                let spatial_align = if sp_na < 1e-8 || sp_nb < 1e-8 { 0.0 }
-                    else { (sp_dot / (sp_na * sp_nb)).clamp(-1.0, 1.0) };
-                let ca_dot: f32 = input_causal.iter().zip(prog_causal.iter()).map(|(a, b)| a * b).sum();
+                let spatial_align = if sp_na < 1e-8 || sp_nb < 1e-8 {
+                    0.0
+                } else {
+                    (sp_dot / (sp_na * sp_nb)).clamp(-1.0, 1.0)
+                };
+                let ca_dot: f32 = input_causal
+                    .iter()
+                    .zip(prog_causal.iter())
+                    .map(|(a, b)| a * b)
+                    .sum();
                 let ca_na: f32 = input_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
                 let ca_nb: f32 = prog_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
-                let causal_align = if ca_na < 1e-8 || ca_nb < 1e-8 { 0.0 }
-                    else { (ca_dot / (ca_na * ca_nb)).clamp(-1.0, 1.0) };
-                let disp_norm_sq: f32 = cond.iter().zip(centroid.iter())
-                    .map(|(a, b)| (a - b) * (a - b)).sum();
-                let proximity = if disp_norm_sq < 1e-8 { 1.0 }
-                    else { (1.0 / disp_norm_sq).min(100.0).sqrt() / 10.0 };
+                let causal_align = if ca_na < 1e-8 || ca_nb < 1e-8 {
+                    0.0
+                } else {
+                    (ca_dot / (ca_na * ca_nb)).clamp(-1.0, 1.0)
+                };
+                let disp_norm_sq: f32 = cond
+                    .iter()
+                    .zip(centroid.iter())
+                    .map(|(a, b)| (a - b) * (a - b))
+                    .sum();
+                let proximity = if disp_norm_sq < 1e-8 {
+                    1.0
+                } else {
+                    (1.0 / disp_norm_sq).min(100.0).sqrt() / 10.0
+                };
                 let base_score = 0.30 * cosine.max(0.0)
                     + 0.35 * (spatial_align + 1.0) / 2.0
                     + 0.20 * (causal_align + 1.0) / 2.0
@@ -3750,11 +4233,16 @@ impl IndexedGenEnv {
 
         let effective_temp = temperature.max(0.01);
         let max_score = top[0].1;
-        let weights: Vec<f32> = top.iter().map(|(_, s)| ((s - max_score) / effective_temp).exp()).collect();
+        let weights: Vec<f32> = top
+            .iter()
+            .map(|(_, s)| ((s - max_score) / effective_temp).exp())
+            .collect();
         let sum: f32 = weights.iter().sum();
         let probs: Vec<f32> = weights.iter().map(|w| w / sum.max(1e-8)).collect();
 
-        let seed: u64 = cond.iter().enumerate()
+        let seed: u64 = cond
+            .iter()
+            .enumerate()
             .fold(0x517cc1b727220a95u64, |acc, (i, &v)| {
                 acc.wrapping_mul(6364136223846793005)
                     .wrapping_add(((v * 1000.0) as u64).wrapping_add(i as u64))
@@ -3782,8 +4270,15 @@ impl IndexedGenEnv {
                 order.push((idx, s));
             }
         }
-        order.into_iter()
-            .map(|(idx, s)| (idx, lattice.programs[idx].display_text(&self.dictionary), s.max(0.0)))
+        order
+            .into_iter()
+            .map(|(idx, s)| {
+                (
+                    idx,
+                    lattice.programs[idx].display_text(&self.dictionary),
+                    s.max(0.0),
+                )
+            })
             .collect()
     }
 
@@ -3801,26 +4296,49 @@ impl IndexedGenEnv {
         let input_spatial = spatial_fingerprint(&input_mv);
         let input_causal = causal_fingerprint(&input_mv);
 
-        let mut scored: Vec<(usize, f32)> = lattice.programs.iter().enumerate()
+        let mut scored: Vec<(usize, f32)> = lattice
+            .programs
+            .iter()
+            .enumerate()
             .map(|(i, prog)| {
                 let cosine = gen_cosine_sim(cond, &prog.ema_centroid);
                 let prog_mv = embed_bridge_vector(&prog.ema_centroid);
                 let prog_spatial = spatial_fingerprint(&prog_mv);
                 let prog_causal = causal_fingerprint(&prog_mv);
-                let sp_dot: f32 = input_spatial.iter().zip(prog_spatial.iter()).map(|(a, b)| a * b).sum();
+                let sp_dot: f32 = input_spatial
+                    .iter()
+                    .zip(prog_spatial.iter())
+                    .map(|(a, b)| a * b)
+                    .sum();
                 let sp_na: f32 = input_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
                 let sp_nb: f32 = prog_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
-                let spatial_align = if sp_na < 1e-8 || sp_nb < 1e-8 { 0.0 }
-                    else { (sp_dot / (sp_na * sp_nb)).clamp(-1.0, 1.0) };
-                let ca_dot: f32 = input_causal.iter().zip(prog_causal.iter()).map(|(a, b)| a * b).sum();
+                let spatial_align = if sp_na < 1e-8 || sp_nb < 1e-8 {
+                    0.0
+                } else {
+                    (sp_dot / (sp_na * sp_nb)).clamp(-1.0, 1.0)
+                };
+                let ca_dot: f32 = input_causal
+                    .iter()
+                    .zip(prog_causal.iter())
+                    .map(|(a, b)| a * b)
+                    .sum();
                 let ca_na: f32 = input_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
                 let ca_nb: f32 = prog_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
-                let causal_align = if ca_na < 1e-8 || ca_nb < 1e-8 { 0.0 }
-                    else { (ca_dot / (ca_na * ca_nb)).clamp(-1.0, 1.0) };
-                let disp_norm_sq: f32 = cond.iter().zip(prog.ema_centroid.iter())
-                    .map(|(a, b)| (a - b) * (a - b)).sum();
-                let proximity = if disp_norm_sq < 1e-8 { 1.0 }
-                    else { (1.0 / disp_norm_sq).min(100.0).sqrt() / 10.0 };
+                let causal_align = if ca_na < 1e-8 || ca_nb < 1e-8 {
+                    0.0
+                } else {
+                    (ca_dot / (ca_na * ca_nb)).clamp(-1.0, 1.0)
+                };
+                let disp_norm_sq: f32 = cond
+                    .iter()
+                    .zip(prog.ema_centroid.iter())
+                    .map(|(a, b)| (a - b) * (a - b))
+                    .sum();
+                let proximity = if disp_norm_sq < 1e-8 {
+                    1.0
+                } else {
+                    (1.0 / disp_norm_sq).min(100.0).sqrt() / 10.0
+                };
                 let score = 0.30 * cosine.max(0.0)
                     + 0.35 * (spatial_align + 1.0) / 2.0
                     + 0.20 * (causal_align + 1.0) / 2.0
@@ -3829,13 +4347,21 @@ impl IndexedGenEnv {
             })
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.into_iter().take(k).map(|(idx, sim)| {
-            let text = lattice.programs[idx].display_text(&self.dictionary);
-            (text, idx, sim)
-        }).collect()
+        scored
+            .into_iter()
+            .take(k)
+            .map(|(idx, sim)| {
+                let text = lattice.programs[idx].display_text(&self.dictionary);
+                (text, idx, sim)
+            })
+            .collect()
     }
 
-    fn nearest_topic_response(&self, cond: &[f32], topic_hint: Option<&str>) -> Option<(String, String, f32)> {
+    fn nearest_topic_response(
+        &self,
+        cond: &[f32],
+        topic_hint: Option<&str>,
+    ) -> Option<(String, String, f32)> {
         if self.topic_subindex.is_empty() {
             return None;
         }
@@ -3847,13 +4373,15 @@ impl IndexedGenEnv {
 
         let mut best: Option<(String, String, f32)> = None;
         for topic in &self.topic_subindex {
-            let (text, _prog_idx, local_conf) = self.nearest_response_in_lattice(&topic.lattice, cond);
+            let (text, _prog_idx, local_conf) =
+                self.nearest_response_in_lattice(&topic.lattice, cond);
             if text.is_empty() {
                 continue;
             }
 
             // Displacement from topic centroid to input, in Cl(1,7)
-            let displacement: Vec<f32> = cond.iter()
+            let displacement: Vec<f32> = cond
+                .iter()
                 .zip(topic.centroid.iter())
                 .map(|(a, b)| a - b)
                 .collect();
@@ -3866,10 +4394,23 @@ impl IndexedGenEnv {
 
             // Causal alignment (boost bivectors)
             let causal_sim = {
-                let dot: f32 = input_causal.iter().zip(topic.causal_centroid.iter()).map(|(a, b)| a * b).sum();
+                let dot: f32 = input_causal
+                    .iter()
+                    .zip(topic.causal_centroid.iter())
+                    .map(|(a, b)| a * b)
+                    .sum();
                 let na: f32 = input_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
-                let nb: f32 = topic.causal_centroid.iter().map(|x| x * x).sum::<f32>().sqrt();
-                if na < 1e-10 || nb < 1e-10 { 0.0 } else { (dot / (na * nb)).max(0.0) }
+                let nb: f32 = topic
+                    .causal_centroid
+                    .iter()
+                    .map(|x| x * x)
+                    .sum::<f32>()
+                    .sqrt();
+                if na < 1e-10 || nb < 1e-10 {
+                    0.0
+                } else {
+                    (dot / (na * nb)).max(0.0)
+                }
             };
 
             let hint_bonus = match hint {
@@ -3878,8 +4419,17 @@ impl IndexedGenEnv {
                 None => 0.02,
             };
             let density_bonus = ((topic.sample_count as f32).ln_1p() / 10.0).min(0.08);
-            let combined = (0.40 * local_conf + 0.22 * field_proximity + 0.18 * causal_sim + hint_bonus + density_bonus).clamp(0.0, 1.0);
-            if best.as_ref().map(|(_, _, score)| combined > *score).unwrap_or(true) {
+            let combined = (0.40 * local_conf
+                + 0.22 * field_proximity
+                + 0.18 * causal_sim
+                + hint_bonus
+                + density_bonus)
+                .clamp(0.0, 1.0);
+            if best
+                .as_ref()
+                .map(|(_, _, score)| combined > *score)
+                .unwrap_or(true)
+            {
                 best = Some((text, topic.topic_name.clone(), combined));
             }
         }
@@ -3890,7 +4440,10 @@ impl IndexedGenEnv {
     fn sentiment_keyword_match_forms(kw: &str) -> Vec<String> {
         let lower = kw.to_ascii_lowercase();
         let mut out = Vec::new();
-        let compact: String = lower.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        let compact: String = lower
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect();
         if compact.len() >= 4 {
             out.push(compact);
         }
@@ -3921,7 +4474,9 @@ impl IndexedGenEnv {
         query_terms: &[String],
         intent_ascii_lower: Option<&str>,
     ) -> bool {
-        use crate::dimension::language::{SENTIMENT_CAUSAL_INDEX_CORE, SENTIMENT_LATTICE_WITNESS_CORE};
+        use crate::dimension::language::{
+            SENTIMENT_CAUSAL_INDEX_CORE, SENTIMENT_LATTICE_WITNESS_CORE,
+        };
         let lex = crate::inference::sentiment_generation_lexicon::global();
         if query_terms.len() < 2 {
             return true;
@@ -4035,9 +4590,7 @@ impl IndexedGenEnv {
         for v in &mut pos_sum {
             *v *= inv_pos;
         }
-        let mut axis: Vec<f32> = (0..dim)
-            .map(|i| neg_sum[i] - pos_sum[i])
-            .collect();
+        let mut axis: Vec<f32> = (0..dim).map(|i| neg_sum[i] - pos_sum[i]).collect();
         let norm: f32 = axis.iter().map(|x| x * x).sum::<f32>().sqrt();
         if norm < 1e-6 {
             return None;
@@ -4135,7 +4688,11 @@ impl IndexedGenEnv {
             let with_marker: Vec<(usize, f32)> = orig
                 .iter()
                 .copied()
-                .filter(|&(idx, _)| topic.lattice.programs[idx].display_text(dictionary).contains(core))
+                .filter(|&(idx, _)| {
+                    topic.lattice.programs[idx]
+                        .display_text(dictionary)
+                        .contains(core)
+                })
                 .collect();
             if !with_marker.is_empty() {
                 *cosine_scores = with_marker;
@@ -4159,10 +4716,8 @@ impl IndexedGenEnv {
             .iter()
             .find(|t| t.topic_name.eq_ignore_ascii_case(forced_topic))
             .or_else(|| {
-                let hint_words: Vec<&str> = forced_topic
-                    .split('_')
-                    .filter(|w| w.len() > 2)
-                    .collect();
+                let hint_words: Vec<&str> =
+                    forced_topic.split('_').filter(|w| w.len() > 2).collect();
                 if hint_words.is_empty() {
                     return None;
                 }
@@ -4172,10 +4727,8 @@ impl IndexedGenEnv {
                         continue;
                     }
                     let tname_lower = t.topic_name.to_ascii_lowercase();
-                    let tname_words: Vec<&str> = tname_lower
-                        .split('_')
-                        .filter(|w| w.len() > 2)
-                        .collect();
+                    let tname_words: Vec<&str> =
+                        tname_lower.split('_').filter(|w| w.len() > 2).collect();
                     let overlap = hint_words
                         .iter()
                         .filter(|hw| tname_words.iter().any(|tw| tw == *hw))
@@ -4329,7 +4882,9 @@ impl IndexedGenEnv {
                 .map(|(di, &(idx, cos))| {
                     let base = cos + lambda * bm25_norm[di];
                     let text = topic.lattice.programs[idx].display_text(&self.dictionary);
-                    let center_exact = query_terms.iter().any(|qt| lookup_json_center_matches(&text, qt));
+                    let center_exact = query_terms
+                        .iter()
+                        .any(|qt| lookup_json_center_matches(&text, qt));
                     let intent_mod = if !self.intent_action.is_empty() {
                         let (_, words) = &docs[di];
                         let has_code = retrieval_lex.program_has_code_markers_bm25(&text);
@@ -4453,7 +5008,10 @@ impl IndexedGenEnv {
                 for (idx, sc) in scored.iter_mut() {
                     let text = topic.lattice.programs[*idx].display_text(&self.dictionary);
                     let tl = text.to_ascii_lowercase();
-                    let hits = qcontent.iter().filter(|qt| tl.contains(qt.as_str())).count();
+                    let hits = qcontent
+                        .iter()
+                        .filter(|qt| tl.contains(qt.as_str()))
+                        .count();
                     let align = hits as f32 / qcontent.len() as f32;
                     *sc += 0.22 * align;
                     if hits == 1 && qcontent.len() >= 3 {
@@ -4523,9 +5081,10 @@ impl IndexedGenEnv {
         let top_prog_idx = scored.first().map(|&(idx, _)| idx);
         let graph_confident = top_prog_idx
             .map(|top_idx| {
-                topic.graph.as_ref().map_or(false, |g| {
-                    g.signature_score(top_idx, &query_terms) > 0.5
-                })
+                topic
+                    .graph
+                    .as_ref()
+                    .map_or(false, |g| g.signature_score(top_idx, &query_terms) > 0.5)
             })
             .unwrap_or(false);
 
@@ -4570,11 +5129,21 @@ impl IndexedGenEnv {
             .collect()
     }
 
-    fn forced_topic_response(&mut self, cond: &[f32], forced_topic: &str) -> Option<(String, String, f32)> {
+    fn forced_topic_response(
+        &mut self,
+        cond: &[f32],
+        forced_topic: &str,
+    ) -> Option<(String, String, f32)> {
         self.forced_topic_response_lang(cond, forced_topic, None, None)
     }
 
-    fn forced_topic_response_lang(&mut self, cond: &[f32], forced_topic: &str, lang_hint: Option<&str>, subject_keywords: Option<&[&str]>) -> Option<(String, String, f32)> {
+    fn forced_topic_response_lang(
+        &mut self,
+        cond: &[f32],
+        forced_topic: &str,
+        lang_hint: Option<&str>,
+        subject_keywords: Option<&[&str]>,
+    ) -> Option<(String, String, f32)> {
         let topic_match = self.resolve_forced_topic_subindex(forced_topic);
 
         // Snapshot recently-returned lines so the selector can skip an immediate
@@ -4793,12 +5362,21 @@ impl IndexedGenEnv {
         if self.lattice.programs.is_empty() {
             return Vec::new();
         }
-        let mut scored: Vec<(usize, f32)> = self.lattice.programs.iter().enumerate()
+        let mut scored: Vec<(usize, f32)> = self
+            .lattice
+            .programs
+            .iter()
+            .enumerate()
             .map(|(i, prog)| {
                 let effective = self.lattice.effective_centroid(i);
-                let centroid = if effective.is_empty() { &prog.ema_centroid } else { &effective };
+                let centroid = if effective.is_empty() {
+                    &prog.ema_centroid
+                } else {
+                    &effective
+                };
                 let cosine = gen_cosine_sim(cond, centroid);
-                let displacement: Vec<f32> = cond.iter()
+                let displacement: Vec<f32> = cond
+                    .iter()
                     .zip(centroid.iter())
                     .map(|(a, b)| a - b)
                     .collect();
@@ -4807,17 +5385,27 @@ impl IndexedGenEnv {
                 let spatial_energy: f32 = disp_spatial.iter().map(|x| x * x).sum::<f32>().sqrt();
                 let spatial_penalty = (spatial_energy * 2.0).min(1.0);
                 let disp_norm_sq: f32 = displacement.iter().map(|d| d * d).sum();
-                let proximity = if disp_norm_sq < 1e-8 { 100.0 } else { (1.0 / disp_norm_sq).min(100.0) };
-                let base = 0.50 * cosine + 0.25 * (proximity / 100.0).sqrt() + 0.25 * (1.0 - spatial_penalty);
+                let proximity = if disp_norm_sq < 1e-8 {
+                    100.0
+                } else {
+                    (1.0 / disp_norm_sq).min(100.0)
+                };
+                let base = 0.50 * cosine
+                    + 0.25 * (proximity / 100.0).sqrt()
+                    + 0.25 * (1.0 - spatial_penalty);
                 let bias = self.lattice.retrieval_bias(i);
                 (i, base * bias)
             })
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.into_iter().take(k).map(|(idx, sim)| {
-            let text = self.lattice.programs[idx].display_text(&self.dictionary);
-            (text, idx, sim)
-        }).collect()
+        scored
+            .into_iter()
+            .take(k)
+            .map(|(idx, sim)| {
+                let text = self.lattice.programs[idx].display_text(&self.dictionary);
+                (text, idx, sim)
+            })
+            .collect()
     }
 
     /// Summarize across topic sub-lattices using coherence-guided selection.
@@ -4860,7 +5448,10 @@ impl IndexedGenEnv {
             let mut text = String::new();
             let mut conf = 0.0f32;
             for (cand_text, _pidx, cand_conf) in &top3 {
-                if !cand_text.is_empty() && cand_text.len() >= 10 && !Self::has_tokenization_artifacts(cand_text) {
+                if !cand_text.is_empty()
+                    && cand_text.len() >= 10
+                    && !Self::has_tokenization_artifacts(cand_text)
+                {
                     text = cand_text.clone();
                     conf = *cand_conf;
                     break;
@@ -4872,7 +5463,8 @@ impl IndexedGenEnv {
                 conf = c;
             }
             let topic_centroid_ref: &[f32] = &topic.centroid;
-            if text.is_empty() || text.len() < 10
+            if text.is_empty()
+                || text.len() < 10
                 || Self::should_reject_text(&text, Some(topic_centroid_ref), Some(cond))
             {
                 continue;
@@ -4888,12 +5480,25 @@ impl IndexedGenEnv {
             // Centroid similarity to query
             let centroid_sim = {
                 let dim = cond.len().min(topic.centroid.len());
-                if dim == 0 { 0.0 } else {
-                    let dot: f32 = cond[..dim].iter().zip(topic.centroid[..dim].iter())
-                        .map(|(a, b)| a * b).sum();
+                if dim == 0 {
+                    0.0
+                } else {
+                    let dot: f32 = cond[..dim]
+                        .iter()
+                        .zip(topic.centroid[..dim].iter())
+                        .map(|(a, b)| a * b)
+                        .sum();
                     let na = cond[..dim].iter().map(|x| x * x).sum::<f32>().sqrt();
-                    let nb = topic.centroid[..dim].iter().map(|x| x * x).sum::<f32>().sqrt();
-                    if na < 1e-10 || nb < 1e-10 { 0.0 } else { (dot / (na * nb)).max(0.0) }
+                    let nb = topic.centroid[..dim]
+                        .iter()
+                        .map(|x| x * x)
+                        .sum::<f32>()
+                        .sqrt();
+                    if na < 1e-10 || nb < 1e-10 {
+                        0.0
+                    } else {
+                        (dot / (na * nb)).max(0.0)
+                    }
                 }
             };
 
@@ -4914,12 +5519,8 @@ impl IndexedGenEnv {
         // Phase 2: Coherence-guided selection
         // Use topic centroids for coherence analysis — they represent the
         // "sending region" in the neuroscience analogy
-        let centroid_refs: Vec<&[f32]> = candidates.iter()
-            .map(|c| c.centroid.as_slice())
-            .collect();
-        let relevance_scores: Vec<f32> = candidates.iter()
-            .map(|c| c.relevance)
-            .collect();
+        let centroid_refs: Vec<&[f32]> = candidates.iter().map(|c| c.centroid.as_slice()).collect();
+        let relevance_scores: Vec<f32> = candidates.iter().map(|c| c.relevance).collect();
 
         // Select programs that maximize both relevance AND ensemble coherence.
         // min_coherence=0.20 prevents adding programs that desynchronize the ensemble.
@@ -4935,13 +5536,20 @@ impl IndexedGenEnv {
         }
 
         // Compute ensemble coherence of the selected set
-        let selected_centroids: Vec<&[f32]> = selected_indices.iter()
+        let selected_centroids: Vec<&[f32]> = selected_indices
+            .iter()
             .map(|&i| candidates[i].centroid.as_slice())
             .collect();
         let (ens_coherence, band_detail) = if selected_centroids.len() >= 2 {
             ensemble_coherence(&selected_centroids)
         } else {
-            (1.0, crate::coherence::BandCoherence { combined: 1.0, ..Default::default() })
+            (
+                1.0,
+                crate::coherence::BandCoherence {
+                    combined: 1.0,
+                    ..Default::default()
+                },
+            )
         };
 
         crate::infer_trace!(
@@ -4965,7 +5573,9 @@ impl IndexedGenEnv {
 
             // Deduplicate
             let is_duplicate = parts.iter().any(|existing| {
-                let overlap_words: usize = cand.opening.split_whitespace()
+                let overlap_words: usize = cand
+                    .opening
+                    .split_whitespace()
                     .filter(|w| existing.to_lowercase().contains(&w.to_lowercase()))
                     .count();
                 let total_words = cand.opening.split_whitespace().count().max(1);
@@ -4990,14 +5600,20 @@ impl IndexedGenEnv {
 
         let avg_conf = total_conf / parts.len() as f32;
         let composed = parts.join(" ");
-        (composed, avg_conf.clamp(0.0, 1.0), topics_used, ens_coherence)
+        (
+            composed,
+            avg_conf.clamp(0.0, 1.0),
+            topics_used,
+            ens_coherence,
+        )
     }
 
     /// Hard reject: mask tokens, bracket glitches, and known training/meta boilerplate leaks.
     /// **Never** overridden by graph confidence or centroid-vs-query alignment.
     fn hard_reject_lattice_decoded_text(text: &str) -> bool {
         let t = text.to_ascii_lowercase();
-        if crate::inference::sentiment_generation_lexicon::global().hard_reject_lexicon_substrings(&t)
+        if crate::inference::sentiment_generation_lexicon::global()
+            .hard_reject_lexicon_substrings(&t)
         {
             return true;
         }
@@ -5131,8 +5747,8 @@ impl IndexedGenEnv {
         // EXCLUDES particle-prepositions ("on", "in", "by", "up", "out", "over") that
         // legitimately end sentences ("go on", "come in", "stop by") to avoid false rejects.
         const DANGLING: &[&str] = &[
-            "a", "an", "the", "my", "your", "our", "their", "his", "her", "its",
-            "and", "or", "but", "nor", "of", "with", "from", "into", "onto", "than",
+            "a", "an", "the", "my", "your", "our", "their", "his", "her", "its", "and", "or",
+            "but", "nor", "of", "with", "from", "into", "onto", "than",
         ];
         for sentence in t.split(|c| c == '.' || c == '!' || c == '?') {
             let toks: Vec<&str> = sentence
@@ -5193,11 +5809,28 @@ impl IndexedGenEnv {
         let wc = words.len();
 
         // Count single-character "words" (excluding only punctuation/operators)
-        let single_char_count = words.iter()
+        let single_char_count = words
+            .iter()
             .filter(|w| {
-                w.len() == 1 && !matches!(w.as_bytes().first(),
-                    Some(b'(' | b')' | b'-' | b'+' | b'=' | b',' | b'.' | b':' | b';' | b'&' | b'*' | b'/' | b'?' | b'!')
-                )
+                w.len() == 1
+                    && !matches!(
+                        w.as_bytes().first(),
+                        Some(
+                            b'(' | b')'
+                                | b'-'
+                                | b'+'
+                                | b'='
+                                | b','
+                                | b'.'
+                                | b':'
+                                | b';'
+                                | b'&'
+                                | b'*'
+                                | b'/'
+                                | b'?'
+                                | b'!'
+                        )
+                    )
             })
             .count();
 
@@ -5207,7 +5840,8 @@ impl IndexedGenEnv {
 
         // All single alphabetic chars (no exclusions) — catches garble that
         // sprinkles common letters (a, e, t, s) throughout real words.
-        let all_single_alpha = words.iter()
+        let all_single_alpha = words
+            .iter()
             .filter(|w| w.len() == 1 && w.chars().next().map_or(false, |c| c.is_alphabetic()))
             .count();
         if all_single_alpha >= 5 && all_single_alpha as f32 / wc as f32 > 0.12 {
@@ -5246,9 +5880,7 @@ impl IndexedGenEnv {
             }
 
             // Bigram repetition: same 2-word pair appears 3+ times
-            let bigrams: Vec<(&str, &str)> = words.windows(2)
-                .map(|w| (w[0], w[1]))
-                .collect();
+            let bigrams: Vec<(&str, &str)> = words.windows(2).map(|w| (w[0], w[1])).collect();
             let mut bigram_counts: std::collections::HashMap<(&str, &str), u32> =
                 std::collections::HashMap::new();
             for &bg in &bigrams {
@@ -5286,7 +5918,8 @@ impl IndexedGenEnv {
             if sentences.len() >= 3 {
                 let mut connected = 0usize;
                 for i in 0..sentences.len() {
-                    let has_prev = i == 0 || sentences[i - 1].intersection(&sentences[i]).count() > 0;
+                    let has_prev =
+                        i == 0 || sentences[i - 1].intersection(&sentences[i]).count() > 0;
                     let has_next = i == sentences.len() - 1
                         || sentences[i].intersection(&sentences[i + 1]).count() > 0;
                     if has_prev || has_next {
@@ -5305,7 +5938,11 @@ impl IndexedGenEnv {
 
     /// Extract the opening portion of a text (first 1-2 sentences, up to max_chars).
     fn extract_opening(text: &str, max_chars: usize) -> String {
-        let truncated = if text.len() > max_chars { &text[..max_chars] } else { text };
+        let truncated = if text.len() > max_chars {
+            &text[..max_chars]
+        } else {
+            text
+        };
 
         // Find a sentence boundary
         if let Some(period_pos) = truncated.find(". ") {
@@ -5383,17 +6020,11 @@ impl IndexedGenEnv {
         let label = Self::sentiment_topic_hint_display_label(coarse);
 
         let tone: &str = match coarse {
-            "positive_strong" | "positive_mild" => {
-                "The overall tone reads as clearly positive"
-            }
-            "negative_strong" | "negative_mild" => {
-                "The overall tone reads as clearly negative"
-            }
+            "positive_strong" | "positive_mild" => "The overall tone reads as clearly positive",
+            "negative_strong" | "negative_mild" => "The overall tone reads as clearly negative",
             "neutral" | "neutral_chop" => "The overall tone reads as mostly neutral",
             "sarcastic" => "The line may use irony or surface/actual mismatch",
-            "mixed" => {
-                "Contrastive or dual-valence wording — both poles appear in the same line"
-            }
+            "mixed" => "Contrastive or dual-valence wording — both poles appear in the same line",
             _ => "Classification is non-obvious from surface text alone",
         };
 
@@ -5463,7 +6094,11 @@ impl IndexedGenEnv {
             }
         }
         if out.is_empty() {
-            intent.chars().filter(|c| !matches!(c, '\n' | '\r')).take(140).collect()
+            intent
+                .chars()
+                .filter(|c| !matches!(c, '\n' | '\r'))
+                .take(140)
+                .collect()
         } else {
             out.join(", ")
         }
@@ -5512,7 +6147,11 @@ impl IndexedGenEnv {
         // This prevents addition's high cosine similarity from drowning out subtraction.
         let kw_owned: Vec<String> = self.subject_keywords.clone();
         let kw_refs: Vec<&str> = kw_owned.iter().map(|s| s.as_str()).collect();
-        let kw_opt: Option<&[&str]> = if kw_refs.is_empty() { None } else { Some(&kw_refs) };
+        let kw_opt: Option<&[&str]> = if kw_refs.is_empty() {
+            None
+        } else {
+            Some(&kw_refs)
+        };
         let forced = topic_hint
             .and_then(|h| self.forced_topic_response_lang(cond, h, lang_hint, kw_opt))
             .filter(|(ft, _, ft_conf)| {
@@ -5592,10 +6231,14 @@ impl IndexedGenEnv {
         // when the sub-lattice's cosine-nearest happens to be about a different topic.
         if forced_active && topic_selected.is_some() && !kw_refs.is_empty() {
             let text_lower = text.to_ascii_lowercase();
-            let has_kw_match = kw_refs.iter().any(|kw| kw.len() > 3 && text_lower.contains(*kw));
+            let has_kw_match = kw_refs
+                .iter()
+                .any(|kw| kw.len() > 3 && text_lower.contains(*kw));
             if !has_kw_match {
                 let global_lower = global_text_backup.to_ascii_lowercase();
-                let global_has_kw = kw_refs.iter().any(|kw| kw.len() > 3 && global_lower.contains(*kw));
+                let global_has_kw = kw_refs
+                    .iter()
+                    .any(|kw| kw.len() > 3 && global_lower.contains(*kw));
                 let global_open: String = global_text_backup.chars().take(400).collect();
                 if global_has_kw
                     && global_conf > 0.30
@@ -5619,7 +6262,9 @@ impl IndexedGenEnv {
         // Check artifacts only on the opening portion the user will see
         let opening_check: String = text.chars().take(300).collect();
         let prog_centroid = &self.lattice.programs[prog_idx].ema_centroid;
-        if forced_active && topic_selected.is_some() && text.len() > 5
+        if forced_active
+            && topic_selected.is_some()
+            && text.len() > 5
             && !Self::should_reject_text(&opening_check, Some(prog_centroid), Some(cond))
         {
             self.last_selected_archetype = None;
@@ -5630,13 +6275,15 @@ impl IndexedGenEnv {
         // ∇F field gradient: compute the directional derivative of the response field
         // at the query point. Large |∇F| means we're between programs (the field is
         // changing fast) — inhibit verbatim and use gradient-aware slot inference.
-        let (field_gradient, gradient_mag) = cloze::compute_field_gradient(cond, &self.lattice.programs);
+        let (field_gradient, gradient_mag) =
+            cloze::compute_field_gradient(cond, &self.lattice.programs);
 
         // STA inhibition gate: fires when EITHER the displacement energy is high
         // OR the field gradient magnitude is significant (we're between programs).
         let field_inhibited = if lattice_conf >= 0.75 {
             let retrieved_centroid = &self.lattice.programs[prog_idx].ema_centroid;
-            let displacement: Vec<f32> = cond.iter()
+            let displacement: Vec<f32> = cond
+                .iter()
                 .zip(retrieved_centroid.iter())
                 .map(|(a, b)| a - b)
                 .collect();
@@ -5653,10 +6300,16 @@ impl IndexedGenEnv {
         };
 
         // High confidence AND in the program's rest frame: return lattice text directly
-        if lattice_conf >= 0.80 && text.len() > 5 && !field_inhibited
+        if lattice_conf >= 0.80
+            && text.len() > 5
+            && !field_inhibited
             && !Self::should_reject_text(&opening_check, Some(prog_centroid), Some(cond))
         {
-            self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
+            self.last_selected_archetype = if topic_selected.is_some() {
+                None
+            } else {
+                Some(prog_idx)
+            };
             self.last_generation_confidence = lattice_conf;
             self.lattice.on_retrieval(prog_idx, cond);
             if topic_selected.is_none() {
@@ -5683,16 +6336,24 @@ impl IndexedGenEnv {
                         // ∇F-aware slot inference: use gradient to bias toward
                         // the correct program's slot fills.
                         let inferred = cloze::infer_slots_with_gradient(
-                            cond, &field_gradient, gradient_mag,
-                            arch_idx, cb,
-                            &self.lattice.programs, 7,
+                            cond,
+                            &field_gradient,
+                            gradient_mag,
+                            arch_idx,
+                            cb,
+                            &self.lattice.programs,
+                            7,
                         );
                         cloze::encode_inferred_slot_bits(&inferred, cb)
                     } else if field_inhibited {
                         // Inhibited but low gradient: use proximity-based inference.
                         let inferred = cloze::infer_slots(
-                            cond, arch_idx, cb, &self.dictionary,
-                            &self.lattice.programs, 5,
+                            cond,
+                            arch_idx,
+                            cb,
+                            &self.dictionary,
+                            &self.lattice.programs,
+                            5,
                         );
                         cloze::encode_inferred_slot_bits(&inferred, cb)
                     } else {
@@ -5710,16 +6371,22 @@ impl IndexedGenEnv {
                         let cb_ref = cb;
                         let a_idx = arch_idx;
                         crate::predictive_coder::optimize_slot_bits(
-                            &slot_bits, 6, 0.08, 0.03,
+                            &slot_bits,
+                            6,
+                            0.08,
+                            0.03,
                             &|bits: &[f32]| {
                                 let ids = cb_ref.decode_with_archetype(a_idx, bits);
                                 let txt = dict_ref.decode(&ids);
-                                if txt.len() < 5 { return -1.0; }
+                                if txt.len() < 5 {
+                                    return -1.0;
+                                }
                                 let tok_ids = dict_ref.encode(&txt);
                                 let mut score = 0.0f32;
                                 for pid in 0..programs_ref.len().min(5) {
                                     let p = &programs_ref[pid];
-                                    let overlap = tok_ids.iter()
+                                    let overlap = tok_ids
+                                        .iter()
                                         .filter(|t| p.token_sequence.contains(t))
                                         .count();
                                     let sim = gen_cosine_sim(cond_ref, &p.ema_centroid).max(0.0);
@@ -5735,7 +6402,10 @@ impl IndexedGenEnv {
                     let decoded_ids = cb.decode_with_archetype(arch_idx, &optimized_bits);
                     let decoded_text = self.dictionary.decode(&decoded_ids);
                     let decoded_text = Self::truncate_archetype(
-                        &cb.archetypes, arch_idx, &decoded_ids, &decoded_text,
+                        &cb.archetypes,
+                        arch_idx,
+                        &decoded_ids,
+                        &decoded_text,
                     );
                     // Coherence gate: cloze slot-inference can compose token soup when the
                     // query lands between programs. Reject fragmented composition and fall
@@ -5753,7 +6423,11 @@ impl IndexedGenEnv {
                     }
                 }
             }
-            self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
+            self.last_selected_archetype = if topic_selected.is_some() {
+                None
+            } else {
+                Some(prog_idx)
+            };
             self.last_generation_confidence = lattice_conf;
             return (text, lattice_conf);
         }
@@ -5766,7 +6440,9 @@ impl IndexedGenEnv {
             let mut best_schema_score = 0.0f32;
 
             for schema in &self.schemas {
-                if schema.support < 2 || schema.fixed.is_empty() { continue; }
+                if schema.support < 2 || schema.fixed.is_empty() {
+                    continue;
+                }
                 let tokens = crate::predictive_coder::fill_schema(schema, cond);
                 let text = self.dictionary.decode(&tokens);
                 if text.len() > 10 && !Self::has_tokenization_artifacts(&text) {
@@ -5790,15 +6466,22 @@ impl IndexedGenEnv {
             use crate::gradient_memory::{GradientMemory, GradientMemoryConfig, MemorySource};
             let top_k = self.nearest_responses_k(cond, 4);
             if top_k.len() >= 2 {
-                let sources: Vec<MemorySource> = top_k.iter().map(|(text, pidx, conf)| {
-                    let token_ids = self.dictionary.encode(text);
-                    let centroid = if *pidx < self.lattice.programs.len() {
-                        self.lattice.programs[*pidx].ema_centroid.clone()
-                    } else {
-                        cond.to_vec()
-                    };
-                    MemorySource { centroid, token_ids, similarity: *conf }
-                }).collect();
+                let sources: Vec<MemorySource> = top_k
+                    .iter()
+                    .map(|(text, pidx, conf)| {
+                        let token_ids = self.dictionary.encode(text);
+                        let centroid = if *pidx < self.lattice.programs.len() {
+                            self.lattice.programs[*pidx].ema_centroid.clone()
+                        } else {
+                            cond.to_vec()
+                        };
+                        MemorySource {
+                            centroid,
+                            token_ids,
+                            similarity: *conf,
+                        }
+                    })
+                    .collect();
 
                 let stgm_config = GradientMemoryConfig::default();
                 let target_dim = cond.len();
@@ -5806,7 +6489,8 @@ impl IndexedGenEnv {
                 let result = gm.optimize(cond, target_dim);
 
                 let composed = gm.decode_sentences(&self.dictionary);
-                if composed.len() > 10 && result.coherence.combined > 0.40
+                if composed.len() > 10
+                    && result.coherence.combined > 0.40
                     && !Self::has_tokenization_artifacts(&composed)
                 {
                     self.last_selected_archetype = None;
@@ -5820,7 +6504,9 @@ impl IndexedGenEnv {
         // compose trajectories from that topic's programs via ChunkCodec.
         // This gives compositional generation with topic precision.
         if let Some(ref topic_name) = topic_selected {
-            if let Some((ctext, cconf)) = self.generate_continuous_for_topic(cond, topic_name, _max_len) {
+            if let Some((ctext, cconf)) =
+                self.generate_continuous_for_topic(cond, topic_name, _max_len)
+            {
                 if ctext.len() > 10 && !Self::has_tokenization_artifacts(&ctext) && cconf > 0.35 {
                     return (ctext, cconf);
                 }
@@ -5835,7 +6521,10 @@ impl IndexedGenEnv {
                     let best_tokens = self.dictionary.encode(&top_k[0].0);
                     let slot_bits = cb.encode_slot_only(&best_tokens);
                     let (ids, comp_conf) = hopf.compose_and_decode_with_personality(
-                        cond, &slot_bits, cb, self.diversity_bonus,
+                        cond,
+                        &slot_bits,
+                        cb,
+                        self.diversity_bonus,
                     );
                     let composed = self.dictionary.decode(&ids);
                     if composed.len() > 5 {
@@ -5859,17 +6548,32 @@ impl IndexedGenEnv {
         }
 
         // Final fallback: return lattice text as-is
-        self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
+        self.last_selected_archetype = if topic_selected.is_some() {
+            None
+        } else {
+            Some(prog_idx)
+        };
         self.last_generation_confidence = lattice_conf;
         (text, lattice_conf)
     }
 
     /// Generate using a pre-selected archetype index (from ArchetypeBrain).
     pub fn generate_with_archetype(
-        &mut self, cond: &[f32], arch_idx: usize, arch_conf: f32,
-        _max_len: usize, _temperature: f32,
+        &mut self,
+        cond: &[f32],
+        arch_idx: usize,
+        arch_conf: f32,
+        _max_len: usize,
+        _temperature: f32,
     ) -> (String, f32) {
-        self.generate_with_archetype_for_topic(cond, None, arch_idx, arch_conf, _max_len, _temperature)
+        self.generate_with_archetype_for_topic(
+            cond,
+            None,
+            arch_idx,
+            arch_conf,
+            _max_len,
+            _temperature,
+        )
     }
 
     pub fn generate_with_archetype_for_topic(
@@ -5923,7 +6627,11 @@ impl IndexedGenEnv {
             || (lattice_conf >= 0.80 && text.len() > 5))
             && !Self::should_reject_text(&opening_check2, Some(prog_centroid2), Some(cond))
         {
-            self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
+            self.last_selected_archetype = if topic_selected.is_some() {
+                None
+            } else {
+                Some(prog_idx)
+            };
             self.last_generation_confidence = lattice_conf;
             return (text, lattice_conf);
         }
@@ -5935,9 +6643,8 @@ impl IndexedGenEnv {
                 let slot_bits = cb.encode_slot_only(&slot_tokens);
                 let decoded_ids = cb.decode_with_archetype(arch_idx, &slot_bits);
                 let decoded_text = self.dictionary.decode(&decoded_ids);
-                let decoded_text = Self::truncate_archetype(
-                    &cb.archetypes, arch_idx, &decoded_ids, &decoded_text,
-                );
+                let decoded_text =
+                    Self::truncate_archetype(&cb.archetypes, arch_idx, &decoded_ids, &decoded_text);
                 if decoded_text.len() > 5 {
                     self.last_selected_archetype = Some(arch_idx);
                     self.last_generation_confidence = arch_conf * lattice_conf;
@@ -5946,14 +6653,21 @@ impl IndexedGenEnv {
             }
         }
 
-        self.last_selected_archetype = if topic_selected.is_some() { None } else { Some(prog_idx) };
+        self.last_selected_archetype = if topic_selected.is_some() {
+            None
+        } else {
+            Some(prog_idx)
+        };
         self.last_generation_confidence = lattice_conf;
         (text, lattice_conf)
     }
 
     /// Generate and return an 8d E8 contribution vector alongside the text.
     pub fn generate_with_e8(
-        &mut self, cond: &[f32], max_len: usize, temperature: f32,
+        &mut self,
+        cond: &[f32],
+        max_len: usize,
+        temperature: f32,
     ) -> (String, f32, [f32; 8]) {
         let (text, conf) = self.generate(cond, max_len, temperature);
         let mut raw = [0.0f32; 8];
@@ -5984,7 +6698,9 @@ impl IndexedGenEnv {
     /// with the new (embedding, correction) pair. No backprop.
     #[cfg(feature = "training")]
     pub fn train_step(&mut self, cond: &[f32], target: &str, _rng: &mut impl Rng) -> f32 {
-        if self.frozen { return 0.0; }
+        if self.frozen {
+            return 0.0;
+        }
         let pairs = vec![(cond.to_vec(), target.to_string())];
         self.lattice.develop(&pairs, 0.7);
         let (_, _, conf) = self.nearest_response(cond);
@@ -5992,14 +6708,20 @@ impl IndexedGenEnv {
     }
 
     /// Freeze the environment (no further online learning).
-    pub fn freeze(&mut self) { self.frozen = true; }
+    pub fn freeze(&mut self) {
+        self.frozen = true;
+    }
 
     pub fn program_count(&self) -> usize {
         self.lattice.program_count()
     }
 
-    pub fn total_neurons(&self) -> usize { 0 }
-    pub fn total_synapses(&self) -> usize { 0 }
+    pub fn total_neurons(&self) -> usize {
+        0
+    }
+    pub fn total_synapses(&self) -> usize {
+        0
+    }
 
     // ===================================================================
     // Continuum: session lifecycle management
@@ -6021,8 +6743,17 @@ impl IndexedGenEnv {
     }
 
     /// Record that a topic sub-lattice program was retrieved.
-    pub fn on_topic_program_retrieved(&mut self, topic_name: &str, program_idx: usize, query_embedding: &[f32]) {
-        if let Some(sub) = self.topic_subindex.iter_mut().find(|t| t.topic_name.eq_ignore_ascii_case(topic_name)) {
+    pub fn on_topic_program_retrieved(
+        &mut self,
+        topic_name: &str,
+        program_idx: usize,
+        query_embedding: &[f32],
+    ) {
+        if let Some(sub) = self
+            .topic_subindex
+            .iter_mut()
+            .find(|t| t.topic_name.eq_ignore_ascii_case(topic_name))
+        {
             sub.lattice.on_retrieval(program_idx, query_embedding);
         }
     }
@@ -6057,10 +6788,16 @@ impl IndexedGenEnv {
         embedding: &[f32],
         correction_text: &str,
     ) {
-        self.lattice.inject_correction(wrong_program_idx, embedding, correction_text);
+        self.lattice
+            .inject_correction(wrong_program_idx, embedding, correction_text);
     }
 
-    fn truncate_archetype(archetypes: &[ResponseArchetype], arch_idx: usize, ids: &[u16], text: &str) -> String {
+    fn truncate_archetype(
+        archetypes: &[ResponseArchetype],
+        arch_idx: usize,
+        ids: &[u16],
+        text: &str,
+    ) -> String {
         if let Some(arch) = archetypes.get(arch_idx) {
             let bound = if arch.median_content_length > 0 {
                 arch.median_content_length + 2
@@ -6084,8 +6821,12 @@ mod tests {
     #[test]
     fn looks_fragmented_catches_dangling_endings() {
         // Garble class the coherence gate must reject (cloze word-salad).
-        assert!(IndexedGenEnv::looks_fragmented("My claws is polite mrrp my."));
-        assert!(IndexedGenEnv::looks_fragmented("I kick. dig a. I kick the flag."));
+        assert!(IndexedGenEnv::looks_fragmented(
+            "My claws is polite mrrp my."
+        ));
+        assert!(IndexedGenEnv::looks_fragmented(
+            "I kick. dig a. I kick the flag."
+        ));
         assert!(IndexedGenEnv::looks_fragmented("I do is the and warm."));
     }
 
@@ -6129,7 +6870,10 @@ mod tests {
         for id in 0u16..(dict_size as u16) {
             let coded_bits = env.id_to_bits(id);
             // Decode through ECC + soft decode (same pipeline as decode_output)
-            let hard: Vec<u8> = coded_bits.iter().map(|&v| if v > 0.5 { 1u8 } else { 0u8 }).collect();
+            let hard: Vec<u8> = coded_bits
+                .iter()
+                .map(|&v| if v > 0.5 { 1u8 } else { 0u8 })
+                .collect();
             let corrected = hamming_decode(&hard, bpt);
             let soft: Vec<f32> = corrected.iter().map(|&b| b as f32).collect();
             let back = GroupGenEnv::nibbles_to_id(&soft, &env.dictionary, dict_size, bpt);
@@ -6262,7 +7006,13 @@ mod tests {
         use crate::dimension::language::SENTIMENT_LATTICE_WITNESS_CORE;
 
         let terms: Vec<String> = [
-            "reputation", "troubled", "startup", "delve", "gotten", "worse", "even",
+            "reputation",
+            "troubled",
+            "startup",
+            "delve",
+            "gotten",
+            "worse",
+            "even",
         ]
         .into_iter()
         .map(|s| s.to_string())
@@ -6272,16 +7022,18 @@ mod tests {
             SENTIMENT_LATTICE_WITNESS_CORE
         );
         assert!(!IndexedGenEnv::sentiment_witness_matches_subject_keywords(
-            &joint,
-            &terms,
-            None,
+            &joint, &terms, None,
         ));
     }
 
     #[test]
     fn sentiment_prompt_anchor_helpers_topic_and_excerpt() {
-        assert!(IndexedGenEnv::is_sentiment_lattice_topic_hint("negative_mild"));
-        assert!(!IndexedGenEnv::is_sentiment_lattice_topic_hint("subtraction_operation"));
+        assert!(IndexedGenEnv::is_sentiment_lattice_topic_hint(
+            "negative_mild"
+        ));
+        assert!(!IndexedGenEnv::is_sentiment_lattice_topic_hint(
+            "subtraction_operation"
+        ));
         assert!(!IndexedGenEnv::is_sentiment_lattice_topic_hint("identity"));
         assert_eq!(
             IndexedGenEnv::sentiment_topic_hint_display_label("negative_mild"),
@@ -6463,13 +7215,17 @@ mod tests {
             loss_field = env.train_step(&cond, target, &mut rng_f);
         }
 
-        println!("after {} steps — baseline: {:.4}, field: {:.4}", steps, loss_baseline, loss_field);
+        println!(
+            "after {} steps — baseline: {:.4}, field: {:.4}",
+            steps, loss_baseline, loss_field
+        );
         // At minimal step counts the effect is within floating-point noise;
         // assert the field does not degrade convergence (equal or better).
         assert!(
             loss_field <= loss_baseline + 0.001,
             "ephaptic field should not degrade convergence: field={:.4} vs baseline={:.4}",
-            loss_field, loss_baseline,
+            loss_field,
+            loss_baseline,
         );
     }
 
@@ -6526,14 +7282,30 @@ mod tests {
         let texts = support_texts();
         let dict = TokenDictionary::build(&texts, 500);
         let cb = AlgebraicCodebook::build(&texts, &dict, 8, None);
-        assert!(!cb.archetypes.is_empty(), "should have at least 1 archetype");
+        assert!(
+            !cb.archetypes.is_empty(),
+            "should have at least 1 archetype"
+        );
         assert!(cb.total_bits > 0, "total bits should be > 0");
-        assert!(cb.total_bits < 500, "total bits should be much less than raw binary (was {})", cb.total_bits);
-        println!("codebook: {} archetypes, {} max slots, {} total bits",
-            cb.archetypes.len(), cb.max_slot_count, cb.total_bits);
+        assert!(
+            cb.total_bits < 500,
+            "total bits should be much less than raw binary (was {})",
+            cb.total_bits
+        );
+        println!(
+            "codebook: {} archetypes, {} max slots, {} total bits",
+            cb.archetypes.len(),
+            cb.max_slot_count,
+            cb.total_bits
+        );
         for (i, arch) in cb.archetypes.iter().enumerate() {
-            println!("  arch[{}]: {} fixed, {} slots, len={}",
-                i, arch.fixed.len(), arch.slots.len(), arch.length);
+            println!(
+                "  arch[{}]: {} fixed, {} slots, len={}",
+                i,
+                arch.fixed.len(),
+                arch.slots.len(),
+                arch.length
+            );
         }
     }
 
@@ -6549,8 +7321,11 @@ mod tests {
             assert_eq!(bits.len(), cb.total_bits, "encoded length mismatch");
             let decoded_ids = cb.decode(&bits);
             // Compare token IDs directly (text roundtrip may lose whitespace nuances)
-            assert_eq!(decoded_ids, token_ids,
-                "token ID roundtrip failed for: {}\n  got: {:?}\n  exp: {:?}", text, decoded_ids, token_ids);
+            assert_eq!(
+                decoded_ids, token_ids,
+                "token ID roundtrip failed for: {}\n  got: {:?}\n  exp: {:?}",
+                text, decoded_ids, token_ids
+            );
         }
     }
 
@@ -6561,10 +7336,18 @@ mod tests {
         let cb = AlgebraicCodebook::build(&texts, &dict, 8, None);
         let raw_output = MAX_TOKENS * bits_for_dict(dict.len());
         let algebraic_output = cb.total_bits;
-        println!("raw output_dim={}, algebraic output_dim={}, reduction={}x",
-            raw_output, algebraic_output, raw_output / algebraic_output.max(1));
-        assert!(algebraic_output < raw_output / 2,
-            "algebraic should be at least 2x smaller: {} vs {}", algebraic_output, raw_output);
+        println!(
+            "raw output_dim={}, algebraic output_dim={}, reduction={}x",
+            raw_output,
+            algebraic_output,
+            raw_output / algebraic_output.max(1)
+        );
+        assert!(
+            algebraic_output < raw_output / 2,
+            "algebraic should be at least 2x smaller: {} vs {}",
+            algebraic_output,
+            raw_output
+        );
     }
 
     #[test]
@@ -6602,7 +7385,12 @@ mod tests {
         }
         let loss_200 = env.train_step(&cond, target, &mut rng);
         println!("algebraic loss: {} -> {}", loss_0, loss_200);
-        assert!(loss_200 < loss_0, "loss should decrease: {} -> {}", loss_0, loss_200);
+        assert!(
+            loss_200 < loss_0,
+            "loss should decrease: {} -> {}",
+            loss_0,
+            loss_200
+        );
     }
 
     #[test]
@@ -6619,7 +7407,11 @@ mod tests {
             assert_eq!(target.len(), env.output_dim);
             let decoded = env.decode_output(&target);
             let expected = dict.decode(&dict.encode(text));
-            assert_eq!(decoded, expected, "env encode/decode roundtrip failed for: {}", text);
+            assert_eq!(
+                decoded, expected,
+                "env encode/decode roundtrip failed for: {}",
+                text
+            );
         }
     }
 
@@ -6647,19 +7439,34 @@ mod tests {
         let cb_stat = AlgebraicCodebook::build(&texts, &dict, 16, None);
         let cb_syn = AlgebraicCodebook::build_syntax_aware(&texts, &dict, 16, None);
 
-        println!("statistical: {} archetypes, {} max slots, {} total bits",
-            cb_stat.archetypes.len(), cb_stat.max_slot_count, cb_stat.total_bits);
-        println!("syntax-aware: {} archetypes, {} max slots, {} total bits",
-            cb_syn.archetypes.len(), cb_syn.max_slot_count, cb_syn.total_bits);
+        println!(
+            "statistical: {} archetypes, {} max slots, {} total bits",
+            cb_stat.archetypes.len(),
+            cb_stat.max_slot_count,
+            cb_stat.total_bits
+        );
+        println!(
+            "syntax-aware: {} archetypes, {} max slots, {} total bits",
+            cb_syn.archetypes.len(),
+            cb_syn.max_slot_count,
+            cb_syn.total_bits
+        );
 
         for (i, arch) in cb_syn.archetypes.iter().enumerate() {
-            println!("  syn arch[{}]: {} fixed, {} slots, len={}",
-                i, arch.fixed.len(), arch.slots.len(), arch.length);
+            println!(
+                "  syn arch[{}]: {} fixed, {} slots, len={}",
+                i,
+                arch.fixed.len(),
+                arch.slots.len(),
+                arch.length
+            );
         }
 
         // Syntax-aware should have fewer total bits (more fixed tokens from keywords)
-        println!("reduction: statistical={} bits, syntax-aware={} bits",
-            cb_stat.total_bits, cb_syn.total_bits);
+        println!(
+            "reduction: statistical={} bits, syntax-aware={} bits",
+            cb_stat.total_bits, cb_syn.total_bits
+        );
     }
 
     #[test]
@@ -6671,10 +7478,18 @@ mod tests {
         for &text in &texts {
             let token_ids = dict.encode(text);
             let bits = cb.encode(&token_ids);
-            assert_eq!(bits.len(), cb.total_bits, "encoded length mismatch for: {}", text);
+            assert_eq!(
+                bits.len(),
+                cb.total_bits,
+                "encoded length mismatch for: {}",
+                text
+            );
             let decoded_ids = cb.decode(&bits);
-            assert_eq!(decoded_ids, token_ids,
-                "syntax-aware roundtrip failed for: {}\n  got: {:?}\n  exp: {:?}", text, decoded_ids, token_ids);
+            assert_eq!(
+                decoded_ids, token_ids,
+                "syntax-aware roundtrip failed for: {}\n  got: {:?}\n  exp: {:?}",
+                text, decoded_ids, token_ids
+            );
         }
     }
 
@@ -6683,8 +7498,11 @@ mod tests {
         let texts = code_texts();
         let dict = TokenDictionary::build(&texts, 500);
         let cb = AlgebraicCodebook::build_syntax_aware(&texts, &dict, 16, None);
-        println!("syntax-aware code env: {} bits (raw would be {})",
-            cb.total_bits, MAX_TOKENS * bits_for_dict(dict.len()));
+        println!(
+            "syntax-aware code env: {} bits (raw would be {})",
+            cb.total_bits,
+            MAX_TOKENS * bits_for_dict(dict.len())
+        );
         let mut rng = StdRng::seed_from_u64(42);
         let ov = GenEnvOverrides::default();
         let mut env = GroupGenEnv::new_algebraic(dict, cb, &ov, &mut rng);
@@ -6697,7 +7515,12 @@ mod tests {
         }
         let loss_200 = env.train_step(&cond, target, &mut rng);
         println!("syntax-aware code loss: {} -> {}", loss_0, loss_200);
-        assert!(loss_200 < loss_0, "loss should decrease: {} -> {}", loss_0, loss_200);
+        assert!(
+            loss_200 < loss_0,
+            "loss should decrease: {} -> {}",
+            loss_0,
+            loss_200
+        );
     }
 
     #[test]
@@ -6726,23 +7549,38 @@ mod tests {
     fn test_prototype_slot_only_mode() {
         let texts = support_texts();
         let dict = TokenDictionary::build(&texts, 500);
-        let embs: Vec<Vec<f32>> = texts.iter().enumerate().map(|(i, _)| {
-            let mut e = vec![0.0f32; GEN_COND_DIM];
-            e[i % GEN_COND_DIM] = 1.0;
-            e
-        }).collect();
+        let embs: Vec<Vec<f32>> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let mut e = vec![0.0f32; GEN_COND_DIM];
+                e[i % GEN_COND_DIM] = 1.0;
+                e
+            })
+            .collect();
         let emb_refs: Vec<&[f32]> = embs.iter().map(|e| e.as_slice()).collect();
 
         let cb = AlgebraicCodebook::build(&texts, &dict, 8, Some(&emb_refs));
-        assert!(cb.has_prototypes(), "should have prototypes when embeddings provided");
+        assert!(
+            cb.has_prototypes(),
+            "should have prototypes when embeddings provided"
+        );
         assert_eq!(cb.archetype_prototypes.len(), cb.archetypes.len());
-        assert!(cb.slot_only_bits < cb.total_bits, "slot_only_bits ({}) should be less than total_bits ({})",
-            cb.slot_only_bits, cb.total_bits);
+        assert!(
+            cb.slot_only_bits < cb.total_bits,
+            "slot_only_bits ({}) should be less than total_bits ({})",
+            cb.slot_only_bits,
+            cb.total_bits
+        );
 
         // Archetype selection should work
         let (arch_idx, confidence) = cb.select_archetype_by_embedding(&embs[0]);
         assert!(arch_idx < cb.archetypes.len());
-        assert!(confidence > 0.0, "confidence should be positive: {}", confidence);
+        assert!(
+            confidence > 0.0,
+            "confidence should be positive: {}",
+            confidence
+        );
 
         // Slot-only encode/decode roundtrip
         let token_ids = dict.encode(texts[0]);
@@ -6758,11 +7596,15 @@ mod tests {
     fn test_prototype_env_train_and_generate() {
         let texts = support_texts();
         let dict = TokenDictionary::build(&texts, 500);
-        let embs: Vec<Vec<f32>> = texts.iter().enumerate().map(|(i, _)| {
-            let mut e = vec![0.0f32; GEN_COND_DIM];
-            e[i % GEN_COND_DIM] = 1.0;
-            e
-        }).collect();
+        let embs: Vec<Vec<f32>> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let mut e = vec![0.0f32; GEN_COND_DIM];
+                e[i % GEN_COND_DIM] = 1.0;
+                e
+            })
+            .collect();
         let emb_refs: Vec<&[f32]> = embs.iter().map(|e| e.as_slice()).collect();
 
         let cb = AlgebraicCodebook::build(&texts, &dict, 8, Some(&emb_refs));
@@ -6774,9 +7616,12 @@ mod tests {
 
         // output_dim should be at least slot_only_bits (with 256-bit minimum floor)
         assert!(env.output_dim > 0);
-        assert!(env.output_dim >= env.codebook.as_ref().unwrap().slot_only_bits,
+        assert!(
+            env.output_dim >= env.codebook.as_ref().unwrap().slot_only_bits,
             "env output_dim ({}) should be >= slot_only_bits ({})",
-            env.output_dim, env.codebook.as_ref().unwrap().slot_only_bits);
+            env.output_dim,
+            env.codebook.as_ref().unwrap().slot_only_bits
+        );
 
         // Train
         let cond = vec![0.1f32; GEN_COND_DIM];
@@ -6805,8 +7650,16 @@ mod tests {
         ];
         let dict = TokenDictionary::build(&texts, 100);
 
-        let emb_a = { let mut e = vec![0.0f32; GEN_COND_DIM]; e[0] = 1.0; e };
-        let emb_b = { let mut e = vec![0.0f32; GEN_COND_DIM]; e[1] = 1.0; e };
+        let emb_a = {
+            let mut e = vec![0.0f32; GEN_COND_DIM];
+            e[0] = 1.0;
+            e
+        };
+        let emb_b = {
+            let mut e = vec![0.0f32; GEN_COND_DIM];
+            e[1] = 1.0;
+            e
+        };
         let embs = vec![emb_a.clone(), emb_a.clone(), emb_b.clone(), emb_b.clone()];
         let emb_refs: Vec<&[f32]> = embs.iter().map(|e| e.as_slice()).collect();
 
@@ -6822,7 +7675,12 @@ mod tests {
         let hopf = HopfCompositionTable::build(&cb, Some(&emb_refs), &clusters, 2);
 
         // --- Single archetype path (argmax) ---
-        let ood = { let mut e = vec![0.0f32; GEN_COND_DIM]; e[0] = 0.5; e[1] = 0.5; e };
+        let ood = {
+            let mut e = vec![0.0f32; GEN_COND_DIM];
+            e[0] = 0.5;
+            e[1] = 0.5;
+            e
+        };
         let (single_idx, single_conf) = cb.select_archetype_by_embedding(&ood);
         let slot_bits = vec![0.5f32; cb.slot_only_bits];
         let single_ids = cb.decode_with_archetype(single_idx, &slot_bits);
@@ -6832,14 +7690,25 @@ mod tests {
         let (hopf_ids, hopf_conf) = hopf.compose_and_decode(&ood, &slot_bits, &cb);
         let hopf_text = dict.decode(&hopf_ids);
 
-        println!("single arch={} conf={:.3}: {:?}", single_idx, single_conf, single_text);
+        println!(
+            "single arch={} conf={:.3}: {:?}",
+            single_idx, single_conf, single_text
+        );
         println!("hopf        conf={:.3}: {:?}", hopf_conf, hopf_text);
 
         // Both produce real text (not empty, not garbage)
         assert!(!single_ids.is_empty());
         assert!(!hopf_ids.is_empty());
-        assert!(single_text.contains("start") || single_text.contains("middle") || single_text.contains("end"));
-        assert!(hopf_text.contains("start") || hopf_text.contains("middle") || hopf_text.contains("end"));
+        assert!(
+            single_text.contains("start")
+                || single_text.contains("middle")
+                || single_text.contains("end")
+        );
+        assert!(
+            hopf_text.contains("start")
+                || hopf_text.contains("middle")
+                || hopf_text.contains("end")
+        );
     }
 
     #[test]
@@ -6853,16 +7722,41 @@ mod tests {
         ];
         let dict = TokenDictionary::build(&texts, 200);
 
-        let emb_micro = { let mut e = vec![0.0f32; GEN_COND_DIM]; e[0] = 1.0; e[2] = 0.5; e };
-        let emb_obs = { let mut e = vec![0.0f32; GEN_COND_DIM]; e[1] = 1.0; e[3] = 0.5; e };
-        let embs = vec![emb_micro.clone(), emb_micro.clone(), emb_obs.clone(), emb_obs.clone()];
+        let emb_micro = {
+            let mut e = vec![0.0f32; GEN_COND_DIM];
+            e[0] = 1.0;
+            e[2] = 0.5;
+            e
+        };
+        let emb_obs = {
+            let mut e = vec![0.0f32; GEN_COND_DIM];
+            e[1] = 1.0;
+            e[3] = 0.5;
+            e
+        };
+        let embs = vec![
+            emb_micro.clone(),
+            emb_micro.clone(),
+            emb_obs.clone(),
+            emb_obs.clone(),
+        ];
         let emb_refs: Vec<&[f32]> = embs.iter().map(|e| e.as_slice()).collect();
 
         let cb = AlgebraicCodebook::build(&texts, &dict, 2, Some(&emb_refs));
         assert!(cb.has_prototypes());
-        println!("slot_only_bits={} archetypes={}", cb.slot_only_bits, cb.archetypes.len());
+        println!(
+            "slot_only_bits={} archetypes={}",
+            cb.slot_only_bits,
+            cb.archetypes.len()
+        );
         for (i, a) in cb.archetypes.iter().enumerate() {
-            println!("  arch[{}]: fixed={} slots={} len={}", i, a.fixed.len(), a.slots.len(), a.length);
+            println!(
+                "  arch[{}]: fixed={} slots={} len={}",
+                i,
+                a.fixed.len(),
+                a.slots.len(),
+                a.length
+            );
         }
 
         // Simulate incoherent output bits (all 0.5 = maximally indecisive)
@@ -6871,15 +7765,29 @@ mod tests {
         let coherence = cb.output_coherence(arch_idx, &garbage_output);
         let effective = geometric_conf * coherence;
 
-        println!("geometric={:.3} coherence={:.3} effective={:.3}",
-                 geometric_conf, coherence, effective);
+        println!(
+            "geometric={:.3} coherence={:.3} effective={:.3}",
+            geometric_conf, coherence, effective
+        );
 
         // Geometric confidence should be high (close embedding match)
-        assert!(geometric_conf > 0.8, "geometric should be high: {}", geometric_conf);
+        assert!(
+            geometric_conf > 0.8,
+            "geometric should be high: {}",
+            geometric_conf
+        );
         // Coherence should be low (indecisive bits = garbage)
-        assert!(coherence < 0.5, "coherence should detect garbage: {}", coherence);
+        assert!(
+            coherence < 0.5,
+            "coherence should detect garbage: {}",
+            coherence
+        );
         // Effective confidence should drop below 0.9, triggering Hopf
-        assert!(effective < 0.9, "effective should trigger Hopf: {}", effective);
+        assert!(
+            effective < 0.9,
+            "effective should trigger Hopf: {}",
+            effective
+        );
 
         // Conversely, decisive bits should have high coherence
         let decisive_output: Vec<f32> = (0..cb.slot_only_bits.max(32))
@@ -6887,7 +7795,11 @@ mod tests {
             .collect();
         let coherence_good = cb.output_coherence(arch_idx, &decisive_output);
         println!("decisive coherence={:.3}", coherence_good);
-        assert!(coherence_good > 0.5, "decisive bits should be coherent: {}", coherence_good);
+        assert!(
+            coherence_good > 0.5,
+            "decisive bits should be coherent: {}",
+            coherence_good
+        );
     }
 
     #[test]
@@ -6901,7 +7813,8 @@ mod tests {
         let c2 = E8Contribution {
             group_idx: 1,
             lattice_point: E8Lattice::nearest_point(&[0.0, 0.0, 1.5, 1.5, 0.0, 0.0, 0.0, 0.0]),
-            text: "Use API Gateway as a proxy for routing. Apply Circuit Breaker for resilience.".to_string(),
+            text: "Use API Gateway as a proxy for routing. Apply Circuit Breaker for resilience."
+                .to_string(),
             confidence: 0.6,
         };
 
@@ -6951,34 +7864,52 @@ mod tests {
         println!("quantum blend:   {:?}", quantum);
 
         // Quantum sentence composition: leader (c1) should appear first
-        let (q_composed, q_score) = e8_compose_sentences_quantum(
-            &quantum, &[c1.clone(), c2.clone()], 4, q,
+        let (q_composed, q_score) =
+            e8_compose_sentences_quantum(&quantum, &[c1.clone(), c2.clone()], 4, q);
+        println!(
+            "quantum composed (q={:.2}): {} (score={:.3})",
+            q, q_composed, q_score
         );
-        println!("quantum composed (q={:.2}): {} (score={:.3})", q, q_composed, q_score);
         assert!(!q_composed.is_empty());
 
         // With q > 1, c1 (the leader with higher confidence) should dominate
         // The composed text should start with c1's content
-        assert!(q_composed.starts_with("Decompose") || q_composed.starts_with("Apply"),
-            "leader group should contribute first: {}", q_composed);
+        assert!(
+            q_composed.starts_with("Decompose") || q_composed.starts_with("Apply"),
+            "leader group should contribute first: {}",
+            q_composed
+        );
 
         // R-matrix should be asymmetric: R(c1, c2) > R(c2, c1) when q > 1
         let r12 = r_matrix(&c1, &c2, q);
         let r21 = r_matrix(&c2, &c1, q);
         println!("R(c1,c2)={:.3} R(c2,c1)={:.3}", r12, r21);
-        assert!(r12 > r21, "R-matrix should favor the leader: R12={} R21={}", r12, r21);
+        assert!(
+            r12 > r21,
+            "R-matrix should favor the leader: R12={} R21={}",
+            r12,
+            r21
+        );
 
         // At q=1, R-matrix should still respect confidence ordering
         // but without the deformation boost
         let r12_classical = r_matrix(&c1, &c2, 1.0);
         let r21_classical = r_matrix(&c2, &c1, 1.0);
-        println!("R_classical(c1,c2)={:.3} R_classical(c2,c1)={:.3}", r12_classical, r21_classical);
+        println!(
+            "R_classical(c1,c2)={:.3} R_classical(c2,c1)={:.3}",
+            r12_classical, r21_classical
+        );
         // The asymmetry at q>1 should be larger than at q=1
         let asym_quantum = (r12 - r21).abs();
         let asym_classical = (r12_classical - r21_classical).abs();
-        println!("asymmetry: quantum={:.3} classical={:.3}", asym_quantum, asym_classical);
-        assert!(asym_quantum >= asym_classical,
-            "quantum deformation should increase asymmetry");
+        println!(
+            "asymmetry: quantum={:.3} classical={:.3}",
+            asym_quantum, asym_classical
+        );
+        assert!(
+            asym_quantum >= asym_classical,
+            "quantum deformation should increase asymmetry"
+        );
     }
 
     #[test]
@@ -6999,21 +7930,51 @@ mod tests {
 
         assert_eq!(env.env.current_lr, 0.25, "memorize LR should be 0.25");
         assert_eq!(env.env.config.dropout_rate, 0.0, "memorize: no dropout");
-        assert_eq!(env.env.config.weight_decay, 0.0, "memorize: no weight decay");
+        assert_eq!(
+            env.env.config.weight_decay, 0.0,
+            "memorize: no weight decay"
+        );
         assert_eq!(env.env.config.bias_decay, 0.0, "memorize: no bias decay");
-        assert_eq!(env.env.config.lateral_inhibition, 0.0, "memorize: no lateral inhib");
+        assert_eq!(
+            env.env.config.lateral_inhibition, 0.0,
+            "memorize: no lateral inhib"
+        );
         let hidden_size = env.env.layers.get(1).map_or(0, |l| l.len());
-        assert_eq!(env.env.config.competitive_k, hidden_size, "memorize: full k");
-        assert_eq!(env.env.config.prune_stop_tick, 1, "memorize: pruning disabled");
+        assert_eq!(
+            env.env.config.competitive_k, hidden_size,
+            "memorize: full k"
+        );
+        assert_eq!(
+            env.env.config.prune_stop_tick, 1,
+            "memorize: pruning disabled"
+        );
 
         env.enter_consolidate_mode(&snap);
 
-        assert!((env.env.current_lr - orig_lr).abs() < 1e-6, "consolidate: LR restored");
-        assert_eq!(env.env.config.competitive_k, orig_k, "consolidate: k restored");
-        assert!((env.env.config.dropout_rate - orig_dropout).abs() < 1e-6, "consolidate: dropout restored");
-        assert!((env.env.config.weight_decay - orig_wd).abs() < 1e-8, "consolidate: weight_decay restored");
-        assert!((env.env.config.bias_decay - orig_bd).abs() < 1e-8, "consolidate: bias_decay restored");
-        assert_eq!(env.env.config.prune_stop_tick, 0, "consolidate: pruning re-enabled");
+        assert!(
+            (env.env.current_lr - orig_lr).abs() < 1e-6,
+            "consolidate: LR restored"
+        );
+        assert_eq!(
+            env.env.config.competitive_k, orig_k,
+            "consolidate: k restored"
+        );
+        assert!(
+            (env.env.config.dropout_rate - orig_dropout).abs() < 1e-6,
+            "consolidate: dropout restored"
+        );
+        assert!(
+            (env.env.config.weight_decay - orig_wd).abs() < 1e-8,
+            "consolidate: weight_decay restored"
+        );
+        assert!(
+            (env.env.config.bias_decay - orig_bd).abs() < 1e-8,
+            "consolidate: bias_decay restored"
+        );
+        assert_eq!(
+            env.env.config.prune_stop_tick, 0,
+            "consolidate: pruning re-enabled"
+        );
     }
 
     #[test]
@@ -7027,7 +7988,9 @@ mod tests {
         // Train a pair with memorize mode ON
         let mut env_mem = GroupGenEnv::new(dict.clone(), &mut rng);
         let _snap = env_mem.enter_memorize_mode();
-        let cond: Vec<f32> = (0..env_mem.env.layers[0].len()).map(|i| (i as f32 * 0.1).sin()).collect();
+        let cond: Vec<f32> = (0..env_mem.env.layers[0].len())
+            .map(|i| (i as f32 * 0.1).sin())
+            .collect();
         let mut mem_loss = 0.0;
         for _ in 0..5 {
             mem_loss = env_mem.train_step(&cond, "alpha", &mut rng);
@@ -7036,15 +7999,24 @@ mod tests {
         // Train the same pair with normal mode
         let mut rng2 = rand::rngs::StdRng::seed_from_u64(99);
         let mut env_norm = GroupGenEnv::new(dict, &mut rng2);
-        let cond2: Vec<f32> = (0..env_norm.env.layers[0].len()).map(|i| (i as f32 * 0.1).sin()).collect();
+        let cond2: Vec<f32> = (0..env_norm.env.layers[0].len())
+            .map(|i| (i as f32 * 0.1).sin())
+            .collect();
         let mut norm_loss = 0.0;
         for _ in 0..5 {
             norm_loss = env_norm.train_step(&cond2, "alpha", &mut rng2);
         }
 
-        println!("memorize loss after 5 steps: {:.4}, normal loss: {:.4}", mem_loss, norm_loss);
-        assert!(mem_loss < norm_loss,
-            "memorize mode should converge faster: mem={:.4} vs norm={:.4}", mem_loss, norm_loss);
+        println!(
+            "memorize loss after 5 steps: {:.4}, normal loss: {:.4}",
+            mem_loss, norm_loss
+        );
+        assert!(
+            mem_loss < norm_loss,
+            "memorize mode should converge faster: mem={:.4} vs norm={:.4}",
+            mem_loss,
+            norm_loss
+        );
     }
 
     // =====================================================================
@@ -7059,32 +8031,54 @@ mod tests {
         let mut emb = vec![0.0f32; 128];
         for (i, &v) in seed.iter().enumerate() {
             emb[i] = v;
-            if i + 8 < 128 { emb[i + 8] = v * 0.5; }
-            if i + 16 < 128 { emb[i + 16] = v * 0.25; }
+            if i + 8 < 128 {
+                emb[i + 8] = v * 0.5;
+            }
+            if i + 16 < 128 {
+                emb[i + 16] = v * 0.25;
+            }
         }
         emb
     }
 
     fn diverse_support_corpus() -> Vec<(&'static str, Vec<f32>)> {
         vec![
-            ("To reset your password, go to Settings > Security > Reset password",
-             make_embedding(&[1.0, 0.0, 0.2, 0.0, 0.5, 0.1, 0.0, 0.3])),
-            ("To reset your password, navigate to Settings > Security > Change password",
-             make_embedding(&[0.95, 0.05, 0.2, 0.0, 0.5, 0.1, 0.0, 0.3])),
-            ("To reset your password, visit Settings and click Security then Reset",
-             make_embedding(&[0.9, 0.1, 0.18, 0.0, 0.5, 0.12, 0.0, 0.28])),
-            ("You can change your email in Settings > Profile > Email address",
-             make_embedding(&[0.0, 1.0, 0.3, 0.1, 0.0, 0.5, 0.2, 0.0])),
-            ("You can change your email in Settings > Profile > Update email",
-             make_embedding(&[0.05, 0.95, 0.3, 0.1, 0.0, 0.5, 0.2, 0.0])),
-            ("You can update your email under Settings > Profile > Email",
-             make_embedding(&[0.1, 0.9, 0.28, 0.12, 0.0, 0.48, 0.22, 0.0])),
-            ("Contact support at help@example.com for billing questions",
-             make_embedding(&[0.0, 0.0, 1.0, 0.5, 0.2, 0.0, 0.7, 0.1])),
-            ("Contact support at help@example.com for account issues",
-             make_embedding(&[0.0, 0.0, 0.95, 0.55, 0.2, 0.0, 0.65, 0.15])),
-            ("Reach out to help@example.com for billing concerns",
-             make_embedding(&[0.0, 0.0, 0.9, 0.6, 0.18, 0.0, 0.72, 0.08])),
+            (
+                "To reset your password, go to Settings > Security > Reset password",
+                make_embedding(&[1.0, 0.0, 0.2, 0.0, 0.5, 0.1, 0.0, 0.3]),
+            ),
+            (
+                "To reset your password, navigate to Settings > Security > Change password",
+                make_embedding(&[0.95, 0.05, 0.2, 0.0, 0.5, 0.1, 0.0, 0.3]),
+            ),
+            (
+                "To reset your password, visit Settings and click Security then Reset",
+                make_embedding(&[0.9, 0.1, 0.18, 0.0, 0.5, 0.12, 0.0, 0.28]),
+            ),
+            (
+                "You can change your email in Settings > Profile > Email address",
+                make_embedding(&[0.0, 1.0, 0.3, 0.1, 0.0, 0.5, 0.2, 0.0]),
+            ),
+            (
+                "You can change your email in Settings > Profile > Update email",
+                make_embedding(&[0.05, 0.95, 0.3, 0.1, 0.0, 0.5, 0.2, 0.0]),
+            ),
+            (
+                "You can update your email under Settings > Profile > Email",
+                make_embedding(&[0.1, 0.9, 0.28, 0.12, 0.0, 0.48, 0.22, 0.0]),
+            ),
+            (
+                "Contact support at help@example.com for billing questions",
+                make_embedding(&[0.0, 0.0, 1.0, 0.5, 0.2, 0.0, 0.7, 0.1]),
+            ),
+            (
+                "Contact support at help@example.com for account issues",
+                make_embedding(&[0.0, 0.0, 0.95, 0.55, 0.2, 0.0, 0.65, 0.15]),
+            ),
+            (
+                "Reach out to help@example.com for billing concerns",
+                make_embedding(&[0.0, 0.0, 0.9, 0.6, 0.18, 0.0, 0.72, 0.08]),
+            ),
         ]
     }
 
@@ -7105,14 +8099,20 @@ mod tests {
         let dict = TokenDictionary::build(&texts, 500);
         let cb = AlgebraicCodebook::build(&texts, &dict, 8, Some(&embeddings));
 
-        assert!(cb.has_prototypes(), "codebook must have embedding prototypes");
+        assert!(
+            cb.has_prototypes(),
+            "codebook must have embedding prototypes"
+        );
 
         let mut overlap_sum = 0.0f64;
         for (text, emb) in &corpus {
             let token_ids = dict.encode(text);
             let (selected_arch, confidence) = cb.select_archetype_by_embedding(emb);
 
-            assert!(confidence > 0.0, "confidence should be positive for training data");
+            assert!(
+                confidence > 0.0,
+                "confidence should be positive for training data"
+            );
 
             let slot_bits = cb.encode_slot_only(&token_ids);
             let decoded_ids = cb.decode_with_archetype(selected_arch, &slot_bits);
@@ -7122,13 +8122,24 @@ mod tests {
             let overlap = expected_set.intersection(&decoded_set).count() as f64
                 / expected_set.len().max(1) as f64;
             overlap_sum += overlap;
-            println!("  arch={} conf={:.2} overlap={:.0}%  '{}'",
-                selected_arch, confidence, overlap * 100.0, text);
+            println!(
+                "  arch={} conf={:.2} overlap={:.0}%  '{}'",
+                selected_arch,
+                confidence,
+                overlap * 100.0,
+                text
+            );
         }
         let avg_overlap = overlap_sum / corpus.len() as f64;
-        println!("algebraic lookup avg token overlap (zero training): {:.1}%", avg_overlap * 100.0);
-        assert!(avg_overlap >= 0.65,
-            "codebook lookup should achieve ≥65% token overlap with zero training, got {:.1}%", avg_overlap * 100.0);
+        println!(
+            "algebraic lookup avg token overlap (zero training): {:.1}%",
+            avg_overlap * 100.0
+        );
+        assert!(
+            avg_overlap >= 0.65,
+            "codebook lookup should achieve ≥65% token overlap with zero training, got {:.1}%",
+            avg_overlap * 100.0
+        );
     }
 
     /// The NeuralEnvironment needs hundreds of epochs to achieve what the
@@ -7156,8 +8167,14 @@ mod tests {
         for _ in 0..100 {
             loss_100 = env.train_step(&padded_cond, texts[0], &mut rng);
         }
-        println!("NeuralEnv: loss_0={:.4}, loss_100={:.4} (still training after 100 epochs)", loss_0, loss_100);
-        assert!(loss_100 > 0.0, "env should still have nonzero loss after 100 steps");
+        println!(
+            "NeuralEnv: loss_0={:.4}, loss_100={:.4} (still training after 100 epochs)",
+            loss_0, loss_100
+        );
+        assert!(
+            loss_100 > 0.0,
+            "env should still have nonzero loss after 100 steps"
+        );
     }
 
     /// Codebook + Hopf composition produces coherent multi-archetype
@@ -7186,8 +8203,12 @@ mod tests {
         let hopf = HopfCompositionTable::build(&cb, Some(&embeddings), &clusters, 3);
 
         // Compose from a novel embedding (midpoint of two clusters)
-        let mid: Vec<f32> = corpus[0].1.iter().zip(corpus[3].1.iter())
-            .map(|(a, b)| (a + b) / 2.0).collect();
+        let mid: Vec<f32> = corpus[0]
+            .1
+            .iter()
+            .zip(corpus[3].1.iter())
+            .map(|(a, b)| (a + b) / 2.0)
+            .collect();
 
         let frag_indices = hopf.compose(&mid);
         assert_eq!(frag_indices.len(), 3, "should select 3 segments");
@@ -7195,8 +8216,14 @@ mod tests {
         let dummy_slots = vec![0.5f32; cb.slot_only_bits];
         let (ids, confidence) = hopf.compose_and_decode(&mid, &dummy_slots, &cb);
         let text = dict.decode(&ids);
-        println!("Hopf composed (zero training): '{}' conf={:.3}", text, confidence);
-        assert!(!text.is_empty(), "Hopf composition should produce non-empty text");
+        println!(
+            "Hopf composed (zero training): '{}' conf={:.3}",
+            text, confidence
+        );
+        assert!(
+            !text.is_empty(),
+            "Hopf composition should produce non-empty text"
+        );
     }
 
     /// Paramecium lattice routes to the correct archetype with a single
@@ -7206,13 +8233,18 @@ mod tests {
         let corpus = diverse_support_corpus();
         let texts: Vec<&str> = corpus.iter().map(|(t, _)| *t).collect();
         let dict = TokenDictionary::build(&texts, 500);
-        let pairs: Vec<(Vec<f32>, String)> = corpus.iter()
-            .map(|(t, e)| (e.clone(), t.to_string())).collect();
+        let pairs: Vec<(Vec<f32>, String)> = corpus
+            .iter()
+            .map(|(t, e)| (e.clone(), t.to_string()))
+            .collect();
 
         let mut lattice = crate::dimension::paramecium::InfraciliaryLattice::new(dict.clone());
         lattice.develop(&pairs, 0.85);
 
-        assert!(lattice.program_count() > 0, "lattice should have programs after develop");
+        assert!(
+            lattice.program_count() > 0,
+            "lattice should have programs after develop"
+        );
 
         let mut routed_correct = 0usize;
         for (_text, emb) in &corpus {
@@ -7222,9 +8254,17 @@ mod tests {
             }
         }
         let rate = routed_correct as f64 / corpus.len() as f64;
-        println!("Paramecium routing (one-pass develop): {}/{} = {:.1}%",
-            routed_correct, corpus.len(), rate * 100.0);
-        assert!(rate >= 0.7, "lattice should route ≥70% of training data confidently, got {:.1}%", rate * 100.0);
+        println!(
+            "Paramecium routing (one-pass develop): {}/{} = {:.1}%",
+            routed_correct,
+            corpus.len(),
+            rate * 100.0
+        );
+        assert!(
+            rate >= 0.7,
+            "lattice should route ≥70% of training data confidently, got {:.1}%",
+            rate * 100.0
+        );
     }
 
     /// Full algebraic pipeline end-to-end: dictionary → codebook → prototype
@@ -7243,7 +8283,9 @@ mod tests {
             for (i, text) in texts.iter().enumerate() {
                 let ids = dict.encode(text);
                 let (arch, _) = cb.match_best(&ids);
-                if arch < c.len() { c[arch].push(i); }
+                if arch < c.len() {
+                    c[arch].push(i);
+                }
             }
             c
         };
@@ -7276,13 +8318,24 @@ mod tests {
                 / expected_set.len().max(1) as f64;
             token_overlap_sum += overlap;
 
-            println!("  conf={:.2} arch={} overlap={:.0}%  '{}' → '{}'",
-                conf, arch_idx, overlap * 100.0, text, decoded);
+            println!(
+                "  conf={:.2} arch={} overlap={:.0}%  '{}' → '{}'",
+                conf,
+                arch_idx,
+                overlap * 100.0,
+                text,
+                decoded
+            );
         }
         let exact_rate = exact_matches as f64 / corpus.len() as f64;
         let avg_overlap = token_overlap_sum / corpus.len() as f64;
         println!("\nFull algebraic pipeline (ZERO epochs):");
-        println!("  exact match: {}/{} = {:.1}%", exact_matches, corpus.len(), exact_rate * 100.0);
+        println!(
+            "  exact match: {}/{} = {:.1}%",
+            exact_matches,
+            corpus.len(),
+            exact_rate * 100.0
+        );
         println!("  avg token overlap: {:.1}%", avg_overlap * 100.0);
         println!("  → codebook handles {:.0}% of the problem; remaining {:.0}% is within-archetype slot variation",
             avg_overlap * 100.0, (1.0 - avg_overlap) * 100.0);
@@ -7327,31 +8380,60 @@ mod tests {
                 env.train_step(&padded, text, &mut rng);
             }
             if epoch == neural_epochs - 1 {
-                let loss: f32 = corpus.iter().map(|(text, emb)| {
-                    for (i, v) in emb.iter().enumerate().take(GEN_COND_DIM) {
-                        padded[i] = *v;
-                    }
-                    env.train_step(&padded, text, &mut rng)
-                }).sum::<f32>() / corpus.len() as f32;
-                println!("  NeuralEnv after {} epochs: loss={:.4}", neural_epochs, loss);
+                let loss: f32 = corpus
+                    .iter()
+                    .map(|(text, emb)| {
+                        for (i, v) in emb.iter().enumerate().take(GEN_COND_DIM) {
+                            padded[i] = *v;
+                        }
+                        env.train_step(&padded, text, &mut rng)
+                    })
+                    .sum::<f32>()
+                    / corpus.len() as f32;
+                println!(
+                    "  NeuralEnv after {} epochs: loss={:.4}",
+                    neural_epochs, loss
+                );
             }
         }
         let neural_time = t1.elapsed();
 
         let speedup = neural_time.as_micros() as f64 / algebraic_time.as_micros().max(1) as f64;
         println!("\nAlgebraic (build + full inference): {:?}", algebraic_time);
-        println!("Neural ({} epochs, real training needs 1000+): {:?}", neural_epochs, neural_time);
-        println!("Speedup: {:.0}x (would be ~{:.0}x at 1000 epochs)", speedup, speedup * 1000.0 / neural_epochs as f64);
-        assert!(speedup > 5.0,
+        println!(
+            "Neural ({} epochs, real training needs 1000+): {:?}",
+            neural_epochs, neural_time
+        );
+        println!(
+            "Speedup: {:.0}x (would be ~{:.0}x at 1000 epochs)",
+            speedup,
+            speedup * 1000.0 / neural_epochs as f64
+        );
+        assert!(
+            speedup > 5.0,
             "algebraic pipeline should be >5x faster than even {} neural epochs, got {:.1}x",
-            neural_epochs, speedup);
+            neural_epochs,
+            speedup
+        );
     }
 
     #[test]
     fn hard_reject_masks_meta_boilerplate_and_bracket_glitch() {
-        assert!(IndexedGenEnv::should_reject_text("see [MASK] here", None, None));
-        assert!(IndexedGenEnv::should_reject_text("I am Growformer, a specialized AI agent built by swtch", None, None));
-        assert!(IndexedGenEnv::should_reject_text("ideas, and[][ MASK] people", None, None));
+        assert!(IndexedGenEnv::should_reject_text(
+            "see [MASK] here",
+            None,
+            None
+        ));
+        assert!(IndexedGenEnv::should_reject_text(
+            "I am Growformer, a specialized AI agent built by swtch",
+            None,
+            None
+        ));
+        assert!(IndexedGenEnv::should_reject_text(
+            "ideas, and[][ MASK] people",
+            None,
+            None
+        ));
         assert!(!IndexedGenEnv::should_reject_text(
             "Funding is negative but price holds; shorts may be trapped.",
             None,
@@ -7379,18 +8461,28 @@ mod tests {
         let embeddings: Vec<&[f32]> = corpus.iter().map(|(_, e)| e.as_slice()).collect();
 
         let env = IndexedGenEnv::build(&texts, &embeddings, 8, 0.85);
-        assert!(env.program_count() > 0, "lattice should have programs after build");
+        assert!(
+            env.program_count() > 0,
+            "lattice should have programs after build"
+        );
         assert!(env.codebook.is_some(), "codebook should be present");
         assert!(env.hopf_table.is_some(), "hopf table should be present");
 
         let mut env = env;
         for (text, emb) in &corpus {
             let (generated, conf) = env.generate(emb, 300, 0.8);
-            assert!(!generated.is_empty(), "generation should produce non-empty text for {:?}", text);
+            assert!(
+                !generated.is_empty(),
+                "generation should produce non-empty text for {:?}",
+                text
+            );
             assert!(conf > 0.0, "confidence should be > 0");
         }
-        println!("IndexedGenEnv: {} programs, all {} inputs generated non-empty",
-            env.program_count(), corpus.len());
+        println!(
+            "IndexedGenEnv: {} programs, all {} inputs generated non-empty",
+            env.program_count(),
+            corpus.len()
+        );
     }
 
     #[test]
@@ -7405,17 +8497,26 @@ mod tests {
         let mut overlap_sum = 0.0f64;
         for (text, emb) in &corpus {
             let (generated, conf) = env.generate(emb, 300, 0.8);
-            let expected_set: std::collections::HashSet<u16> = dict.encode(text).into_iter().collect();
-            let decoded_set: std::collections::HashSet<u16> = dict.encode(&generated).into_iter().collect();
+            let expected_set: std::collections::HashSet<u16> =
+                dict.encode(text).into_iter().collect();
+            let decoded_set: std::collections::HashSet<u16> =
+                dict.encode(&generated).into_iter().collect();
             let overlap = expected_set.intersection(&decoded_set).count() as f64
                 / expected_set.len().max(1) as f64;
             overlap_sum += overlap;
-            println!("  conf={:.2} overlap={:.0}%  expect={:?}  got={:?}",
-                conf, overlap * 100.0,
-                &text[..text.len().min(60)], &generated[..generated.len().min(60)]);
+            println!(
+                "  conf={:.2} overlap={:.0}%  expect={:?}  got={:?}",
+                conf,
+                overlap * 100.0,
+                &text[..text.len().min(60)],
+                &generated[..generated.len().min(60)]
+            );
         }
         let avg_overlap = overlap_sum / corpus.len() as f64;
-        println!("IndexedGenEnv avg token overlap (zero training): {:.1}%", avg_overlap * 100.0);
+        println!(
+            "IndexedGenEnv avg token overlap (zero training): {:.1}%",
+            avg_overlap * 100.0
+        );
         assert!(avg_overlap >= 0.50,
             "IndexedGenEnv should achieve ≥50% token overlap with zero iterative training, got {:.1}%",
             avg_overlap * 100.0);
@@ -7445,15 +8546,21 @@ mod tests {
         let mut clusters = vec![Vec::new(); codebook.archetypes.len()];
         for (i, seq) in seqs.iter().enumerate() {
             let (arch, _) = codebook.match_best(seq);
-            if arch < clusters.len() { clusters[arch].push(i); }
+            if arch < clusters.len() {
+                clusters[arch].push(i);
+            }
         }
         let hopf = HopfCompositionTable::build(&codebook, Some(&emb_refs), &clusters, 3);
-        let triples: Vec<(Vec<f32>, String, String)> = embeddings.iter().zip(texts.iter()).zip(topics.iter())
+        let triples: Vec<(Vec<f32>, String, String)> = embeddings
+            .iter()
+            .zip(texts.iter())
+            .zip(topics.iter())
             .map(|((emb, text), topic)| (emb.clone(), (*text).to_string(), (*topic).to_string()))
             .collect();
 
         let mut env = IndexedGenEnv::from_tagged_parts(dict, codebook, hopf, &triples, 0.99);
-        let (resp, conf) = env.generate_for_topic(&embeddings[0], Some("account_recovery"), 64, 0.7);
+        let (resp, conf) =
+            env.generate_for_topic(&embeddings[0], Some("account_recovery"), 64, 0.7);
         assert!(conf > 0.75, "topic-routed confidence too low: {}", conf);
         assert!(
             resp.to_lowercase().contains("password") || resp.to_lowercase().contains("recovery"),
@@ -7475,12 +8582,21 @@ mod tests {
         let novel_emb = make_embedding(&[0.99, -0.5, 0.3, 0.7, -0.2, 0.1, 0.8, -0.9]);
         let novel_text = "This is a completely novel response about quantum entanglement patterns.";
         let loss = env.train_step(&novel_emb, novel_text, &mut rng);
-        println!("Online train_step loss: {:.4}, programs: {} -> {}",
-            loss, initial_programs, env.program_count());
-        assert!(env.program_count() >= initial_programs,
-            "online learning should maintain or grow program count");
+        println!(
+            "Online train_step loss: {:.4}, programs: {} -> {}",
+            loss,
+            initial_programs,
+            env.program_count()
+        );
+        assert!(
+            env.program_count() >= initial_programs,
+            "online learning should maintain or grow program count"
+        );
 
         let (generated, _conf) = env.generate(&novel_emb, 300, 0.8);
-        assert!(!generated.is_empty(), "should generate after online learning");
+        assert!(
+            !generated.is_empty(),
+            "should generate after online learning"
+        );
     }
 }

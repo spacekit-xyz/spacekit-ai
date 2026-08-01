@@ -3,9 +3,9 @@
 // External face = DAG node (categorical identity, typed morphisms).
 // Internal face = PythagorasTree (composition storage, bifunctor split).
 
-use std::marker::PhantomData;
-use crate::category::{Layer, NodeId};
 use crate::category::pythagoras::PythagorasNode;
+use crate::category::{Layer, NodeId};
+use std::marker::PhantomData;
 
 // ── NodeMetadata ──────────────────────────────────────────────────────────────
 
@@ -41,11 +41,7 @@ pub struct CategoricalNode<W, A, B> {
 }
 
 impl<W: Clone, A: Clone, B> CategoricalNode<W, A, B> {
-    pub fn new(
-        id: NodeId,
-        meta: NodeMetadata,
-        composition: PythagorasNode<W>,
-    ) -> Self {
+    pub fn new(id: NodeId, meta: NodeMetadata, composition: PythagorasNode<W>) -> Self {
         Self {
             id,
             meta,
@@ -128,10 +124,7 @@ impl<W: Clone, A: Clone, B> CategoricalNode<W, A, B> {
     pub fn prune(&mut self) {
         let dim = self.composition.dimension;
         let w = self.composition.weights.clone();
-        let old = std::mem::replace(
-            &mut self.composition,
-            PythagorasNode::leaf(w, dim),
-        );
+        let old = std::mem::replace(&mut self.composition, PythagorasNode::leaf(w, dim));
         self.composition = old.prune();
         self.meta.version += 1;
     }

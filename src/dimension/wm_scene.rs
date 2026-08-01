@@ -492,7 +492,10 @@ pub struct SceneActDecision {
 }
 
 /// Predictive route / energy on a scene graph (deploy_step analog).
-pub fn scene_deploy_step(bundle: &SceneWmBundle, scene: &SceneGraph) -> Result<SceneStepDecision, String> {
+pub fn scene_deploy_step(
+    bundle: &SceneWmBundle,
+    scene: &SceneGraph,
+) -> Result<SceneStepDecision, String> {
     bundle.verify()?;
     let z = bundle.encoder.encode(scene);
     let ps = bundle.energy_stable.propose_next(&z);
@@ -789,8 +792,7 @@ pub fn evaluate_scene_wm_bundle(bundle: &SceneWmBundle, seed: u64) -> SceneWmSee
             let mut best_e = f32::INFINITY;
             for a in 0..ACTION_DIM {
                 let act = WmAction::from_u8(a as u8);
-                let e = 0.5
-                    * (act_s.planning_energy(&zv, act) + act_l.planning_energy(&zv, act));
+                let e = 0.5 * (act_s.planning_energy(&zv, act) + act_l.planning_energy(&zv, act));
                 if e < best_e - 1e-6 {
                     best_e = e;
                     best = act;
@@ -872,11 +874,7 @@ mod tests {
         let r = run_phase3v_scene_seed(42);
         assert!(!r.chat_metric_used);
         assert!(r.pin_stable);
-        assert!(
-            r.regime_agreement > 0.55,
-            "regime {}",
-            r.regime_agreement
-        );
+        assert!(r.regime_agreement > 0.55, "regime {}", r.regime_agreement);
         assert!(r.energy_margin > 0.0);
         assert!(
             r.structure_ablation_drop > 1e-4,

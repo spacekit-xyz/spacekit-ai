@@ -65,7 +65,9 @@ impl SaliencyLexicon {
     /// 0.5 for substring of a bigram keyword, 0.0 otherwise.
     pub fn score(&self, token: &str) -> f32 {
         let lower = token.to_ascii_lowercase();
-        if lower.len() <= 2 { return 0.0; }
+        if lower.len() <= 2 {
+            return 0.0;
+        }
         if self.keywords.contains(&lower) {
             return 1.0;
         }
@@ -78,12 +80,24 @@ impl SaliencyLexicon {
     }
 
     /// Find positions of salient tokens in a token ID sequence.
-    pub fn salient_positions(&self, token_ids: &[u16], dict: &TokenDictionary) -> Vec<(usize, f32)> {
-        token_ids.iter().enumerate().filter_map(|(i, &id)| {
-            let text = dict.token_str(id)?;
-            let s = self.score(text);
-            if s > 0.0 { Some((i, s)) } else { None }
-        }).collect()
+    pub fn salient_positions(
+        &self,
+        token_ids: &[u16],
+        dict: &TokenDictionary,
+    ) -> Vec<(usize, f32)> {
+        token_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &id)| {
+                let text = dict.token_str(id)?;
+                let s = self.score(text);
+                if s > 0.0 {
+                    Some((i, s))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }
 
@@ -105,7 +119,9 @@ pub fn mask_salient_spans(
         return Vec::new();
     }
 
-    let salient_positions: Vec<usize> = words.iter().enumerate()
+    let salient_positions: Vec<usize> = words
+        .iter()
+        .enumerate()
         .filter(|(_, w)| lexicon.score(w) > 0.0)
         .map(|(i, _)| i)
         .collect();
@@ -124,9 +140,15 @@ pub fn mask_salient_spans(
         let span_len = 1 + ((splitmix64(hasher + 1) as usize) % 2);
         let end = (mask_idx + span_len).min(words.len());
 
-        let masked: Vec<&str> = words.iter().enumerate()
+        let masked: Vec<&str> = words
+            .iter()
+            .enumerate()
             .map(|(i, w)| {
-                if i >= mask_idx && i < end { "[MASK]" } else { *w }
+                if i >= mask_idx && i < end {
+                    "[MASK]"
+                } else {
+                    *w
+                }
             })
             .collect();
         augmented.push(masked.join(" "));
@@ -210,7 +232,8 @@ pub fn rtd_detection_accuracy(
         return (0, 0, 1.0);
     }
 
-    let detected = original_ids.iter()
+    let detected = original_ids
+        .iter()
         .zip(corrupted_ids.iter())
         .zip(replaced_mask.iter())
         .filter(|((orig, corr), &was_replaced)| was_replaced && orig != corr)
@@ -251,7 +274,9 @@ pub fn contrastive_refine(
             let mut nearest_other: Option<(usize, usize, f32)> = None;
 
             for t_b in 0..num_topics {
-                if t_a == t_b { continue; }
+                if t_a == t_b {
+                    continue;
+                }
                 for (p_b, entry_b) in topic_programs[t_b].1.iter().enumerate() {
                     let sim = cosine_sim(&centroid_a, &entry_b.centroid);
                     if sim > margin {
@@ -292,7 +317,11 @@ fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na < 1e-8 || nb < 1e-8 { 0.0 } else { dot / (na * nb) }
+    if na < 1e-8 || nb < 1e-8 {
+        0.0
+    } else {
+        dot / (na * nb)
+    }
 }
 
 fn splitmix64(mut state: u64) -> u64 {
@@ -313,7 +342,7 @@ fn splitmix64(mut state: u64) -> u64 {
 //   Grade 8 (pseudoscalar): negation pairs (assertion vs negation)
 // ---------------------------------------------------------------------------
 
-use crate::clifford::{GRADE_OFFSETS, GRADE_DIMS};
+use crate::clifford::{GRADE_DIMS, GRADE_OFFSETS};
 use crate::text_autoencoder::SpacetimeChunk;
 
 /// Per-grade loss decomposition for the STA-CALM training objective.
@@ -349,11 +378,24 @@ pub fn graded_training_loss(
 
     // Grade 3: discourse trivector — cosine distance in discourse space
     let trivector_loss = {
-        let dot: f32 = predicted.discourse.iter().zip(actual.discourse.iter())
-            .map(|(a, b)| a * b).sum();
-        let na: f32 = predicted.discourse.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let dot: f32 = predicted
+            .discourse
+            .iter()
+            .zip(actual.discourse.iter())
+            .map(|(a, b)| a * b)
+            .sum();
+        let na: f32 = predicted
+            .discourse
+            .iter()
+            .map(|x| x * x)
+            .sum::<f32>()
+            .sqrt();
         let nb: f32 = actual.discourse.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if na < 1e-8 || nb < 1e-8 { 1.0 } else { 1.0 - (dot / (na * nb)) }
+        if na < 1e-8 || nb < 1e-8 {
+            1.0
+        } else {
+            1.0 - (dot / (na * nb))
+        }
     };
 
     // Grade 8: pseudoscalar — sign agreement loss
@@ -374,7 +416,11 @@ pub fn graded_training_loss(
     let normalized_total = if w_sum > 1e-8 { total / w_sum } else { total };
 
     GradedLoss {
-        scalar_loss, vector_loss, bivector_loss, trivector_loss, pseudo_loss,
+        scalar_loss,
+        vector_loss,
+        bivector_loss,
+        trivector_loss,
+        pseudo_loss,
         total: normalized_total,
     }
 }
@@ -394,7 +440,9 @@ pub fn sentence_order_score(first: &SpacetimeChunk, second: &SpacetimeChunk) -> 
         forward_discourse[i] = second.discourse[i] - first.discourse[i];
     }
     let norm: f32 = forward_discourse.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm < 1e-8 { return 0.0; }
+    if norm < 1e-8 {
+        return 0.0;
+    }
     // Positive asymmetry = correct order, negative = reversed
     let asymmetry: f32 = forward_discourse.iter().sum::<f32>() / norm;
     asymmetry
@@ -435,9 +483,7 @@ pub fn augment_training_data(
     for (i, (text, response)) in samples.iter().enumerate() {
         let seed = (i as u64).wrapping_mul(0x517cc1b727220a95);
 
-        let masked_texts = mask_salient_spans(
-            response, lexicon, mask_augments_per_sample, seed,
-        );
+        let masked_texts = mask_salient_spans(response, lexicon, mask_augments_per_sample, seed);
         for mt in masked_texts {
             augmented.push(AugmentedSample {
                 text: text.clone(),
@@ -446,9 +492,9 @@ pub fn augment_training_data(
             });
         }
 
-        if let Some((corrupted, _mask)) = replace_salient_tokens(
-            response, lexicon, dict, rtd_rate, seed.wrapping_add(42),
-        ) {
+        if let Some((corrupted, _mask)) =
+            replace_salient_tokens(response, lexicon, dict, rtd_rate, seed.wrapping_add(42))
+        {
             augmented.push(AugmentedSample {
                 text: text.clone(),
                 response: corrupted,
@@ -509,7 +555,9 @@ pub fn generate_contrastive_pairs(
             // Find a same-topic positive (highest grade-1 sim within topic)
             let mut best_positive: Option<(&str, f32)> = None;
             for (text_p, chunk_p) in progs_a {
-                if std::ptr::eq(text_a, text_p) { continue; }
+                if std::ptr::eq(text_a, text_p) {
+                    continue;
+                }
                 let sim = chunk_a.semantic_similarity(chunk_p);
                 if best_positive.map_or(true, |(_, best)| sim > best) {
                     best_positive = Some((text_p.as_str(), sim));
@@ -518,7 +566,9 @@ pub fn generate_contrastive_pairs(
 
             // Find cross-topic negatives with high grade-1 sim
             for (t_b, (_topic_b, progs_b)) in topic_programs.iter().enumerate() {
-                if t_a == t_b { continue; }
+                if t_a == t_b {
+                    continue;
+                }
                 for (text_n, chunk_n) in progs_b {
                     let g1_sim = chunk_a.semantic_similarity(chunk_n);
                     if g1_sim > similarity_threshold {
@@ -564,7 +614,9 @@ pub fn generate_negation_pairs(texts: &[String]) -> Vec<NegationPair> {
 
     for text in texts {
         let words: Vec<&str> = text.split_whitespace().collect();
-        if words.len() < 3 { continue; }
+        if words.len() < 3 {
+            continue;
+        }
 
         // Pattern 1: "X is Y" → "X is not Y"
         if let Some(is_pos) = words.iter().position(|w| w.eq_ignore_ascii_case("is")) {
@@ -594,8 +646,10 @@ pub fn generate_negation_pairs(texts: &[String]) -> Vec<NegationPair> {
 
         // Pattern 3: "X can Y" → "X cannot Y"
         if let Some(can_pos) = words.iter().position(|w| w.eq_ignore_ascii_case("can")) {
-            if can_pos + 1 < words.len() && !words[can_pos + 1].eq_ignore_ascii_case("not")
-                && !words[can_pos].eq_ignore_ascii_case("cannot") {
+            if can_pos + 1 < words.len()
+                && !words[can_pos + 1].eq_ignore_ascii_case("not")
+                && !words[can_pos].eq_ignore_ascii_case("cannot")
+            {
                 let mut negated: Vec<String> = words.iter().map(|w| w.to_string()).collect();
                 negated[can_pos] = "cannot".to_string();
                 pairs.push(NegationPair {
@@ -651,9 +705,7 @@ pub fn generate_negation_pairs(texts: &[String]) -> Vec<NegationPair> {
 //   from the full geometric product composition
 // ---------------------------------------------------------------------------
 
-use crate::text_autoencoder::{
-    ChunkCodec, SemanticPropagator, CATA_DIM, CHUNK_K,
-};
+use crate::text_autoencoder::{ChunkCodec, SemanticPropagator, CATA_DIM, CHUNK_K};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TrainingPhase {
@@ -723,13 +775,15 @@ impl TrainingOrchestrator {
     }
 
     fn centroid_chunks(programs: &[(String, Vec<u16>, Vec<f32>)]) -> Vec<SpacetimeChunk> {
-        programs.iter()
+        programs
+            .iter()
             .map(|(_, _, centroid)| SpacetimeChunk::from_centroid(centroid))
             .collect()
     }
 
     fn topic_groups(programs: &[(String, Vec<u16>, Vec<f32>)]) -> Vec<(String, Vec<usize>)> {
-        let mut map: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+        let mut map: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
         for (i, (topic, _, _)) in programs.iter().enumerate() {
             map.entry(topic.clone()).or_default().push(i);
         }
@@ -750,8 +804,13 @@ impl TrainingOrchestrator {
         phase3_epochs: usize,
     ) -> Vec<EpochDiagnostics> {
         println!("\n--- STA-CALM Training Orchestrator (centroid-bridged) ---");
-        println!("  programs: {}, phase1: {} epochs, phase2: {} epochs, phase3: {} epochs",
-            programs.len(), phase1_epochs, phase2_epochs, phase3_epochs);
+        println!(
+            "  programs: {}, phase1: {} epochs, phase2: {} epochs, phase3: {} epochs",
+            programs.len(),
+            phase1_epochs,
+            phase2_epochs,
+            phase3_epochs
+        );
 
         self.phase = TrainingPhase::GradePretraining;
         println!("\n  [Phase 1: Grade Pretraining (centroid-bridged)]");
@@ -806,7 +865,9 @@ impl TrainingOrchestrator {
 
         // Within-topic pairs: same semantic domain, differentiated structure
         for (_, indices) in &groups {
-            if indices.len() < 2 { continue; }
+            if indices.len() < 2 {
+                continue;
+            }
             for w in indices.windows(2) {
                 let a = &chunks[w[0]];
                 let b = &chunks[w[1]];
@@ -821,14 +882,18 @@ impl TrainingOrchestrator {
 
                 let sop = sentence_order_score(a, b);
                 sop_total += 1;
-                if sop > 0.0 { sop_correct += 1; }
+                if sop > 0.0 {
+                    sop_correct += 1;
+                }
             }
         }
 
         // Cross-topic contrastive pairs for bivector grade separation
         for (ti, (_, indices_a)) in groups.iter().enumerate() {
             for (tj, (_, indices_b)) in groups.iter().enumerate() {
-                if ti >= tj { continue; }
+                if ti >= tj {
+                    continue;
+                }
                 for &ia in indices_a {
                     for &ib in indices_b {
                         let g1_sim = chunks[ia].semantic_similarity(&chunks[ib]);
@@ -865,7 +930,8 @@ impl TrainingOrchestrator {
         }
 
         // Negation pair training using decoded program text
-        let texts: Vec<String> = programs.iter()
+        let texts: Vec<String> = programs
+            .iter()
             .map(|(topic, tokens, _)| {
                 if tokens.len() >= 3 {
                     let seq = self.codec.encode_sequence(tokens);
@@ -886,24 +952,30 @@ impl TrainingOrchestrator {
         if !texts.is_empty() {
             let neg_pairs = generate_negation_pairs(&texts);
             for pair in &neg_pairs {
-                let assert_tokens: Vec<u16> = pair.assertion.split_whitespace()
+                let assert_tokens: Vec<u16> = pair
+                    .assertion
+                    .split_whitespace()
                     .take(CHUNK_K)
                     .filter_map(|w| w.strip_prefix('t').and_then(|n| n.parse::<u16>().ok()))
                     .collect();
-                let neg_tokens: Vec<u16> = pair.negation.split_whitespace()
+                let neg_tokens: Vec<u16> = pair
+                    .negation
+                    .split_whitespace()
                     .take(CHUNK_K)
                     .filter_map(|w| w.strip_prefix('t').and_then(|n| n.parse::<u16>().ok()))
                     .collect();
                 if assert_tokens.len() >= 2 && neg_tokens.len() >= 2 {
                     let assert_chunk = SpacetimeChunk::from_chunk(
-                        &self.codec.encode_chunk(&pad_to_k(&assert_tokens))
+                        &self.codec.encode_chunk(&pad_to_k(&assert_tokens)),
                     );
                     let neg_chunk = SpacetimeChunk::from_chunk(
-                        &self.codec.encode_chunk(&pad_to_k(&neg_tokens))
+                        &self.codec.encode_chunk(&pad_to_k(&neg_tokens)),
                     );
                     let loss = negation_pair_loss(&assert_chunk, &neg_chunk);
                     neg_total += 1;
-                    if loss < 0.5 { neg_correct += 1; }
+                    if loss < 0.5 {
+                        neg_correct += 1;
+                    }
                 }
             }
         }
@@ -915,8 +987,16 @@ impl TrainingOrchestrator {
         diag.avg_trivector_loss = total_loss.trivector_loss / n;
         diag.avg_pseudo_loss = total_loss.pseudo_loss / n;
         diag.avg_total_loss = total_loss.total / n;
-        diag.sop_accuracy = if sop_total > 0 { sop_correct as f32 / sop_total as f32 } else { 0.0 };
-        diag.negation_accuracy = if neg_total > 0 { neg_correct as f32 / neg_total as f32 } else { 0.0 };
+        diag.sop_accuracy = if sop_total > 0 {
+            sop_correct as f32 / sop_total as f32
+        } else {
+            0.0
+        };
+        diag.negation_accuracy = if neg_total > 0 {
+            neg_correct as f32 / neg_total as f32
+        } else {
+            0.0
+        };
         diag.num_samples = count;
         diag
     }
@@ -942,18 +1022,18 @@ impl TrainingOrchestrator {
         let groups = Self::topic_groups(programs);
 
         for (_, indices) in &groups {
-            if indices.len() < 3 { continue; }
+            if indices.len() < 3 {
+                continue;
+            }
 
-            let trajectory: Vec<SpacetimeChunk> = indices.iter()
-                .map(|&i| chunks[i].clone())
-                .collect();
+            let trajectory: Vec<SpacetimeChunk> =
+                indices.iter().map(|&i| chunks[i].clone()).collect();
 
             let train_traj = &trajectory[..trajectory.len() - 1];
             let target = &trajectory[trajectory.len() - 1];
 
-            let propagator = SemanticPropagator::from_trajectory(
-                train_traj, self.mass, self.coupling,
-            );
+            let propagator =
+                SemanticPropagator::from_trajectory(train_traj, self.mass, self.coupling);
 
             if let Some((predicted, _interval, confidence)) = propagator.predict_next() {
                 let pred_st = SpacetimeChunk::from_centroid(&predicted);
@@ -1002,7 +1082,9 @@ impl TrainingOrchestrator {
         let groups = Self::topic_groups(programs);
 
         for (_, indices) in &groups {
-            if indices.len() < 2 { continue; }
+            if indices.len() < 2 {
+                continue;
+            }
             for w in indices.windows(2) {
                 let a = &chunks[w[0]];
                 let b = &chunks[w[1]];
@@ -1017,14 +1099,12 @@ impl TrainingOrchestrator {
             }
 
             if indices.len() >= 3 {
-                let trajectory: Vec<SpacetimeChunk> = indices.iter()
-                    .map(|&i| chunks[i].clone())
-                    .collect();
+                let trajectory: Vec<SpacetimeChunk> =
+                    indices.iter().map(|&i| chunks[i].clone()).collect();
                 let train_traj = &trajectory[..trajectory.len() - 1];
                 let target = &trajectory[trajectory.len() - 1];
-                let propagator = SemanticPropagator::from_trajectory(
-                    train_traj, self.mass, self.coupling,
-                );
+                let propagator =
+                    SemanticPropagator::from_trajectory(train_traj, self.mass, self.coupling);
                 if let Some((predicted, _interval, confidence)) = propagator.predict_next() {
                     let pred_st = SpacetimeChunk::from_centroid(&predicted);
                     let rotor_loss = graded_training_loss(&pred_st, target, &self.grade_weights);
@@ -1061,7 +1141,9 @@ impl TrainingOrchestrator {
         diag.avg_total_loss = total_loss.total / n;
         diag.rotor_prediction_confidence = if rotor_count > 0 {
             total_rotor_conf / rotor_count as f32
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         diag.num_samples = count;
         diag
     }
@@ -1116,7 +1198,11 @@ mod tests {
         let augmented = mask_salient_spans(text, &lex, 3, 42);
         assert!(!augmented.is_empty());
         for aug in &augmented {
-            assert!(aug.contains("[MASK]"), "Augmented text should contain [MASK]: {}", aug);
+            assert!(
+                aug.contains("[MASK]"),
+                "Augmented text should contain [MASK]: {}",
+                aug
+            );
             assert!(!aug.contains("stack") || aug.contains("[MASK]"));
         }
     }
@@ -1124,47 +1210,69 @@ mod tests {
     #[test]
     fn test_contrastive_refine() {
         let mut topics = vec![
-            ("stack".to_string(), vec![
-                CentroidEntry { centroid: vec![1.0, 0.0, 0.0, 0.0], program_idx: 0 },
-            ]),
-            ("queue".to_string(), vec![
-                CentroidEntry { centroid: vec![0.95, 0.1, 0.0, 0.0], program_idx: 0 },
-            ]),
+            (
+                "stack".to_string(),
+                vec![CentroidEntry {
+                    centroid: vec![1.0, 0.0, 0.0, 0.0],
+                    program_idx: 0,
+                }],
+            ),
+            (
+                "queue".to_string(),
+                vec![CentroidEntry {
+                    centroid: vec![0.95, 0.1, 0.0, 0.0],
+                    program_idx: 0,
+                }],
+            ),
         ];
 
-        let sim_before = cosine_sim(
-            &topics[0].1[0].centroid,
-            &topics[1].1[0].centroid,
-        );
+        let sim_before = cosine_sim(&topics[0].1[0].centroid, &topics[1].1[0].centroid);
 
         let repulsions = contrastive_refine(&mut topics, 0.5, 0.1);
         assert!(repulsions > 0);
 
-        let sim_after = cosine_sim(
-            &topics[0].1[0].centroid,
-            &topics[1].1[0].centroid,
+        let sim_after = cosine_sim(&topics[0].1[0].centroid, &topics[1].1[0].centroid);
+        assert!(
+            sim_after < sim_before,
+            "Contrastive refinement should reduce similarity: before={}, after={}",
+            sim_before,
+            sim_after
         );
-        assert!(sim_after < sim_before, "Contrastive refinement should reduce similarity: before={}, after={}", sim_before, sim_after);
     }
 
     #[test]
     fn test_augment_pipeline() {
         let lex = test_lexicon();
-        let dict = TokenDictionary::build(&[
-            "A stack is a LIFO data structure",
-            "A queue is a FIFO data structure",
-        ], 4096);
+        let dict = TokenDictionary::build(
+            &[
+                "A stack is a LIFO data structure",
+                "A queue is a FIFO data structure",
+            ],
+            4096,
+        );
 
         let samples = vec![
-            ("What is a stack?".to_string(), "A stack is a LIFO data structure".to_string()),
-            ("What is a queue?".to_string(), "A queue is a FIFO data structure".to_string()),
+            (
+                "What is a stack?".to_string(),
+                "A stack is a LIFO data structure".to_string(),
+            ),
+            (
+                "What is a queue?".to_string(),
+                "A queue is a FIFO data structure".to_string(),
+            ),
         ];
 
         let augmented = augment_training_data(&samples, &lex, &dict, 2, 0.3);
         assert!(!augmented.is_empty(), "Should produce augmented samples");
 
-        let mask_count = augmented.iter().filter(|a| a.kind == AugmentKind::SalientMask).count();
-        let rtd_count = augmented.iter().filter(|a| a.kind == AugmentKind::RtdNegative).count();
+        let mask_count = augmented
+            .iter()
+            .filter(|a| a.kind == AugmentKind::SalientMask)
+            .count();
+        let rtd_count = augmented
+            .iter()
+            .filter(|a| a.kind == AugmentKind::RtdNegative)
+            .count();
         assert!(mask_count > 0, "Should have masked augments");
         assert!(rtd_count > 0, "Should have RTD augments");
     }
@@ -1177,38 +1285,45 @@ mod tests {
     fn test_graded_training_loss_identical() {
         use crate::text_autoencoder::{ChunkCodec, SpacetimeChunk, CHUNK_K};
         let codec = ChunkCodec::new(256);
-        let chunk = SpacetimeChunk::from_chunk(
-            &codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80])
-        );
+        let chunk =
+            SpacetimeChunk::from_chunk(&codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]));
         let loss = graded_training_loss(&chunk, &chunk, &DEFAULT_GRADE_WEIGHTS);
-        assert!(loss.total < 0.1, "identical chunks should have near-zero loss: {}", loss.total);
-        assert!(loss.vector_loss < 0.01, "vector loss should be ~0: {}", loss.vector_loss);
+        assert!(
+            loss.total < 0.1,
+            "identical chunks should have near-zero loss: {}",
+            loss.total
+        );
+        assert!(
+            loss.vector_loss < 0.01,
+            "vector loss should be ~0: {}",
+            loss.vector_loss
+        );
     }
 
     #[test]
     fn test_graded_training_loss_different() {
         use crate::text_autoencoder::{ChunkCodec, SpacetimeChunk, CHUNK_K};
         let codec = ChunkCodec::new(256);
-        let a = SpacetimeChunk::from_chunk(
-            &codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80])
-        );
+        let a = SpacetimeChunk::from_chunk(&codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]));
         let b = SpacetimeChunk::from_chunk(
-            &codec.encode_chunk(&[200, 201, 202, 203, 204, 205, 206, 207])
+            &codec.encode_chunk(&[200, 201, 202, 203, 204, 205, 206, 207]),
         );
         let loss = graded_training_loss(&a, &b, &DEFAULT_GRADE_WEIGHTS);
-        assert!(loss.total > 0.1, "different chunks should have significant loss: {}", loss.total);
+        assert!(
+            loss.total > 0.1,
+            "different chunks should have significant loss: {}",
+            loss.total
+        );
     }
 
     #[test]
     fn test_sentence_order_prediction() {
         use crate::text_autoencoder::{ChunkCodec, SpacetimeChunk, CHUNK_K};
         let codec = ChunkCodec::new(256);
-        let first = SpacetimeChunk::from_chunk(
-            &codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80])
-        );
-        let second = SpacetimeChunk::from_chunk(
-            &codec.encode_chunk(&[11, 21, 31, 41, 51, 61, 71, 81])
-        );
+        let first =
+            SpacetimeChunk::from_chunk(&codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]));
+        let second =
+            SpacetimeChunk::from_chunk(&codec.encode_chunk(&[11, 21, 31, 41, 51, 61, 71, 81]));
         let score_correct = sentence_order_score(&first, &second);
         let score_reversed = sentence_order_score(&second, &first);
         // Correct and reversed should have opposite signs
@@ -1226,11 +1341,21 @@ mod tests {
             "Short".to_string(),
         ];
         let pairs = generate_negation_pairs(&texts);
-        assert!(!pairs.is_empty(), "should generate at least some negation pairs");
+        assert!(
+            !pairs.is_empty(),
+            "should generate at least some negation pairs"
+        );
         for pair in &pairs {
-            assert_ne!(pair.assertion, pair.negation, "negation should differ from assertion");
+            assert_ne!(
+                pair.assertion, pair.negation,
+                "negation should differ from assertion"
+            );
             let has_negation = pair.negation.contains("not") || pair.negation.contains("cannot");
-            assert!(has_negation, "negation should contain negation word: {}", pair.negation);
+            assert!(
+                has_negation,
+                "negation should contain negation word: {}",
+                pair.negation
+            );
         }
     }
 
@@ -1238,14 +1363,16 @@ mod tests {
     fn test_negation_pair_loss() {
         use crate::text_autoencoder::{ChunkCodec, SpacetimeChunk, CHUNK_K};
         let codec = ChunkCodec::new(256);
-        let a = SpacetimeChunk::from_chunk(
-            &codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80])
-        );
+        let a = SpacetimeChunk::from_chunk(&codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]));
         let b = SpacetimeChunk::from_chunk(
-            &codec.encode_chunk(&[200, 201, 202, 203, 204, 205, 206, 207])
+            &codec.encode_chunk(&[200, 201, 202, 203, 204, 205, 206, 207]),
         );
         let loss = negation_pair_loss(&a, &b);
-        assert!(loss >= 0.0, "negation loss should be non-negative: {}", loss);
+        assert!(
+            loss >= 0.0,
+            "negation loss should be non-negative: {}",
+            loss
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1255,10 +1382,34 @@ mod tests {
     #[test]
     fn test_orchestrator_full_pipeline() {
         let mut programs = vec![
-            ("topic_a".to_string(), vec![10, 20, 30, 40, 50, 60, 70, 80, 11, 21, 31, 41, 51, 61, 71, 81], vec![0.1; 32]),
-            ("topic_a".to_string(), vec![12, 22, 32, 42, 52, 62, 72, 82, 13, 23, 33, 43, 53, 63, 73, 83], vec![0.2; 32]),
-            ("topic_b".to_string(), vec![100, 110, 120, 130, 140, 150, 160, 170, 101, 111, 121, 131, 141, 151, 161, 171], vec![0.3; 32]),
-            ("topic_b".to_string(), vec![102, 112, 122, 132, 142, 152, 162, 172, 103, 113, 123, 133, 143, 153, 163, 173], vec![0.4; 32]),
+            (
+                "topic_a".to_string(),
+                vec![
+                    10, 20, 30, 40, 50, 60, 70, 80, 11, 21, 31, 41, 51, 61, 71, 81,
+                ],
+                vec![0.1; 32],
+            ),
+            (
+                "topic_a".to_string(),
+                vec![
+                    12, 22, 32, 42, 52, 62, 72, 82, 13, 23, 33, 43, 53, 63, 73, 83,
+                ],
+                vec![0.2; 32],
+            ),
+            (
+                "topic_b".to_string(),
+                vec![
+                    100, 110, 120, 130, 140, 150, 160, 170, 101, 111, 121, 131, 141, 151, 161, 171,
+                ],
+                vec![0.3; 32],
+            ),
+            (
+                "topic_b".to_string(),
+                vec![
+                    102, 112, 122, 132, 142, 152, 162, 172, 103, 113, 123, 133, 143, 153, 163, 173,
+                ],
+                vec![0.4; 32],
+            ),
         ];
 
         let mut orch = TrainingOrchestrator::new(256);
@@ -1281,16 +1432,37 @@ mod tests {
         // Centroids should have been modified
         let orig_centroid = vec![0.1f32; 32];
         let modified = &programs[0].2;
-        let diff: f32 = orig_centroid.iter().zip(modified.iter())
-            .map(|(a, b)| (a - b).abs()).sum();
-        assert!(diff > 0.0, "centroid should be modified by training: diff={}", diff);
+        let diff: f32 = orig_centroid
+            .iter()
+            .zip(modified.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        assert!(
+            diff > 0.0,
+            "centroid should be modified by training: diff={}",
+            diff
+        );
     }
 
     #[test]
     fn test_orchestrator_phase_transitions() {
         let mut programs = vec![
-            ("a".to_string(), vec![10, 20, 30, 40, 50, 60, 70, 80, 15, 25, 35, 45, 55, 65, 75, 85, 18, 28, 38, 48, 58, 68, 78, 88], vec![0.5; 16]),
-            ("b".to_string(), vec![100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123], vec![0.5; 16]),
+            (
+                "a".to_string(),
+                vec![
+                    10, 20, 30, 40, 50, 60, 70, 80, 15, 25, 35, 45, 55, 65, 75, 85, 18, 28, 38, 48,
+                    58, 68, 78, 88,
+                ],
+                vec![0.5; 16],
+            ),
+            (
+                "b".to_string(),
+                vec![
+                    100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115,
+                    116, 117, 118, 119, 120, 121, 122, 123,
+                ],
+                vec![0.5; 16],
+            ),
         ];
 
         let mut orch = TrainingOrchestrator::new(256);

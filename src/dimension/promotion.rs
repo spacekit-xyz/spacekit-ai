@@ -3,14 +3,16 @@
 use crate::types::GroupId;
 use serde::{Deserialize, Serialize};
 
-use super::embedding::{compute_group_embedding, build_tag_vector, cosine_similarity, GroupEmbedding, TAG_VECTOR_DIM};
+use super::embedding::{
+    build_tag_vector, compute_group_embedding, cosine_similarity, GroupEmbedding, TAG_VECTOR_DIM,
+};
 use super::main_dim::MainDimension;
 use super::mirror_dim::MirrorDimension;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromotionGateConfig {
     pub accuracy_threshold: f32,
-    pub redundancy_threshold: f32,  // cosine above this = reject (redundant)
+    pub redundancy_threshold: f32, // cosine above this = reject (redundant)
     pub stability_window_epochs: u32,
 }
 
@@ -27,8 +29,13 @@ impl Default for PromotionGateConfig {
 #[derive(Debug, Clone)]
 pub enum PromotionDecision {
     Promote,
-    ContinueTraining { reason: String },
-    Reject { reason: String, similar_to: Option<GroupId> },
+    ContinueTraining {
+        reason: String,
+    },
+    Reject {
+        reason: String,
+        similar_to: Option<GroupId>,
+    },
 }
 
 /// Evaluate a mirror for promotion. May run forward passes on mirror.env (activations only).
@@ -40,8 +47,11 @@ pub fn evaluate_promotion(
 ) -> PromotionDecision {
     if mirror.best_accuracy < config.accuracy_threshold {
         return PromotionDecision::ContinueTraining {
-            reason: format!("accuracy {:.1}% below threshold {:.0}%",
-                mirror.best_accuracy * 100.0, config.accuracy_threshold * 100.0),
+            reason: format!(
+                "accuracy {:.1}% below threshold {:.0}%",
+                mirror.best_accuracy * 100.0,
+                config.accuracy_threshold * 100.0
+            ),
         };
     }
     let mirror_vec = compute_group_embedding(&mut mirror.env, calibration_data);

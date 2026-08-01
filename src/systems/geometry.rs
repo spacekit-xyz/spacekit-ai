@@ -1,8 +1,8 @@
+use crate::neuron::Neuron;
+use crate::types::*;
 use rand::Rng;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use crate::types::*;
-use crate::neuron::Neuron;
 use std::collections::HashMap;
 
 /// System 4: Physics-Based Geometry — N-body Particle Integrator
@@ -77,15 +77,25 @@ pub fn update_geometry(
 
     // Snapshot: (pos, activation, mass, layer, group_id)
     // group_id included so force computation can apply group boundary penalty
-    let snapshot: HashMap<NeuronId, (Vec3, f32, f32, usize, Option<GroupId>)> = neurons.iter()
+    let snapshot: HashMap<NeuronId, (Vec3, f32, f32, usize, Option<GroupId>)> = neurons
+        .iter()
         .map(|(&id, n)| {
             let layer = *layer_of.get(&id).unwrap_or(&0);
             (id, (n.geometry, n.activation, n.mass, layer, n.group_id))
         })
         .collect();
 
-    let synapse_snapshot: HashMap<NeuronId, Vec<(NeuronId, f32)>> = neurons.iter()
-        .map(|(&id, n)| (id, n.synapses.iter().map(|s| (s.target, s.metabolic_cost())).collect()))
+    let synapse_snapshot: HashMap<NeuronId, Vec<(NeuronId, f32)>> = neurons
+        .iter()
+        .map(|(&id, n)| {
+            (
+                id,
+                n.synapses
+                    .iter()
+                    .map(|s| (s.target, s.metabolic_cost()))
+                    .collect(),
+            )
+        })
         .collect();
 
     let forces: Vec<(NeuronId, Vec3)> = crate::maybe_par_iter!(snapshot)
@@ -103,12 +113,18 @@ pub fn update_geometry(
             // causing task groups to self-organise into spatially separate clusters.
             // Only applies when both neurons have an assigned group (not input/output).
             let max_repulsion_dist = config.debye_length * 4.0;
-            for (&other_id, &(other_pos, _, other_mass, other_layer, other_group)) in snapshot.iter() {
-                if other_id == id || other_layer != layer { continue; }
+            for (&other_id, &(other_pos, _, other_mass, other_layer, other_group)) in
+                snapshot.iter()
+            {
+                if other_id == id || other_layer != layer {
+                    continue;
+                }
                 let diff = pos - other_pos;
                 let dist_sq = diff.magnitude_sq();
                 let dist = dist_sq.sqrt();
-                if dist > max_repulsion_dist { continue; }
+                if dist > max_repulsion_dist {
+                    continue;
+                }
 
                 // Group boundary penalty: 3× repulsion between different task groups.
                 // Neurons with no group (input/output, ungrouped hidden) are unaffected.
@@ -120,7 +136,8 @@ pub fn update_geometry(
                 // Debye screening: repulsion decays as exp(-dist/lambda_D)
                 let screening = (-dist / config.debye_length).exp();
                 let magnitude = (config.k_repel * mass * other_mass * group_penalty * screening
-                    / (dist_sq + 0.01)).min(5.0);
+                    / (dist_sq + 0.01))
+                    .min(5.0);
                 f = f + diff * (magnitude / dist.max(0.001));
             }
 
@@ -147,7 +164,9 @@ pub fn update_geometry(
     let dt = config.physics_dt;
     for (id, force) in forces {
         if let Some(neuron) = neurons.get_mut(&id) {
-            if neuron.frozen { continue; }
+            if neuron.frozen {
+                continue;
+            }
             let noise = Vec3::new(
                 gaussian_sample(rng) * config.thermal_noise,
                 gaussian_sample(rng) * config.thermal_noise,
@@ -157,7 +176,9 @@ pub fn update_geometry(
             neuron.velocity = neuron.velocity * (1.0 - config.damping) + accel * dt + noise;
             // Velocity clamp prevents instability at close range
             let speed = neuron.velocity.magnitude();
-            if speed > 2.0 { neuron.velocity = neuron.velocity * (2.0 / speed); }
+            if speed > 2.0 {
+                neuron.velocity = neuron.velocity * (2.0 / speed);
+            }
             neuron.geometry = neuron.geometry + neuron.velocity * dt;
             neuron.geometry.x = neuron.geometry.x.clamp(-10.0, 10.0);
             neuron.geometry.y = neuron.geometry.y.clamp(-10.0, 10.0);
@@ -189,26 +210,32 @@ pub fn reaction_diffusion_inhibition(
     lateral_inhibition: f32,
     sigma_inhib: f32,
 ) {
-    if lateral_inhibition <= 0.0 || sigma_inhib <= 0.0 { return; }
+    if lateral_inhibition <= 0.0 || sigma_inhib <= 0.0 {
+        return;
+    }
 
     // Snapshot positions + activations for this layer
-    let layer_state: Vec<(NeuronId, Vec3, f32)> = layer_ids.iter()
+    let layer_state: Vec<(NeuronId, Vec3, f32)> = layer_ids
+        .iter()
         .filter(|id| dropout_mask.get(id) != Some(&true))
-        .filter_map(|&id| {
-            neurons.get(&id).map(|n| (id, n.geometry, n.activation))
-        })
+        .filter_map(|&id| neurons.get(&id).map(|n| (id, n.geometry, n.activation)))
         .collect();
 
-    if layer_state.is_empty() { return; }
+    if layer_state.is_empty() {
+        return;
+    }
 
     // Compute spatially-weighted inhibitory input for each neuron
     // inhib_i = Σ_j kernel(dist_ij) * act_j  normalized by Σ_j kernel(dist_ij)
-    let inhibitions: Vec<(NeuronId, f32)> = layer_state.iter()
+    let inhibitions: Vec<(NeuronId, f32)> = layer_state
+        .iter()
         .map(|&(id, pos, _)| {
             let mut weighted_sum = 0.0f32;
             let mut weight_total = 0.0f32;
             for &(other_id, other_pos, other_act) in &layer_state {
-                if other_id == id { continue; }
+                if other_id == id {
+                    continue;
+                }
                 let dist = pos.distance(&other_pos);
                 let kernel = (-dist / sigma_inhib).exp();
                 weighted_sum += kernel * other_act;
@@ -226,7 +253,9 @@ pub fn reaction_diffusion_inhibition(
     // Apply inhibition, floor at 0 (skip frozen — consolidated pathway keeps pre-inhibition activation)
     for (id, inhib) in inhibitions {
         if let Some(n) = neurons.get_mut(&id) {
-            if n.frozen { continue; }
+            if n.frozen {
+                continue;
+            }
             n.activation = (n.activation - lateral_inhibition * inhib).max(0.0);
         }
     }
@@ -240,12 +269,21 @@ fn gaussian_sample(rng: &mut impl Rng) -> f32 {
 }
 
 pub fn compute_geometric_spread(neurons: &HashMap<NeuronId, Neuron>) -> f32 {
-    if neurons.is_empty() { return 0.0; }
-    let sum = neurons.values().fold(Vec3::zero(), |acc, n| acc + n.geometry);
+    if neurons.is_empty() {
+        return 0.0;
+    }
+    let sum = neurons
+        .values()
+        .fold(Vec3::zero(), |acc, n| acc + n.geometry);
     let count = neurons.len() as f32;
     let centroid = Vec3::new(sum.x / count, sum.y / count, sum.z / count);
-    let variance: f32 = neurons.values()
-        .map(|n| { let d = n.geometry.distance(&centroid); d * d })
-        .sum::<f32>() / count;
+    let variance: f32 = neurons
+        .values()
+        .map(|n| {
+            let d = n.geometry.distance(&centroid);
+            d * d
+        })
+        .sum::<f32>()
+        / count;
     variance.sqrt()
 }

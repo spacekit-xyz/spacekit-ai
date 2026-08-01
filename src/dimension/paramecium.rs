@@ -21,8 +21,8 @@
 //! shifts the nearest attractor via EMA. The lattice self-organizes through
 //! repeated exposure — like a paramecium learning to ignore a repeated stimulus.
 
-use serde::{Deserialize, Serialize};
 use crate::spectral::{E8Lattice, TokenDictionary};
+use serde::{Deserialize, Serialize};
 
 /// A node on the infraciliary lattice. Each cilium has a position in E8 space,
 /// a phase (activation level), and a habituation counter.
@@ -77,7 +77,6 @@ pub struct BehavioralProgram {
     pub habituation: f32,
 
     // === Persistent state (gene expression / long-term config) ===
-
     /// Accumulated quality score from MetaCognition feedback.
     /// Programs that consistently pass quality checks build higher scores,
     /// biasing future retrieval toward proven-reliable responses.
@@ -93,7 +92,6 @@ pub struct BehavioralProgram {
     pub total_retrievals: u64,
 
     // === Medium-term state (post-translational / session-scoped) ===
-
     /// Session centroid drift: accumulated embedding bias from repeated queries
     /// in the current session. Enables in-context adaptation without modifying
     /// the persistent centroid. Applied as an additive offset during retrieval.
@@ -107,7 +105,6 @@ pub struct BehavioralProgram {
     pub session_quality_sum: f32,
 
     // === Short-term state (ionic / membrane potential) ===
-
     /// Activation level: decays between inference turns. Recently-fired programs
     /// have high activation, enabling refractory-period suppression.
     #[serde(skip)]
@@ -130,7 +127,9 @@ impl BehavioralProgram {
     }
 }
 
-fn default_reliability() -> f32 { 0.5 }
+fn default_reliability() -> f32 {
+    0.5
+}
 
 /// Wave propagation state across the lattice.
 /// The metachronal wave is an EMA field that carries "what was just sensed"
@@ -172,8 +171,8 @@ impl WaveState {
             }
             let distance = ((i as f32 - source_idx as f32).abs() / n as f32).min(0.5);
             let wave_contribution = intensity * (-distance * 4.0).exp();
-            self.phases[i] = self.phases[i] * self.damping
-                + wave_contribution * self.propagation_alpha;
+            self.phases[i] =
+                self.phases[i] * self.damping + wave_contribution * self.propagation_alpha;
         }
 
         self.energy = self.phases.iter().map(|p| p * p).sum();
@@ -214,7 +213,9 @@ pub struct InfraciliaryLattice {
     pub novelty_factor: f32,
 }
 
-fn default_novelty_factor() -> f32 { 1.0 }
+fn default_novelty_factor() -> f32 {
+    1.0
+}
 
 /// Result of a paramecium inference step.
 #[derive(Clone, Debug)]
@@ -302,7 +303,9 @@ impl InfraciliaryLattice {
     /// Returns the number of repulsion operations performed.
     pub fn contrastive_refine(&mut self, margin: f32, rate: f32) -> usize {
         let n = self.programs.len();
-        if n < 2 { return 0; }
+        if n < 2 {
+            return 0;
+        }
 
         let mut repulsions = 0;
         for i in 0..n {
@@ -313,16 +316,27 @@ impl InfraciliaryLattice {
                     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
                     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
                     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-                    if na < 1e-8 || nb < 1e-8 { 0.0 } else { dot / (na * nb) }
+                    if na < 1e-8 || nb < 1e-8 {
+                        0.0
+                    } else {
+                        dot / (na * nb)
+                    }
                 };
 
                 if sim > margin {
-                    let tokens_match = self.programs[i].token_sequence == self.programs[j].token_sequence;
-                    if tokens_match { continue; }
+                    let tokens_match =
+                        self.programs[i].token_sequence == self.programs[j].token_sequence;
+                    if tokens_match {
+                        continue;
+                    }
 
-                    let dim = self.programs[i].ema_centroid.len().min(self.programs[j].ema_centroid.len());
+                    let dim = self.programs[i]
+                        .ema_centroid
+                        .len()
+                        .min(self.programs[j].ema_centroid.len());
                     for d in 0..dim {
-                        let delta = self.programs[i].ema_centroid[d] - self.programs[j].ema_centroid[d];
+                        let delta =
+                            self.programs[i].ema_centroid[d] - self.programs[j].ema_centroid[d];
                         self.programs[i].ema_centroid[d] += delta * rate;
                         self.programs[j].ema_centroid[d] -= delta * rate;
                     }
@@ -377,8 +391,7 @@ impl InfraciliaryLattice {
         }
 
         // 1. Gradient sensing: find the nearest behavioral program
-        let (best_idx, best_similarity) = self.nearest_program(embedding)
-            .unwrap_or((0, 0.0));
+        let (best_idx, best_similarity) = self.nearest_program(embedding).unwrap_or((0, 0.0));
 
         // 2. Wave propagation: activate the winning program and let the wave spread
         self.wave.propagate(best_idx, best_similarity);
@@ -421,8 +434,7 @@ impl InfraciliaryLattice {
         let prog_mut = &mut self.programs[selected_idx];
         for (i, v) in embedding.iter().enumerate() {
             if i < prog_mut.ema_centroid.len() {
-                prog_mut.ema_centroid[i] =
-                    prog_mut.ema_centroid[i] * (1.0 - alpha) + v * alpha;
+                prog_mut.ema_centroid[i] = prog_mut.ema_centroid[i] * (1.0 - alpha) + v * alpha;
             }
         }
         prog_mut.activation_count += 1;
@@ -495,18 +507,19 @@ impl InfraciliaryLattice {
                 if merged[j] {
                     continue;
                 }
-                let sim = cosine_similarity(&self.programs[i].ema_centroid,
-                                           &self.programs[j].ema_centroid);
+                let sim = cosine_similarity(
+                    &self.programs[i].ema_centroid,
+                    &self.programs[j].ema_centroid,
+                );
                 if sim >= merge_threshold {
-                    let total = self.programs[i].activation_count
-                        + self.programs[j].activation_count;
+                    let total =
+                        self.programs[i].activation_count + self.programs[j].activation_count;
                     let wi = self.programs[i].activation_count as f32 / total as f32;
                     let wj = self.programs[j].activation_count as f32 / total as f32;
 
                     let dim = self.programs[i].ema_centroid.len();
                     for k in 0..dim {
-                        self.programs[i].ema_centroid[k] =
-                            self.programs[i].ema_centroid[k] * wi
+                        self.programs[i].ema_centroid[k] = self.programs[i].ema_centroid[k] * wi
                             + self.programs[j].ema_centroid[k] * wj;
                     }
                     self.programs[i].activation_count = total;
@@ -520,9 +533,7 @@ impl InfraciliaryLattice {
 
         let mut i = 0;
         while i < self.programs.len() {
-            if merged.get(i).copied().unwrap_or(false)
-                || self.programs[i].activation_count == 0
-            {
+            if merged.get(i).copied().unwrap_or(false) || self.programs[i].activation_count == 0 {
                 self.programs.remove(i);
                 merged.remove(i);
             } else {
@@ -542,22 +553,29 @@ impl InfraciliaryLattice {
             return Vec::new();
         }
 
-        let mut scored: Vec<(usize, f32)> = self.programs.iter().enumerate()
+        let mut scored: Vec<(usize, f32)> = self
+            .programs
+            .iter()
+            .enumerate()
             .map(|(i, prog)| (i, cosine_similarity(embedding, &prog.ema_centroid)))
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        scored.into_iter().take(k).map(|(idx, sim)| {
-            let prog = &self.programs[idx];
-            let text = prog.display_text(&self.dictionary);
-            ParameciumResponse {
-                text,
-                program_idx: idx,
-                confidence: sim,
-                wave_energy: self.wave.phases.get(idx).copied().unwrap_or(0.0),
-                habituated: false,
-            }
-        }).collect()
+        scored
+            .into_iter()
+            .take(k)
+            .map(|(idx, sim)| {
+                let prog = &self.programs[idx];
+                let text = prog.display_text(&self.dictionary);
+                ParameciumResponse {
+                    text,
+                    program_idx: idx,
+                    confidence: sim,
+                    wave_energy: self.wave.phases.get(idx).copied().unwrap_or(0.0),
+                    habituated: false,
+                }
+            })
+            .collect()
     }
 
     // -------------------------------------------------------------------
@@ -579,7 +597,9 @@ impl InfraciliaryLattice {
     /// Returns indices into the original slice, hardest-first.
     /// Use for curriculum learning: present novel samples with more training steps.
     pub fn curriculum_order(&self, embeddings: &[Vec<f32>]) -> Vec<(usize, f32)> {
-        let mut scored: Vec<(usize, f32)> = embeddings.iter().enumerate()
+        let mut scored: Vec<(usize, f32)> = embeddings
+            .iter()
+            .enumerate()
             .map(|(i, emb)| {
                 let (conf, _) = self.novelty_score(emb);
                 (i, conf)
@@ -593,20 +613,26 @@ impl InfraciliaryLattice {
     /// Returns (suggested_group_count, cluster_assignments).
     /// Each cluster assignment is the program index the embedding maps to.
     /// Use for bottom-up group discovery instead of hand-labeled action_target.
-    pub fn discover_groups(&mut self, embeddings: &[Vec<f32>], spawn_threshold: f32) -> (usize, Vec<usize>) {
+    pub fn discover_groups(
+        &mut self,
+        embeddings: &[Vec<f32>],
+        spawn_threshold: f32,
+    ) -> (usize, Vec<usize>) {
         let saved_programs = self.programs.clone();
         let saved_wave = self.wave.clone();
 
         self.programs.clear();
         self.wave = WaveState::new(0);
 
-        let dummy_texts: Vec<(Vec<f32>, String)> = embeddings.iter()
+        let dummy_texts: Vec<(Vec<f32>, String)> = embeddings
+            .iter()
             .map(|e| (e.clone(), String::new()))
             .collect();
         self.develop(&dummy_texts, spawn_threshold);
 
         let group_count = self.programs.len();
-        let assignments: Vec<usize> = embeddings.iter()
+        let assignments: Vec<usize> = embeddings
+            .iter()
             .map(|emb| self.nearest_program(emb).map(|(idx, _)| idx).unwrap_or(0))
             .collect();
 
@@ -620,7 +646,8 @@ impl InfraciliaryLattice {
     /// Returns (centroid_embedding, representative_token_sequence) pairs.
     /// Use to initialize AlgebraicCodebook archetypes instead of random k-means.
     pub fn archetype_seeds(&self) -> Vec<(Vec<f32>, Vec<u16>)> {
-        self.programs.iter()
+        self.programs
+            .iter()
             .filter(|p| p.activation_count > 0)
             .map(|p| (p.ema_centroid.clone(), p.token_sequence.clone()))
             .collect()
@@ -637,8 +664,7 @@ impl InfraciliaryLattice {
             return Vec::new();
         }
 
-        let (best_idx, best_sim) = self.nearest_program(embedding)
-            .unwrap_or((0, 0.0));
+        let (best_idx, best_sim) = self.nearest_program(embedding).unwrap_or((0, 0.0));
 
         let mut scratch_wave = WaveState::new(self.programs.len());
         scratch_wave.propagate(best_idx, best_sim);
@@ -671,7 +697,9 @@ impl InfraciliaryLattice {
     /// Updates short-term activation, session counters, and persistent retrievals.
     /// Also accumulates session centroid drift toward the query embedding.
     pub fn on_retrieval(&mut self, program_idx: usize, query_embedding: &[f32]) {
-        if program_idx >= self.programs.len() { return; }
+        if program_idx >= self.programs.len() {
+            return;
+        }
 
         let prog = &mut self.programs[program_idx];
         prog.total_retrievals += 1;
@@ -699,21 +727,26 @@ impl InfraciliaryLattice {
     /// This is the "gene expression" pathway — persistent changes that
     /// bias future retrieval toward proven-reliable programs.
     pub fn apply_feedback(&mut self, program_idx: usize, accepted: bool, quality: f32) {
-        if program_idx >= self.programs.len() { return; }
+        if program_idx >= self.programs.len() {
+            return;
+        }
 
         let prog = &mut self.programs[program_idx];
 
         // Quality score: EMA toward +1 (accepted) or -1 (rejected)
-        let feedback = if accepted { quality.clamp(0.0, 1.0) } else { -quality.clamp(0.0, 1.0) };
+        let feedback = if accepted {
+            quality.clamp(0.0, 1.0)
+        } else {
+            -quality.clamp(0.0, 1.0)
+        };
         let alpha = 0.15;
-        prog.quality_score = (prog.quality_score * (1.0 - alpha) + feedback * alpha)
-            .clamp(-1.0, 1.0);
+        prog.quality_score =
+            (prog.quality_score * (1.0 - alpha) + feedback * alpha).clamp(-1.0, 1.0);
 
         // Reliability: ratio of acceptances, EMA-smoothed
         let hit = if accepted { 1.0f32 } else { 0.0 };
         let rel_alpha = 0.1;
-        prog.reliability = (prog.reliability * (1.0 - rel_alpha) + hit * rel_alpha)
-            .clamp(0.0, 1.0);
+        prog.reliability = (prog.reliability * (1.0 - rel_alpha) + hit * rel_alpha).clamp(0.0, 1.0);
 
         // Session quality tracking
         prog.session_quality_sum += if accepted { quality } else { -quality };
@@ -743,7 +776,8 @@ impl InfraciliaryLattice {
         if prog.session_drift.is_empty() || prog.session_drift.iter().all(|&v| v == 0.0) {
             return prog.ema_centroid.clone();
         }
-        prog.ema_centroid.iter()
+        prog.ema_centroid
+            .iter()
             .zip(prog.session_drift.iter())
             .map(|(&base, &drift)| base + drift)
             .collect()
@@ -761,19 +795,23 @@ impl InfraciliaryLattice {
     /// `novelty_factor` scales the refractory/activation penalties:
     ///   1.0 = default (sentiment brains), 2.0+ = strong novelty (chat brains).
     pub fn retrieval_bias_with_novelty(&self, program_idx: usize, novelty_factor: f32) -> f32 {
-        if program_idx >= self.programs.len() { return 1.0; }
+        if program_idx >= self.programs.len() {
+            return 1.0;
+        }
         let prog = &self.programs[program_idx];
 
         // Persistent: quality and reliability boost/suppress
         let quality_factor = 1.0 + prog.quality_score * 0.15; // [-0.85, 1.15]
-        let reliability_factor = 0.7 + prog.reliability * 0.6;  // [0.7, 1.3]
+        let reliability_factor = 0.7 + prog.reliability * 0.6; // [0.7, 1.3]
 
         // Short-term: refractory suppression prevents monoculture
         // novelty_factor amplifies suppression for chat brains (e.g. 2.0 → 0.4 penalty)
         let base_refractory = 0.3 * novelty_factor;
         let refractory_penalty = if prog.refractory {
             (1.0 - base_refractory).max(0.2)
-        } else { 1.0 };
+        } else {
+            1.0
+        };
         let activation_suppress = (prog.activation_level * 0.3 * novelty_factor).min(0.5);
         let activation_penalty = 1.0 - activation_suppress;
 
@@ -790,7 +828,9 @@ impl InfraciliaryLattice {
             if prog.session_hits >= min_session_hits && !prog.session_drift.is_empty() {
                 let avg_quality = if prog.session_hits > 0 {
                     prog.session_quality_sum / prog.session_hits as f32
-                } else { 0.0 };
+                } else {
+                    0.0
+                };
 
                 // Only consolidate if session quality was net-positive
                 if avg_quality > 0.0 {
@@ -870,14 +910,21 @@ impl InfraciliaryLattice {
 
     /// Total memory footprint estimate in bytes.
     pub fn memory_bytes(&self) -> usize {
-        let prog_bytes: usize = self.programs.iter().map(|p| {
-            p.centroid.len() * 4
-                + p.lattice_signature.len() * 4
-                + p.token_sequence.len() * 2
-                + p.ema_centroid.len() * 4
-                + p.verbatim_display_text.as_ref().map(|s| s.len()).unwrap_or(0)
-                + 24 // scalar fields
-        }).sum();
+        let prog_bytes: usize = self
+            .programs
+            .iter()
+            .map(|p| {
+                p.centroid.len() * 4
+                    + p.lattice_signature.len() * 4
+                    + p.token_sequence.len() * 2
+                    + p.ema_centroid.len() * 4
+                    + p.verbatim_display_text
+                        .as_ref()
+                        .map(|s| s.len())
+                        .unwrap_or(0)
+                    + 24 // scalar fields
+            })
+            .sum();
         let wave_bytes = self.wave.phases.len() * 4 + 12;
         prog_bytes + wave_bytes + 32
     }
@@ -927,7 +974,11 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         nb += bi * bi;
     }
     let denom = na.sqrt() * nb.sqrt();
-    if denom < 1e-20 { 0.0 } else { (dot / denom) as f32 }
+    if denom < 1e-20 {
+        0.0
+    } else {
+        (dot / denom) as f32
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -952,7 +1003,8 @@ mod tests {
 
     fn test_embedding(seed: f32) -> Vec<f32> {
         (0..crate::dimension::language::DEFAULT_BRIDGE_DIM)
-            .map(|i| ((i as f32 + seed) * 0.1).sin()).collect()
+            .map(|i| ((i as f32 + seed) * 0.1).sin())
+            .collect()
     }
 
     #[test]
@@ -962,15 +1014,20 @@ mod tests {
 
         let samples: Vec<(Vec<f32>, String)> = vec![
             (test_embedding(1.0), "reset your password".to_string()),
-            (test_embedding(2.0), "the observer pattern decouples".to_string()),
+            (
+                test_embedding(2.0),
+                "the observer pattern decouples".to_string(),
+            ),
             (test_embedding(100.0), "implement binary search".to_string()),
         ];
 
         lattice.develop(&samples, 0.95);
 
-        assert!(lattice.program_count() >= 2,
+        assert!(
+            lattice.program_count() >= 2,
             "distant embeddings should spawn separate programs, got {}",
-            lattice.program_count());
+            lattice.program_count()
+        );
     }
 
     #[test]
@@ -1002,9 +1059,14 @@ mod tests {
         let r3 = lattice.respond(&emb);
 
         assert!(!r1.habituated, "first response should not be habituated");
-        assert!(r2.habituated, "second identical stimulus should be habituated");
-        assert!(r3.confidence <= r2.confidence,
-            "confidence should not increase with habituation");
+        assert!(
+            r2.habituated,
+            "second identical stimulus should be habituated"
+        );
+        assert!(
+            r3.confidence <= r2.confidence,
+            "confidence should not increase with habituation"
+        );
     }
 
     #[test]
@@ -1012,16 +1074,27 @@ mod tests {
         let mut wave = WaveState::new(10);
         wave.propagate(5, 1.0);
 
-        assert!(wave.phases[5] > wave.phases[0],
-            "source node should have higher phase than distant node");
-        assert!(wave.phases[4] > wave.phases[0],
-            "neighbor should have higher phase than far node");
-        assert!(wave.energy > 0.0, "wave energy should be positive after propagation");
+        assert!(
+            wave.phases[5] > wave.phases[0],
+            "source node should have higher phase than distant node"
+        );
+        assert!(
+            wave.phases[4] > wave.phases[0],
+            "neighbor should have higher phase than far node"
+        );
+        assert!(
+            wave.energy > 0.0,
+            "wave energy should be positive after propagation"
+        );
 
         let energy_before = wave.energy;
         wave.decay();
-        assert!(wave.energy < energy_before,
-            "energy should decrease after decay: {} vs {}", wave.energy, energy_before);
+        assert!(
+            wave.energy < energy_before,
+            "energy should decrease after decay: {} vs {}",
+            wave.energy,
+            energy_before
+        );
     }
 
     #[test]
@@ -1039,8 +1112,10 @@ mod tests {
         let before = lattice.last_program;
 
         lattice.avoidance_reaction();
-        assert_ne!(lattice.last_program, before,
-            "avoidance should switch to a different program");
+        assert_ne!(
+            lattice.last_program, before,
+            "avoidance should switch to a different program"
+        );
     }
 
     #[test]
@@ -1050,18 +1125,25 @@ mod tests {
 
         let e1 = test_embedding(1.0);
         let mut e2 = e1.clone();
-        for v in &mut e2 { *v += 0.001; }
+        for v in &mut e2 {
+            *v += 0.001;
+        }
 
-        lattice.develop(&[
-            (e1, "reset password".to_string()),
-            (e2, "reset your password".to_string()),
-            (test_embedding(100.0), "binary search".to_string()),
-        ], 0.99);
+        lattice.develop(
+            &[
+                (e1, "reset password".to_string()),
+                (e2, "reset your password".to_string()),
+                (test_embedding(100.0), "binary search".to_string()),
+            ],
+            0.99,
+        );
 
         let before = lattice.program_count();
         lattice.autogamy(0.99);
-        assert!(lattice.program_count() <= before,
-            "autogamy should merge very similar programs");
+        assert!(
+            lattice.program_count() <= before,
+            "autogamy should merge very similar programs"
+        );
     }
 
     #[test]
@@ -1078,8 +1160,10 @@ mod tests {
 
         let volley = lattice.trichocyst_volley(&test_embedding(1.5), 2);
         assert_eq!(volley.len(), 2, "should return top-2 programs");
-        assert!(volley[0].confidence >= volley[1].confidence,
-            "results should be sorted by confidence");
+        assert!(
+            volley[0].confidence >= volley[1].confidence,
+            "results should be sorted by confidence"
+        );
     }
 
     #[test]
@@ -1093,8 +1177,11 @@ mod tests {
         lattice.develop(&samples, 0.99);
 
         let bytes = lattice.memory_bytes();
-        assert!(bytes < 100_000,
-            "50-program paramecium should be under 100KB, got {} bytes", bytes);
+        assert!(
+            bytes < 100_000,
+            "50-program paramecium should be under 100KB, got {} bytes",
+            bytes
+        );
     }
 
     #[test]
@@ -1118,16 +1205,21 @@ mod tests {
         let e_password = test_embedding(1.0);
         let e_search = test_embedding(100.0);
 
-        lattice.develop(&[
-            (e_password.clone(), "reset your password".to_string()),
-            (e_search.clone(), "implement binary search".to_string()),
-        ], 0.99);
+        lattice.develop(
+            &[
+                (e_password.clone(), "reset your password".to_string()),
+                (e_search.clone(), "implement binary search".to_string()),
+            ],
+            0.99,
+        );
 
         let r1 = lattice.respond(&test_embedding(1.1));
         let r2 = lattice.respond(&test_embedding(99.9));
 
-        assert_ne!(r1.program_idx, r2.program_idx,
-            "different inputs should activate different programs");
+        assert_ne!(
+            r1.program_idx, r2.program_idx,
+            "different inputs should activate different programs"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -1145,9 +1237,12 @@ mod tests {
         let (known_conf, known_idx) = lattice.novelty_score(&known);
         let (novel_conf, _) = lattice.novelty_score(&test_embedding(500.0));
 
-        assert!(known_conf > novel_conf,
+        assert!(
+            known_conf > novel_conf,
             "known input should have higher confidence than novel: {} vs {}",
-            known_conf, novel_conf);
+            known_conf,
+            novel_conf
+        );
         assert!(known_idx.is_some());
     }
 
@@ -1166,8 +1261,10 @@ mod tests {
         ];
 
         let order = lattice.curriculum_order(&embeddings);
-        assert_eq!(order[0].0, 1,
-            "hardest sample (idx 1, distant) should come first");
+        assert_eq!(
+            order[0].0, 1,
+            "hardest sample (idx 1, distant) should come first"
+        );
     }
 
     #[test]
@@ -1186,14 +1283,23 @@ mod tests {
 
         let (group_count, assignments) = lattice.discover_groups(&embeddings, 0.95);
 
-        assert!(group_count >= 2,
-            "two distant clusters should produce at least 2 groups, got {}", group_count);
-        assert_eq!(assignments[0], assignments[1],
-            "nearby embeddings should be in the same cluster");
-        assert_eq!(assignments[3], assignments[4],
-            "nearby embeddings should be in the same cluster");
-        assert_ne!(assignments[0], assignments[3],
-            "distant clusters should be in different groups");
+        assert!(
+            group_count >= 2,
+            "two distant clusters should produce at least 2 groups, got {}",
+            group_count
+        );
+        assert_eq!(
+            assignments[0], assignments[1],
+            "nearby embeddings should be in the same cluster"
+        );
+        assert_eq!(
+            assignments[3], assignments[4],
+            "nearby embeddings should be in the same cluster"
+        );
+        assert_ne!(
+            assignments[0], assignments[3],
+            "distant clusters should be in different groups"
+        );
     }
 
     #[test]
@@ -1201,10 +1307,13 @@ mod tests {
         let dict = test_dict();
         let mut lattice = InfraciliaryLattice::new(dict);
 
-        lattice.develop(&[
-            (test_embedding(1.0), "reset password".to_string()),
-            (test_embedding(100.0), "binary search".to_string()),
-        ], 0.99);
+        lattice.develop(
+            &[
+                (test_embedding(1.0), "reset password".to_string()),
+                (test_embedding(100.0), "binary search".to_string()),
+            ],
+            0.99,
+        );
 
         let seeds = lattice.archetype_seeds();
         assert!(seeds.len() >= 2, "should have at least 2 archetype seeds");
@@ -1217,16 +1326,24 @@ mod tests {
         let dict = test_dict();
         let mut lattice = InfraciliaryLattice::new(dict);
 
-        lattice.develop(&[
-            (test_embedding(1.0), "reset password".to_string()),
-            (test_embedding(100.0), "binary search".to_string()),
-        ], 0.99);
+        lattice.develop(
+            &[
+                (test_embedding(1.0), "reset password".to_string()),
+                (test_embedding(100.0), "binary search".to_string()),
+            ],
+            0.99,
+        );
 
         let wc = lattice.wave_conditioning(&test_embedding(1.1));
-        assert_eq!(wc.len(), lattice.program_count(),
-            "wave conditioning vector should have one element per program");
-        assert!(wc.iter().any(|&v| v > 0.0),
-            "at least one program should be activated");
+        assert_eq!(
+            wc.len(),
+            lattice.program_count(),
+            "wave conditioning vector should have one element per program"
+        );
+        assert!(
+            wc.iter().any(|&v| v > 0.0),
+            "at least one program should be activated"
+        );
     }
 
     // ===================================================================
@@ -1236,10 +1353,13 @@ mod tests {
     fn make_two_program_lattice() -> InfraciliaryLattice {
         let dict = test_dict();
         let mut lattice = InfraciliaryLattice::new(dict);
-        lattice.develop(&[
-            (test_embedding(1.0), "reset your password".to_string()),
-            (test_embedding(100.0), "implement binary search".to_string()),
-        ], 0.99);
+        lattice.develop(
+            &[
+                (test_embedding(1.0), "reset your password".to_string()),
+                (test_embedding(100.0), "implement binary search".to_string()),
+            ],
+            0.99,
+        );
         assert!(lattice.program_count() >= 2);
         lattice
     }
@@ -1266,8 +1386,14 @@ mod tests {
     fn test_new_programs_have_neutral_state() {
         let lattice = make_two_program_lattice();
         for prog in &lattice.programs {
-            assert_eq!(prog.quality_score, 0.0, "new programs start with neutral quality");
-            assert!((prog.reliability - 0.5).abs() < 0.01, "new programs start with 0.5 reliability");
+            assert_eq!(
+                prog.quality_score, 0.0,
+                "new programs start with neutral quality"
+            );
+            assert!(
+                (prog.reliability - 0.5).abs() < 0.01,
+                "new programs start with 0.5 reliability"
+            );
             assert_eq!(prog.total_retrievals, 0, "no retrievals yet");
             assert_eq!(prog.activation_level, 0.0, "no activation yet");
             assert!(!prog.refractory, "not refractory");
@@ -1291,7 +1417,10 @@ mod tests {
             assert!(!prog.refractory, "refractory reset");
             assert_eq!(prog.session_hits, 0, "session hits reset");
             assert!(!prog.session_drift.is_empty(), "session drift initialized");
-            assert!(prog.session_drift.iter().all(|&v| v == 0.0), "session drift zeroed");
+            assert!(
+                prog.session_drift.iter().all(|&v| v == 0.0),
+                "session drift zeroed"
+            );
         }
     }
 
@@ -1304,12 +1433,17 @@ mod tests {
         lattice.on_retrieval(0, &query);
 
         let prog = &lattice.programs[0];
-        assert_eq!(prog.total_retrievals, 1, "persistent retrieval count incremented");
+        assert_eq!(
+            prog.total_retrievals, 1,
+            "persistent retrieval count incremented"
+        );
         assert_eq!(prog.session_hits, 1, "session hit count incremented");
         assert_eq!(prog.activation_level, 1.0, "activation set to 1.0");
         assert!(prog.refractory, "refractory flag set");
-        assert!(prog.session_drift.iter().any(|&v| v != 0.0),
-            "session drift should shift toward query");
+        assert!(
+            prog.session_drift.iter().any(|&v| v != 0.0),
+            "session drift should shift toward query"
+        );
 
         // Second program should be untouched
         let other = &lattice.programs[1];
@@ -1334,18 +1468,23 @@ mod tests {
 
         // Effective centroid should be shifted from base
         let effective = lattice.effective_centroid(0);
-        let drift_magnitude: f32 = effective.iter()
+        let drift_magnitude: f32 = effective
+            .iter()
             .zip(base_centroid.iter())
             .map(|(e, b)| (e - b) * (e - b))
             .sum::<f32>()
             .sqrt();
 
-        assert!(drift_magnitude > 0.0,
-            "effective centroid should drift from base after 3 hits");
+        assert!(
+            drift_magnitude > 0.0,
+            "effective centroid should drift from base after 3 hits"
+        );
 
         // Persistent centroid should be unchanged
-        assert_eq!(lattice.programs[0].ema_centroid, base_centroid,
-            "persistent centroid must not change from session drift");
+        assert_eq!(
+            lattice.programs[0].ema_centroid, base_centroid,
+            "persistent centroid must not change from session drift"
+        );
     }
 
     #[test]
@@ -1360,17 +1499,24 @@ mod tests {
         // One decay step
         lattice.decay_activations();
         let level_after_1 = lattice.programs[0].activation_level;
-        assert!(level_after_1 < 1.0 && level_after_1 > 0.0,
-            "activation should decay but not vanish: {}", level_after_1);
+        assert!(
+            level_after_1 < 1.0 && level_after_1 > 0.0,
+            "activation should decay but not vanish: {}",
+            level_after_1
+        );
 
         // Several more decay steps should clear it
         for _ in 0..10 {
             lattice.decay_activations();
         }
-        assert_eq!(lattice.programs[0].activation_level, 0.0,
-            "activation should reach zero after many decay steps");
-        assert!(!lattice.programs[0].refractory,
-            "refractory should clear when activation drops below threshold");
+        assert_eq!(
+            lattice.programs[0].activation_level, 0.0,
+            "activation should reach zero after many decay steps"
+        );
+        assert!(
+            !lattice.programs[0].refractory,
+            "refractory should clear when activation drops below threshold"
+        );
     }
 
     #[test]
@@ -1382,12 +1528,18 @@ mod tests {
 
         lattice.apply_feedback(0, true, 0.8);
 
-        assert!(lattice.programs[0].quality_score > q_before,
+        assert!(
+            lattice.programs[0].quality_score > q_before,
             "positive feedback should increase quality: {} → {}",
-            q_before, lattice.programs[0].quality_score);
-        assert!(lattice.programs[0].reliability > r_before,
+            q_before,
+            lattice.programs[0].quality_score
+        );
+        assert!(
+            lattice.programs[0].reliability > r_before,
             "accept should increase reliability: {} → {}",
-            r_before, lattice.programs[0].reliability);
+            r_before,
+            lattice.programs[0].reliability
+        );
     }
 
     #[test]
@@ -1402,12 +1554,18 @@ mod tests {
 
         lattice.apply_feedback(0, false, 0.7);
 
-        assert!(lattice.programs[0].quality_score < q_before,
+        assert!(
+            lattice.programs[0].quality_score < q_before,
             "negative feedback should decrease quality: {} → {}",
-            q_before, lattice.programs[0].quality_score);
-        assert!(lattice.programs[0].reliability < r_before,
+            q_before,
+            lattice.programs[0].quality_score
+        );
+        assert!(
+            lattice.programs[0].reliability < r_before,
             "reject should decrease reliability: {} → {}",
-            r_before, lattice.programs[0].reliability);
+            r_before,
+            lattice.programs[0].reliability
+        );
     }
 
     #[test]
@@ -1418,19 +1576,27 @@ mod tests {
         for _ in 0..100 {
             lattice.apply_feedback(0, true, 1.0);
         }
-        assert!(lattice.programs[0].quality_score <= 1.0,
-            "quality must be clamped to 1.0");
-        assert!(lattice.programs[0].reliability <= 1.0,
-            "reliability must be clamped to 1.0");
+        assert!(
+            lattice.programs[0].quality_score <= 1.0,
+            "quality must be clamped to 1.0"
+        );
+        assert!(
+            lattice.programs[0].reliability <= 1.0,
+            "reliability must be clamped to 1.0"
+        );
 
         // Lots of negative feedback
         for _ in 0..200 {
             lattice.apply_feedback(0, false, 1.0);
         }
-        assert!(lattice.programs[0].quality_score >= -1.0,
-            "quality must be clamped to -1.0");
-        assert!(lattice.programs[0].reliability >= 0.0,
-            "reliability must be clamped to 0.0");
+        assert!(
+            lattice.programs[0].quality_score >= -1.0,
+            "quality must be clamped to -1.0"
+        );
+        assert!(
+            lattice.programs[0].reliability >= 0.0,
+            "reliability must be clamped to 0.0"
+        );
     }
 
     #[test]
@@ -1439,8 +1605,11 @@ mod tests {
         let bias = lattice.retrieval_bias(0);
         // quality=0 → factor 1.0, reliability=0.5 → factor 1.0,
         // no activation, no refractory
-        assert!((bias - 1.0).abs() < 0.15,
-            "fresh program bias should be near 1.0, got {}", bias);
+        assert!(
+            (bias - 1.0).abs() < 0.15,
+            "fresh program bias should be near 1.0, got {}",
+            bias
+        );
     }
 
     #[test]
@@ -1455,9 +1624,12 @@ mod tests {
         let bias_good = lattice.retrieval_bias(0);
         let bias_neutral = lattice.retrieval_bias(1);
 
-        assert!(bias_good > bias_neutral,
+        assert!(
+            bias_good > bias_neutral,
             "high-quality program should have higher bias: {} vs {}",
-            bias_good, bias_neutral);
+            bias_good,
+            bias_neutral
+        );
     }
 
     #[test]
@@ -1470,9 +1642,12 @@ mod tests {
         lattice.on_retrieval(0, &test_embedding(1.1));
         let bias_after = lattice.retrieval_bias(0);
 
-        assert!(bias_after < bias_before,
+        assert!(
+            bias_after < bias_before,
             "refractory program should have lower bias: {} → {}",
-            bias_before, bias_after);
+            bias_before,
+            bias_after
+        );
     }
 
     #[test]
@@ -1487,9 +1662,12 @@ mod tests {
         let bias_0 = lattice.retrieval_bias(0);
         let bias_1 = lattice.retrieval_bias(1);
 
-        assert!(bias_0 < bias_1,
+        assert!(
+            bias_0 < bias_1,
             "refractory program 0 should have lower bias than fresh program 1: {} vs {}",
-            bias_0, bias_1);
+            bias_0,
+            bias_1
+        );
     }
 
     #[test]
@@ -1511,14 +1689,17 @@ mod tests {
         lattice.consolidate_session(3);
 
         let consolidated_centroid = &lattice.programs[0].ema_centroid;
-        let drift: f32 = consolidated_centroid.iter()
+        let drift: f32 = consolidated_centroid
+            .iter()
             .zip(original_centroid.iter())
             .map(|(a, b)| (a - b) * (a - b))
             .sum::<f32>()
             .sqrt();
 
-        assert!(drift > 0.0,
-            "consolidation should shift persistent centroid slightly");
+        assert!(
+            drift > 0.0,
+            "consolidation should shift persistent centroid slightly"
+        );
 
         // Session state should be reset after consolidation
         assert_eq!(lattice.programs[0].session_hits, 0);
@@ -1539,8 +1720,10 @@ mod tests {
 
         lattice.consolidate_session(3);
 
-        assert_eq!(lattice.programs[0].ema_centroid, original_centroid,
-            "low-hit programs should not have their centroid modified");
+        assert_eq!(
+            lattice.programs[0].ema_centroid, original_centroid,
+            "low-hit programs should not have their centroid modified"
+        );
     }
 
     #[test]
@@ -1558,16 +1741,20 @@ mod tests {
 
         lattice.consolidate_session(3);
 
-        assert_eq!(lattice.programs[0].ema_centroid, original_centroid,
-            "programs with net-negative session quality should not consolidate drift");
+        assert_eq!(
+            lattice.programs[0].ema_centroid, original_centroid,
+            "programs with net-negative session quality should not consolidate drift"
+        );
     }
 
     #[test]
     fn test_effective_centroid_without_session_is_base() {
         let lattice = make_two_program_lattice();
         let effective = lattice.effective_centroid(0);
-        assert_eq!(effective, lattice.programs[0].ema_centroid,
-            "without session, effective centroid should equal base centroid");
+        assert_eq!(
+            effective, lattice.programs[0].ema_centroid,
+            "without session, effective centroid should equal base centroid"
+        );
     }
 
     #[test]
@@ -1581,13 +1768,16 @@ mod tests {
         let effective = lattice.effective_centroid(0);
         let base = &lattice.programs[0].ema_centroid;
 
-        let diff: f32 = effective.iter()
+        let diff: f32 = effective
+            .iter()
             .zip(base.iter())
             .map(|(e, b)| (e - b).abs())
             .sum();
 
-        assert!(diff > 0.0,
-            "effective centroid should differ from base after session hits");
+        assert!(
+            diff > 0.0,
+            "effective centroid should differ from base after session hits"
+        );
     }
 
     #[test]
@@ -1605,7 +1795,10 @@ mod tests {
 
         let q_after_s1 = lattice.programs[0].quality_score;
         let r_after_s1 = lattice.programs[0].reliability;
-        assert!(q_after_s1 > 0.0, "quality should be positive after good session");
+        assert!(
+            q_after_s1 > 0.0,
+            "quality should be positive after good session"
+        );
         assert!(r_after_s1 > 0.5, "reliability should increase from 0.5");
         assert_eq!(lattice.programs[0].total_retrievals, 5);
 
@@ -1620,7 +1813,10 @@ mod tests {
 
         let q_after_s2 = lattice.programs[0].quality_score;
         let r_after_s2 = lattice.programs[0].reliability;
-        assert!(q_after_s2 < q_after_s1, "quality should decrease after bad session");
+        assert!(
+            q_after_s2 < q_after_s1,
+            "quality should decrease after bad session"
+        );
         assert!(r_after_s2 < r_after_s1, "reliability should decrease");
         assert_eq!(lattice.programs[0].total_retrievals, 9);
 
@@ -1643,19 +1839,35 @@ mod tests {
         assert!(b >= MIN_BIAS && b <= MAX_BIAS, "bias out of range: {}", b);
 
         // After positive feedback
-        for _ in 0..50 { lattice.apply_feedback(0, true, 1.0); }
+        for _ in 0..50 {
+            lattice.apply_feedback(0, true, 1.0);
+        }
         let b = lattice.retrieval_bias(0);
-        assert!(b >= MIN_BIAS && b <= MAX_BIAS, "bias out of range after positive: {}", b);
+        assert!(
+            b >= MIN_BIAS && b <= MAX_BIAS,
+            "bias out of range after positive: {}",
+            b
+        );
 
         // After retrieval (refractory)
         lattice.on_retrieval(0, &test_embedding(1.0));
         let b = lattice.retrieval_bias(0);
-        assert!(b >= MIN_BIAS && b <= MAX_BIAS, "bias out of range when refractory: {}", b);
+        assert!(
+            b >= MIN_BIAS && b <= MAX_BIAS,
+            "bias out of range when refractory: {}",
+            b
+        );
 
         // After lots of negative feedback
-        for _ in 0..100 { lattice.apply_feedback(0, false, 1.0); }
+        for _ in 0..100 {
+            lattice.apply_feedback(0, false, 1.0);
+        }
         let b = lattice.retrieval_bias(0);
-        assert!(b >= MIN_BIAS && b <= MAX_BIAS, "bias out of range after negative: {}", b);
+        assert!(
+            b >= MIN_BIAS && b <= MAX_BIAS,
+            "bias out of range after negative: {}",
+            b
+        );
     }
 
     #[test]
@@ -1677,22 +1889,36 @@ mod tests {
         let restored: InfraciliaryLattice = serde_json::from_str(&serialized).expect("deserialize");
 
         // Persistent state preserved
-        assert!((restored.programs[0].quality_score - q_before).abs() < 1e-6,
-            "quality_score should survive serialization");
-        assert!((restored.programs[0].reliability - r_before).abs() < 1e-6,
-            "reliability should survive serialization");
-        assert_eq!(restored.programs[0].total_retrievals, retrievals_before,
-            "total_retrievals should survive serialization");
+        assert!(
+            (restored.programs[0].quality_score - q_before).abs() < 1e-6,
+            "quality_score should survive serialization"
+        );
+        assert!(
+            (restored.programs[0].reliability - r_before).abs() < 1e-6,
+            "reliability should survive serialization"
+        );
+        assert_eq!(
+            restored.programs[0].total_retrievals, retrievals_before,
+            "total_retrievals should survive serialization"
+        );
 
         // Volatile state dropped (serde(skip))
-        assert_eq!(restored.programs[0].activation_level, 0.0,
-            "activation_level should be zero after deserialization");
-        assert!(!restored.programs[0].refractory,
-            "refractory should be false after deserialization");
-        assert!(restored.programs[0].session_drift.is_empty(),
-            "session_drift should be empty after deserialization");
-        assert_eq!(restored.programs[0].session_hits, 0,
-            "session_hits should be zero after deserialization");
+        assert_eq!(
+            restored.programs[0].activation_level, 0.0,
+            "activation_level should be zero after deserialization"
+        );
+        assert!(
+            !restored.programs[0].refractory,
+            "refractory should be false after deserialization"
+        );
+        assert!(
+            restored.programs[0].session_drift.is_empty(),
+            "session_drift should be empty after deserialization"
+        );
+        assert_eq!(
+            restored.programs[0].session_hits, 0,
+            "session_hits should be zero after deserialization"
+        );
     }
 
     // ===================================================================
@@ -1706,7 +1932,8 @@ mod tests {
             .map(|i| {
                 let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
                 sign * ((i as f32) * 0.73 + 3.14).cos()
-            }).collect()
+            })
+            .collect()
     }
 
     #[test]
@@ -1715,20 +1942,23 @@ mod tests {
         let before = lattice.program_count();
 
         let far = distant_embedding();
-        lattice.inject_correction(
-            Some(0),
-            &far,
-            "completely new response",
+        lattice.inject_correction(Some(0), &far, "completely new response");
+
+        assert_eq!(
+            lattice.program_count(),
+            before + 1,
+            "distant correction should spawn a new program"
         );
 
-        assert_eq!(lattice.program_count(), before + 1,
-            "distant correction should spawn a new program");
-
         let new_prog = lattice.programs.last().unwrap();
-        assert!(new_prog.quality_score > 0.0,
-            "new correction program should start with positive quality");
-        assert!(new_prog.reliability > 0.5,
-            "new correction program should start with above-average reliability");
+        assert!(
+            new_prog.quality_score > 0.0,
+            "new correction program should start with positive quality"
+        );
+        assert!(
+            new_prog.reliability > 0.5,
+            "new correction program should start with above-average reliability"
+        );
     }
 
     #[test]
@@ -1740,14 +1970,12 @@ mod tests {
         let q_before = lattice.programs[0].quality_score;
 
         let far = distant_embedding();
-        lattice.inject_correction(
-            Some(0),
-            &far,
-            "corrected response",
-        );
+        lattice.inject_correction(Some(0), &far, "corrected response");
 
-        assert!(lattice.programs[0].quality_score < q_before,
-            "wrong program should be degraded by correction");
+        assert!(
+            lattice.programs[0].quality_score < q_before,
+            "wrong program should be degraded by correction"
+        );
     }
 
     #[test]
@@ -1756,14 +1984,13 @@ mod tests {
         let before = lattice.program_count();
 
         let near_emb = test_embedding(1.001);
-        lattice.inject_correction(
-            Some(1),
-            &near_emb,
-            "updated nearby response",
-        );
+        lattice.inject_correction(Some(1), &near_emb, "updated nearby response");
 
-        assert_eq!(lattice.program_count(), before,
-            "correction near existing program should reinforce, not spawn");
+        assert_eq!(
+            lattice.program_count(),
+            before,
+            "correction near existing program should reinforce, not spawn"
+        );
     }
 
     #[test]
@@ -1772,13 +1999,12 @@ mod tests {
         let before = lattice.program_count();
 
         let far = distant_embedding();
-        lattice.inject_correction(
-            None,
-            &far,
-            "new knowledge",
-        );
+        lattice.inject_correction(None, &far, "new knowledge");
 
-        assert_eq!(lattice.program_count(), before + 1,
-            "should still spawn even without a wrong program index");
+        assert_eq!(
+            lattice.program_count(),
+            before + 1,
+            "should still spawn even without a wrong program index"
+        );
     }
 }

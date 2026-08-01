@@ -82,9 +82,9 @@ pub fn try_init_topic_graph_bundle_with_extras(
 
     for p in extra_overlay_paths {
         if p.is_file() {
-            let s = p.to_str().ok_or_else(|| {
-                format!("Topic overlay path is not valid UTF-8: {}", p.display())
-            })?;
+            let s = p
+                .to_str()
+                .ok_or_else(|| format!("Topic overlay path is not valid UTF-8: {}", p.display()))?;
             let overlay_g = TopicGraph::from_file(s)?;
             graph = Some(match graph {
                 Some(g) => g.merge_overlay(overlay_g),
@@ -126,12 +126,16 @@ pub fn topic_graph() -> Option<TopicGraph> {
 /// `true` after a successful graph install. `false` when no graph is loaded.
 #[inline]
 pub fn topic_graph_loaded() -> bool {
-    TOPIC_GRAPH.read().ok().map(|g| g.is_some()).unwrap_or(false)
+    TOPIC_GRAPH
+        .read()
+        .ok()
+        .map(|g| g.is_some())
+        .unwrap_or(false)
 }
 
 use crate::clifford::{
-    Multivector, Rotor, embed_bridge_vector, structural_fingerprint,
-    structural_similarity, apply_group_rotor, GRADE_OFFSETS,
+    apply_group_rotor, embed_bridge_vector, structural_fingerprint, structural_similarity,
+    Multivector, Rotor, GRADE_OFFSETS,
 };
 
 // ---------------------------------------------------------------------------
@@ -140,23 +144,48 @@ use crate::clifford::{
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MetaOp {
-    Bind { name: String, typ: MetaType },
-    BinaryOp { op: String },
-    UnaryOp { op: String },
-    FnDef { name: String, params: u8, returns: MetaType },
-    Call { arity: u8 },
-    Branch { arms: u8 },
-    Loop { kind: LoopKind },
+    Bind {
+        name: String,
+        typ: MetaType,
+    },
+    BinaryOp {
+        op: String,
+    },
+    UnaryOp {
+        op: String,
+    },
+    FnDef {
+        name: String,
+        params: u8,
+        returns: MetaType,
+    },
+    Call {
+        arity: u8,
+    },
+    Branch {
+        arms: u8,
+    },
+    Loop {
+        kind: LoopKind,
+    },
     Map,
     Fold,
     Filter,
     Compose,
-    PatternMatch { arms: u8 },
+    PatternMatch {
+        arms: u8,
+    },
     Return,
     Collect,
-    StructDef { fields: u8 },
-    EnumDef { variants: u8 },
-    TraitDef { methods: u8 },
+    StructDef {
+        fields: u8,
+    },
+    EnumDef {
+        variants: u8,
+    },
+    TraitDef {
+        methods: u8,
+    },
     ImplBlock,
     ErrorHandle,
     GenericParam,
@@ -220,12 +249,29 @@ impl MetaConcept {
     pub fn all() -> &'static [MetaConcept] {
         use MetaConcept::*;
         &[
-            BinaryArithmetic, UnaryOperation, FunctionDefinition,
-            StructDefinition, EnumAlgebraic, TraitInterface,
-            ErrorHandling, Iteration, PatternMatching, AsyncConcurrency,
-            SearchAlgorithm, SortAlgorithm, DataStructure, Composition,
-            Testing, Debugging, Refactoring, InformationTheory,
-            GeneralKnowledge, Support, Conversation, PetCompanion, CausalReasoning,
+            BinaryArithmetic,
+            UnaryOperation,
+            FunctionDefinition,
+            StructDefinition,
+            EnumAlgebraic,
+            TraitInterface,
+            ErrorHandling,
+            Iteration,
+            PatternMatching,
+            AsyncConcurrency,
+            SearchAlgorithm,
+            SortAlgorithm,
+            DataStructure,
+            Composition,
+            Testing,
+            Debugging,
+            Refactoring,
+            InformationTheory,
+            GeneralKnowledge,
+            Support,
+            Conversation,
+            PetCompanion,
+            CausalReasoning,
         ]
     }
 
@@ -234,7 +280,10 @@ impl MetaConcept {
     }
 
     pub fn from_index(idx: usize) -> Self {
-        Self::all().get(idx).copied().unwrap_or(MetaConcept::GeneralKnowledge)
+        Self::all()
+            .get(idx)
+            .copied()
+            .unwrap_or(MetaConcept::GeneralKnowledge)
     }
 
     pub fn name(&self) -> &'static str {
@@ -268,59 +317,68 @@ impl MetaConcept {
     pub fn canonical_ops(&self) -> Vec<MetaOp> {
         match self {
             Self::BinaryArithmetic => vec![
-                MetaOp::FnDef { name: "op".into(), params: 2, returns: MetaType::Numeric },
-                MetaOp::Bind { name: "a".into(), typ: MetaType::Numeric },
-                MetaOp::Bind { name: "b".into(), typ: MetaType::Numeric },
+                MetaOp::FnDef {
+                    name: "op".into(),
+                    params: 2,
+                    returns: MetaType::Numeric,
+                },
+                MetaOp::Bind {
+                    name: "a".into(),
+                    typ: MetaType::Numeric,
+                },
+                MetaOp::Bind {
+                    name: "b".into(),
+                    typ: MetaType::Numeric,
+                },
                 MetaOp::BinaryOp { op: "?".into() },
                 MetaOp::Return,
             ],
             Self::UnaryOperation => vec![
-                MetaOp::FnDef { name: "op".into(), params: 1, returns: MetaType::Numeric },
-                MetaOp::Bind { name: "x".into(), typ: MetaType::Numeric },
+                MetaOp::FnDef {
+                    name: "op".into(),
+                    params: 1,
+                    returns: MetaType::Numeric,
+                },
+                MetaOp::Bind {
+                    name: "x".into(),
+                    typ: MetaType::Numeric,
+                },
                 MetaOp::UnaryOp { op: "?".into() },
                 MetaOp::Return,
             ],
             Self::FunctionDefinition => vec![
-                MetaOp::FnDef { name: "f".into(), params: 0, returns: MetaType::Generic },
+                MetaOp::FnDef {
+                    name: "f".into(),
+                    params: 0,
+                    returns: MetaType::Generic,
+                },
                 MetaOp::Return,
             ],
-            Self::StructDefinition => vec![
-                MetaOp::StructDef { fields: 0 },
-                MetaOp::ImplBlock,
-            ],
+            Self::StructDefinition => vec![MetaOp::StructDef { fields: 0 }, MetaOp::ImplBlock],
             Self::EnumAlgebraic => vec![
                 MetaOp::EnumDef { variants: 0 },
                 MetaOp::PatternMatch { arms: 0 },
             ],
-            Self::TraitInterface => vec![
-                MetaOp::TraitDef { methods: 0 },
-                MetaOp::ImplBlock,
-            ],
+            Self::TraitInterface => vec![MetaOp::TraitDef { methods: 0 }, MetaOp::ImplBlock],
             Self::ErrorHandling => vec![
                 MetaOp::ErrorHandle,
                 MetaOp::Branch { arms: 2 },
                 MetaOp::Return,
             ],
-            Self::Iteration => vec![
-                MetaOp::Map,
-                MetaOp::Filter,
-                MetaOp::Collect,
-            ],
-            Self::PatternMatching => vec![
-                MetaOp::PatternMatch { arms: 0 },
-            ],
-            Self::AsyncConcurrency => vec![
-                MetaOp::AsyncAwait,
-                MetaOp::ErrorHandle,
-                MetaOp::Return,
-            ],
+            Self::Iteration => vec![MetaOp::Map, MetaOp::Filter, MetaOp::Collect],
+            Self::PatternMatching => vec![MetaOp::PatternMatch { arms: 0 }],
+            Self::AsyncConcurrency => vec![MetaOp::AsyncAwait, MetaOp::ErrorHandle, MetaOp::Return],
             Self::SearchAlgorithm => vec![
-                MetaOp::Loop { kind: LoopKind::While },
+                MetaOp::Loop {
+                    kind: LoopKind::While,
+                },
                 MetaOp::Branch { arms: 2 },
                 MetaOp::Return,
             ],
             Self::SortAlgorithm => vec![
-                MetaOp::Loop { kind: LoopKind::ForEach },
+                MetaOp::Loop {
+                    kind: LoopKind::ForEach,
+                },
                 MetaOp::Branch { arms: 2 },
                 MetaOp::Collect,
             ],
@@ -329,11 +387,7 @@ impl MetaConcept {
                 MetaOp::Allocate,
                 MetaOp::ImplBlock,
             ],
-            Self::Composition => vec![
-                MetaOp::Compose,
-                MetaOp::Call { arity: 0 },
-                MetaOp::Return,
-            ],
+            Self::Composition => vec![MetaOp::Compose, MetaOp::Call { arity: 0 }, MetaOp::Return],
             _ => vec![],
         }
     }
@@ -369,30 +423,74 @@ pub fn detect_language(text: &str) -> TargetLanguage {
 
     // Note: avoid bare `"match "` — it appears in English ("playoff match because…")
     // and falsely wins the Rust score. Prefer `match {` / `match(` style cues.
-    let rust_signals = ["rust", "cargo", "impl ", "struct ", "&mut", "fn ",
-        "crate", "enum ", "trait ", "tokio", "async fn", "Vec<", "Option<",
-        "Result<", "match {", " match {", "println!", "unwrap", "lifetime", "borrow"];
-    let python_signals = ["python", "pip", "def ", "import ", "class ",
-        "self.", "print(", "__init__", "numpy", "pandas", "django",
-        "flask", "pytest", "lambda ", "list comprehension"];
-    let ts_signals = ["typescript", "javascript", "npm", "node",
-        "const ", "interface ", "react", "async function", "promise",
-        "console.log", "=>", "export ", "import {"];
-    let go_signals = ["golang", " go ", "func ", "package ", "goroutine",
-        "chan ", "defer ", "go func"];
+    let rust_signals = [
+        "rust", "cargo", "impl ", "struct ", "&mut", "fn ", "crate", "enum ", "trait ", "tokio",
+        "async fn", "Vec<", "Option<", "Result<", "match {", " match {", "println!", "unwrap",
+        "lifetime", "borrow",
+    ];
+    let python_signals = [
+        "python",
+        "pip",
+        "def ",
+        "import ",
+        "class ",
+        "self.",
+        "print(",
+        "__init__",
+        "numpy",
+        "pandas",
+        "django",
+        "flask",
+        "pytest",
+        "lambda ",
+        "list comprehension",
+    ];
+    let ts_signals = [
+        "typescript",
+        "javascript",
+        "npm",
+        "node",
+        "const ",
+        "interface ",
+        "react",
+        "async function",
+        "promise",
+        "console.log",
+        "=>",
+        "export ",
+        "import {",
+    ];
+    let go_signals = [
+        "golang",
+        " go ",
+        "func ",
+        "package ",
+        "goroutine",
+        "chan ",
+        "defer ",
+        "go func",
+    ];
 
     let mut scores = [0i32; 4]; // rust, python, ts, go
     for kw in &rust_signals {
-        if lower.contains(kw) { scores[0] += 1; }
+        if lower.contains(kw) {
+            scores[0] += 1;
+        }
     }
     for kw in &python_signals {
-        if lower.contains(kw) { scores[1] += 1; }
+        if lower.contains(kw) {
+            scores[1] += 1;
+        }
     }
     for kw in &ts_signals {
-        if lower.contains(kw) { scores[2] += 1; }
+        if lower.contains(kw) {
+            scores[2] += 1;
+        }
     }
     for kw in &go_signals {
-        if lower.contains(kw) { scores[3] += 1; }
+        if lower.contains(kw) {
+            scores[3] += 1;
+        }
     }
 
     let max_score = *scores.iter().max().unwrap_or(&0);
@@ -419,17 +517,17 @@ pub fn detect_language(text: &str) -> TargetLanguage {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum QueryAction {
-    Define,     // "What is X?" / "Define X"
-    Explain,    // "Explain X" / "How does X work?"
-    Locate,     // "Where is X?" / "Where does X happen?"
-    Reason,     // "Why does X?" / "Why is X important?"
-    Temporal,   // "When should I use X?" / "When does X apply?"
-    Compare,    // "Compare X and Y" / "Difference between X and Y"
-    Implement,  // "Write X" / "Create X" / "Build X" / "Implement X"
-    Design,     // "Design X" / "Architect X" / "Plan X"
-    Debug,      // "Fix X" / "Debug X" / "Why is X broken?"
-    List,       // "List X" / "What are the types of X?"
-    Retrieve,   // Direct noun phrase — "Rate-distortion tradeoff" / "Huffman coding"
+    Define,    // "What is X?" / "Define X"
+    Explain,   // "Explain X" / "How does X work?"
+    Locate,    // "Where is X?" / "Where does X happen?"
+    Reason,    // "Why does X?" / "Why is X important?"
+    Temporal,  // "When should I use X?" / "When does X apply?"
+    Compare,   // "Compare X and Y" / "Difference between X and Y"
+    Implement, // "Write X" / "Create X" / "Build X" / "Implement X"
+    Design,    // "Design X" / "Architect X" / "Plan X"
+    Debug,     // "Fix X" / "Debug X" / "Why is X broken?"
+    List,      // "List X" / "What are the types of X?"
+    Retrieve,  // Direct noun phrase — "Rate-distortion tradeoff" / "Huffman coding"
 }
 
 impl QueryAction {
@@ -454,7 +552,17 @@ impl QueryAction {
     }
 
     pub fn is_informational(&self) -> bool {
-        matches!(self, Self::Define | Self::Explain | Self::Reason | Self::Locate | Self::Temporal | Self::Compare | Self::List | Self::Retrieve)
+        matches!(
+            self,
+            Self::Define
+                | Self::Explain
+                | Self::Reason
+                | Self::Locate
+                | Self::Temporal
+                | Self::Compare
+                | Self::List
+                | Self::Retrieve
+        )
     }
 }
 
@@ -539,7 +647,11 @@ fn replace_money_token(w: &str) -> Option<String> {
             None
         };
         let rest = rest.or_else(|| {
-            if !unicode_sym.is_empty() { w.strip_prefix(unicode_sym) } else { None }
+            if !unicode_sym.is_empty() {
+                w.strip_prefix(unicode_sym)
+            } else {
+                None
+            }
         });
         if let Some(rest) = rest {
             if let Some(m) = parse_prefixed_currency_amount(rest, ccy) {
@@ -576,7 +688,8 @@ fn take_digits_commas(s: &str) -> (String, usize) {
 /// After leading `£`/`€` stripped: `43bn`, `1_200_000`, `500k`.
 fn parse_prefixed_currency_amount(rest: &str, default_ccy: &str) -> Option<String> {
     let rl = rest.to_ascii_lowercase();
-    let rl = rl.trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']'));
+    let rl =
+        rl.trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']'));
     let (scaled_digits, ccy) = if let Some(s) = rl.strip_suffix("bn") {
         (scale_money_digits(s, 1_000_000_000u128)?, default_ccy)
     } else if let Some(s) = rl.strip_suffix('b') {
@@ -656,7 +769,8 @@ pub fn parse_query_intent(text: &str) -> QueryIntent {
     let (action, subject_start) = extract_action(trimmed);
 
     // Phase 2: Extract subject (everything after the action prefix)
-    let subject = trimmed[subject_start..].trim()
+    let subject = trimmed[subject_start..]
+        .trim()
         .trim_end_matches('?')
         .trim_end_matches('.')
         .trim()
@@ -673,49 +787,139 @@ fn extract_action(text: &str) -> (QueryAction, usize) {
     // Interrogative patterns — ordered by specificity
     let patterns: &[(&[&str], QueryAction)] = &[
         // Compare
-        (&["compare ", "difference between ", "differences between ",
-          "contrast ", "versus ", " vs "], QueryAction::Compare),
-
+        (
+            &[
+                "compare ",
+                "difference between ",
+                "differences between ",
+                "contrast ",
+                "versus ",
+                " vs ",
+            ],
+            QueryAction::Compare,
+        ),
         // Why
-        (&["why does ", "why is ", "why do ", "why are ", "why should ",
-          "why can't ", "why would "], QueryAction::Reason),
-
+        (
+            &[
+                "why does ",
+                "why is ",
+                "why do ",
+                "why are ",
+                "why should ",
+                "why can't ",
+                "why would ",
+            ],
+            QueryAction::Reason,
+        ),
         // Where
-        (&["where is ", "where does ", "where do ", "where are ",
-          "where should "], QueryAction::Locate),
-
+        (
+            &[
+                "where is ",
+                "where does ",
+                "where do ",
+                "where are ",
+                "where should ",
+            ],
+            QueryAction::Locate,
+        ),
         // When
-        (&["when should ", "when does ", "when do ", "when is ",
-          "when to "], QueryAction::Temporal),
-
+        (
+            &[
+                "when should ",
+                "when does ",
+                "when do ",
+                "when is ",
+                "when to ",
+            ],
+            QueryAction::Temporal,
+        ),
         // What-is (define)
-        (&["what is ", "what is a ", "what is an ", "what is the ",
-          "what are ", "what does ", "define "], QueryAction::Define),
-
+        (
+            &[
+                "what is ",
+                "what is a ",
+                "what is an ",
+                "what is the ",
+                "what are ",
+                "what does ",
+                "define ",
+            ],
+            QueryAction::Define,
+        ),
         // How (explain mechanism)
-        (&["how does ", "how do ", "how is ", "how are ", "how to ",
-          "how can ", "how would "], QueryAction::Explain),
-
+        (
+            &[
+                "how does ",
+                "how do ",
+                "how is ",
+                "how are ",
+                "how to ",
+                "how can ",
+                "how would ",
+            ],
+            QueryAction::Explain,
+        ),
         // List
-        (&["list ", "list all ", "what types of ", "what kinds of ",
-          "enumerate "], QueryAction::List),
-
+        (
+            &[
+                "list ",
+                "list all ",
+                "what types of ",
+                "what kinds of ",
+                "enumerate ",
+            ],
+            QueryAction::List,
+        ),
         // Implement / create / build
-        (&["write ", "write a ", "write an ", "create ", "create a ",
-          "build ", "build a ", "implement ", "implement a ",
-          "code ", "code a ", "make ", "make a ", "generate "], QueryAction::Implement),
-
+        (
+            &[
+                "write ",
+                "write a ",
+                "write an ",
+                "create ",
+                "create a ",
+                "build ",
+                "build a ",
+                "implement ",
+                "implement a ",
+                "code ",
+                "code a ",
+                "make ",
+                "make a ",
+                "generate ",
+            ],
+            QueryAction::Implement,
+        ),
         // Design / architect
-        (&["design ", "design a ", "architect ", "plan ",
-          "plan a "], QueryAction::Design),
-
+        (
+            &["design ", "design a ", "architect ", "plan ", "plan a "],
+            QueryAction::Design,
+        ),
         // Debug / fix
-        (&["fix ", "debug ", "troubleshoot ", "diagnose ",
-          "why is my ", "why isn't ", "why doesn't "], QueryAction::Debug),
-
+        (
+            &[
+                "fix ",
+                "debug ",
+                "troubleshoot ",
+                "diagnose ",
+                "why is my ",
+                "why isn't ",
+                "why doesn't ",
+            ],
+            QueryAction::Debug,
+        ),
         // Explain (weaker patterns)
-        (&["explain ", "describe ", "tell me about ", "tell me what ",
-          "overview of ", "introduction to "], QueryAction::Explain),
+        (
+            &[
+                "explain ",
+                "describe ",
+                "tell me about ",
+                "tell me what ",
+                "overview of ",
+                "introduction to ",
+            ],
+            QueryAction::Explain,
+        ),
     ];
 
     for (prefixes, action) in patterns {
@@ -736,7 +940,8 @@ fn extract_action(text: &str) -> (QueryAction, usize) {
 impl QueryIntent {
     /// Does this intent need a specific sub-lattice answer (not a broad summary)?
     pub fn is_specific(&self) -> bool {
-        !self.subject.is_empty() && self.subject.split_whitespace().count() <= 8
+        !self.subject.is_empty()
+            && self.subject.split_whitespace().count() <= 8
             && !self.action.is_generative()
     }
 
@@ -754,13 +959,27 @@ impl QueryIntent {
 /// Check if a subject is a domain-level concept (broad) vs a specific topic.
 fn is_domain_subject(subject: &str) -> bool {
     let domains = [
-        "software architecture", "software engineering", "design patterns",
-        "system design", "programming paradigm", "machine learning",
-        "artificial intelligence", "cloud computing", "devops",
-        "web development", "data engineering", "computer science",
-        "distributed systems", "operating systems", "networking",
-        "information theory", "coding theory", "signal processing",
-        "database", "security", "cryptography",
+        "software architecture",
+        "software engineering",
+        "design patterns",
+        "system design",
+        "programming paradigm",
+        "machine learning",
+        "artificial intelligence",
+        "cloud computing",
+        "devops",
+        "web development",
+        "data engineering",
+        "computer science",
+        "distributed systems",
+        "operating systems",
+        "networking",
+        "information theory",
+        "coding theory",
+        "signal processing",
+        "database",
+        "security",
+        "cryptography",
     ];
     domains.iter().any(|d| subject.contains(d))
 }
@@ -770,7 +989,11 @@ fn is_domain_subject(subject: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// TODO: Derive from a knowledge graph of operations and their relationships.
-pub fn infer_concept(text: &str, semantic_intent: Option<&str>, action_target: Option<&str>) -> MetaConcept {
+pub fn infer_concept(
+    text: &str,
+    semantic_intent: Option<&str>,
+    action_target: Option<&str>,
+) -> MetaConcept {
     if let Ok(guard) = TOPIC_GRAPH.read() {
         if let Some(graph) = guard.as_ref() {
             return graph.infer_concept(text, semantic_intent, action_target);
@@ -780,7 +1003,11 @@ pub fn infer_concept(text: &str, semantic_intent: Option<&str>, action_target: O
     infer_concept_legacy(text, semantic_intent, action_target)
 }
 
-fn infer_concept_legacy(text: &str, semantic_intent: Option<&str>, action_target: Option<&str>) -> MetaConcept {
+fn infer_concept_legacy(
+    text: &str,
+    semantic_intent: Option<&str>,
+    action_target: Option<&str>,
+) -> MetaConcept {
     let lower = text.to_lowercase();
     let intent = semantic_intent.unwrap_or("").to_lowercase();
     let target = action_target.unwrap_or("").to_lowercase();
@@ -792,8 +1019,11 @@ fn infer_concept_legacy(text: &str, semantic_intent: Option<&str>, action_target
     }
 
     // Support/conversation (check first — these are non-coding)
-    if lower.contains("password") || lower.contains("account")
-        || lower.contains("subscription") || lower.contains("refund") || lower.contains("ticket")
+    if lower.contains("password")
+        || lower.contains("account")
+        || lower.contains("subscription")
+        || lower.contains("refund")
+        || lower.contains("ticket")
     {
         return MetaConcept::Support;
     }
@@ -802,13 +1032,33 @@ fn infer_concept_legacy(text: &str, semantic_intent: Option<&str>, action_target
     }
 
     // Arithmetic operations — tight keyword matching to avoid false positives
-    let arith_keywords = ["addition function", "subtraction function", "multiplication function",
-        "division function", "modulo function", "add function", "subtract function",
-        "multiply function", "divide function", "calculator",
-        "absolute value", "power function", "sum of a list", "compute the average",
-        "min and max", "clamp function", "checked_add", "checked arithmetic",
-        "saturating", "wrapping", "integer overflow",
-        "add two", "two integers", "two numbers", "arithmetic operation"];
+    let arith_keywords = [
+        "addition function",
+        "subtraction function",
+        "multiplication function",
+        "division function",
+        "modulo function",
+        "add function",
+        "subtract function",
+        "multiply function",
+        "divide function",
+        "calculator",
+        "absolute value",
+        "power function",
+        "sum of a list",
+        "compute the average",
+        "min and max",
+        "clamp function",
+        "checked_add",
+        "checked arithmetic",
+        "saturating",
+        "wrapping",
+        "integer overflow",
+        "add two",
+        "two integers",
+        "two numbers",
+        "arithmetic operation",
+    ];
     if arith_keywords.iter().any(|kw| lower.contains(kw)) {
         if lower.contains("abs") || lower.contains("negate") || lower.contains("unary") {
             return MetaConcept::UnaryOperation;
@@ -817,147 +1067,247 @@ fn infer_concept_legacy(text: &str, semantic_intent: Option<&str>, action_target
     }
 
     // Data structures
-    let ds_keywords = ["linked list", "stack", "queue", "tree", "heap",
-        "hash map", "hashmap", "btree", "graph data", "priority queue",
-        "binary tree", "trie"];
+    let ds_keywords = [
+        "linked list",
+        "stack",
+        "queue",
+        "tree",
+        "heap",
+        "hash map",
+        "hashmap",
+        "btree",
+        "graph data",
+        "priority queue",
+        "binary tree",
+        "trie",
+    ];
     if target.contains("data_structure") || ds_keywords.iter().any(|kw| lower.contains(kw)) {
         return MetaConcept::DataStructure;
     }
 
     // Algorithms
-    let search_keywords = ["binary search", "linear search", "search algorithm",
-        "find in", "lookup", "bfs", "dfs", "breadth-first", "depth-first",
-        "dijkstra", "a-star", "a*"];
+    let search_keywords = [
+        "binary search",
+        "linear search",
+        "search algorithm",
+        "find in",
+        "lookup",
+        "bfs",
+        "dfs",
+        "breadth-first",
+        "depth-first",
+        "dijkstra",
+        "a-star",
+        "a*",
+    ];
     if search_keywords.iter().any(|kw| lower.contains(kw)) {
         return MetaConcept::SearchAlgorithm;
     }
-    let sort_keywords = ["sort", "quicksort", "mergesort", "bubble sort",
-        "insertion sort", "heap sort", "radix sort"];
+    let sort_keywords = [
+        "sort",
+        "quicksort",
+        "mergesort",
+        "bubble sort",
+        "insertion sort",
+        "heap sort",
+        "radix sort",
+    ];
     if sort_keywords.iter().any(|kw| lower.contains(kw)) {
         return MetaConcept::SortAlgorithm;
     }
 
     // Pattern matching / enums
-    if lower.contains("pattern match") || lower.contains("match expression")
+    if lower.contains("pattern match")
+        || lower.contains("match expression")
         || (lower.contains("enum") && lower.contains("match"))
     {
         return MetaConcept::PatternMatching;
     }
 
     // Enum / algebraic types
-    if lower.contains("enum") || lower.contains("algebraic data type")
-        || lower.contains("variant") || lower.contains("tagged union")
+    if lower.contains("enum")
+        || lower.contains("algebraic data type")
+        || lower.contains("variant")
+        || lower.contains("tagged union")
     {
         return MetaConcept::EnumAlgebraic;
     }
 
     // Struct / class definition
-    if lower.contains("struct ") || lower.contains("class ")
-        || lower.contains("struct with") || lower.contains("data class")
+    if lower.contains("struct ")
+        || lower.contains("class ")
+        || lower.contains("struct with")
+        || lower.contains("data class")
         || lower.contains("with methods")
     {
         return MetaConcept::StructDefinition;
     }
 
     // Trait / interface
-    if lower.contains("trait") || lower.contains("interface")
-        || lower.contains("polymorphism") || lower.contains("impl ")
-        || lower.contains("implement display") || lower.contains("implement debug")
+    if lower.contains("trait")
+        || lower.contains("interface")
+        || lower.contains("polymorphism")
+        || lower.contains("impl ")
+        || lower.contains("implement display")
+        || lower.contains("implement debug")
     {
         return MetaConcept::TraitInterface;
     }
 
     // Error handling
-    if lower.contains("error handling") || lower.contains("result<")
-        || lower.contains("option<") || lower.contains("try") || lower.contains("catch")
-        || lower.contains("unwrap") || lower.contains("? operator")
+    if lower.contains("error handling")
+        || lower.contains("result<")
+        || lower.contains("option<")
+        || lower.contains("try")
+        || lower.contains("catch")
+        || lower.contains("unwrap")
+        || lower.contains("? operator")
         || target.contains("error")
     {
         return MetaConcept::ErrorHandling;
     }
 
     // Iteration
-    if lower.contains("iterator") || lower.contains("map(") || lower.contains("filter(")
-        || lower.contains("fold(") || lower.contains("collect") || lower.contains("for_each")
-        || lower.contains("method chain") || lower.contains("list comprehension")
+    if lower.contains("iterator")
+        || lower.contains("map(")
+        || lower.contains("filter(")
+        || lower.contains("fold(")
+        || lower.contains("collect")
+        || lower.contains("for_each")
+        || lower.contains("method chain")
+        || lower.contains("list comprehension")
     {
         return MetaConcept::Iteration;
     }
 
     // Async
-    if lower.contains("async") || lower.contains("await") || lower.contains("future")
-        || lower.contains("promise") || lower.contains("tokio") || lower.contains("concurrent")
+    if lower.contains("async")
+        || lower.contains("await")
+        || lower.contains("future")
+        || lower.contains("promise")
+        || lower.contains("tokio")
+        || lower.contains("concurrent")
     {
         return MetaConcept::AsyncConcurrency;
     }
 
     // Closures / higher-order / function definition
-    if lower.contains("closure") || lower.contains("higher-order")
-        || lower.contains("lambda") || lower.contains("function definition")
+    if lower.contains("closure")
+        || lower.contains("higher-order")
+        || lower.contains("lambda")
+        || lower.contains("function definition")
     {
         return MetaConcept::FunctionDefinition;
     }
 
     // Composition
-    if lower.contains("combin") || lower.contains("composit") || lower.contains("blend")
-        || lower.contains("integrate") || target.contains("reasoning")
+    if lower.contains("combin")
+        || lower.contains("composit")
+        || lower.contains("blend")
+        || lower.contains("integrate")
+        || target.contains("reasoning")
     {
         return MetaConcept::Composition;
     }
 
     // Testing
-    if lower.contains("test") || lower.contains("assert") || lower.contains("mock")
+    if lower.contains("test")
+        || lower.contains("assert")
+        || lower.contains("mock")
         || lower.contains("benchmark")
     {
         return MetaConcept::Testing;
     }
 
     // Debugging
-    if lower.contains("debug") || lower.contains("stack trace") || lower.contains("breakpoint")
+    if lower.contains("debug")
+        || lower.contains("stack trace")
+        || lower.contains("breakpoint")
         || target.contains("debug")
     {
         return MetaConcept::Debugging;
     }
 
     // Refactoring
-    if lower.contains("refactor") || lower.contains("clean up") || lower.contains("redesign")
+    if lower.contains("refactor")
+        || lower.contains("clean up")
+        || lower.contains("redesign")
         || target.contains("refactor")
     {
         return MetaConcept::Refactoring;
     }
 
     // Design patterns (map to closest meta-concept)
-    if lower.contains("observer pattern") || lower.contains("factory pattern")
-        || lower.contains("strategy pattern") || lower.contains("decorator pattern")
-        || lower.contains("design pattern") || lower.contains("singleton")
+    if lower.contains("observer pattern")
+        || lower.contains("factory pattern")
+        || lower.contains("strategy pattern")
+        || lower.contains("decorator pattern")
+        || lower.contains("design pattern")
+        || lower.contains("singleton")
         || lower.contains("builder pattern")
     {
         return MetaConcept::TraitInterface; // patterns are fundamentally about interfaces
     }
 
     // Information theory
-    let it_keywords = ["entropy", "mutual information", "kl divergence", "kullback",
-        "channel capacity", "source coding", "shannon", "huffman",
-        "arithmetic coding", "lempel-ziv", "rate-distortion", "rate distortion",
-        "fisher information", "cramer-rao", "fano", "data processing inequality",
-        "cross-entropy", "cross entropy", "information bottleneck",
-        "error-correcting code", "error correcting code", "ldpc", "turbo code",
-        "binary symmetric channel", "awgn", "gaussian noise",
-        "kolmogorov complexity", "minimum description length", "mdl",
-        "typical set", "equipartition", "jensen-shannon", "hellinger",
-        "total variation", "renyi", "convolutional code", "linear block code",
-        "differential entropy", "conditional entropy", "joint entropy",
-        "entropy rate", "sufficient statistic", "information theory"];
+    let it_keywords = [
+        "entropy",
+        "mutual information",
+        "kl divergence",
+        "kullback",
+        "channel capacity",
+        "source coding",
+        "shannon",
+        "huffman",
+        "arithmetic coding",
+        "lempel-ziv",
+        "rate-distortion",
+        "rate distortion",
+        "fisher information",
+        "cramer-rao",
+        "fano",
+        "data processing inequality",
+        "cross-entropy",
+        "cross entropy",
+        "information bottleneck",
+        "error-correcting code",
+        "error correcting code",
+        "ldpc",
+        "turbo code",
+        "binary symmetric channel",
+        "awgn",
+        "gaussian noise",
+        "kolmogorov complexity",
+        "minimum description length",
+        "mdl",
+        "typical set",
+        "equipartition",
+        "jensen-shannon",
+        "hellinger",
+        "total variation",
+        "renyi",
+        "convolutional code",
+        "linear block code",
+        "differential entropy",
+        "conditional entropy",
+        "joint entropy",
+        "entropy rate",
+        "sufficient statistic",
+        "information theory",
+    ];
     if it_keywords.iter().any(|kw| lower.contains(kw))
-        || intent.contains("entropy") || intent.contains("coding")
-        || intent.contains("divergence") || intent.contains("channel")
+        || intent.contains("entropy")
+        || intent.contains("coding")
+        || intent.contains("divergence")
+        || intent.contains("channel")
         || intent.contains("information")
     {
         return MetaConcept::InformationTheory;
     }
 
     // Architecture — routes to TraitInterface to match patterns training group
-    if lower.contains("architecture") || lower.contains("microservice")
+    if lower.contains("architecture")
+        || lower.contains("microservice")
         || lower.contains("system design")
     {
         return MetaConcept::TraitInterface;
@@ -969,8 +1319,11 @@ fn infer_concept_legacy(text: &str, semantic_intent: Option<&str>, action_target
     }
 
     // Fallback: coding intent → function definition, otherwise general knowledge
-    if intent.contains("coding") || target.contains("coding") || lower.contains("implement")
-        || lower.contains("write a") || lower.contains("create a")
+    if intent.contains("coding")
+        || target.contains("coding")
+        || lower.contains("implement")
+        || lower.contains("write a")
+        || lower.contains("create a")
     {
         return MetaConcept::FunctionDefinition;
     }
@@ -1087,23 +1440,36 @@ Install data/knowledge_graph.toml (CLI and server call try_init_topic_graph_bund
 fn infer_operation_topic_legacy(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
 
-    if lower.contains("addition") || lower.contains("add two") || lower.contains("add ") && lower.contains("number")
-        || lower.contains("plus ") || lower.contains("sum function") || lower.contains("sum of")
-        || lower.contains("compute the sum") || lower.contains("adds ")
+    if lower.contains("addition")
+        || lower.contains("add two")
+        || lower.contains("add ") && lower.contains("number")
+        || lower.contains("plus ")
+        || lower.contains("sum function")
+        || lower.contains("sum of")
+        || lower.contains("compute the sum")
+        || lower.contains("adds ")
     {
         return Some("addition_operation".into());
     }
-    if lower.contains("subtraction") || lower.contains("subtract") || lower.contains("minus")
-        || lower.contains("difference function") || lower.contains("a - b")
+    if lower.contains("subtraction")
+        || lower.contains("subtract")
+        || lower.contains("minus")
+        || lower.contains("difference function")
+        || lower.contains("a - b")
     {
         return Some("subtraction_operation".into());
     }
-    if lower.contains("multiplication") || lower.contains("multiply") || lower.contains("product function")
-        || lower.contains("times ") || lower.contains("a * b")
+    if lower.contains("multiplication")
+        || lower.contains("multiply")
+        || lower.contains("product function")
+        || lower.contains("times ")
+        || lower.contains("a * b")
     {
         return Some("multiplication_operation".into());
     }
-    if lower.contains("division") || lower.contains("divide") || lower.contains("quotient")
+    if lower.contains("division")
+        || lower.contains("divide")
+        || lower.contains("quotient")
         || lower.contains("a / b")
     {
         return Some("division_operation".into());
@@ -1125,64 +1491,102 @@ fn infer_operation_topic_legacy(text: &str) -> Option<String> {
     {
         return Some("average_operation".into());
     }
-    if lower.contains("min ") && lower.contains("max ") || lower.contains("min_val") || lower.contains("max_val") {
+    if lower.contains("min ") && lower.contains("max ")
+        || lower.contains("min_val")
+        || lower.contains("max_val")
+    {
         return Some("minmax_operation".into());
     }
     if lower.contains("clamp") || lower.contains("restrict") {
         return Some("clamp_operation".into());
     }
-    if lower.contains("checked") || lower.contains("wrapping") || lower.contains("saturating") || lower.contains("overflow") {
+    if lower.contains("checked")
+        || lower.contains("wrapping")
+        || lower.contains("saturating")
+        || lower.contains("overflow")
+    {
         return Some("safe_arithmetic_operation".into());
     }
 
     // Data structure specifics
-    if lower.contains("linked list") { return Some("linked_list".into()); }
-    if lower.contains("stack") { return Some("stack_implementation".into()); }
-    if lower.contains("queue") { return Some("queue_implementation".into()); }
-    if lower.contains("hash map") || lower.contains("hashmap") { return Some("hashmap_implementation".into()); }
-    if lower.contains("binary tree") || lower.contains("bst") { return Some("tree_implementation".into()); }
+    if lower.contains("linked list") {
+        return Some("linked_list".into());
+    }
+    if lower.contains("stack") {
+        return Some("stack_implementation".into());
+    }
+    if lower.contains("queue") {
+        return Some("queue_implementation".into());
+    }
+    if lower.contains("hash map") || lower.contains("hashmap") {
+        return Some("hashmap_implementation".into());
+    }
+    if lower.contains("binary tree") || lower.contains("bst") {
+        return Some("tree_implementation".into());
+    }
 
     // Design pattern specifics — behavioral (training intent: "behavioral")
-    if lower.contains("observer pattern") || lower.contains("observer") && lower.contains("pattern")
-        || lower.contains("observer") && (lower.contains("event") || lower.contains("subscri") || lower.contains("notif"))
+    if lower.contains("observer pattern")
+        || lower.contains("observer") && lower.contains("pattern")
+        || lower.contains("observer")
+            && (lower.contains("event") || lower.contains("subscri") || lower.contains("notif"))
     {
         return Some("behavioral".into());
     }
-    if lower.contains("strategy pattern") || lower.contains("strategy") && lower.contains("algorithm")
-        || lower.contains("swap algorithm") || lower.contains("strategy") && lower.contains("state")
+    if lower.contains("strategy pattern")
+        || lower.contains("strategy") && lower.contains("algorithm")
+        || lower.contains("swap algorithm")
+        || lower.contains("strategy") && lower.contains("state")
     {
         return Some("behavioral".into());
     }
     if lower.contains("command pattern") || lower.contains("undo") && lower.contains("redo") {
         return Some("behavioral".into());
     }
-    if lower.contains("state pattern") || lower.contains("state machine") && lower.contains("pattern") {
+    if lower.contains("state pattern")
+        || lower.contains("state machine") && lower.contains("pattern")
+    {
         return Some("behavioral".into());
     }
-    if lower.contains("template method") { return Some("behavioral".into()); }
+    if lower.contains("template method") {
+        return Some("behavioral".into());
+    }
     if lower.contains("mediator pattern") || lower.contains("mediator") && lower.contains("coupl") {
         return Some("behavioral".into());
     }
-    if lower.contains("visitor pattern") || lower.contains("chain of responsibility") || lower.contains("memento") {
+    if lower.contains("visitor pattern")
+        || lower.contains("chain of responsibility")
+        || lower.contains("memento")
+    {
         return Some("behavioral".into());
     }
 
     // Design pattern specifics — creational (training intent: "creational")
-    if lower.contains("factory pattern") || lower.contains("factory method") || lower.contains("abstract factory")
-        || lower.contains("factory") && (lower.contains("creat") || lower.contains("instantiat") || lower.contains("construct"))
+    if lower.contains("factory pattern")
+        || lower.contains("factory method")
+        || lower.contains("abstract factory")
+        || lower.contains("factory")
+            && (lower.contains("creat")
+                || lower.contains("instantiat")
+                || lower.contains("construct"))
     {
         return Some("creational".into());
     }
-    if lower.contains("builder pattern") || lower.contains("builder") && lower.contains("construct") {
+    if lower.contains("builder pattern") || lower.contains("builder") && lower.contains("construct")
+    {
         return Some("creational".into());
     }
-    if lower.contains("singleton") { return Some("creational".into()); }
-    if lower.contains("prototype pattern") || lower.contains("prototype") && lower.contains("clon") {
+    if lower.contains("singleton") {
+        return Some("creational".into());
+    }
+    if lower.contains("prototype pattern") || lower.contains("prototype") && lower.contains("clon")
+    {
         return Some("creational".into());
     }
 
     // Design pattern specifics — structural (training intent: "structural")
-    if lower.contains("adapter pattern") || lower.contains("adapter") && lower.contains("interface") {
+    if lower.contains("adapter pattern") || lower.contains("adapter") && lower.contains("interface")
+    {
         return Some("structural".into());
     }
     if (lower.contains("decorator") || lower.contains("decorator pattern"))
@@ -1193,14 +1597,22 @@ fn infer_operation_topic_legacy(text: &str) -> Option<String> {
     if lower.contains("facade pattern") || lower.contains("facade") && lower.contains("simplif") {
         return Some("structural".into());
     }
-    if lower.contains("bridge pattern") || lower.contains("bridge") && lower.contains("abstraction") {
+    if lower.contains("bridge pattern") || lower.contains("bridge") && lower.contains("abstraction")
+    {
         return Some("structural".into());
     }
-    if lower.contains("composite pattern") || lower.contains("composite") && lower.contains("tree") {
+    if lower.contains("composite pattern") || lower.contains("composite") && lower.contains("tree")
+    {
         return Some("structural".into());
     }
-    if lower.contains("flyweight") { return Some("structural".into()); }
-    if lower.contains("subclass") && (lower.contains("extensib") || lower.contains("decorator") || lower.contains("composition")) {
+    if lower.contains("flyweight") {
+        return Some("structural".into());
+    }
+    if lower.contains("subclass")
+        && (lower.contains("extensib")
+            || lower.contains("decorator")
+            || lower.contains("composition"))
+    {
         return Some("structural".into());
     }
 
@@ -1208,22 +1620,39 @@ fn infer_operation_topic_legacy(text: &str) -> Option<String> {
     if lower.contains("microservice") {
         return Some("microservices".into());
     }
-    if lower.contains("hexagonal architecture") || lower.contains("ports and adapter") || lower.contains("hexagonal") && lower.contains("port") {
+    if lower.contains("hexagonal architecture")
+        || lower.contains("ports and adapter")
+        || lower.contains("hexagonal") && lower.contains("port")
+    {
         return Some("hexagonal".into());
     }
     if lower.contains("cqrs") || lower.contains("command query") && lower.contains("segregat") {
         return Some("cqrs".into());
     }
-    if lower.contains("event sourcing") || lower.contains("event-sourc") || lower.contains("event sourc") {
+    if lower.contains("event sourcing")
+        || lower.contains("event-sourc")
+        || lower.contains("event sourc")
+    {
         return Some("event_sourcing".into());
     }
-    if lower.contains("event-driven") || lower.contains("event driven") || lower.contains("pub/sub") || lower.contains("pub sub") {
+    if lower.contains("event-driven")
+        || lower.contains("event driven")
+        || lower.contains("pub/sub")
+        || lower.contains("pub sub")
+    {
         return Some("event_driven".into());
     }
-    if lower.contains("saga") && (lower.contains("pattern") || lower.contains("compensat") || lower.contains("distributed")) {
+    if lower.contains("saga")
+        && (lower.contains("pattern")
+            || lower.contains("compensat")
+            || lower.contains("distributed"))
+    {
         return Some("saga_pattern".into());
     }
-    if lower.contains("circuit breaker") || lower.contains("bulkhead") || lower.contains("resilience pattern") {
+    if lower.contains("circuit breaker")
+        || lower.contains("bulkhead")
+        || lower.contains("resilience pattern")
+    {
         return Some("resilience_patterns".into());
     }
     // Bare "paxos" matches Paxos Labs (fintech); require CS context or exclude company phrases.
@@ -1252,35 +1681,53 @@ fn infer_operation_topic_legacy(text: &str) -> Option<String> {
     {
         return Some("consensus_algorithms".into());
     }
-    if lower.contains("multi-tenant") || lower.contains("multi tenant") || lower.contains("tenancy") {
+    if lower.contains("multi-tenant") || lower.contains("multi tenant") || lower.contains("tenancy")
+    {
         return Some("multi_tenancy".into());
     }
-    if lower.contains("stream process") || lower.contains("streaming") && (lower.contains("pipeline") || lower.contains("data")) {
+    if lower.contains("stream process")
+        || lower.contains("streaming") && (lower.contains("pipeline") || lower.contains("data"))
+    {
         return Some("stream_processing".into());
     }
-    if lower.contains("crdt") || lower.contains("conflict-free") || lower.contains("conflict free") {
+    if lower.contains("crdt") || lower.contains("conflict-free") || lower.contains("conflict free")
+    {
         return Some("crdt_conflict_resolution".into());
     }
 
     // Coding general specifics
-    if lower.contains("iterator") && lower.contains("error") || lower.contains("combine") && lower.contains("iterator") {
+    if lower.contains("iterator") && lower.contains("error")
+        || lower.contains("combine") && lower.contains("iterator")
+    {
         return Some("iterator_error_handling".into());
     }
-    if lower.contains("struct") && lower.contains("method") || lower.contains("impl block") || lower.contains("impl ") && lower.contains("struct") {
+    if lower.contains("struct") && lower.contains("method")
+        || lower.contains("impl block")
+        || lower.contains("impl ") && lower.contains("struct")
+    {
         return Some("struct_methods".into());
     }
-    if lower.contains("error handling") || lower.contains("result") && lower.contains("error") || lower.contains("unwrap") || lower.contains("expect") {
+    if lower.contains("error handling")
+        || lower.contains("result") && lower.contains("error")
+        || lower.contains("unwrap")
+        || lower.contains("expect")
+    {
         return Some("error_handling".into());
     }
-    if lower.contains("decorator") && lower.contains("python") || lower.contains("write a decorator") {
+    if lower.contains("decorator") && lower.contains("python")
+        || lower.contains("write a decorator")
+    {
         return Some("decorator_operation".into());
     }
-    if lower.contains("async") && (lower.contains("await") || lower.contains("future") || lower.contains("tokio"))
+    if lower.contains("async")
+        && (lower.contains("await") || lower.contains("future") || lower.contains("tokio"))
         || lower.contains("async/await")
     {
         return Some("async_pattern".into());
     }
-    if lower.contains("async") && (lower.contains("handler") || lower.contains("timeout") || lower.contains("retry")) {
+    if lower.contains("async")
+        && (lower.contains("handler") || lower.contains("timeout") || lower.contains("retry"))
+    {
         return Some("async_operation".into());
     }
     if lower.contains("refactor") && lower.contains("module") || lower.contains("es module") {
@@ -1291,18 +1738,33 @@ fn infer_operation_topic_legacy(text: &str) -> Option<String> {
     if lower.contains("lru cache") || lower.contains("lru") && lower.contains("cache") {
         return Some("lru_cache_operation".into());
     }
-    if lower.contains("lifetime") && (lower.contains("annotation") || lower.contains("pattern") || lower.contains("rust") || lower.contains("elision")) {
+    if lower.contains("lifetime")
+        && (lower.contains("annotation")
+            || lower.contains("pattern")
+            || lower.contains("rust")
+            || lower.contains("elision"))
+    {
         return Some("lifetime_pattern".into());
     }
-    if lower.contains("borrow") && (lower.contains("debug") || lower.contains("error") || lower.contains("checker")) {
+    if lower.contains("borrow")
+        && (lower.contains("debug") || lower.contains("error") || lower.contains("checker"))
+    {
         return Some("coding_debug".into());
     }
     if lower.contains("recursion") && lower.contains("python")
-        || lower.contains("python") && (lower.contains("depth") || lower.contains("recursionerror") || lower.contains("recursion"))
+        || lower.contains("python")
+            && (lower.contains("depth")
+                || lower.contains("recursionerror")
+                || lower.contains("recursion"))
     {
         return Some("python_debug".into());
     }
-    if lower.contains("recursion") && (lower.contains("debug") || lower.contains("depth") || lower.contains("error") || lower.contains("infinite")) {
+    if lower.contains("recursion")
+        && (lower.contains("debug")
+            || lower.contains("depth")
+            || lower.contains("error")
+            || lower.contains("infinite"))
+    {
         return Some("coding_debug".into());
     }
     if lower.contains("debounce") || lower.contains("throttle") {
@@ -1316,74 +1778,104 @@ fn infer_operation_topic_legacy(text: &str) -> Option<String> {
     if lower.contains("relativity") || lower.contains("einstein") {
         return Some("physics".into());
     }
-    if lower.contains("halting problem") || lower.contains("turing") && lower.contains("machine")
-        || lower.contains("computab") || lower.contains("decidab")
+    if lower.contains("halting problem")
+        || lower.contains("turing") && lower.contains("machine")
+        || lower.contains("computab")
+        || lower.contains("decidab")
     {
         return Some("cs_fundamentals".into());
     }
-    if lower.contains("natural selection") || lower.contains("evolution") && lower.contains("darwin") {
+    if lower.contains("natural selection")
+        || lower.contains("evolution") && lower.contains("darwin")
+    {
         return Some("biology".into());
     }
     if lower.contains("photosynthesis") {
         return Some("biology".into());
     }
-    if lower.contains("supply and demand") || lower.contains("gdp") || lower.contains("inflation") && lower.contains("econom") {
+    if lower.contains("supply and demand")
+        || lower.contains("gdp")
+        || lower.contains("inflation") && lower.contains("econom")
+    {
         return Some("economics".into());
     }
 
     // Support intents — account, billing, cancellation, onboarding
-    if lower.contains("lock") && lower.contains("account") || lower.contains("locked out")
-        || lower.contains("can't log in") || lower.contains("cannot log in")
-        || lower.contains("can't login") || lower.contains("login attempt")
-        || lower.contains("account recover") || lower.contains("regain access")
+    if lower.contains("lock") && lower.contains("account")
+        || lower.contains("locked out")
+        || lower.contains("can't log in")
+        || lower.contains("cannot log in")
+        || lower.contains("can't login")
+        || lower.contains("login attempt")
+        || lower.contains("account recover")
+        || lower.contains("regain access")
         || lower.contains("compromised") && lower.contains("account")
     {
         return Some("account_recovery".into());
     }
-    if lower.contains("cancel") && (lower.contains("subscri") || lower.contains("account") || lower.contains("plan"))
+    if lower.contains("cancel")
+        && (lower.contains("subscri") || lower.contains("account") || lower.contains("plan"))
         || lower.contains("downgrade") && lower.contains("plan")
     {
         return Some("cancellation".into());
     }
-    if lower.contains("charged twice") || lower.contains("duplicate charge")
-        || lower.contains("billing") || lower.contains("refund")
-        || lower.contains("overcharged") || lower.contains("wrong charge")
+    if lower.contains("charged twice")
+        || lower.contains("duplicate charge")
+        || lower.contains("billing")
+        || lower.contains("refund")
+        || lower.contains("overcharged")
+        || lower.contains("wrong charge")
     {
         return Some("billing_issue".into());
     }
-    if lower.contains("reset") && lower.contains("password") || lower.contains("password reset")
+    if lower.contains("reset") && lower.contains("password")
+        || lower.contains("password reset")
         || lower.contains("forgot") && lower.contains("password")
     {
         return Some("account_recovery".into());
     }
-    if lower.contains("api key") || lower.contains("get started") || lower.contains("onboard")
-        || lower.contains("new account") || lower.contains("setup") && lower.contains("account")
+    if lower.contains("api key")
+        || lower.contains("get started")
+        || lower.contains("onboard")
+        || lower.contains("new account")
+        || lower.contains("setup") && lower.contains("account")
     {
         return Some("onboarding_help".into());
     }
-    if lower.contains("outage") || lower.contains("down") && lower.contains("service")
-        || lower.contains("not working") || lower.contains("server error")
+    if lower.contains("outage")
+        || lower.contains("down") && lower.contains("service")
+        || lower.contains("not working")
+        || lower.contains("server error")
     {
         return Some("service_outage".into());
     }
-    if lower.contains("feature request") || lower.contains("suggest") && lower.contains("feature")
+    if lower.contains("feature request")
+        || lower.contains("suggest") && lower.contains("feature")
         || lower.contains("wish") && lower.contains("could")
     {
         return Some("feature_request".into());
     }
-    if lower.contains("privacy") || lower.contains("gdpr") || lower.contains("data deletion")
-        || lower.contains("opt out") || lower.contains("tracking")
+    if lower.contains("privacy")
+        || lower.contains("gdpr")
+        || lower.contains("data deletion")
+        || lower.contains("opt out")
+        || lower.contains("tracking")
     {
         return Some("data_privacy".into());
     }
 
     // Information theory concepts — match semantic_intent values from training data
-    if lower.contains("entropy") && (lower.contains("measure") || lower.contains("uncertainty")
-        || lower.contains("discrete") || lower.contains("random variable"))
+    if lower.contains("entropy")
+        && (lower.contains("measure")
+            || lower.contains("uncertainty")
+            || lower.contains("discrete")
+            || lower.contains("random variable"))
     {
         return Some("entropy".into());
     }
-    if lower.contains("differential entropy") || (lower.contains("entropy") && lower.contains("continuous")) {
+    if lower.contains("differential entropy")
+        || (lower.contains("entropy") && lower.contains("continuous"))
+    {
         return Some("differential_entropy".into());
     }
     if lower.contains("conditional entropy") {
@@ -1437,7 +1929,10 @@ fn infer_operation_topic_legacy(text: &str) -> Option<String> {
     if lower.contains("source coding") || (lower.contains("shannon") && lower.contains("coding")) {
         return Some("source_coding".into());
     }
-    if lower.contains("shannon-hartley") || lower.contains("shannon hartley") || lower.contains("bandlimited") {
+    if lower.contains("shannon-hartley")
+        || lower.contains("shannon hartley")
+        || lower.contains("bandlimited")
+    {
         return Some("shannon_hartley".into());
     }
     if lower.contains("huffman") {
@@ -1446,10 +1941,16 @@ fn infer_operation_topic_legacy(text: &str) -> Option<String> {
     if lower.contains("arithmetic coding") {
         return Some("arithmetic_coding".into());
     }
-    if lower.contains("lempel-ziv") || lower.contains("lempel ziv") || lower.contains("lz77") || lower.contains("lz78") {
+    if lower.contains("lempel-ziv")
+        || lower.contains("lempel ziv")
+        || lower.contains("lz77")
+        || lower.contains("lz78")
+    {
         return Some("lempel_ziv".into());
     }
-    if lower.contains("universal coding") || (lower.contains("universal") && lower.contains("compression")) {
+    if lower.contains("universal coding")
+        || (lower.contains("universal") && lower.contains("compression"))
+    {
         return Some("universal_coding".into());
     }
     if lower.contains("binary symmetric channel") || lower.contains("bsc") {
@@ -1479,7 +1980,8 @@ fn infer_operation_topic_legacy(text: &str) -> Option<String> {
     if lower.contains("fisher information") {
         return Some("fisher_information".into());
     }
-    if lower.contains("cramer-rao") || lower.contains("cramer rao") || lower.contains("cramér-rao") {
+    if lower.contains("cramer-rao") || lower.contains("cramer rao") || lower.contains("cramér-rao")
+    {
         return Some("cramer_rao".into());
     }
     if lower.contains("fano") && lower.contains("inequality") {
@@ -1500,7 +2002,10 @@ fn infer_operation_topic_legacy(text: &str) -> Option<String> {
     if lower.contains("sufficient statistic") {
         return Some("sufficient_statistic".into());
     }
-    if lower.contains("typical set") || lower.contains("asymptotic equipartition") || lower.contains("aep") {
+    if lower.contains("typical set")
+        || lower.contains("asymptotic equipartition")
+        || lower.contains("aep")
+    {
         return Some("asymptotic_equipartition".into());
     }
 
@@ -1608,7 +2113,7 @@ pub struct ConceptEntry {
     pub centroid: Vec<f32>,
     pub sample_count: usize,
     pub projectors: HashMap<String, LanguageProjector>, // language_name → projector
-    pub language_centroids: HashMap<String, Vec<f32>>,   // language_name → centroid
+    pub language_centroids: HashMap<String, Vec<f32>>,  // language_name → centroid
 }
 
 /// The meta-codebook: maps concepts to entries, enabling concept-level routing.
@@ -1629,19 +2134,23 @@ impl MetaCodebook {
     /// Build the meta-codebook from training data embeddings grouped by concept and language.
     ///
     /// `samples`: (embedding, concept, language, original_group_idx)
-    pub fn build(
-        samples: &[(Vec<f32>, MetaConcept, TargetLanguage, usize)],
-    ) -> Self {
+    pub fn build(samples: &[(Vec<f32>, MetaConcept, TargetLanguage, usize)]) -> Self {
         let mut codebook = Self::new();
 
         // Group embeddings by concept
-        let mut by_concept: HashMap<MetaConcept, Vec<(&[f32], TargetLanguage, usize)>> = HashMap::new();
+        let mut by_concept: HashMap<MetaConcept, Vec<(&[f32], TargetLanguage, usize)>> =
+            HashMap::new();
         for (emb, concept, lang, gidx) in samples {
-            by_concept.entry(*concept).or_default().push((emb.as_slice(), *lang, *gidx));
+            by_concept
+                .entry(*concept)
+                .or_default()
+                .push((emb.as_slice(), *lang, *gidx));
         }
 
         for (concept, items) in &by_concept {
-            if items.is_empty() { continue; }
+            if items.is_empty() {
+                continue;
+            }
 
             let dim = items[0].0.len();
 
@@ -1653,7 +2162,9 @@ impl MetaCodebook {
                 }
             }
             let n = items.len() as f32;
-            for c in &mut centroid { *c /= n; }
+            for c in &mut centroid {
+                *c /= n;
+            }
 
             // Group by language within this concept
             let mut by_lang: HashMap<TargetLanguage, Vec<&[f32]>> = HashMap::new();
@@ -1673,7 +2184,9 @@ impl MetaCodebook {
                     }
                 }
                 let ln = lang_embs.len() as f32;
-                for c in &mut lang_centroid { *c /= ln; }
+                for c in &mut lang_centroid {
+                    *c /= ln;
+                }
 
                 // Train a projector: concept_centroid → language_centroid
                 let mut projector = LanguageProjector::new(*lang);
@@ -1694,13 +2207,16 @@ impl MetaCodebook {
             let groups: Vec<usize> = groups.into_iter().map(|(g, _)| g).collect();
             codebook.concept_to_groups.insert(*concept, groups);
 
-            codebook.entries.insert(*concept, ConceptEntry {
-                concept: *concept,
-                centroid,
-                sample_count: items.len(),
-                projectors,
-                language_centroids,
-            });
+            codebook.entries.insert(
+                *concept,
+                ConceptEntry {
+                    concept: *concept,
+                    centroid,
+                    sample_count: items.len(),
+                    projectors,
+                    language_centroids,
+                },
+            );
         }
 
         codebook
@@ -1709,15 +2225,17 @@ impl MetaCodebook {
     /// Route an embedding to the best meta-concept using cosine similarity
     /// to concept centroids. Returns (concept, confidence, second_confidence).
     pub fn route(&self, embedding: &[f32]) -> (MetaConcept, f32, f32) {
-        let mut scored: Vec<(MetaConcept, f32)> = self.entries.iter()
-            .map(|(concept, entry)| {
-                (*concept, cosine_sim(embedding, &entry.centroid))
-            })
+        let mut scored: Vec<(MetaConcept, f32)> = self
+            .entries
+            .iter()
+            .map(|(concept, entry)| (*concept, cosine_sim(embedding, &entry.centroid)))
             .collect();
 
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        let (best_concept, best_sim) = scored.first().copied()
+        let (best_concept, best_sim) = scored
+            .first()
+            .copied()
             .unwrap_or((MetaConcept::GeneralKnowledge, 0.0));
         let second_sim = scored.get(1).map(|x| x.1).unwrap_or(-1.0);
 
@@ -1732,11 +2250,7 @@ impl MetaCodebook {
     ///   2. Embedding similarity to select the best GROUP within that concept
     ///
     /// This decouples "what concept" (text keywords) from "which group" (embedding).
-    pub fn route_and_project(
-        &self,
-        embedding: &[f32],
-        text: &str,
-    ) -> MetaRoutingResult {
+    pub fn route_and_project(&self, embedding: &[f32], text: &str) -> MetaRoutingResult {
         let language = detect_language(text);
 
         // Stage 1: Text-based concept classification — this is deterministic
@@ -1760,7 +2274,9 @@ impl MetaCodebook {
 
         // Stage 3: Within the concept, select the best group by finding which
         // group's centroid the embedding is closest to.
-        let target_groups = self.concept_to_groups.get(&concept)
+        let target_groups = self
+            .concept_to_groups
+            .get(&concept)
             .cloned()
             .unwrap_or_default();
 
@@ -1783,7 +2299,8 @@ impl MetaCodebook {
         // connectors, add the causal group as auxiliary so both can be consulted.
         let auxiliary_groups = if concept != MetaConcept::CausalReasoning {
             if has_causal_connectors(text) {
-                self.concept_to_groups.get(&MetaConcept::CausalReasoning)
+                self.concept_to_groups
+                    .get(&MetaConcept::CausalReasoning)
                     .cloned()
                     .unwrap_or_default()
             } else {
@@ -1816,11 +2333,18 @@ impl MetaCodebook {
         entries.sort_by_key(|(c, _)| c.index());
         for (concept, entry) in &entries {
             let langs: Vec<&str> = entry.projectors.keys().map(|s| s.as_str()).collect();
-            let groups = self.concept_to_groups.get(concept)
+            let groups = self
+                .concept_to_groups
+                .get(concept)
                 .map(|g| format!("{:?}", g))
                 .unwrap_or_default();
-            println!("    {:20} {} samples, langs={:?}, groups={}",
-                concept.name(), entry.sample_count, langs, groups);
+            println!(
+                "    {:20} {} samples, langs={:?}, groups={}",
+                concept.name(),
+                entry.sample_count,
+                langs,
+                groups
+            );
         }
     }
 }
@@ -1851,11 +2375,13 @@ impl MetaRoutingResult {
 
     /// Whether this is a coding concept (vs general/support).
     pub fn is_coding(&self) -> bool {
-        !matches!(self.concept,
+        !matches!(
+            self.concept,
             MetaConcept::GeneralKnowledge
                 | MetaConcept::Support
                 | MetaConcept::Conversation
-                | MetaConcept::PetCompanion)
+                | MetaConcept::PetCompanion
+        )
     }
 }
 
@@ -1876,9 +2402,15 @@ fn concept_from_action_target(target: &str) -> Option<MetaConcept> {
         t if t.contains("refactoring") || t.contains("refactor") => Some(MetaConcept::Refactoring),
         t if t.contains("debugging") || t.contains("debug") => Some(MetaConcept::Debugging),
         t if t.contains("support") => Some(MetaConcept::Support),
-        t if t.contains("conversation") || t.contains("identity") => Some(MetaConcept::Conversation),
-        t if t.contains("pet_chat") || t.contains("pet_create") || t.contains("pet_questionnaire") =>
-            Some(MetaConcept::PetCompanion),
+        t if t.contains("conversation") || t.contains("identity") => {
+            Some(MetaConcept::Conversation)
+        }
+        t if t.contains("pet_chat")
+            || t.contains("pet_create")
+            || t.contains("pet_questionnaire") =>
+        {
+            Some(MetaConcept::PetCompanion)
+        }
         t if t.contains("general_knowledge") => Some(MetaConcept::GeneralKnowledge),
         t if t.contains("reasoning") => Some(MetaConcept::Composition),
         "concepts" => Some(MetaConcept::InformationTheory),
@@ -1903,12 +2435,23 @@ fn has_causal_connectors(text: &str) -> bool {
     // `so` is included only as `, so ` or `. so ` (comma/period anchor) so
     // casual usages like "so cool" or "so, anyway" don't trip it.
     const STRONG: &[&str] = &[
-        " because ", " since ", " therefore ",
-        ", so ", ". so ", "; so ",
-        "in retrospect", "looking back", "it turned out",
-        " triggered ", " caused ", " resulted in ",
-        " pushed ", " led to ", " lead to ",
-        " so that ", " thereby ",
+        " because ",
+        " since ",
+        " therefore ",
+        ", so ",
+        ". so ",
+        "; so ",
+        "in retrospect",
+        "looking back",
+        "it turned out",
+        " triggered ",
+        " caused ",
+        " resulted in ",
+        " pushed ",
+        " led to ",
+        " lead to ",
+        " so that ",
+        " thereby ",
     ];
     if STRONG.iter().any(|c| lower.contains(*c)) {
         return true;
@@ -1918,14 +2461,32 @@ fn has_causal_connectors(text: &str) -> bool {
     // (MIXED / concessive). Only count as causal when paired with explicit
     // consequence or causal verbs in the same clause.
     const CONTRASTIVE: &[&str] = &[
-        " despite ", " although ", " even though ", " yet ",
-        " but ", " however ", " nevertheless ",
-        " meaning ", " implying ", " suggesting ",
+        " despite ",
+        " although ",
+        " even though ",
+        " yet ",
+        " but ",
+        " however ",
+        " nevertheless ",
+        " meaning ",
+        " implying ",
+        " suggesting ",
     ];
     const CAUSAL_CO: &[&str] = &[
-        "spiked", "pushed", "triggered", "caused", "drove",
-        "resulted", "led to", "forced", "crashed", "tanked",
-        "surged", "plummeted", "breach", "default",
+        "spiked",
+        "pushed",
+        "triggered",
+        "caused",
+        "drove",
+        "resulted",
+        "led to",
+        "forced",
+        "crashed",
+        "tanked",
+        "surged",
+        "plummeted",
+        "breach",
+        "default",
     ];
     let has_contrastive = CONTRASTIVE.iter().any(|c| lower.contains(*c));
     if has_contrastive && CAUSAL_CO.iter().any(|w| lower.contains(*w)) {
@@ -1947,7 +2508,11 @@ fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
         nb += bi * bi;
     }
     let denom = na.sqrt() * nb.sqrt();
-    if denom < 1e-20 { 0.0 } else { (dot / denom) as f32 }
+    if denom < 1e-20 {
+        0.0
+    } else {
+        (dot / denom) as f32
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1960,10 +2525,22 @@ mod tests {
 
     #[test]
     fn test_detect_language() {
-        assert_eq!(detect_language("write a function in Rust"), TargetLanguage::Rust);
-        assert_eq!(detect_language("implement in Python"), TargetLanguage::Python);
-        assert_eq!(detect_language("create a React component"), TargetLanguage::TypeScript);
-        assert_eq!(detect_language("explain algorithms"), TargetLanguage::Generic);
+        assert_eq!(
+            detect_language("write a function in Rust"),
+            TargetLanguage::Rust
+        );
+        assert_eq!(
+            detect_language("implement in Python"),
+            TargetLanguage::Python
+        );
+        assert_eq!(
+            detect_language("create a React component"),
+            TargetLanguage::TypeScript
+        );
+        assert_eq!(
+            detect_language("explain algorithms"),
+            TargetLanguage::Generic
+        );
         // English "match" (noun) must not count as Rust `match`:
         assert_eq!(
             detect_language("we lost the playoff match because our star was hurt"),
@@ -1989,7 +2566,11 @@ mod tests {
     fn test_normalize_inference_money_spans_sterling_bn() {
         let s = normalize_inference_money_spans("Unlock £43bn annually");
         assert!(s.contains("money_gbp_"), "got: {}", s);
-        assert!(s.contains("43000000000") || s.contains("43"), "scaled amount preserved: {}", s);
+        assert!(
+            s.contains("43000000000") || s.contains("43"),
+            "scaled amount preserved: {}",
+            s
+        );
     }
 
     #[test]
@@ -2039,7 +2620,11 @@ mod tests {
             MetaConcept::BinaryArithmetic
         );
         assert_eq!(
-            infer_concept("What is the pattern for a struct with methods in Rust", None, None),
+            infer_concept(
+                "What is the pattern for a struct with methods in Rust",
+                None,
+                None
+            ),
             MetaConcept::StructDefinition
         );
     }
@@ -2066,13 +2651,30 @@ mod tests {
     #[test]
     fn test_meta_codebook_build() {
         let samples = vec![
-            (vec![1.0, 0.0, 0.0, 0.0], MetaConcept::BinaryArithmetic, TargetLanguage::Rust, 0),
-            (vec![0.9, 0.1, 0.0, 0.0], MetaConcept::BinaryArithmetic, TargetLanguage::Python, 0),
-            (vec![0.0, 1.0, 0.0, 0.0], MetaConcept::DataStructure, TargetLanguage::Rust, 1),
+            (
+                vec![1.0, 0.0, 0.0, 0.0],
+                MetaConcept::BinaryArithmetic,
+                TargetLanguage::Rust,
+                0,
+            ),
+            (
+                vec![0.9, 0.1, 0.0, 0.0],
+                MetaConcept::BinaryArithmetic,
+                TargetLanguage::Python,
+                0,
+            ),
+            (
+                vec![0.0, 1.0, 0.0, 0.0],
+                MetaConcept::DataStructure,
+                TargetLanguage::Rust,
+                1,
+            ),
         ];
         let codebook = MetaCodebook::build(&samples);
         assert_eq!(codebook.concept_count(), 2);
-        assert!(codebook.entries.contains_key(&MetaConcept::BinaryArithmetic));
+        assert!(codebook
+            .entries
+            .contains_key(&MetaConcept::BinaryArithmetic));
         assert!(codebook.entries.contains_key(&MetaConcept::DataStructure));
 
         // Routing: arithmetic-like vector should route to BinaryArithmetic

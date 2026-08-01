@@ -69,7 +69,9 @@ pub struct Multivector {
 
 impl Default for Multivector {
     fn default() -> Self {
-        Self { components: [0.0; CL8_DIM] }
+        Self {
+            components: [0.0; CL8_DIM],
+        }
     }
 }
 
@@ -99,7 +101,9 @@ pub struct Rotor {
 
 impl Default for Rotor {
     fn default() -> Self {
-        let mut r = Self { components: [0.0; 128] };
+        let mut r = Self {
+            components: [0.0; 128],
+        };
         r.components[0] = 1.0; // identity rotor
         r
     }
@@ -195,8 +199,7 @@ impl Multivector {
     /// Construct a grade-1 vector from 8 components.
     pub fn vector(v: &[f32; CL8_VECTOR_DIM]) -> Self {
         let mut mv = Self::zero();
-        mv.components[GRADE_OFFSETS[1]..GRADE_OFFSETS[1] + 8]
-            .copy_from_slice(v);
+        mv.components[GRADE_OFFSETS[1]..GRADE_OFFSETS[1] + 8].copy_from_slice(v);
         mv
     }
 
@@ -211,7 +214,9 @@ impl Multivector {
 
     /// Extract grade-k components as a slice.
     pub fn grade(&self, k: usize) -> &[f32] {
-        if k > 8 { return &[]; }
+        if k > 8 {
+            return &[];
+        }
         let start = GRADE_OFFSETS[k];
         let end = start + GRADE_DIMS[k];
         &self.components[start..end]
@@ -219,7 +224,9 @@ impl Multivector {
 
     /// Extract grade-k components as a mutable slice.
     pub fn grade_mut(&mut self, k: usize) -> &mut [f32] {
-        if k > 8 { return &mut []; }
+        if k > 8 {
+            return &mut [];
+        }
         let start = GRADE_OFFSETS[k];
         let end = start + GRADE_DIMS[k];
         &mut self.components[start..end]
@@ -254,10 +261,14 @@ impl Multivector {
         let mut result = Multivector::zero();
         for a in 0u16..256 {
             let sa = self.components[blade_flat_index(a as u8)];
-            if sa.abs() < 1e-12 { continue; }
+            if sa.abs() < 1e-12 {
+                continue;
+            }
             for b in 0u16..256 {
                 let sb = other.components[blade_flat_index(b as u8)];
-                if sb.abs() < 1e-12 { continue; }
+                if sb.abs() < 1e-12 {
+                    continue;
+                }
                 let (sign, blade) = geo_sign_and_index(a as u8, b as u8);
                 result.components[blade_flat_index(blade)] += sign * sa * sb;
             }
@@ -278,11 +289,15 @@ impl Multivector {
         let mut result = Multivector::zero();
         for a in 0u16..256 {
             let sa = self.components[blade_flat_index(a as u8)];
-            if sa.abs() < 1e-12 { continue; }
+            if sa.abs() < 1e-12 {
+                continue;
+            }
             let grade_a = blade_grade(a as u8);
             for b in 0u16..256 {
                 let sb = other.components[blade_flat_index(b as u8)];
-                if sb.abs() < 1e-12 { continue; }
+                if sb.abs() < 1e-12 {
+                    continue;
+                }
                 let grade_b = blade_grade(b as u8);
                 let (sign, blade) = geo_sign_and_index(a as u8, b as u8);
                 if blade_grade(blade) == grade_a + grade_b {
@@ -300,7 +315,10 @@ impl Multivector {
         for blade in 0u16..256 {
             let k = blade_grade(blade as u8);
             // Reversal sign: (-1)^{k(k-1)/2} — grades 2,3,6,7 flip sign
-            let sign = match k % 4 { 2 | 3 => -1.0, _ => 1.0 };
+            let sign = match k % 4 {
+                2 | 3 => -1.0,
+                _ => 1.0,
+            };
             result.components[blade_flat_index(blade as u8)] *= sign;
         }
         result
@@ -463,7 +481,9 @@ impl Rotor {
         let norm = norm_sq.sqrt();
         if norm > 1e-10 {
             let inv = 1.0 / norm;
-            for c in &mut self.components { *c *= inv; }
+            for c in &mut self.components {
+                *c *= inv;
+            }
         }
     }
 
@@ -525,7 +545,7 @@ pub fn embed_bridge_vector_with_goal(v: &[f32], goal_mag: f32) -> Multivector {
 /// Wraps a Rotor (28 bivector parameters) with training state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GroupRotor {
-    pub bivector: Vec<f32>,  // 28 trainable parameters
+    pub bivector: Vec<f32>, // 28 trainable parameters
     pub frozen: bool,
     pub l2_weight: f32,
 }
@@ -559,10 +579,17 @@ impl GroupRotor {
     where
         F: FnMut(&[f32]) -> f32,
     {
-        if self.frozen { return; }
+        if self.frozen {
+            return;
+        }
         let eps = 0.02f32;
         let mut perturb = vec![0.0f32; 28];
-        let mut seed = self.bivector.iter().map(|b| (b * 1000.0) as u64).sum::<u64>().wrapping_add(7);
+        let mut seed = self
+            .bivector
+            .iter()
+            .map(|b| (b * 1000.0) as u64)
+            .sum::<u64>()
+            .wrapping_add(7);
         for p in perturb.iter_mut() {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
             *p = if seed % 2 == 0 { 1.0 } else { -1.0 };
@@ -678,7 +705,9 @@ pub fn causal_similarity(a: &Multivector, b: &Multivector) -> f32 {
     let dot: f32 = fa.iter().zip(fb.iter()).map(|(x, y)| x * y).sum();
     let na: f32 = fa.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = fb.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na < 1e-10 || nb < 1e-10 { return 0.0; }
+    if na < 1e-10 || nb < 1e-10 {
+        return 0.0;
+    }
     dot / (na * nb)
 }
 
@@ -692,7 +721,9 @@ pub fn structural_similarity(a: &Multivector, b: &Multivector) -> f32 {
     let dot: f32 = fa.iter().zip(fb.iter()).map(|(x, y)| x * y).sum();
     let na: f32 = fa.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = fb.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na < 1e-10 || nb < 1e-10 { return 0.0; }
+    if na < 1e-10 || nb < 1e-10 {
+        return 0.0;
+    }
     dot / (na * nb)
 }
 
@@ -1028,7 +1059,9 @@ impl CausalGrade {
         }
     }
 
-    pub fn num_classes() -> usize { 3 }
+    pub fn num_classes() -> usize {
+        3
+    }
 }
 
 /// Forward causal energy: signed projection onto the e_01 (temporal cause) and
@@ -1188,8 +1221,11 @@ mod tests {
         // e_0 is timelike: u = 3·e_0, u·u = -9 (Minkowski inner product)
         let u = Multivector::vector(&[3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         let uu = u.geo(&u);
-        assert!((uu.scalar_part() - (-9.0)).abs() < 1e-5,
-            "timelike u·u should be -9 in Cl(1,7), got {}", uu.scalar_part());
+        assert!(
+            (uu.scalar_part() - (-9.0)).abs() < 1e-5,
+            "timelike u·u should be -9 in Cl(1,7), got {}",
+            uu.scalar_part()
+        );
         assert!(uu.bivector_part().iter().all(|&b| b.abs() < 1e-6));
     }
 
@@ -1198,8 +1234,11 @@ mod tests {
         // e_1 is spacelike: v = 3·e_1, v·v = +9 (Euclidean)
         let v = Multivector::vector(&[0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         let vv = v.geo(&v);
-        assert!((vv.scalar_part() - 9.0).abs() < 1e-5,
-            "spacelike v·v should be +9 in Cl(1,7), got {}", vv.scalar_part());
+        assert!(
+            (vv.scalar_part() - 9.0).abs() < 1e-5,
+            "spacelike v·v should be +9 in Cl(1,7), got {}",
+            vv.scalar_part()
+        );
         assert!(vv.bivector_part().iter().all(|&b| b.abs() < 1e-6));
     }
 
@@ -1217,24 +1256,33 @@ mod tests {
         let v = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
         let rotated = r.rotate_vector(&v);
         for i in 0..8 {
-            assert!((rotated[i] - v[i]).abs() < 1e-4,
-                "identity rotor should preserve vector: {} vs {}", rotated[i], v[i]);
+            assert!(
+                (rotated[i] - v[i]).abs() < 1e-4,
+                "identity rotor should preserve vector: {} vs {}",
+                rotated[i],
+                v[i]
+            );
         }
     }
 
     #[test]
     fn test_rotor_rotation_preserves_norm() {
-        let bivector = [0.3f32, -0.2, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                        0.0, 0.0, 0.0, 0.0, 0.0, 0.15, 0.0, 0.0, 0.0,
-                        0.0, 0.0, 0.0, -0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let bivector = [
+            0.3f32, -0.2, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.15, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, -0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ];
         let r = Rotor::from_bivector(&bivector);
         let v = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
         let rotated = r.rotate_vector(&v);
 
         let norm_before: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         let norm_after: f32 = rotated.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm_before - norm_after).abs() < 0.1 * norm_before,
-            "rotor should approximately preserve norm: {} vs {}", norm_before, norm_after);
+        assert!(
+            (norm_before - norm_after).abs() < 0.1 * norm_before,
+            "rotor should approximately preserve norm: {} vs {}",
+            norm_before,
+            norm_after
+        );
     }
 
     #[test]
@@ -1251,7 +1299,11 @@ mod tests {
         // Spacelike vector: self-similarity is positive
         let v = Multivector::vector(&[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         let sim = geometric_similarity(&v, &v);
-        assert!(sim > 0.0, "spacelike self-similarity should be positive: {}", sim);
+        assert!(
+            sim > 0.0,
+            "spacelike self-similarity should be positive: {}",
+            sim
+        );
     }
 
     #[test]
@@ -1259,7 +1311,11 @@ mod tests {
         // Timelike vector: self-inner-product is negative in Cl(1,7)
         let v = Multivector::vector(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         let sim = geometric_similarity(&v, &v);
-        assert!(sim < 0.0, "timelike self-similarity should be negative in Cl(1,7): {}", sim);
+        assert!(
+            sim < 0.0,
+            "timelike self-similarity should be negative in Cl(1,7): {}",
+            sim
+        );
     }
 
     #[test]
@@ -1267,7 +1323,11 @@ mod tests {
         let u = Multivector::vector(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         let v = Multivector::vector(&[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         let sim = geometric_similarity(&u, &v);
-        assert!(sim.abs() < 1e-6, "orthogonal similarity should be ~0: {}", sim);
+        assert!(
+            sim.abs() < 1e-6,
+            "orthogonal similarity should be ~0: {}",
+            sim
+        );
     }
 
     #[test]
@@ -1280,9 +1340,10 @@ mod tests {
 
     #[test]
     fn test_rotor_different_from_identity() {
-        let bivector = [0.5f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let bivector = [
+            0.5f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ];
         let r = Rotor::from_bivector(&bivector);
         let v = [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         let rotated = r.rotate_vector(&v);
@@ -1297,9 +1358,13 @@ mod tests {
         let vu = v.wedge(&u);
         // u∧v = -v∧u for grade-1 vectors
         for i in 0..CL8_DIM {
-            assert!((uv.components[i] + vu.components[i]).abs() < 1e-6,
+            assert!(
+                (uv.components[i] + vu.components[i]).abs() < 1e-6,
                 "wedge should be anticommutative at component {}: {} vs {}",
-                i, uv.components[i], vu.components[i]);
+                i,
+                uv.components[i],
+                vu.components[i]
+            );
         }
     }
 
@@ -1327,7 +1392,10 @@ mod tests {
         let mv = embed_bridge_vector(&v);
         let fp = structural_fingerprint(&mv);
         assert_eq!(fp.len(), 28);
-        assert!(fp.iter().any(|&x| x.abs() > 0.001), "fingerprint should be non-trivial");
+        assert!(
+            fp.iter().any(|&x| x.abs() > 0.001),
+            "fingerprint should be non-trivial"
+        );
     }
 
     #[test]
@@ -1338,21 +1406,33 @@ mod tests {
         let mv1 = embed_bridge_vector(&v1);
         let mv2 = embed_bridge_vector(&v2);
         let sim = structural_similarity(&mv1, &mv2);
-        assert!(sim > 0.9, "same-structure inputs should have high structural similarity: {}", sim);
+        assert!(
+            sim > 0.9,
+            "same-structure inputs should have high structural similarity: {}",
+            sim
+        );
     }
 
     #[test]
     fn test_structural_similarity_different_structure() {
         // Sparse: only first block has signal
         let mut v1 = vec![0.0f32; 128];
-        for i in 0..8 { v1[i] = (i as f32 + 1.0) * 0.5; }
+        for i in 0..8 {
+            v1[i] = (i as f32 + 1.0) * 0.5;
+        }
         // Dense: all blocks have signal with varying magnitudes
-        let v2: Vec<f32> = (0..128).map(|i| ((i as f32 * 0.37).cos()) * (1.0 + (i / 8) as f32)).collect();
+        let v2: Vec<f32> = (0..128)
+            .map(|i| ((i as f32 * 0.37).cos()) * (1.0 + (i / 8) as f32))
+            .collect();
         let mv1 = embed_bridge_vector(&v1);
         let mv2 = embed_bridge_vector(&v2);
         let sim = structural_similarity(&mv1, &mv2);
         // Single-block vs multi-block should produce different wedge structure
-        assert!(sim < 0.95, "sparse vs dense inputs should have distinct structural similarity: {}", sim);
+        assert!(
+            sim < 0.95,
+            "sparse vs dense inputs should have distinct structural similarity: {}",
+            sim
+        );
     }
 
     #[test]
@@ -1360,16 +1440,26 @@ mod tests {
         let v: Vec<f32> = (0..128).map(|i| (i as f32 * 0.02).sin()).collect();
         let mv = embed_bridge_vector(&v);
         let abs = abstract_mv(&mv);
-        assert!(abs.scalar_part().abs() < 1e-10, "abstraction should zero grade-0");
-        assert!(abs.grade(1).iter().all(|&x| x.abs() < 1e-10), "abstraction should zero grade-1");
-        assert!(abs.grade(2).iter().any(|&x| x.abs() > 0.001), "abstraction should preserve grade-2");
+        assert!(
+            abs.scalar_part().abs() < 1e-10,
+            "abstraction should zero grade-0"
+        );
+        assert!(
+            abs.grade(1).iter().all(|&x| x.abs() < 1e-10),
+            "abstraction should zero grade-1"
+        );
+        assert!(
+            abs.grade(2).iter().any(|&x| x.abs() > 0.001),
+            "abstraction should preserve grade-2"
+        );
     }
 
     #[test]
     fn test_transfer_rotor_identity_roundtrip() {
-        let bv = [0.1f32, -0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                   0.0, 0.0, 0.0, 0.0, 0.0, 0.08, 0.0, 0.0, 0.0,
-                   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let bv = [
+            0.1f32, -0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.08, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ];
         let r = Rotor::from_bivector(&bv);
         let id = Rotor::identity();
         let t = transfer_rotor(&id, &r);
@@ -1378,9 +1468,13 @@ mod tests {
         let direct = r.rotate_vector(&v);
         let via_transfer = t.rotate_vector(&v);
         for i in 0..8 {
-            assert!((direct[i] - via_transfer[i]).abs() < 0.15,
+            assert!(
+                (direct[i] - via_transfer[i]).abs() < 0.15,
                 "transfer from identity should approximate source rotor: dim {} {} vs {}",
-                i, direct[i], via_transfer[i]);
+                i,
+                direct[i],
+                via_transfer[i]
+            );
         }
     }
 
@@ -1391,28 +1485,48 @@ mod tests {
         let r = Rotor::from_bivector(&bv);
         let (cond, fp) = condition_with_understanding(&h_raw, &r, 128);
         assert_eq!(cond.len(), 128);
-        assert!(cond.iter().any(|&x| x.abs() > 0.001), "conditioning should be non-trivial");
-        assert!(fp.iter().any(|&x| x.abs() > 0.001), "fingerprint should be non-trivial");
+        assert!(
+            cond.iter().any(|&x| x.abs() > 0.001),
+            "conditioning should be non-trivial"
+        );
+        assert!(
+            fp.iter().any(|&x| x.abs() > 0.001),
+            "fingerprint should be non-trivial"
+        );
     }
 
     #[test]
     fn test_understanding_preserves_content_adapts_structure() {
         let h_raw: Vec<f32> = (0..768).map(|i| (i as f32 * 0.007).sin()).collect();
         let id = Rotor::identity();
-        let bv = [0.2f32, -0.1, 0.15, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                   0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0,
-                   0.0, 0.0, 0.0, -0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let bv = [
+            0.2f32, -0.1, 0.15, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, -0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ];
         let r = Rotor::from_bivector(&bv);
         let (cond_id, fp_id) = condition_with_understanding(&h_raw, &id, 128);
         let (cond_r, fp_r) = condition_with_understanding(&h_raw, &r, 128);
         // Same input: grade-1 content should be identical (first 8 components)
         for i in 0..8 {
-            assert!((cond_id[i] - cond_r[i]).abs() < 1e-4,
-                "content (grade-1) should be preserved: dim {} {} vs {}", i, cond_id[i], cond_r[i]);
+            assert!(
+                (cond_id[i] - cond_r[i]).abs() < 1e-4,
+                "content (grade-1) should be preserved: dim {} {} vs {}",
+                i,
+                cond_id[i],
+                cond_r[i]
+            );
         }
         // Structure (fingerprint) should differ due to rotor
-        let fp_diff: f32 = fp_id.iter().zip(fp_r.iter()).map(|(a, b)| (a - b).abs()).sum();
-        assert!(fp_diff > 0.01, "structural fingerprint should change under non-identity rotor: diff={}", fp_diff);
+        let fp_diff: f32 = fp_id
+            .iter()
+            .zip(fp_r.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        assert!(
+            fp_diff > 0.01,
+            "structural fingerprint should change under non-identity rotor: diff={}",
+            fp_diff
+        );
     }
 
     #[test]
@@ -1441,12 +1555,16 @@ mod tests {
         let causal = causal_fingerprint(&mv);
         let spatial = spatial_fingerprint(&mv);
         for i in 0..7 {
-            assert!((full[i] - causal[i]).abs() < 1e-10,
-                "causal fingerprint should be first 7 of structural");
+            assert!(
+                (full[i] - causal[i]).abs() < 1e-10,
+                "causal fingerprint should be first 7 of structural"
+            );
         }
         for i in 0..21 {
-            assert!((full[7 + i] - spatial[i]).abs() < 1e-10,
-                "spatial fingerprint should be last 21 of structural");
+            assert!(
+                (full[7 + i] - spatial[i]).abs() < 1e-10,
+                "spatial fingerprint should be last 21 of structural"
+            );
         }
     }
 
@@ -1456,12 +1574,16 @@ mod tests {
         let mv0 = embed_bridge_vector_with_goal(&v, 0.0);
         let mv1 = embed_bridge_vector_with_goal(&v, 1.0);
         let e0_idx = GRADE_OFFSETS[1]; // timelike component
-        assert!((mv0.components[e0_idx] - mv1.components[e0_idx]).abs() > 0.01,
-            "goal magnitude should change the timelike component");
+        assert!(
+            (mv0.components[e0_idx] - mv1.components[e0_idx]).abs() > 0.01,
+            "goal magnitude should change the timelike component"
+        );
         // Spacelike components (indices 1..7 of grade-1) should be identical
         for i in 1..8 {
-            assert!((mv0.grade(1)[i] - mv1.grade(1)[i]).abs() < 1e-10,
-                "goal magnitude should not affect spacelike components");
+            assert!(
+                (mv0.grade(1)[i] - mv1.grade(1)[i]).abs() < 1e-10,
+                "goal magnitude should not affect spacelike components"
+            );
         }
     }
 
@@ -1470,7 +1592,11 @@ mod tests {
         // v = (1, 1, 0, ...) → v·v = -1 + 1 = 0 (null/lightlike vector)
         let v = Multivector::vector(&[1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         let sim = geometric_similarity(&v, &v);
-        assert!(sim.abs() < 1e-5, "lightlike vector self-product should be ~0: {}", sim);
+        assert!(
+            sim.abs() < 1e-5,
+            "lightlike vector self-product should be ~0: {}",
+            sim
+        );
     }
 
     #[test]
@@ -1481,7 +1607,11 @@ mod tests {
         a.components[GRADE_OFFSETS[1]] = 0.0;
         b.components[GRADE_OFFSETS[1]] = 1.0;
         let s2 = minkowski_interval(&a, &b);
-        assert!(s2 < 0.0, "pure timelike separation should give s² < 0: {}", s2);
+        assert!(
+            s2 < 0.0,
+            "pure timelike separation should give s² < 0: {}",
+            s2
+        );
         assert_eq!(classify_interval(s2), IntervalType::Timelike);
     }
 
@@ -1493,7 +1623,11 @@ mod tests {
         a.components[GRADE_OFFSETS[1] + 1] = 0.0;
         b.components[GRADE_OFFSETS[1] + 1] = 1.0;
         let s2 = minkowski_interval(&a, &b);
-        assert!(s2 > 0.0, "pure spacelike separation should give s² > 0: {}", s2);
+        assert!(
+            s2 > 0.0,
+            "pure spacelike separation should give s² > 0: {}",
+            s2
+        );
         assert_eq!(classify_interval(s2), IntervalType::Spacelike);
     }
 
@@ -1505,7 +1639,11 @@ mod tests {
         b.components[GRADE_OFFSETS[1]] = 1.0;
         b.components[GRADE_OFFSETS[1] + 1] = 1.0;
         let s2 = minkowski_interval(&a, &b);
-        assert!(s2.abs() < 0.02, "equal timelike+spacelike change should be lightlike: {}", s2);
+        assert!(
+            s2.abs() < 0.02,
+            "equal timelike+spacelike change should be lightlike: {}",
+            s2
+        );
         assert_eq!(classify_interval(s2), IntervalType::Lightlike);
     }
 
@@ -1516,8 +1654,11 @@ mod tests {
         scalar.components[0] = 1.0;
         let dual = pseudoscalar_product(&scalar);
         // The result should have significant grade-8 content
-        assert!(dual.components[GRADE_OFFSETS[8]].abs() > 0.5,
-            "scalar * I should produce pseudoscalar: grade-8 = {}", dual.components[GRADE_OFFSETS[8]]);
+        assert!(
+            dual.components[GRADE_OFFSETS[8]].abs() > 0.5,
+            "scalar * I should produce pseudoscalar: grade-8 = {}",
+            dual.components[GRADE_OFFSETS[8]]
+        );
     }
 
     #[test]
@@ -1527,8 +1668,11 @@ mod tests {
         pseudo.components[GRADE_OFFSETS[8]] = 1.0;
         let i_squared = pseudo.geo(&pseudo);
         // Should be close to -1 scalar
-        assert!((i_squared.components[0] + 1.0).abs() < 1e-5,
-            "I² should be -1: got {}", i_squared.components[0]);
+        assert!(
+            (i_squared.components[0] + 1.0).abs() < 1e-5,
+            "I² should be -1: got {}",
+            i_squared.components[0]
+        );
     }
 
     #[test]
@@ -1556,7 +1700,10 @@ mod tests {
         let a = Multivector::vector(&[2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         let b = Multivector::zero();
         let s2 = causal_block_interval(&a, &b);
-        assert!(s2 < 0.0, "pure timelike separation should be negative: {s2}");
+        assert!(
+            s2 < 0.0,
+            "pure timelike separation should be negative: {s2}"
+        );
         assert!((s2 - (-4.0)).abs() < 1e-5);
     }
 
@@ -1565,7 +1712,10 @@ mod tests {
         let a = Multivector::vector(&[0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         let b = Multivector::zero();
         let s2 = causal_block_interval(&a, &b);
-        assert!(s2 > 0.0, "pure spacelike separation should be positive: {s2}");
+        assert!(
+            s2 > 0.0,
+            "pure spacelike separation should be positive: {s2}"
+        );
         assert!((s2 - 9.0).abs() < 1e-5);
     }
 
@@ -1615,7 +1765,10 @@ mod tests {
             mv.components[g2_start + blade_to_grade_index(blade)] = (i as f32 + 1.0) * 0.3;
         }
         let sim = causal_block_similarity(&mv, &mv);
-        assert!((sim - 1.0).abs() < 1e-5, "self-similarity should be 1.0: {sim}");
+        assert!(
+            (sim - 1.0).abs() < 1e-5,
+            "self-similarity should be 1.0: {sim}"
+        );
     }
 
     // ── Supervised causal grades tests ───────────────────────────────────

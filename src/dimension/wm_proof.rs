@@ -110,7 +110,10 @@ fn default_encoder_path() -> PathBuf {
 }
 
 /// Ensure a pinned encoder file exists (create once; never retrain).
-pub fn ensure_frozen_encoder_file(in_dim: usize, seed: u64) -> Result<FrozenExternalEncoder, String> {
+pub fn ensure_frozen_encoder_file(
+    in_dim: usize,
+    seed: u64,
+) -> Result<FrozenExternalEncoder, String> {
     let path = default_encoder_path();
     if path.exists() {
         let enc = FrozenExternalEncoder::load(&path)?;

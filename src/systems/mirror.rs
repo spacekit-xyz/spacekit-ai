@@ -1,5 +1,5 @@
-use crate::types::*;
 use crate::neuron::Neuron;
+use crate::types::*;
 use std::collections::HashMap;
 
 /// System 6: IFS Mirror Coupling
@@ -63,13 +63,17 @@ fn box_count(positions: &[Vec3], scale: f32) -> usize {
 
 fn linear_slope(x: &[f32], y: &[f32]) -> f32 {
     let n = x.len() as f32;
-    if n < 2.0 { return 0.0; }
+    if n < 2.0 {
+        return 0.0;
+    }
     let sx: f32 = x.iter().sum();
     let sy: f32 = y.iter().sum();
     let sxy: f32 = x.iter().zip(y.iter()).map(|(a, b)| a * b).sum();
     let sxx: f32 = x.iter().map(|a| a * a).sum();
     let denom = n * sxx - sx * sx;
-    if denom.abs() < 1e-10 { return 0.0; }
+    if denom.abs() < 1e-10 {
+        return 0.0;
+    }
     (n * sxy - sx * sy) / denom
 }
 
@@ -81,8 +85,12 @@ pub fn apply_ifs_mirror_coupling(
     config: &EnvironmentConfig,
 ) {
     for group in groups.values() {
-        let Some(mirror_id) = group.mirror_group else { continue };
-        let Some(mirror) = groups.get(&mirror_id) else { continue };
+        let Some(mirror_id) = group.mirror_group else {
+            continue;
+        };
+        let Some(mirror) = groups.get(&mirror_id) else {
+            continue;
+        };
 
         let centroid_a = group.centroid;
         let centroid_b = mirror.centroid;
@@ -97,12 +105,14 @@ pub fn apply_ifs_mirror_coupling(
             let partner_pos = neurons.get(&id_b).map(|n| n.geometry);
 
             if let (Some(partner), Some(neuron)) = (partner_pos, neurons.get_mut(&id_a)) {
-                if neuron.frozen { continue; }
+                if neuron.frozen {
+                    continue;
+                }
                 // Target: the reflection of the partner across the midplane
                 let target = reflect_across_midplane(partner, centroid_a, centroid_b);
                 let delta = target - neuron.geometry;
-                neuron.geometry = neuron.geometry
-                    + delta * (config.mirror_coupling_strength * 0.01);
+                neuron.geometry =
+                    neuron.geometry + delta * (config.mirror_coupling_strength * 0.01);
             }
         }
 
@@ -114,11 +124,12 @@ pub fn apply_ifs_mirror_coupling(
             let partner_pos = neurons.get(&id_a).map(|n| n.geometry);
 
             if let (Some(partner), Some(neuron)) = (partner_pos, neurons.get_mut(&id_b)) {
-                if neuron.frozen { continue; }
+                if neuron.frozen {
+                    continue;
+                }
                 let target = reflect_across_midplane(partner, centroid_b, centroid_a);
                 let delta = target - neuron.geometry;
-                neuron.geometry = neuron.geometry
-                    + delta * (config.mirror_coupling_strength);
+                neuron.geometry = neuron.geometry + delta * (config.mirror_coupling_strength);
             }
         }
     }
@@ -136,10 +147,14 @@ pub fn mirror_symmetry_score(
     let Some(ga) = groups.get(&a) else { return 0.0 };
     let Some(gb) = groups.get(&b) else { return 0.0 };
 
-    let pos_a: Vec<Vec3> = ga.members.iter()
+    let pos_a: Vec<Vec3> = ga
+        .members
+        .iter()
         .filter_map(|id| neurons.get(id).map(|n| n.geometry))
         .collect();
-    let pos_b: Vec<Vec3> = gb.members.iter()
+    let pos_b: Vec<Vec3> = gb
+        .members
+        .iter()
         .filter_map(|id| neurons.get(id).map(|n| n.geometry))
         .collect();
 
@@ -160,7 +175,9 @@ pub fn update_group_centroids(
             group.centroid = Vec3::zero();
             continue;
         }
-        let sum = group.members.iter()
+        let sum = group
+            .members
+            .iter()
             .filter_map(|id| neurons.get(id))
             .fold(Vec3::zero(), |acc, n| acc + n.geometry);
         let count = group.members.len() as f32;
@@ -169,6 +186,10 @@ pub fn update_group_centroids(
 }
 
 pub fn pair_mirror_groups(groups: &mut HashMap<GroupId, NeuronGroup>, a: GroupId, b: GroupId) {
-    if let Some(g) = groups.get_mut(&a) { g.mirror_group = Some(b); }
-    if let Some(g) = groups.get_mut(&b) { g.mirror_group = Some(a); }
+    if let Some(g) = groups.get_mut(&a) {
+        g.mirror_group = Some(b);
+    }
+    if let Some(g) = groups.get_mut(&b) {
+        g.mirror_group = Some(a);
+    }
 }

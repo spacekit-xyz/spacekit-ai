@@ -1,5 +1,5 @@
-use crate::types::*;
 use crate::neuron::Neuron;
+use crate::types::*;
 use std::collections::HashMap;
 
 /// System 3: Spike-Timing-Dependent Plasticity (STDP)
@@ -38,10 +38,14 @@ pub fn update_stdp(
     };
 
     if let Some(pre_neuron) = neurons.get_mut(&pre_id) {
-        if pre_neuron.frozen { return; }
+        if pre_neuron.frozen {
+            return;
+        }
         for synapse in pre_neuron.synapses.iter_mut() {
             if synapse.target == post_id {
-                if synapse.frozen { break; }
+                if synapse.frozen {
+                    break;
+                }
                 // Clamp preserves sign: inhibitory synapses stay inhibitory
                 synapse.strength = (synapse.strength + delta_w).clamp(-1.5, 1.5);
 
@@ -84,10 +88,7 @@ pub fn record_firing(
 }
 
 /// Returns which neurons fired (crossed threshold) in this tick
-pub fn get_fired_neurons(
-    neurons: &HashMap<NeuronId, Neuron>,
-    threshold: f32,
-) -> Vec<NeuronId> {
+pub fn get_fired_neurons(neurons: &HashMap<NeuronId, Neuron>, threshold: f32) -> Vec<NeuronId> {
     neurons
         .values()
         .filter(|n| n.activation >= threshold)

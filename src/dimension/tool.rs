@@ -107,8 +107,12 @@ impl ToolRegistry {
         // Require actual arithmetic context: digits, or operators adjacent to spaces/digits.
         // Reject '/' inside words like "async/await", "tcp/ip", "read/write".
         let has_digit = lower.chars().any(|c| c.is_ascii_digit());
-        let has_arith_op = lower.contains(" * ") || lower.contains(" + ") || lower.contains(" / ")
-            || lower.contains(" minus ") || lower.contains(" plus ") || lower.contains(" times ");
+        let has_arith_op = lower.contains(" * ")
+            || lower.contains(" + ")
+            || lower.contains(" / ")
+            || lower.contains(" minus ")
+            || lower.contains(" plus ")
+            || lower.contains(" times ");
         let has_numeric_signal = has_digit || has_arith_op;
         let mut best: Option<(usize, &ToolSchema)> = None;
 
@@ -119,11 +123,16 @@ impl ToolRegistry {
             if schema.name == "calculator" && !has_numeric_signal {
                 continue;
             }
-            let hits = schema.triggers.iter()
+            let hits = schema
+                .triggers
+                .iter()
                 .filter(|t| lower.contains(t.as_str()))
                 .count();
             if hits > 0 {
-                if best.as_ref().map_or(true, |(prev_hits, _)| hits > *prev_hits) {
+                if best
+                    .as_ref()
+                    .map_or(true, |(prev_hits, _)| hits > *prev_hits)
+                {
                     best = Some((hits, schema));
                 }
             }
@@ -141,7 +150,9 @@ impl ToolRegistry {
     /// Returns true if any registered tool matches the text.
     pub fn has_match(&self, text: &str) -> bool {
         let lower = text.to_ascii_lowercase();
-        self.tools.iter().any(|s| s.triggers.iter().any(|t| lower.contains(t.as_str())))
+        self.tools
+            .iter()
+            .any(|s| s.triggers.iter().any(|t| lower.contains(t.as_str())))
     }
 
     /// Create a registry pre-loaded with built-in tool schemas.
@@ -168,7 +179,10 @@ fn extract_arguments(schema: &ToolSchema, text: &str) -> HashMap<String, String>
             }
         }
         "web_search" => {
-            if let Some(query) = extract_after_keyword(text, &["search for", "look up", "find information about", "search"]) {
+            if let Some(query) = extract_after_keyword(
+                text,
+                &["search for", "look up", "find information about", "search"],
+            ) {
                 args.insert("query".to_string(), query);
             }
         }
@@ -203,7 +217,8 @@ fn extract_math_expression(text: &str) -> Option<String> {
     for prefix in prefixes {
         if let Some(pos) = text.find(prefix) {
             let rest = text[pos + prefix.len()..].trim();
-            let expr: String = rest.chars()
+            let expr: String = rest
+                .chars()
                 .take_while(|c| c.is_ascii_digit() || " +-*/.()%^".contains(*c))
                 .collect();
             let expr = expr.trim().to_string();
@@ -220,7 +235,10 @@ fn extract_after_keyword(text: &str, keywords: &[&str]) -> Option<String> {
         if let Some(pos) = text.find(kw) {
             let rest = text[pos + kw.len()..].trim();
             if !rest.is_empty() {
-                return Some(rest.trim_matches(|c: char| c == '"' || c == '\'').to_string());
+                return Some(
+                    rest.trim_matches(|c: char| c == '"' || c == '\'')
+                        .to_string(),
+                );
             }
         }
     }
@@ -239,7 +257,18 @@ fn extract_code_block(text: &str) -> Option<String> {
 }
 
 fn extract_language(text: &str) -> Option<String> {
-    let langs = ["python", "rust", "javascript", "typescript", "ruby", "go", "java", "c++", "bash", "shell"];
+    let langs = [
+        "python",
+        "rust",
+        "javascript",
+        "typescript",
+        "ruby",
+        "go",
+        "java",
+        "c++",
+        "bash",
+        "shell",
+    ];
     for lang in langs {
         if text.contains(lang) {
             return Some(lang.to_string());
@@ -269,14 +298,12 @@ fn builtin_calculator() -> ToolSchema {
     ToolSchema {
         name: "calculator".to_string(),
         description: "Evaluate arithmetic expressions".to_string(),
-        parameters: vec![
-            ToolParam {
-                name: "expression".to_string(),
-                param_type: ParamType::String,
-                description: "The mathematical expression to evaluate".to_string(),
-                required: true,
-            },
-        ],
+        parameters: vec![ToolParam {
+            name: "expression".to_string(),
+            param_type: ParamType::String,
+            description: "The mathematical expression to evaluate".to_string(),
+            required: true,
+        }],
         triggers: vec![
             "calculate".to_string(),
             "compute".to_string(),
@@ -297,14 +324,12 @@ fn builtin_web_search() -> ToolSchema {
     ToolSchema {
         name: "web_search".to_string(),
         description: "Search the web for information".to_string(),
-        parameters: vec![
-            ToolParam {
-                name: "query".to_string(),
-                param_type: ParamType::String,
-                description: "The search query".to_string(),
-                required: true,
-            },
-        ],
+        parameters: vec![ToolParam {
+            name: "query".to_string(),
+            param_type: ParamType::String,
+            description: "The search query".to_string(),
+            required: true,
+        }],
         triggers: vec![
             "search for".to_string(),
             "look up".to_string(),
@@ -345,14 +370,12 @@ fn builtin_file_reader() -> ToolSchema {
     ToolSchema {
         name: "file_reader".to_string(),
         description: "Read the contents of a file".to_string(),
-        parameters: vec![
-            ToolParam {
-                name: "path".to_string(),
-                param_type: ParamType::String,
-                description: "File path to read".to_string(),
-                required: true,
-            },
-        ],
+        parameters: vec![ToolParam {
+            name: "path".to_string(),
+            param_type: ParamType::String,
+            description: "File path to read".to_string(),
+            required: true,
+        }],
         triggers: vec![
             "read file".to_string(),
             "show file".to_string(),
@@ -401,9 +424,14 @@ mod tests {
     #[test]
     fn test_match_code_runner() {
         let reg = ToolRegistry::with_builtins();
-        let call = reg.match_tool("run this python code: print('hello')").unwrap();
+        let call = reg
+            .match_tool("run this python code: print('hello')")
+            .unwrap();
         assert_eq!(call.tool_name, "code_runner");
-        assert!(call.arguments.get("language").map_or(false, |l| l == "python"));
+        assert!(call
+            .arguments
+            .get("language")
+            .map_or(false, |l| l == "python"));
     }
 
     #[test]
@@ -446,16 +474,31 @@ mod tests {
 
     #[test]
     fn test_extract_math_expression() {
-        assert_eq!(extract_math_expression("calculate 2 + 3"), Some("2 + 3".to_string()));
-        assert_eq!(extract_math_expression("what is 100 / 5"), Some("100 / 5".to_string()));
-        assert_eq!(extract_math_expression("compute 3.14 * 2"), Some("3.14 * 2".to_string()));
+        assert_eq!(
+            extract_math_expression("calculate 2 + 3"),
+            Some("2 + 3".to_string())
+        );
+        assert_eq!(
+            extract_math_expression("what is 100 / 5"),
+            Some("100 / 5".to_string())
+        );
+        assert_eq!(
+            extract_math_expression("compute 3.14 * 2"),
+            Some("3.14 * 2".to_string())
+        );
         assert_eq!(extract_math_expression("explain recursion"), None);
     }
 
     #[test]
     fn test_extract_file_path() {
-        assert_eq!(extract_file_path("read file src/main.rs"), Some("src/main.rs".to_string()));
-        assert_eq!(extract_file_path("show me /tmp/data.txt please"), Some("/tmp/data.txt".to_string()));
+        assert_eq!(
+            extract_file_path("read file src/main.rs"),
+            Some("src/main.rs".to_string())
+        );
+        assert_eq!(
+            extract_file_path("show me /tmp/data.txt please"),
+            Some("/tmp/data.txt".to_string())
+        );
     }
 
     #[test]

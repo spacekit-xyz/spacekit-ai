@@ -19,4 +19,7 @@ cargo run --release --bin growformer-demos -- --phase3u-vjepa-wm
 
 echo "OK: V-JEPA ${MODE} smoke finished."
 echo "For Meta weights: VJEPA_MODE=hf bash scripts/smoke_vjepa_export.sh"
-echo "  (requires: pip install torch transformers; model facebook/vjepa2-vitl-fpc64-256)"
+echo "  (requires: recent transformers with vjepa2 support; torch; model facebook/vjepa2-vitl-fpc64-256)"
+echo "Real-log path: --phase5g-vjepa-real-log (frozen-vision on dumped log);"
+echo "  HF: python3 scripts/export_vjepa_features.py --mode hf --log data/wm/vjepa_real_log/visuomotor_log_v1.jsonl \\"
+echo "      --out data/wm/vjepa_export_hf_real_log.json"

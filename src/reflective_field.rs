@@ -77,7 +77,11 @@ pub struct GoalAttractor {
 
 impl GoalAttractor {
     pub fn new(target: Vec<f32>, pull: f32, label: impl Into<String>) -> Self {
-        Self { target, pull: pull.clamp(0.0, 1.0), label: label.into() }
+        Self {
+            target,
+            pull: pull.clamp(0.0, 1.0),
+            label: label.into(),
+        }
     }
 
     /// Take one geodesic-style step of `cond` toward the target, preserving the
@@ -121,7 +125,11 @@ impl Default for ReflectiveWeights {
     fn default() -> Self {
         // Mirror the previously-scattered constants as the neutral baseline so an
         // unmodulated field reproduces the tuned behavior.
-        Self { identity: 0.10, activity: 0.15, drive: 0.20 }
+        Self {
+            identity: 0.10,
+            activity: 0.15,
+            drive: 0.20,
+        }
     }
 }
 
@@ -138,7 +146,11 @@ pub struct ReflectiveField {
 
 impl ReflectiveField {
     pub fn new(enabled: bool) -> Self {
-        Self { enabled, base: ReflectiveWeights::default(), attractor: None }
+        Self {
+            enabled,
+            base: ReflectiveWeights::default(),
+            attractor: None,
+        }
     }
 
     /// Set (or clear) the active goal-attractor for upcoming turns.
@@ -263,16 +275,29 @@ mod tests {
         let f = ReflectiveField::new(true);
         let single = f.weights(None, false);
         let multi = f.weights(None, true);
-        assert!(multi.activity > single.activity, "mid-conversation favors momentum");
+        assert!(
+            multi.activity > single.activity,
+            "mid-conversation favors momentum"
+        );
     }
 
     #[test]
     fn contentment_strengthens_identity_urgency_strengthens_drive() {
         let f = ReflectiveField::new(true);
         // Sated/content: high serotonin, low norepinephrine.
-        let sated = DriveState { hunger: 0.05, energy: 0.4, social: 0.95 }.map_neuromodulators();
+        let sated = DriveState {
+            hunger: 0.05,
+            energy: 0.4,
+            social: 0.95,
+        }
+        .map_neuromodulators();
         // Hungry/urgent: high norepinephrine, lower serotonin.
-        let hungry = DriveState { hunger: 0.95, energy: 0.8, social: 0.2 }.map_neuromodulators();
+        let hungry = DriveState {
+            hunger: 0.95,
+            energy: 0.8,
+            social: 0.2,
+        }
+        .map_neuromodulators();
 
         let ws = f.weights(Some(sated), false);
         let wh = f.weights(Some(hungry), false);
@@ -290,14 +315,43 @@ mod tests {
         let activity = vec![1.0f32; 32];
         let drive_lonely = [0.9f32]; // hungry/needy
         let drive_sated = [0.1f32];
-        let lonely_nm = DriveState { hunger: 0.9, energy: 0.7, social: 0.1 }.map_neuromodulators();
-        let sated_nm = DriveState { hunger: 0.1, energy: 0.5, social: 0.9 }.map_neuromodulators();
+        let lonely_nm = DriveState {
+            hunger: 0.9,
+            energy: 0.7,
+            social: 0.1,
+        }
+        .map_neuromodulators();
+        let sated_nm = DriveState {
+            hunger: 0.1,
+            energy: 0.5,
+            social: 0.9,
+        }
+        .map_neuromodulators();
 
-        f.compose(&mut a, ocean, &activity, &drive_lonely, Some(lonely_nm), true, 3);
-        f.compose(&mut b, ocean, &activity, &drive_sated, Some(sated_nm), true, 3);
+        f.compose(
+            &mut a,
+            ocean,
+            &activity,
+            &drive_lonely,
+            Some(lonely_nm),
+            true,
+            3,
+        );
+        f.compose(
+            &mut b,
+            ocean,
+            &activity,
+            &drive_sated,
+            Some(sated_nm),
+            true,
+            3,
+        );
 
         let diff: f32 = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).sum();
-        assert!(diff > 0.01, "different drive states must produce different conditioning: {diff}");
+        assert!(
+            diff > 0.01,
+            "different drive states must produce different conditioning: {diff}"
+        );
     }
 
     #[test]
@@ -307,7 +361,10 @@ mod tests {
         let mut cond = vec![0.0, 1.0, 0.0, 0.0];
         let before = cosine(&cond, &target);
         let after = att.apply(&mut cond);
-        assert!(after > before, "one step should raise alignment: {before} → {after}");
+        assert!(
+            after > before,
+            "one step should raise alignment: {before} → {after}"
+        );
     }
 
     #[test]
@@ -338,14 +395,22 @@ mod tests {
         let before = norm(&cond);
         att.apply(&mut cond);
         let after = norm(&cond);
-        assert!((before - after).abs() < 1e-4, "magnitude preserved: {before} vs {after}");
+        assert!(
+            (before - after).abs() < 1e-4,
+            "magnitude preserved: {before} vs {after}"
+        );
     }
 
     #[test]
     fn weights_stay_bounded_under_extremes() {
         let f = ReflectiveField::new(true);
         for &(h, e, s) in &[(1.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)] {
-            let nm = DriveState { hunger: h, energy: e, social: s }.map_neuromodulators();
+            let nm = DriveState {
+                hunger: h,
+                energy: e,
+                social: s,
+            }
+            .map_neuromodulators();
             let w = f.weights(Some(nm), true);
             assert!(w.identity >= 0.0 && w.identity <= 0.5);
             assert!(w.activity >= 0.0 && w.activity <= 0.6);

@@ -1,10 +1,9 @@
 use growformer::clifford::{
-    causal_block_bivectors, causal_block_interval, causal_block_vector, classify_interval,
-    embed_bridge_vector, temporal_ordering_loss, temporal_ordering_score,
-    causal_forward_energy, causal_retro_energy, causal_intervention_energy,
-    causal_grade_logits, causal_grade_loss, combined_causal_loss,
-    causal_contrastive_repulsion, CausalGrade, IntervalType,
-    CAUSAL_BLADE_COUNT, CAUSAL_BLOCK_DIM,
+    causal_block_bivectors, causal_block_interval, causal_block_vector,
+    causal_contrastive_repulsion, causal_forward_energy, causal_grade_logits, causal_grade_loss,
+    causal_intervention_energy, causal_retro_energy, classify_interval, combined_causal_loss,
+    embed_bridge_vector, temporal_ordering_loss, temporal_ordering_score, CausalGrade,
+    IntervalType, CAUSAL_BLADE_COUNT, CAUSAL_BLOCK_DIM,
 };
 use growformer::dimension::language::{
     CausalAnnotation, EncoderPreset, HashingLanguageEncoder, LanguageEncoder,
@@ -130,14 +129,21 @@ fn causal_block_interval_varies_across_rows() {
 
     assert!(!intervals.is_empty());
 
-    let timelike = intervals.iter().filter(|(_, _, t)| *t == IntervalType::Timelike).count();
-    let spacelike = intervals.iter().filter(|(_, _, t)| *t == IntervalType::Spacelike).count();
-    let lightlike = intervals.iter().filter(|(_, _, t)| *t == IntervalType::Lightlike).count();
+    let timelike = intervals
+        .iter()
+        .filter(|(_, _, t)| *t == IntervalType::Timelike)
+        .count();
+    let spacelike = intervals
+        .iter()
+        .filter(|(_, _, t)| *t == IntervalType::Spacelike)
+        .count();
+    let lightlike = intervals
+        .iter()
+        .filter(|(_, _, t)| *t == IntervalType::Lightlike)
+        .count();
 
     println!("--- Causal block intervals ({} pairs) ---", intervals.len());
-    println!(
-        "  Timelike: {timelike}, Spacelike: {spacelike}, Lightlike: {lightlike}"
-    );
+    println!("  Timelike: {timelike}, Spacelike: {spacelike}, Lightlike: {lightlike}");
     for (id, s2, itype) in &intervals {
         println!("  {id}: s²={s2:.4} ({itype:?})");
     }
@@ -170,9 +176,7 @@ fn temporal_ordering_loss_nonzero_on_untrained_encoder() {
 
     assert!(count > 0);
     let avg = total_loss / count as f32;
-    println!(
-        "Average temporal ordering loss (untrained, margin=0.5): {avg:.4} over {count} pairs"
-    );
+    println!("Average temporal ordering loss (untrained, margin=0.5): {avg:.4} over {count} pairs");
     println!("(This is the baseline that training should reduce.)");
 }
 
@@ -189,14 +193,13 @@ fn causal_grade_distribution_baseline() {
     let mut total = 0usize;
 
     for row in &rows {
-        let Some(ref causal) = row.causal else { continue };
+        let Some(ref causal) = row.causal else {
+            continue;
+        };
         let (Some(ref cause), Some(ref effect)) = (&causal.cause_span, &causal.effect_span) else {
             continue;
         };
-        let grade = CausalGrade::from_labels(
-            &causal.causal_type,
-            causal.causal_subtype.as_deref(),
-        );
+        let grade = CausalGrade::from_labels(&causal.causal_type, causal.causal_subtype.as_deref());
         match grade {
             CausalGrade::Forward => forward_count += 1,
             CausalGrade::Retrospective => retro_count += 1,
@@ -209,9 +212,12 @@ fn causal_grade_distribution_baseline() {
         let loss = causal_grade_loss(&cause_mv, &effect_mv, grade);
         grade_loss_sum += loss;
 
-        let predicted = logits.iter().enumerate()
+        let predicted = logits
+            .iter()
+            .enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .map(|(i, _)| i).unwrap_or(0);
+            .map(|(i, _)| i)
+            .unwrap_or(0);
         if predicted == grade.class_index() {
             grade_correct += 1;
         }
@@ -219,14 +225,30 @@ fn causal_grade_distribution_baseline() {
     }
 
     println!("--- Causal grade distribution ({total} rows) ---");
-    println!("  Forward: {forward_count}, Retrospective: {retro_count}, Interventional: {interv_count}");
-    let accuracy = if total > 0 { grade_correct as f32 / total as f32 } else { 0.0 };
-    let avg_loss = if total > 0 { grade_loss_sum / total as f32 } else { 0.0 };
-    println!("  Grade accuracy (untrained): {:.1}% ({grade_correct}/{total})", accuracy * 100.0);
+    println!(
+        "  Forward: {forward_count}, Retrospective: {retro_count}, Interventional: {interv_count}"
+    );
+    let accuracy = if total > 0 {
+        grade_correct as f32 / total as f32
+    } else {
+        0.0
+    };
+    let avg_loss = if total > 0 {
+        grade_loss_sum / total as f32
+    } else {
+        0.0
+    };
+    println!(
+        "  Grade accuracy (untrained): {:.1}% ({grade_correct}/{total})",
+        accuracy * 100.0
+    );
     println!("  Average grade CE loss: {avg_loss:.4}");
     println!("(Baseline: random would be ~33.3%. Improvement comes from training.)");
 
-    assert!(total >= 37, "should have at least 37 causal rows with spans");
+    assert!(
+        total >= 37,
+        "should have at least 37 causal rows with spans"
+    );
 }
 
 #[test]
@@ -239,14 +261,13 @@ fn causal_energy_profiles_differ_by_grade() {
     let mut int_energies: Vec<f32> = Vec::new();
 
     for row in &rows {
-        let Some(ref causal) = row.causal else { continue };
+        let Some(ref causal) = row.causal else {
+            continue;
+        };
         let (Some(ref cause), Some(ref effect)) = (&causal.cause_span, &causal.effect_span) else {
             continue;
         };
-        let grade = CausalGrade::from_labels(
-            &causal.causal_type,
-            causal.causal_subtype.as_deref(),
-        );
+        let grade = CausalGrade::from_labels(&causal.causal_type, causal.causal_subtype.as_deref());
         let cause_mv = embed_text(&encoder, cause);
         let effect_mv = embed_text(&encoder, effect);
 
@@ -262,13 +283,29 @@ fn causal_energy_profiles_differ_by_grade() {
     }
 
     let avg = |v: &[f32]| -> f32 {
-        if v.is_empty() { 0.0 } else { v.iter().sum::<f32>() / v.len() as f32 }
+        if v.is_empty() {
+            0.0
+        } else {
+            v.iter().sum::<f32>() / v.len() as f32
+        }
     };
 
     println!("--- Causal energy profiles (untrained baseline) ---");
-    println!("  Forward boost-plane norm (avg): {:.4} ({} rows)", avg(&fwd_energies), fwd_energies.len());
-    println!("  Retro |e_03| (avg):             {:.4} ({} rows)", avg(&ret_energies), ret_energies.len());
-    println!("  Interventional bivector mag (avg): {:.4} ({} rows)", avg(&int_energies), int_energies.len());
+    println!(
+        "  Forward boost-plane norm (avg): {:.4} ({} rows)",
+        avg(&fwd_energies),
+        fwd_energies.len()
+    );
+    println!(
+        "  Retro |e_03| (avg):             {:.4} ({} rows)",
+        avg(&ret_energies),
+        ret_energies.len()
+    );
+    println!(
+        "  Interventional bivector mag (avg): {:.4} ({} rows)",
+        avg(&int_energies),
+        int_energies.len()
+    );
     println!("(Training should separate these profiles further.)");
 
     assert!(!fwd_energies.is_empty());
@@ -286,22 +323,26 @@ fn contrastive_repulsion_baseline_on_contrast_groups() {
         effect_mv: growformer::clifford::Multivector,
         grade: CausalGrade,
     }
-    let mut groups: std::collections::HashMap<String, Vec<GradeEntry>> = std::collections::HashMap::new();
+    let mut groups: std::collections::HashMap<String, Vec<GradeEntry>> =
+        std::collections::HashMap::new();
 
     for row in &rows {
-        let Some(ref causal) = row.causal else { continue };
+        let Some(ref causal) = row.causal else {
+            continue;
+        };
         let (Some(ref cause), Some(ref effect)) = (&causal.cause_span, &causal.effect_span) else {
             continue;
         };
-        let Some(ref cg) = causal.contrast_group else { continue };
-        let grade = CausalGrade::from_labels(
-            &causal.causal_type,
-            causal.causal_subtype.as_deref(),
-        );
+        let Some(ref cg) = causal.contrast_group else {
+            continue;
+        };
+        let grade = CausalGrade::from_labels(&causal.causal_type, causal.causal_subtype.as_deref());
         let cause_mv = embed_text(&encoder, cause);
         let effect_mv = embed_text(&encoder, effect);
         groups.entry(cg.clone()).or_default().push(GradeEntry {
-            cause_mv, effect_mv, grade,
+            cause_mv,
+            effect_mv,
+            grade,
         });
     }
 
@@ -311,7 +352,9 @@ fn contrastive_repulsion_baseline_on_contrast_groups() {
     for (group_name, entries) in &groups {
         for (i, ei) in entries.iter().enumerate() {
             for ej in entries.iter().skip(i + 1) {
-                if ei.grade == ej.grade { continue; }
+                if ei.grade == ej.grade {
+                    continue;
+                }
                 let (fwd, ret) = if ei.grade == CausalGrade::Forward
                     || (ei.grade != CausalGrade::Retrospective
                         && ej.grade == CausalGrade::Retrospective)
@@ -331,10 +374,17 @@ fn contrastive_repulsion_baseline_on_contrast_groups() {
         }
     }
 
-    let avg_rep = if pair_count > 0 { total_repulsion / pair_count as f32 } else { 0.0 };
+    let avg_rep = if pair_count > 0 {
+        total_repulsion / pair_count as f32
+    } else {
+        0.0
+    };
     println!("\n--- Contrastive repulsion baseline ---");
     println!("  Pairs: {pair_count}, Avg repulsion: {avg_rep:.4}");
     println!("(Training should push repulsion toward 0 as grades separate.)");
 
-    assert!(pair_count >= 5, "should have at least 5 cross-grade pairs, got {pair_count}");
+    assert!(
+        pair_count >= 5,
+        "should have at least 5 cross-grade pairs, got {pair_count}"
+    );
 }

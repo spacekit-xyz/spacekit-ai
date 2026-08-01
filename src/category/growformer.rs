@@ -3,10 +3,7 @@
 // tree, trainable linear heads, three-term disentanglement, cross-branch dropout.
 
 use crate::category::curriculum::{AuxLabelLoss, CurriculumScheduler};
-use crate::category::disentanglement::{
-    combined_loss_full, cosine_sim,
-    LossBreakdown, SimpleRng,
-};
+use crate::category::disentanglement::{combined_loss_full, cosine_sim, LossBreakdown, SimpleRng};
 use crate::category::forward::{
     align_to_dim, apply_weight_grad_sgd, bifunctor_branch_vectors,
     bifunctor_branch_vectors_backward_acc, char_hash_embed, record_embedding, zero_weight_clone,
@@ -16,11 +13,11 @@ use crate::category::linear_head::LinearHead;
 use crate::category::node::{CategoricalNode, NodeMetadata};
 use crate::category::pythagoras::{nearest_pythagorean_split, PythagorasNode};
 use crate::category::sentiment::{entity_to_aux_category, ParsedInput, SentimentFunctor};
-use crate::category::{Layer, NodeId};
 use crate::category::training::{AuxCategory, SentimentLabel, TrainingBatch};
+use crate::category::{Layer, NodeId};
 use crate::clifford::{
-    embed_bridge_vector, temporal_ordering_loss, combined_causal_loss,
-    causal_contrastive_repulsion, CausalGrade,
+    causal_contrastive_repulsion, combined_causal_loss, embed_bridge_vector,
+    temporal_ordering_loss, CausalGrade,
 };
 use std::collections::HashMap;
 
@@ -192,7 +189,10 @@ impl GrowformerNode {
             return false;
         }
 
-        match self.node.grow(left_w, right_w, policy.pythagorean_tolerance) {
+        match self
+            .node
+            .grow(left_w, right_w, policy.pythagorean_tolerance)
+        {
             Ok(()) => {
                 self.state.grow_count += 1;
                 println!("[grow]  {}", self.node.summary());
@@ -295,16 +295,10 @@ impl GrowformerTrainer {
 
     pub fn with_config(curriculum: CurriculumScheduler, config: TrainerConfig) -> Self {
         let mut hrng = SimpleRng::new(config.head_seed);
-        let sentiment_head = LinearHead::new_random(
-            config.branch_dim,
-            SentimentLabel::num_classes(),
-            &mut hrng,
-        );
-        let aux_head = LinearHead::new_random(
-            config.branch_dim,
-            AuxCategory::num_classes(),
-            &mut hrng,
-        );
+        let sentiment_head =
+            LinearHead::new_random(config.branch_dim, SentimentLabel::num_classes(), &mut hrng);
+        let aux_head =
+            LinearHead::new_random(config.branch_dim, AuxCategory::num_classes(), &mut hrng);
         Self {
             nodes: HashMap::new(),
             curriculum,
@@ -364,7 +358,8 @@ impl GrowformerTrainer {
 
         let mut sent_batch: Vec<Vec<f32>> = Vec::with_capacity(batch.len());
         let mut ent_batch: Vec<Vec<f32>> = Vec::with_capacity(batch.len());
-        let labels: Vec<SentimentLabel> = batch.records.iter().map(|r| r.sentiment.clone()).collect();
+        let labels: Vec<SentimentLabel> =
+            batch.records.iter().map(|r| r.sentiment.clone()).collect();
 
         let mut sum_sent_ce = 0.0f32;
         let mut sum_aux = 0.0f32;
@@ -398,9 +393,7 @@ impl GrowformerTrainer {
                 let g = self.aux_head.grad_input_ce(&e, ai);
                 self.aux_head
                     .step_ce(&e, ai, lr * config.aux_label_lambda.max(0.05));
-                g.into_iter()
-                    .map(|x| x * config.aux_label_lambda)
-                    .collect()
+                g.into_iter().map(|x| x * config.aux_label_lambda).collect()
             } else {
                 vec![0.0f32; branch_dim]
             };
@@ -455,16 +448,14 @@ impl GrowformerTrainer {
             let effect_emb = char_hash_embed(es, embed_dim);
             let cause_mv = embed_bridge_vector(&cause_emb);
             let effect_mv = embed_bridge_vector(&effect_emb);
-            let grade = CausalGrade::from_labels(
-                &ca.causal_type,
-                ca.causal_subtype.as_deref(),
-            );
-            let (_ord, _grd, row_loss) = combined_causal_loss(
-                &cause_mv, &effect_mv, grade, causal_margin, grade_lambda,
-            );
+            let grade = CausalGrade::from_labels(&ca.causal_type, ca.causal_subtype.as_deref());
+            let (_ord, _grd, row_loss) =
+                combined_causal_loss(&cause_mv, &effect_mv, grade, causal_margin, grade_lambda);
             causal_loss_sum += row_loss;
             causal_rows.push(CausalRow {
-                cause_mv, effect_mv, grade,
+                cause_mv,
+                effect_mv,
+                grade,
                 contrast_group: ca.contrast_group.clone(),
             });
         }
@@ -480,10 +471,16 @@ impl GrowformerTrainer {
             let mut rep_sum = 0.0f32;
             let mut rep_cnt = 0u32;
             for (i, ri) in causal_rows.iter().enumerate() {
-                let Some(ref cg_i) = ri.contrast_group else { continue };
+                let Some(ref cg_i) = ri.contrast_group else {
+                    continue;
+                };
                 for rj in causal_rows.iter().skip(i + 1) {
-                    let Some(ref cg_j) = rj.contrast_group else { continue };
-                    if cg_i != cg_j || ri.grade == rj.grade { continue; }
+                    let Some(ref cg_j) = rj.contrast_group else {
+                        continue;
+                    };
+                    if cg_i != cg_j || ri.grade == rj.grade {
+                        continue;
+                    }
                     let (fwd, ret) = if ri.grade == CausalGrade::Forward
                         || (ri.grade != CausalGrade::Retrospective
                             && rj.grade == CausalGrade::Retrospective)
@@ -496,10 +493,15 @@ impl GrowformerTrainer {
                     rep_cnt += 1;
                 }
             }
-            if rep_cnt > 0 { rep_sum / rep_cnt as f32 } else { 0.0 }
+            if rep_cnt > 0 {
+                rep_sum / rep_cnt as f32
+            } else {
+                0.0
+            }
         };
 
-        let combined = total_loss + mean_aux
+        let combined = total_loss
+            + mean_aux
             + causal_lambda * causal_ordering_term
             + repulsion_lambda * causal_repulsion_term;
 
@@ -507,10 +509,7 @@ impl GrowformerTrainer {
             && self.config.branch_stats_every_steps > 0
             && step % self.config.branch_stats_every_steps == 0;
         if log_branch {
-            let n = self
-                .config
-                .branch_stats_sample_count
-                .min(sent_batch.len());
+            let n = self.config.branch_stats_sample_count.min(sent_batch.len());
             eprintln!(
                 "[branch] step={}  (s,e change with parse-tree SGD + dropout; frozen only if train stalled)",
                 step
@@ -634,7 +633,10 @@ impl GrowformerTrainer {
     }
 
     /// Batch over strings (each row uses hash embedding). Fails only per-item if parse node missing.
-    pub fn infer_head_batch<S: AsRef<str>>(&self, inputs: &[S]) -> Vec<Result<InferenceResult, &'static str>> {
+    pub fn infer_head_batch<S: AsRef<str>>(
+        &self,
+        inputs: &[S],
+    ) -> Vec<Result<InferenceResult, &'static str>> {
         inputs.iter().map(|s| self.infer_head(s.as_ref())).collect()
     }
 
@@ -642,7 +644,10 @@ impl GrowformerTrainer {
         &self,
         inputs: &[S],
     ) -> Vec<Result<InferenceDetail, &'static str>> {
-        inputs.iter().map(|s| self.infer_head_detail(s.as_ref())).collect()
+        inputs
+            .iter()
+            .map(|s| self.infer_head_detail(s.as_ref()))
+            .collect()
     }
 
     /// Classify using `SentimentFunctor` only (no linear heads).
@@ -707,7 +712,9 @@ impl GrowformerTrainer {
     /// Extract a [`CategoricalComposer`] from the trained state: clones the parse
     /// tree's Pythagoras composition + both linear heads. Returns `Err` if the
     /// parse node hasn't been registered.
-    pub fn to_composer(&self) -> Result<crate::category::compose::CategoricalComposer, &'static str> {
+    pub fn to_composer(
+        &self,
+    ) -> Result<crate::category::compose::CategoricalComposer, &'static str> {
         let parse = self.parse_node().ok_or("parse node not registered")?;
         Ok(crate::category::compose::CategoricalComposer::new(
             parse.node.composition.clone(),

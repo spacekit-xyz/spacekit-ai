@@ -1,7 +1,7 @@
 pub mod checkpoint;
-pub mod metabolic;
-pub mod growth;
-pub mod stdp;
 pub mod geometry;
-pub mod whorls;
+pub mod growth;
+pub mod metabolic;
 pub mod mirror;
+pub mod stdp;
+pub mod whorls;

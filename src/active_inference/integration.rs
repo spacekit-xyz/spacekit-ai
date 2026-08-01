@@ -29,9 +29,7 @@ pub fn observation_from_reflection_outcome(outcome: &ReflectionOutcome) -> Obser
     let quality = reflection_quality(outcome);
     let terminal = match outcome {
         ReflectionOutcome::Accept { .. } => ReflectionTerminal::Accepted,
-        ReflectionOutcome::Retry { attempt, .. } => ReflectionTerminal::Retry {
-            attempt: *attempt,
-        },
+        ReflectionOutcome::Retry { attempt, .. } => ReflectionTerminal::Retry { attempt: *attempt },
         ReflectionOutcome::Degrade { .. } => ReflectionTerminal::Degraded,
     };
     Observation::ReflectionCycle { quality, terminal }

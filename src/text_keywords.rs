@@ -48,7 +48,10 @@ mod tests {
     fn quarter_not_headquarters() {
         let lower = "we moved headquarters to austin".to_lowercase();
         assert!(!keyword_matches_in_lower(&lower, "quarter"));
-        assert!(keyword_matches_in_lower("great quarter everyone", "quarter"));
+        assert!(keyword_matches_in_lower(
+            "great quarter everyone",
+            "quarter"
+        ));
     }
 
     #[test]

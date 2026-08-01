@@ -35,13 +35,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::clifford::{
-    embed_bridge_vector, structural_fingerprint, structural_similarity,
-    apply_group_rotor, extract_conditioning, transfer_rotor,
-    Multivector, Rotor, GroupRotor,
+    apply_group_rotor, embed_bridge_vector, extract_conditioning, structural_fingerprint,
+    structural_similarity, transfer_rotor, GroupRotor, Multivector, Rotor,
 };
-use crate::infer_trace;
 use crate::dimension::group_gen::IndexedGenEnv;
 use crate::dimension::paramecium::InfraciliaryLattice;
+use crate::infer_trace;
 use crate::spectral::TokenDictionary;
 
 /// A node in the cognitive map: one program from one group.
@@ -127,9 +126,13 @@ impl CognitiveMap {
             let mv_i = Multivector::from_bivector_fp(&nodes[i].fingerprint);
             let mut scored: Vec<(usize, f32)> = Vec::new();
             for j in 0..n {
-                if i == j { continue; }
+                if i == j {
+                    continue;
+                }
                 // Cross-group edges are more valuable for reasoning
-                if nodes[i].group_idx == nodes[j].group_idx { continue; }
+                if nodes[i].group_idx == nodes[j].group_idx {
+                    continue;
+                }
                 let mv_j = Multivector::from_bivector_fp(&nodes[j].fingerprint);
                 let sim = structural_similarity(&mv_i, &mv_j);
                 if sim >= EDGE_THRESHOLD {
@@ -139,16 +142,29 @@ impl CognitiveMap {
             scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             scored.truncate(MAX_EDGES_PER_NODE);
             for &(j, sim) in &scored {
-                edges.push(CognitiveEdge { source: i, target: j, structural_sim: sim });
+                edges.push(CognitiveEdge {
+                    source: i,
+                    target: j,
+                    structural_sim: sim,
+                });
                 adjacency[i].push((j, sim));
             }
         }
 
-        CognitiveMap { nodes, edges, adjacency, index }
+        CognitiveMap {
+            nodes,
+            edges,
+            adjacency,
+            index,
+        }
     }
 
-    pub fn node_count(&self) -> usize { self.nodes.len() }
-    pub fn edge_count(&self) -> usize { self.edges.len() }
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
 }
 
 /// An activation during multi-group query.
@@ -193,10 +209,24 @@ const DEFAULT_INHIBITION: f32 = 0.15;
 const DEFAULT_SPREAD_DECAY: f32 = 0.6;
 
 fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f64 = a.iter().zip(b.iter()).map(|(&x, &y)| (x as f64) * (y as f64)).sum();
-    let na = a.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
-    let nb = b.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
-    if na < 1e-20 || nb < 1e-20 { return 0.0; }
+    let dot: f64 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| (x as f64) * (y as f64))
+        .sum();
+    let na = a
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        .sqrt();
+    let nb = b
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        .sqrt();
+    if na < 1e-20 || nb < 1e-20 {
+        return 0.0;
+    }
     (dot / (na * nb)) as f32
 }
 
@@ -225,17 +255,25 @@ impl ReasoningEngine {
         let mut activations = Vec::new();
         for (&gidx, env) in group_envs {
             let dict = self.group_dictionaries.get(&gidx);
-            let mut scored: Vec<(usize, f32)> = env.lattice.programs.iter().enumerate()
+            let mut scored: Vec<(usize, f32)> = env
+                .lattice
+                .programs
+                .iter()
+                .enumerate()
                 .map(|(i, prog)| (i, cosine_sim(cond, &prog.ema_centroid)))
                 .collect();
             scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
             for &(pidx, sim) in scored.iter().take(self.activations_per_group) {
-                if sim < 0.1 { break; }
+                if sim < 0.1 {
+                    break;
+                }
                 let text = dict
                     .map(|d| env.lattice.programs[pidx].display_text(d))
                     .unwrap_or_default();
-                let node_idx = self.cognitive_map.index
+                let node_idx = self
+                    .cognitive_map
+                    .index
                     .get(&(gidx, pidx))
                     .copied()
                     .unwrap_or(0);
@@ -253,12 +291,11 @@ impl ReasoningEngine {
     /// Phase 2: Wave settling on the cognitive map.
     /// Iterative propagation: activated nodes boost neighbors, lateral
     /// inhibition suppresses competing hypotheses.
-    fn settle_wave(
-        &self,
-        initial_activations: &[Activation],
-    ) -> Vec<f32> {
+    fn settle_wave(&self, initial_activations: &[Activation]) -> Vec<f32> {
         let n = self.cognitive_map.nodes.len();
-        if n == 0 { return Vec::new(); }
+        if n == 0 {
+            return Vec::new();
+        }
 
         let mut energy = vec![0.0f32; n];
 
@@ -275,7 +312,9 @@ impl ReasoningEngine {
 
             // Spreading activation: each node boosts its neighbors
             for i in 0..n {
-                if prev[i] < 0.05 { continue; }
+                if prev[i] < 0.05 {
+                    continue;
+                }
                 for &(neighbor, edge_weight) in &self.cognitive_map.adjacency[i] {
                     let spread = prev[i] * edge_weight * self.spread_decay;
                     energy[neighbor] = (energy[neighbor] + spread).min(1.0);
@@ -287,7 +326,9 @@ impl ReasoningEngine {
             for (i, e) in energy.iter().enumerate() {
                 let gidx = self.cognitive_map.nodes[i].group_idx;
                 let entry = group_max.entry(gidx).or_insert(0.0);
-                if *e > *entry { *entry = *e; }
+                if *e > *entry {
+                    *entry = *e;
+                }
             }
             for (i, e) in energy.iter_mut().enumerate() {
                 let gidx = self.cognitive_map.nodes[i].group_idx;
@@ -301,7 +342,9 @@ impl ReasoningEngine {
             // Normalize to prevent runaway
             let max_e = energy.iter().cloned().fold(0.0f32, f32::max);
             if max_e > 1.0 {
-                for e in &mut energy { *e /= max_e; }
+                for e in &mut energy {
+                    *e /= max_e;
+                }
             }
         }
 
@@ -330,7 +373,9 @@ impl ReasoningEngine {
 
         // Score nodes by BOTH wave energy AND direct input relevance.
         // This prevents a high-connectivity hub from winning regardless of input.
-        let mut scored: Vec<(usize, f32)> = energy.iter().enumerate()
+        let mut scored: Vec<(usize, f32)> = energy
+            .iter()
+            .enumerate()
             .filter(|(_, &e)| e > 0.1)
             .map(|(i, &e)| {
                 let node = &self.cognitive_map.nodes[i];
@@ -349,7 +394,9 @@ impl ReasoningEngine {
             let gidx = self.cognitive_map.nodes[node_idx].group_idx;
             if seen_groups.insert(gidx) {
                 best_per_group.push((node_idx, combined_score));
-                if best_per_group.len() >= 3 { break; }
+                if best_per_group.len() >= 3 {
+                    break;
+                }
             }
         }
 
@@ -367,7 +414,9 @@ impl ReasoningEngine {
         if best_per_group.len() == 1 {
             let (node_idx, e) = best_per_group[0];
             let node = &self.cognitive_map.nodes[node_idx];
-            let text = self.group_dictionaries.get(&node.group_idx)
+            let text = self
+                .group_dictionaries
+                .get(&node.group_idx)
                 .map(|d| node.display_text(d))
                 .unwrap_or_default();
             return ReasoningResult {
@@ -380,26 +429,31 @@ impl ReasoningEngine {
         }
 
         // Multi-group composition via transfer rotors
-        let source_groups: Vec<usize> = best_per_group.iter()
+        let source_groups: Vec<usize> = best_per_group
+            .iter()
             .map(|(ni, _)| self.cognitive_map.nodes[*ni].group_idx)
             .collect();
 
         // The primary node is the strongest activation
         let (primary_node_idx, primary_energy) = best_per_group[0];
         let primary_node = &self.cognitive_map.nodes[primary_node_idx];
-        let primary_text = self.group_dictionaries.get(&primary_node.group_idx)
+        let primary_text = self
+            .group_dictionaries
+            .get(&primary_node.group_idx)
             .map(|d| primary_node.display_text(d))
             .unwrap_or_default();
 
         // For each secondary group, extract transferred knowledge
         let mut transferred_fragments: Vec<(String, f32)> = Vec::new();
-        let primary_rotor = group_rotors.get(&primary_node.group_idx)
+        let primary_rotor = group_rotors
+            .get(&primary_node.group_idx)
             .map(|gr| gr.rotor())
             .unwrap_or_else(Rotor::identity);
 
         for &(node_idx, e) in best_per_group.iter().skip(1) {
             let node = &self.cognitive_map.nodes[node_idx];
-            let secondary_rotor = group_rotors.get(&node.group_idx)
+            let secondary_rotor = group_rotors
+                .get(&node.group_idx)
                 .map(|gr| gr.rotor())
                 .unwrap_or_else(Rotor::identity);
 
@@ -413,10 +467,11 @@ impl ReasoningEngine {
             // Measure alignment after transfer — how well does the transferred
             // concept fit the original query?
             let input_mv = embed_bridge_vector(cond);
-            let alignment = structural_similarity(&transferred_mv, &input_mv)
-                .max(0.0);
+            let alignment = structural_similarity(&transferred_mv, &input_mv).max(0.0);
 
-            let text = self.group_dictionaries.get(&node.group_idx)
+            let text = self
+                .group_dictionaries
+                .get(&node.group_idx)
                 .map(|d| node.display_text(d))
                 .unwrap_or_default();
 
@@ -456,10 +511,13 @@ impl ReasoningEngine {
             // synthetic marker (e.g. "__GROWFORMER_SENT_WITNESS__") and its
             // preceding training-sample text from leaking into the composed
             // System2 output when multiple lattice fragments are interleaved.
-            let cleaned = crate::dimension::language::strip_sentiment_lattice_witness_for_display(text);
+            let cleaned =
+                crate::dimension::language::strip_sentiment_lattice_witness_for_display(text);
             for sent in cleaned.split(". ").chain(cleaned.split(".\n")) {
                 let sent = sent.trim().trim_end_matches('.');
-                if sent.len() < 5 { continue; }
+                if sent.len() < 5 {
+                    continue;
+                }
                 if sent.contains(crate::dimension::language::SENTIMENT_LATTICE_WITNESS_CORE) {
                     continue;
                 }
@@ -472,21 +530,32 @@ impl ReasoningEngine {
         }
 
         if sentences.is_empty() {
-            return fragments.first().map(|(t, _)| t.clone()).unwrap_or_default();
+            return fragments
+                .first()
+                .map(|(t, _)| t.clone())
+                .unwrap_or_default();
         }
 
         // Score by weight and deduplicate
-        sentences.sort_by(|a, b| b.weight.partial_cmp(&a.weight).unwrap_or(std::cmp::Ordering::Equal));
+        sentences.sort_by(|a, b| {
+            b.weight
+                .partial_cmp(&a.weight)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let mut selected: Vec<String> = Vec::new();
         let mut total_len = 0;
         let max_len = 600;
 
         for sent in &sentences {
-            if total_len + sent.text.len() > max_len { break; }
+            if total_len + sent.text.len() > max_len {
+                break;
+            }
             // Rough dedup: skip if a selected sentence is very similar
             let duplicate = selected.iter().any(|s| {
-                let overlap = sent.text.split_whitespace()
+                let overlap = sent
+                    .text
+                    .split_whitespace()
                     .filter(|w| s.contains(w))
                     .count();
                 let total = sent.text.split_whitespace().count().max(1);
@@ -499,7 +568,10 @@ impl ReasoningEngine {
         }
 
         if selected.is_empty() {
-            return fragments.first().map(|(t, _)| t.clone()).unwrap_or_default();
+            return fragments
+                .first()
+                .map(|(t, _)| t.clone())
+                .unwrap_or_default();
         }
 
         selected.join(". ") + "."
@@ -527,9 +599,13 @@ impl ReasoningEngine {
         _primary_confidence: f32,
         group_envs: &HashMap<usize, IndexedGenEnv>,
     ) -> bool {
-        let mut group_scores: Vec<(usize, f32)> = group_envs.iter()
+        let mut group_scores: Vec<(usize, f32)> = group_envs
+            .iter()
             .map(|(&gidx, env)| {
-                let best_sim = env.lattice.programs.iter()
+                let best_sim = env
+                    .lattice
+                    .programs
+                    .iter()
                     .map(|p| cosine_sim(cond, &p.ema_centroid))
                     .fold(0.0f32, f32::max);
                 (gidx, best_sim)
@@ -632,10 +708,11 @@ impl WorkingMemory {
     /// Insert an entry, evicting the weakest if at capacity.
     pub fn insert(&mut self, entry: WorkingMemoryEntry) {
         if self.entries.len() >= self.capacity {
-            if let Some((min_idx, _)) = self.entries.iter().enumerate()
-                .min_by(|(_, a), (_, b)| a.activation.partial_cmp(&b.activation)
-                    .unwrap_or(std::cmp::Ordering::Equal))
-            {
+            if let Some((min_idx, _)) = self.entries.iter().enumerate().min_by(|(_, a), (_, b)| {
+                a.activation
+                    .partial_cmp(&b.activation)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }) {
                 if self.entries[min_idx].activation < entry.activation {
                     self.entries.swap_remove(min_idx);
                 } else {
@@ -653,7 +730,9 @@ impl WorkingMemory {
             self.coherence = 0.0;
             return;
         }
-        let total: f32 = self.entries.iter()
+        let total: f32 = self
+            .entries
+            .iter()
             .map(|e| cosine_sim(&e.embedding, &self.goal).max(0.0) * e.activation)
             .sum();
         self.coherence = total / self.entries.len() as f32;
@@ -690,7 +769,10 @@ pub enum StepAction {
     /// Retrieve a related program from a specific group.
     Retrieve { group_idx: usize },
     /// Apply a transfer rotor to map knowledge from one domain to another.
-    Transfer { source_group: usize, target_group: usize },
+    Transfer {
+        source_group: usize,
+        target_group: usize,
+    },
     /// Compose current working memory entries into a partial conclusion.
     Compose,
     /// Working memory is coherent enough; stop reasoning.
@@ -797,7 +879,9 @@ impl ReasoningEngine {
                 terminated_by = System2Termination::CoherenceReached;
                 infer_trace!(
                     "  [system2] step {} → TERMINATE (coherence {:.3} >= {:.3})",
-                    steps_taken, wm.coherence, config.coherence_threshold
+                    steps_taken,
+                    wm.coherence,
+                    config.coherence_threshold
                 );
                 break;
             }
@@ -828,7 +912,10 @@ impl ReasoningEngine {
                 StepAction::Retrieve { group_idx } => {
                     self.step_retrieve(&mut wm, group_idx, group_envs, config, steps_taken);
                 }
-                StepAction::Transfer { source_group, target_group } => {
+                StepAction::Transfer {
+                    source_group,
+                    target_group,
+                } => {
                     self.step_transfer(
                         &mut wm,
                         source_group,
@@ -863,7 +950,10 @@ impl ReasoningEngine {
                 }
                 StepAction::Terminate => {
                     terminated_by = System2Termination::CoherenceReached;
-                    infer_trace!("  [system2] step {} → operator chose TERMINATE", steps_taken);
+                    infer_trace!(
+                        "  [system2] step {} → operator chose TERMINATE",
+                        steps_taken
+                    );
                     break;
                 }
             }
@@ -873,7 +963,9 @@ impl ReasoningEngine {
 
         // Assemble final response from working memory
         let (text, confidence) = self.assemble_from_wm(&wm, cond);
-        let source_groups: Vec<usize> = wm.entries.iter()
+        let source_groups: Vec<usize> = wm
+            .entries
+            .iter()
             .map(|e| e.group_idx)
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
@@ -924,10 +1016,16 @@ impl ReasoningEngine {
             // Need diversity: find a group not yet in working memory
             // that has high structural similarity to an existing entry
             let existing_group = wm.entries.first().map(|e| e.group_idx).unwrap_or(0);
-            let best_related = self.find_related_group(existing_group, &group_activations, group_envs);
+            let best_related =
+                self.find_related_group(existing_group, &group_activations, group_envs);
             if let Some(target_group) = best_related {
-                infer_trace!("  [system2] → RETRIEVE from group {} (diversify)", target_group);
-                return StepAction::Retrieve { group_idx: target_group };
+                infer_trace!(
+                    "  [system2] → RETRIEVE from group {} (diversify)",
+                    target_group
+                );
+                return StepAction::Retrieve {
+                    group_idx: target_group,
+                };
             }
             // No related groups available; try compose with what we have
             return StepAction::Compose;
@@ -942,10 +1040,10 @@ impl ReasoningEngine {
             let (g2, _) = sorted_groups[1];
 
             // Check if we've already done a transfer between these groups
-            let has_transfer = wm.entries.iter().any(|e| {
-                e.step_produced > 0
-                    && e.text.starts_with("[transferred:")
-            });
+            let has_transfer = wm
+                .entries
+                .iter()
+                .any(|e| e.step_produced > 0 && e.text.starts_with("[transferred:"));
 
             if !has_transfer {
                 infer_trace!("  [system2] → TRANSFER from group {} to group {}", g2, g1);
@@ -969,7 +1067,11 @@ impl ReasoningEngine {
         group_envs: &HashMap<usize, IndexedGenEnv>,
     ) -> Option<usize> {
         // Use cognitive map edges to find structurally related groups
-        let source_nodes: Vec<usize> = self.cognitive_map.nodes.iter().enumerate()
+        let source_nodes: Vec<usize> = self
+            .cognitive_map
+            .nodes
+            .iter()
+            .enumerate()
             .filter(|(_, n)| n.group_idx == source_group)
             .map(|(i, _)| i)
             .collect();
@@ -986,7 +1088,8 @@ impl ReasoningEngine {
         }
 
         // Pick the most related group that we have an env for
-        group_scores.into_iter()
+        group_scores
+            .into_iter()
             .filter(|(g, _)| group_envs.contains_key(g))
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(g, _)| g)
@@ -1023,11 +1126,18 @@ impl ReasoningEngine {
         if best_sim >= config.min_activation {
             let prog = &env.lattice.programs[best_idx];
             let text = dict.map(|d| prog.display_text(d)).unwrap_or_default();
-            let node_idx = self.cognitive_map.index.get(&(group_idx, best_idx)).copied();
+            let node_idx = self
+                .cognitive_map
+                .index
+                .get(&(group_idx, best_idx))
+                .copied();
 
             infer_trace!(
                 "  [system2] step {} RETRIEVE: group={}, sim={:.3}, text_len={}",
-                step, group_idx, best_sim, text.len()
+                step,
+                group_idx,
+                best_sim,
+                text.len()
             );
 
             wm.insert(WorkingMemoryEntry {
@@ -1054,19 +1164,26 @@ impl ReasoningEngine {
         config: &System2Config,
         step: usize,
     ) {
-        let source_rotor = group_rotors.get(&source_group)
+        let source_rotor = group_rotors
+            .get(&source_group)
             .map(|gr| gr.rotor())
             .unwrap_or_else(Rotor::identity);
-        let target_rotor = group_rotors.get(&target_group)
+        let target_rotor = group_rotors
+            .get(&target_group)
             .map(|gr| gr.rotor())
             .unwrap_or_else(Rotor::identity);
         let xfer = transfer_rotor(&source_rotor, &target_rotor);
 
         // Find the strongest source entry in working memory
-        let source_entry = wm.entries.iter()
+        let source_entry = wm
+            .entries
+            .iter()
             .filter(|e| e.group_idx == source_group)
-            .max_by(|a, b| a.activation.partial_cmp(&b.activation)
-                .unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.activation
+                    .partial_cmp(&b.activation)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .cloned();
 
         if let Some(entry) = source_entry {
@@ -1082,14 +1199,20 @@ impl ReasoningEngine {
             if alignment >= config.transfer_threshold {
                 infer_trace!(
                     "  [system2] step {} TRANSFER: {}→{}, alignment={:.3}",
-                    step, source_group, target_group, alignment
+                    step,
+                    source_group,
+                    target_group,
+                    alignment
                 );
 
                 wm.insert(WorkingMemoryEntry {
                     node_idx: None,
                     group_idx: target_group,
                     embedding: transferred_emb,
-                    text: format!("[transferred: {}→{}] {}", source_group, target_group, entry.text),
+                    text: format!(
+                        "[transferred: {}→{}] {}",
+                        source_group, target_group, entry.text
+                    ),
                     activation: alignment,
                     step_produced: step,
                 });
@@ -1104,7 +1227,9 @@ impl ReasoningEngine {
             return;
         }
 
-        let fragments: Vec<(String, f32)> = wm.entries.iter()
+        let fragments: Vec<(String, f32)> = wm
+            .entries
+            .iter()
             .map(|e| (e.text.clone(), e.activation))
             .collect();
 
@@ -1143,10 +1268,15 @@ impl ReasoningEngine {
         }
 
         // If there's a composed entry (from a Compose step), prefer it
-        if let Some(composed) = wm.entries.iter()
+        if let Some(composed) = wm
+            .entries
+            .iter()
             .filter(|e| e.step_produced > 0 && e.text.len() > 20)
-            .max_by(|a, b| a.activation.partial_cmp(&b.activation)
-                .unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.activation
+                    .partial_cmp(&b.activation)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
         {
             let mut text = composed.text.clone();
             // Strip transfer markers from final output
@@ -1162,10 +1292,14 @@ impl ReasoningEngine {
 
         // Otherwise, assemble from individual entries
         let mut sorted: Vec<&WorkingMemoryEntry> = wm.entries.iter().collect();
-        sorted.sort_by(|a, b| b.activation.partial_cmp(&a.activation)
-            .unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| {
+            b.activation
+                .partial_cmp(&a.activation)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
-        let fragments: Vec<(String, f32)> = sorted.iter()
+        let fragments: Vec<(String, f32)> = sorted
+            .iter()
             .take(4)
             .map(|e| (e.text.clone(), e.activation))
             .collect();
@@ -1213,9 +1347,13 @@ impl ReasoningEngine {
         }
 
         // Check for cross-domain co-activation
-        let mut group_scores: Vec<(usize, f32)> = group_envs.iter()
+        let mut group_scores: Vec<(usize, f32)> = group_envs
+            .iter()
             .map(|(&gidx, env)| {
-                let best_sim = env.lattice.programs.iter()
+                let best_sim = env
+                    .lattice
+                    .programs
+                    .iter()
                     .map(|p| cosine_sim(cond, &p.ema_centroid))
                     .fold(0.0f32, f32::max);
                 (gidx, best_sim)
@@ -1239,14 +1377,16 @@ impl ReasoningEngine {
         let ambiguity = if top > 0.01 { second / top } else { 0.0 };
 
         // Complex topic hints suggest multi-step reasoning is valuable
-        let complex_topic = topic_hint.map(|t| {
-            t.contains("compare")
-                || t.contains("difference")
-                || t.contains("combine")
-                || t.contains("migrate")
-                || t.contains("refactor")
-                || t.contains("trade")
-        }).unwrap_or(false);
+        let complex_topic = topic_hint
+            .map(|t| {
+                t.contains("compare")
+                    || t.contains("difference")
+                    || t.contains("combine")
+                    || t.contains("migrate")
+                    || t.contains("refactor")
+                    || t.contains("trade")
+            })
+            .unwrap_or(false);
 
         ambiguity > 0.70 || complex_topic
     }
@@ -1267,29 +1407,54 @@ mod tests {
     fn test_wave_settling_converges() {
         let map = CognitiveMap {
             nodes: vec![
-                CognitiveNode { group_idx: 0, program_idx: 0, fingerprint: [0.1; 28], centroid: vec![1.0, 0.0], token_sequence: vec![1], verbatim_display_text: None },
-                CognitiveNode { group_idx: 1, program_idx: 0, fingerprint: [0.1; 28], centroid: vec![0.0, 1.0], token_sequence: vec![2], verbatim_display_text: None },
-                CognitiveNode { group_idx: 2, program_idx: 0, fingerprint: [0.0; 28], centroid: vec![0.5, 0.5], token_sequence: vec![3], verbatim_display_text: None },
+                CognitiveNode {
+                    group_idx: 0,
+                    program_idx: 0,
+                    fingerprint: [0.1; 28],
+                    centroid: vec![1.0, 0.0],
+                    token_sequence: vec![1],
+                    verbatim_display_text: None,
+                },
+                CognitiveNode {
+                    group_idx: 1,
+                    program_idx: 0,
+                    fingerprint: [0.1; 28],
+                    centroid: vec![0.0, 1.0],
+                    token_sequence: vec![2],
+                    verbatim_display_text: None,
+                },
+                CognitiveNode {
+                    group_idx: 2,
+                    program_idx: 0,
+                    fingerprint: [0.0; 28],
+                    centroid: vec![0.5, 0.5],
+                    token_sequence: vec![3],
+                    verbatim_display_text: None,
+                },
             ],
-            edges: vec![
-                CognitiveEdge { source: 0, target: 1, structural_sim: 0.8 },
-            ],
-            adjacency: vec![
-                vec![(1, 0.8)],
-                vec![(0, 0.8)],
-                vec![],
-            ],
+            edges: vec![CognitiveEdge {
+                source: 0,
+                target: 1,
+                structural_sim: 0.8,
+            }],
+            adjacency: vec![vec![(1, 0.8)], vec![(0, 0.8)], vec![]],
             index: HashMap::new(),
         };
 
         let engine = ReasoningEngine::new(map, HashMap::new());
-        let activations = vec![
-            Activation { node_idx: 0, group_idx: 0, similarity: 0.9, text: "hello".into() },
-        ];
+        let activations = vec![Activation {
+            node_idx: 0,
+            group_idx: 0,
+            similarity: 0.9,
+            text: "hello".into(),
+        }];
         let energy = engine.settle_wave(&activations);
         assert_eq!(energy.len(), 3);
         assert!(energy[0] > 0.5, "Primary activation should be strong");
-        assert!(energy[1] > 0.0, "Connected neighbor should activate via spreading");
+        assert!(
+            energy[1] > 0.0,
+            "Connected neighbor should activate via spreading"
+        );
         assert!(energy[2] < energy[1], "Unconnected node should be weaker");
     }
 }

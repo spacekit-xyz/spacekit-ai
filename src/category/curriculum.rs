@@ -39,8 +39,8 @@ impl Stage {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Scaffold => "SCAFFOLD",
-            Self::Loosen   => "LOOSEN",
-            Self::Harden   => "HARDEN",
+            Self::Loosen => "LOOSEN",
+            Self::Harden => "HARDEN",
         }
     }
 }
@@ -98,8 +98,8 @@ impl Default for CurriculumScheduler {
     fn default() -> Self {
         Self {
             scaffold_end: 100,
-            loosen_end:   250,
-            harden_grow_threshold:  0.15,
+            loosen_end: 250,
+            harden_grow_threshold: 0.15,
             harden_prune_threshold: 0.40,
         }
     }
@@ -135,26 +135,26 @@ impl CurriculumScheduler {
                 step,
                 aux_label_lambda: 0.3,
                 branch_dropout_p: 0.0,
-                growth_enabled:   false, // too early — regions not yet stable
-                prune_enabled:    false,
-                disentanglement:  DisentanglementLoss::new(DisentanglementWeights::stage_1()),
-                growth_policy:    GrowthPolicy::scaffold(),
+                growth_enabled: false, // too early — regions not yet stable
+                prune_enabled: false,
+                disentanglement: DisentanglementLoss::new(DisentanglementWeights::stage_1()),
+                growth_policy: GrowthPolicy::scaffold(),
             },
             Stage::Loosen => CurriculumConfig {
                 stage,
                 step,
-                aux_label_lambda: 0.0,  // labels dropped
+                aux_label_lambda: 0.0, // labels dropped
                 branch_dropout_p: 0.2,
-                growth_enabled:   false, // still building independence
-                prune_enabled:    false,
-                disentanglement:  DisentanglementLoss::new(DisentanglementWeights::stage_2()),
-                growth_policy:    GrowthPolicy::loosen(),
+                growth_enabled: false, // still building independence
+                prune_enabled: false,
+                disentanglement: DisentanglementLoss::new(DisentanglementWeights::stage_2()),
+                growth_policy: GrowthPolicy::loosen(),
             },
             Stage::Harden => {
                 // Growth only when disentanglement is tight enough
                 let growth_enabled = last_dis_loss < self.harden_grow_threshold;
                 // Prune when branches have collapsed (loss too high despite depth)
-                let prune_enabled  = last_dis_loss > self.harden_prune_threshold;
+                let prune_enabled = last_dis_loss > self.harden_prune_threshold;
                 CurriculumConfig {
                     stage,
                     step,
@@ -162,8 +162,8 @@ impl CurriculumScheduler {
                     branch_dropout_p: 0.1, // light dropout to maintain robustness
                     growth_enabled,
                     prune_enabled,
-                    disentanglement:  DisentanglementLoss::new(DisentanglementWeights::stage_3()),
-                    growth_policy:    GrowthPolicy::harden(),
+                    disentanglement: DisentanglementLoss::new(DisentanglementWeights::stage_3()),
+                    growth_policy: GrowthPolicy::harden(),
                 }
             }
         }
@@ -173,25 +173,21 @@ impl CurriculumScheduler {
     pub fn stage_progress(&self, step: usize) -> f32 {
         match self.stage(step) {
             Stage::Scaffold => step as f32 / self.scaffold_end as f32,
-            Stage::Loosen   => {
-                (step - self.scaffold_end) as f32
-                    / (self.loosen_end - self.scaffold_end) as f32
+            Stage::Loosen => {
+                (step - self.scaffold_end) as f32 / (self.loosen_end - self.scaffold_end) as f32
             }
-            Stage::Harden   => 1.0, // open-ended
+            Stage::Harden => 1.0, // open-ended
         }
     }
 
     pub fn summary(&self) {
         println!(
             "CurriculumScheduler: scaffold=[0,{}] loosen=[{},{}] harden=[{},∞]",
-            self.scaffold_end,
-            self.scaffold_end, self.loosen_end,
-            self.loosen_end,
+            self.scaffold_end, self.scaffold_end, self.loosen_end, self.loosen_end,
         );
         println!(
             "  grow_threshold={:.3} prune_threshold={:.3}",
-            self.harden_grow_threshold,
-            self.harden_prune_threshold,
+            self.harden_grow_threshold, self.harden_prune_threshold,
         );
     }
 }
@@ -223,7 +219,9 @@ impl AuxLabelLoss {
         let sum_exp: f32 = exp.iter().sum();
         let log_softmax: Vec<f32> = exp.iter().map(|e| (e / sum_exp).ln()).collect();
 
-        let ce: f32 = target.iter().zip(log_softmax.iter())
+        let ce: f32 = target
+            .iter()
+            .zip(log_softmax.iter())
             .map(|(t, ls)| -t * ls)
             .sum();
 

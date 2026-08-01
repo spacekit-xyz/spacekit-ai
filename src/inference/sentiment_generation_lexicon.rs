@@ -233,11 +233,15 @@ mod tests {
         assert!(!g.is_sentiment_lattice_topic_hint("identity"));
         assert_eq!(g.routing_coarse_for_hint("copium"), "mixed");
         assert_eq!(g.routing_coarse_for_hint("identity"), "neutral");
-        assert!(g.display_label_for_topic("negative_mild").contains("NEGATIVE"));
+        assert!(g
+            .display_label_for_topic("negative_mild")
+            .contains("NEGATIVE"));
         assert!(g.hard_reject_lexicon_substrings("[mask]xx"));
         let paxos_garble = "consensus algorithms — corporate- hr funding; fast behavior reporting a neutral frustration,- news,'.";
         assert!(g.hard_reject_lexicon_substrings(&paxos_garble.to_ascii_lowercase()));
-        assert!(g.hard_reject_lexicon_substrings("average operation — classic stop of public grievance"));
+        assert!(g.hard_reject_lexicon_substrings(
+            "average operation — classic stop of public grievance"
+        ));
         assert!(g
             .lattice_lexical_override_body("neutral")
             .is_some_and(|s| !s.is_empty()));

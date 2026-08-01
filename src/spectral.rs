@@ -76,7 +76,11 @@ pub fn hamming_decode(codeword: &[u8], data_bits: usize) -> Vec<u8> {
         let mut parity = 0u8;
         for pos in 1..=len {
             if pos & parity_pos != 0 {
-                parity ^= if pos - 1 < codeword.len() { codeword[pos - 1] } else { 0 };
+                parity ^= if pos - 1 < codeword.len() {
+                    codeword[pos - 1]
+                } else {
+                    0
+                };
             }
         }
         if parity != 0 {
@@ -149,7 +153,11 @@ impl E8Lattice {
         }
         let coset_dist = Self::dist_sq(x, &coset_point);
 
-        if d8_dist <= coset_dist { d8_point } else { coset_point }
+        if d8_dist <= coset_dist {
+            d8_point
+        } else {
+            coset_point
+        }
     }
 
     /// Nearest point in the D8 lattice (integer points with even coordinate sum).
@@ -202,7 +210,11 @@ impl E8Lattice {
             let offset = sub * 8;
             let mut block = [0.0f32; 8];
             for i in 0..8 {
-                block[i] = if offset + i < x.len() { x[offset + i] } else { 0.0 };
+                block[i] = if offset + i < x.len() {
+                    x[offset + i]
+                } else {
+                    0.0
+                };
             }
             let lattice_point = Self::nearest_point(&block);
             for i in 0..8 {
@@ -217,7 +229,8 @@ impl E8Lattice {
     /// E8 subspaces). Lower = better match to lattice structure.
     pub fn quantization_distance(x: &[f32]) -> f32 {
         let quantized = Self::quantize_64d(x);
-        x.iter().zip(quantized.iter())
+        x.iter()
+            .zip(quantized.iter())
             .map(|(a, b)| (a - b) * (a - b))
             .sum()
     }
@@ -249,11 +262,7 @@ impl E8Lattice {
             let end = (offset + 8).min(n);
             let slice_a = &qa[offset..end];
             let slice_b = &qb[offset..end];
-            let dot: f32 = slice_a
-                .iter()
-                .zip(slice_b.iter())
-                .map(|(x, y)| x * y)
-                .sum();
+            let dot: f32 = slice_a.iter().zip(slice_b.iter()).map(|(x, y)| x * y).sum();
             let na = slice_a.iter().map(|v| v * v).sum::<f32>().sqrt();
             let nb = slice_b.iter().map(|v| v * v).sum::<f32>().sqrt();
             if na > 1e-8 && nb > 1e-8 {
@@ -283,7 +292,11 @@ impl E8Lattice {
         let dot: f32 = qa.iter().zip(qb.iter()).map(|(x, y)| x * y).sum();
         let na = qa.iter().map(|v| v * v).sum::<f32>().sqrt();
         let nb = qb.iter().map(|v| v * v).sum::<f32>().sqrt();
-        let cos = if na > 1e-8 && nb > 1e-8 { dot / (na * nb) } else { 0.0 };
+        let cos = if na > 1e-8 && nb > 1e-8 {
+            dot / (na * nb)
+        } else {
+            0.0
+        };
         ((cos + 1.0) * 1.5).clamp(0.0, 3.0)
     }
 
@@ -293,10 +306,7 @@ impl E8Lattice {
     ///
     /// When prototypes are already E8-quantized (after training), this reduces
     /// to a fast lattice-point comparison.
-    pub fn select_archetype(
-        embedding: &[f32],
-        prototypes: &[Vec<f32>],
-    ) -> (usize, f32) {
+    pub fn select_archetype(embedding: &[f32], prototypes: &[Vec<f32>]) -> (usize, f32) {
         if prototypes.is_empty() {
             return (0, 0.0);
         }
@@ -315,8 +325,13 @@ impl E8Lattice {
                 let p_norm = proto.iter().map(|v| v * v).sum::<f32>().sqrt();
                 let sim = if raw_norm > 1e-8 && p_norm > 1e-8 {
                     dot / (raw_norm * p_norm)
-                } else { 0.0 };
-                if sim > best_sim { best_sim = sim; best_idx = i; }
+                } else {
+                    0.0
+                };
+                if sim > best_sim {
+                    best_sim = sim;
+                    best_idx = i;
+                }
             }
             return (best_idx, best_sim.max(0.0));
         }
@@ -592,10 +607,14 @@ impl LeechLattice {
                 let use_half = (mask >> b) & 1 == 1;
                 let nearest = if use_half {
                     let mut shifted = [0.0f32; 8];
-                    for i in 0..8 { shifted[i] = blocks[b][i] - 0.5; }
+                    for i in 0..8 {
+                        shifted[i] = blocks[b][i] - 0.5;
+                    }
                     let d8 = E8Lattice::nearest_point(&shifted);
                     let mut result = [0.0f32; 8];
-                    for i in 0..8 { result[i] = d8[i] + 0.5; }
+                    for i in 0..8 {
+                        result[i] = d8[i] + 0.5;
+                    }
 
                     // Verify it's half-integer E8 (sum should be even)
                     let sum: f32 = result.iter().sum();
@@ -612,7 +631,9 @@ impl LeechLattice {
                 }
 
                 // Track coset: integer = 0, half-integer = 1
-                if use_half { _coset_sum += 1; }
+                if use_half {
+                    _coset_sum += 1;
+                }
             }
 
             // Leech lattice constraint: the coset pattern must be
@@ -657,7 +678,9 @@ impl LeechLattice {
             let mut block = [0.0f32; 24];
             for i in 0..24 {
                 let idx = b * 24 + i;
-                if idx < dim { block[i] = x[idx]; }
+                if idx < dim {
+                    block[i] = x[idx];
+                }
             }
             let nearest = Self::nearest_point(&block);
             for i in 0..24 {
@@ -675,7 +698,11 @@ impl LeechLattice {
         let dot: f32 = qa.iter().zip(qb.iter()).map(|(x, y)| x * y).sum();
         let na = qa.iter().map(|v| v * v).sum::<f32>().sqrt();
         let nb = qb.iter().map(|v| v * v).sum::<f32>().sqrt();
-        if na > 1e-8 && nb > 1e-8 { dot / (na * nb) } else { 0.0 }
+        if na > 1e-8 && nb > 1e-8 {
+            dot / (na * nb)
+        } else {
+            0.0
+        }
     }
 
     /// Compatibility score for project entities in Leech space.
@@ -693,7 +720,9 @@ impl LeechLattice {
         k: usize,
     ) -> Vec<(usize, f32)> {
         let q = Self::nearest_point(query);
-        let mut scored: Vec<(usize, f32)> = points.iter().enumerate()
+        let mut scored: Vec<(usize, f32)> = points
+            .iter()
+            .enumerate()
             .map(|(i, p)| {
                 let qp = Self::nearest_point(p);
                 let dist = Self::dist_sq_24(&q, &qp);
@@ -805,7 +834,13 @@ impl CodeAnalyzer {
         let call_sites = Self::extract_call_sites(&lines, &declarations);
         let metrics = Self::compute_metrics(&lines, &declarations, language);
 
-        CodeStructure { language, declarations, imports, call_sites, metrics }
+        CodeStructure {
+            language,
+            declarations,
+            imports,
+            call_sites,
+            metrics,
+        }
     }
 
     fn detect_language(path: &str) -> CodeLanguage {
@@ -829,7 +864,10 @@ impl CodeAnalyzer {
 
         for (line_num, &line) in lines.iter().enumerate() {
             let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with('#') && lang == CodeLanguage::C {
+            if trimmed.is_empty()
+                || trimmed.starts_with("//")
+                || trimmed.starts_with('#') && lang == CodeLanguage::C
+            {
                 continue;
             }
 
@@ -858,7 +896,11 @@ impl CodeAnalyzer {
             // Python declarations
             if matches!(lang, CodeLanguage::Python) {
                 if trimmed.starts_with("def ") || trimmed.starts_with("async def ") {
-                    let name_start = if trimmed.starts_with("async") { "async def ".len() } else { "def ".len() };
+                    let name_start = if trimmed.starts_with("async") {
+                        "async def ".len()
+                    } else {
+                        "def ".len()
+                    };
                     if let Some(name) = trimmed[name_start..].split('(').next() {
                         let params = Self::extract_params_from_line(trimmed);
                         let is_test = name.starts_with("test_") || name.starts_with("test");
@@ -875,10 +917,16 @@ impl CodeAnalyzer {
                             // Track separately in metrics
                         }
                     }
-                    if lang == CodeLanguage::Python { indent_stack.push(nesting + 1); }
+                    if lang == CodeLanguage::Python {
+                        indent_stack.push(nesting + 1);
+                    }
                 } else if trimmed.starts_with("class ") {
-                    let name = trimmed["class ".len()..].split(['(', ':']).next()
-                        .unwrap_or("").trim().to_string();
+                    let name = trimmed["class ".len()..]
+                        .split(['(', ':'])
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
                     decls.push(Declaration {
                         kind: DeclKind::Class,
                         name,
@@ -895,8 +943,16 @@ impl CodeAnalyzer {
             // TypeScript / JavaScript declarations
             if matches!(lang, CodeLanguage::TypeScript | CodeLanguage::JavaScript) {
                 let is_export = trimmed.starts_with("export ");
-                let check = if is_export { trimmed["export ".len()..].trim_start() } else { trimmed };
-                let check = if check.starts_with("default ") { &check["default ".len()..] } else { check };
+                let check = if is_export {
+                    trimmed["export ".len()..].trim_start()
+                } else {
+                    trimmed
+                };
+                let check = if check.starts_with("default ") {
+                    &check["default ".len()..]
+                } else {
+                    check
+                };
 
                 if check.starts_with("function ") || check.starts_with("async function ") {
                     let after = if check.starts_with("async") {
@@ -916,8 +972,12 @@ impl CodeAnalyzer {
                         });
                     }
                 } else if check.starts_with("class ") {
-                    let name = check["class ".len()..].split(['{', ' ']).next()
-                        .unwrap_or("").trim().to_string();
+                    let name = check["class ".len()..]
+                        .split(['{', ' '])
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
                     decls.push(Declaration {
                         kind: DeclKind::Class,
                         name,
@@ -928,8 +988,12 @@ impl CodeAnalyzer {
                         return_type: None,
                     });
                 } else if check.starts_with("interface ") && lang == CodeLanguage::TypeScript {
-                    let name = check["interface ".len()..].split(['{', ' ', '<']).next()
-                        .unwrap_or("").trim().to_string();
+                    let name = check["interface ".len()..]
+                        .split(['{', ' ', '<'])
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
                     decls.push(Declaration {
                         kind: DeclKind::Interface,
                         name,
@@ -948,8 +1012,10 @@ impl CodeAnalyzer {
                     let rest = &trimmed["func ".len()..];
                     // Skip receiver: func (r *Receiver) Name(...)
                     let rest = if rest.starts_with('(') {
-                        rest.find(')').and_then(|i| rest.get(i+1..))
-                            .unwrap_or(rest).trim_start()
+                        rest.find(')')
+                            .and_then(|i| rest.get(i + 1..))
+                            .unwrap_or(rest)
+                            .trim_start()
                     } else {
                         rest
                     };
@@ -967,8 +1033,11 @@ impl CodeAnalyzer {
                         });
                     }
                 } else if trimmed.starts_with("type ") && trimmed.contains("struct") {
-                    let name = trimmed["type ".len()..].split_whitespace().next()
-                        .unwrap_or("").to_string();
+                    let name = trimmed["type ".len()..]
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .to_string();
                     decls.push(Declaration {
                         kind: DeclKind::Struct,
                         name,
@@ -979,8 +1048,11 @@ impl CodeAnalyzer {
                         return_type: None,
                     });
                 } else if trimmed.starts_with("type ") && trimmed.contains("interface") {
-                    let name = trimmed["type ".len()..].split_whitespace().next()
-                        .unwrap_or("").to_string();
+                    let name = trimmed["type ".len()..]
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .to_string();
                     decls.push(Declaration {
                         kind: DeclKind::Interface,
                         name,
@@ -995,11 +1067,15 @@ impl CodeAnalyzer {
 
             // C/C++ declarations
             if matches!(lang, CodeLanguage::C | CodeLanguage::Cpp) {
-                if trimmed.contains('(') && !trimmed.starts_with("if") &&
-                    !trimmed.starts_with("for") && !trimmed.starts_with("while") &&
-                    !trimmed.starts_with("switch") && !trimmed.starts_with("//") &&
-                    !trimmed.starts_with("/*") && !trimmed.starts_with("return") &&
-                    brace_depth <= 1
+                if trimmed.contains('(')
+                    && !trimmed.starts_with("if")
+                    && !trimmed.starts_with("for")
+                    && !trimmed.starts_with("while")
+                    && !trimmed.starts_with("switch")
+                    && !trimmed.starts_with("//")
+                    && !trimmed.starts_with("/*")
+                    && !trimmed.starts_with("return")
+                    && brace_depth <= 1
                 {
                     // Heuristic: top-level line with parens is likely a function
                     let parts: Vec<&str> = trimmed.split('(').collect();
@@ -1007,7 +1083,11 @@ impl CodeAnalyzer {
                         let tokens: Vec<&str> = before_paren.split_whitespace().collect();
                         if tokens.len() >= 2 {
                             let name = tokens.last().unwrap().trim_start_matches('*').to_string();
-                            if name.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_') {
+                            if name
+                                .chars()
+                                .next()
+                                .map_or(false, |c| c.is_alphabetic() || c == '_')
+                            {
                                 decls.push(Declaration {
                                     kind: DeclKind::Function,
                                     name,
@@ -1022,8 +1102,12 @@ impl CodeAnalyzer {
                     }
                 }
                 if lang == CodeLanguage::Cpp && trimmed.starts_with("class ") {
-                    let name = trimmed["class ".len()..].split(['{', ':', ' ']).next()
-                        .unwrap_or("").trim().to_string();
+                    let name = trimmed["class ".len()..]
+                        .split(['{', ':', ' '])
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
                     decls.push(Declaration {
                         kind: DeclKind::Class,
                         name,
@@ -1034,9 +1118,15 @@ impl CodeAnalyzer {
                         return_type: None,
                     });
                 }
-                if trimmed.contains("struct ") && (trimmed.contains('{') || trimmed.ends_with(';')) {
+                if trimmed.contains("struct ") && (trimmed.contains('{') || trimmed.ends_with(';'))
+                {
                     let after = trimmed.split("struct ").nth(1).unwrap_or("");
-                    let name = after.split(['{', ' ', ';']).next().unwrap_or("").trim().to_string();
+                    let name = after
+                        .split(['{', ' ', ';'])
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
                     if !name.is_empty() {
                         decls.push(Declaration {
                             kind: DeclKind::Struct,
@@ -1056,7 +1146,12 @@ impl CodeAnalyzer {
                 let is_public = trimmed.starts_with("public ");
                 if trimmed.contains("class ") {
                     let after = trimmed.split("class ").nth(1).unwrap_or("");
-                    let name = after.split(['{', ' ', '<']).next().unwrap_or("").trim().to_string();
+                    let name = after
+                        .split(['{', ' ', '<'])
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
                     if !name.is_empty() {
                         decls.push(Declaration {
                             kind: DeclKind::Class,
@@ -1070,7 +1165,12 @@ impl CodeAnalyzer {
                     }
                 } else if trimmed.contains("interface ") {
                     let after = trimmed.split("interface ").nth(1).unwrap_or("");
-                    let name = after.split(['{', ' ', '<']).next().unwrap_or("").trim().to_string();
+                    let name = after
+                        .split(['{', ' ', '<'])
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
                     if !name.is_empty() {
                         decls.push(Declaration {
                             kind: DeclKind::Interface,
@@ -1082,9 +1182,11 @@ impl CodeAnalyzer {
                             return_type: None,
                         });
                     }
-                } else if trimmed.contains('(') && !trimmed.starts_with("if") &&
-                    !trimmed.starts_with("for") && !trimmed.starts_with("while") &&
-                    brace_depth <= 2
+                } else if trimmed.contains('(')
+                    && !trimmed.starts_with("if")
+                    && !trimmed.starts_with("for")
+                    && !trimmed.starts_with("while")
+                    && brace_depth <= 2
                 {
                     let parts: Vec<&str> = trimmed.split('(').collect();
                     if let Some(before) = parts.first() {
@@ -1122,64 +1224,148 @@ impl CodeAnalyzer {
         decls
     }
 
-    fn parse_rust_decl(check: &str, is_pub: bool, line: usize, nesting: u32) -> Option<Declaration> {
+    fn parse_rust_decl(
+        check: &str,
+        is_pub: bool,
+        line: usize,
+        nesting: u32,
+    ) -> Option<Declaration> {
         if check.starts_with("fn ") || check.starts_with("async fn ") {
-            let after = if check.starts_with("async") { &check["async fn ".len()..] } else { &check["fn ".len()..] };
+            let after = if check.starts_with("async") {
+                &check["async fn ".len()..]
+            } else {
+                &check["fn ".len()..]
+            };
             let name = after.split(['(', '<']).next()?.trim().to_string();
             let params = Self::extract_params_from_line(check);
             let ret = Self::extract_rust_return_type(check);
             return Some(Declaration {
-                kind: DeclKind::Function, name, is_public: is_pub, line, nesting_depth: nesting, params, return_type: ret,
+                kind: DeclKind::Function,
+                name,
+                is_public: is_pub,
+                line,
+                nesting_depth: nesting,
+                params,
+                return_type: ret,
             });
         }
         if check.starts_with("struct ") {
-            let name = check["struct ".len()..].split(['{', '(', '<', ' ', ';']).next()?.trim().to_string();
+            let name = check["struct ".len()..]
+                .split(['{', '(', '<', ' ', ';'])
+                .next()?
+                .trim()
+                .to_string();
             return Some(Declaration {
-                kind: DeclKind::Struct, name, is_public: is_pub, line, nesting_depth: nesting, params: vec![], return_type: None,
+                kind: DeclKind::Struct,
+                name,
+                is_public: is_pub,
+                line,
+                nesting_depth: nesting,
+                params: vec![],
+                return_type: None,
             });
         }
         if check.starts_with("enum ") {
-            let name = check["enum ".len()..].split(['{', '<', ' ']).next()?.trim().to_string();
+            let name = check["enum ".len()..]
+                .split(['{', '<', ' '])
+                .next()?
+                .trim()
+                .to_string();
             return Some(Declaration {
-                kind: DeclKind::Enum, name, is_public: is_pub, line, nesting_depth: nesting, params: vec![], return_type: None,
+                kind: DeclKind::Enum,
+                name,
+                is_public: is_pub,
+                line,
+                nesting_depth: nesting,
+                params: vec![],
+                return_type: None,
             });
         }
         if check.starts_with("trait ") {
-            let name = check["trait ".len()..].split(['{', '<', ' ', ':']).next()?.trim().to_string();
+            let name = check["trait ".len()..]
+                .split(['{', '<', ' ', ':'])
+                .next()?
+                .trim()
+                .to_string();
             return Some(Declaration {
-                kind: DeclKind::Trait, name, is_public: is_pub, line, nesting_depth: nesting, params: vec![], return_type: None,
+                kind: DeclKind::Trait,
+                name,
+                is_public: is_pub,
+                line,
+                nesting_depth: nesting,
+                params: vec![],
+                return_type: None,
             });
         }
         if check.starts_with("impl ") || check.starts_with("impl<") {
             let rest = if check.starts_with("impl<") {
-                check.find('>').map(|i| &check[i+1..]).unwrap_or(&check[5..])
+                check
+                    .find('>')
+                    .map(|i| &check[i + 1..])
+                    .unwrap_or(&check[5..])
             } else {
                 &check[5..]
             };
             let name = rest.split(['{', ' ']).next()?.trim().to_string();
             return Some(Declaration {
-                kind: DeclKind::Impl, name, is_public: is_pub, line, nesting_depth: nesting, params: vec![], return_type: None,
+                kind: DeclKind::Impl,
+                name,
+                is_public: is_pub,
+                line,
+                nesting_depth: nesting,
+                params: vec![],
+                return_type: None,
             });
         }
         if check.starts_with("mod ") {
-            let name = check["mod ".len()..].split(['{', ';', ' ']).next()?.trim().to_string();
+            let name = check["mod ".len()..]
+                .split(['{', ';', ' '])
+                .next()?
+                .trim()
+                .to_string();
             return Some(Declaration {
-                kind: DeclKind::Module, name, is_public: is_pub, line, nesting_depth: nesting, params: vec![], return_type: None,
+                kind: DeclKind::Module,
+                name,
+                is_public: is_pub,
+                line,
+                nesting_depth: nesting,
+                params: vec![],
+                return_type: None,
             });
         }
         if check.starts_with("const ") || check.starts_with("static ") {
             let kw_len = if check.starts_with("const") { 6 } else { 7 };
-            let name = check[kw_len..].split([':',' ','=']).next()?.trim().to_string();
+            let name = check[kw_len..]
+                .split([':', ' ', '='])
+                .next()?
+                .trim()
+                .to_string();
             if !name.is_empty() && name != "_" {
                 return Some(Declaration {
-                    kind: DeclKind::Constant, name, is_public: is_pub, line, nesting_depth: nesting, params: vec![], return_type: None,
+                    kind: DeclKind::Constant,
+                    name,
+                    is_public: is_pub,
+                    line,
+                    nesting_depth: nesting,
+                    params: vec![],
+                    return_type: None,
                 });
             }
         }
         if check.starts_with("type ") {
-            let name = check["type ".len()..].split(['<', '=', ' ']).next()?.trim().to_string();
+            let name = check["type ".len()..]
+                .split(['<', '=', ' '])
+                .next()?
+                .trim()
+                .to_string();
             return Some(Declaration {
-                kind: DeclKind::TypeAlias, name, is_public: is_pub, line, nesting_depth: nesting, params: vec![], return_type: None,
+                kind: DeclKind::TypeAlias,
+                name,
+                is_public: is_pub,
+                line,
+                nesting_depth: nesting,
+                params: vec![],
+                return_type: None,
             });
         }
         None
@@ -1201,11 +1387,18 @@ impl CodeAnalyzer {
                         };
                         let clean = use_part.trim_end_matches(';').trim();
                         let is_wildcard = clean.ends_with("::*");
-                        let module = clean.split("::{").next().unwrap_or(clean)
-                            .trim_end_matches("::*").to_string();
+                        let module = clean
+                            .split("::{")
+                            .next()
+                            .unwrap_or(clean)
+                            .trim_end_matches("::*")
+                            .to_string();
                         let symbols = if clean.contains("::{") {
-                            clean.split("::{").nth(1)
-                                .unwrap_or("").trim_end_matches('}')
+                            clean
+                                .split("::{")
+                                .nth(1)
+                                .unwrap_or("")
+                                .trim_end_matches('}')
                                 .split(',')
                                 .map(|s| s.trim().to_string())
                                 .filter(|s| !s.is_empty())
@@ -1215,79 +1408,139 @@ impl CodeAnalyzer {
                         } else {
                             vec![]
                         };
-                        imports.push(ImportEdge { module_path: module, symbols, is_wildcard });
+                        imports.push(ImportEdge {
+                            module_path: module,
+                            symbols,
+                            is_wildcard,
+                        });
                     }
                 }
                 CodeLanguage::Python => {
                     if trimmed.starts_with("import ") {
-                        let module = trimmed["import ".len()..].split(' ').next()
-                            .unwrap_or("").trim().to_string();
-                        imports.push(ImportEdge { module_path: module.clone(), symbols: vec![module], is_wildcard: false });
+                        let module = trimmed["import ".len()..]
+                            .split(' ')
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        imports.push(ImportEdge {
+                            module_path: module.clone(),
+                            symbols: vec![module],
+                            is_wildcard: false,
+                        });
                     } else if trimmed.starts_with("from ") {
                         let parts: Vec<&str> = trimmed.splitn(4, ' ').collect();
                         if parts.len() >= 4 && parts[2] == "import" {
                             let module = parts[1].to_string();
                             let is_wildcard = parts[3].trim() == "*";
-                            let symbols = if is_wildcard { vec![] } else {
+                            let symbols = if is_wildcard {
+                                vec![]
+                            } else {
                                 parts[3].split(',').map(|s| s.trim().to_string()).collect()
                             };
-                            imports.push(ImportEdge { module_path: module, symbols, is_wildcard });
+                            imports.push(ImportEdge {
+                                module_path: module,
+                                symbols,
+                                is_wildcard,
+                            });
                         }
                     }
                 }
                 CodeLanguage::TypeScript | CodeLanguage::JavaScript => {
-                    if trimmed.contains("import ") && (trimmed.contains(" from ") || trimmed.contains("require(")) {
+                    if trimmed.contains("import ")
+                        && (trimmed.contains(" from ") || trimmed.contains("require("))
+                    {
                         let module = if trimmed.contains(" from ") {
-                            trimmed.rsplit(" from ").next()
-                                .unwrap_or("").trim().trim_matches(|c| c == '\'' || c == '"' || c == ';')
+                            trimmed
+                                .rsplit(" from ")
+                                .next()
+                                .unwrap_or("")
+                                .trim()
+                                .trim_matches(|c| c == '\'' || c == '"' || c == ';')
                                 .to_string()
                         } else {
-                            trimmed.split("require(").nth(1)
+                            trimmed
+                                .split("require(")
+                                .nth(1)
                                 .and_then(|s| s.split(')').next())
-                                .unwrap_or("").trim().trim_matches(|c| c == '\'' || c == '"')
+                                .unwrap_or("")
+                                .trim()
+                                .trim_matches(|c| c == '\'' || c == '"')
                                 .to_string()
                         };
                         let is_wildcard = trimmed.contains("* as ");
                         let symbols = if trimmed.contains('{') {
-                            trimmed.split('{').nth(1)
+                            trimmed
+                                .split('{')
+                                .nth(1)
                                 .and_then(|s| s.split('}').next())
-                                .unwrap_or("").split(',')
+                                .unwrap_or("")
+                                .split(',')
                                 .map(|s| s.split(" as ").next().unwrap_or(s).trim().to_string())
                                 .filter(|s| !s.is_empty())
                                 .collect()
                         } else {
                             vec![]
                         };
-                        imports.push(ImportEdge { module_path: module, symbols, is_wildcard });
+                        imports.push(ImportEdge {
+                            module_path: module,
+                            symbols,
+                            is_wildcard,
+                        });
                     }
                 }
                 CodeLanguage::Go => {
                     if trimmed.starts_with("import ") {
-                        let module = trimmed["import ".len()..].trim()
-                            .trim_matches('"').trim_matches('(').to_string();
+                        let module = trimmed["import ".len()..]
+                            .trim()
+                            .trim_matches('"')
+                            .trim_matches('(')
+                            .to_string();
                         if !module.is_empty() && module != "(" {
-                            imports.push(ImportEdge { module_path: module, symbols: vec![], is_wildcard: false });
+                            imports.push(ImportEdge {
+                                module_path: module,
+                                symbols: vec![],
+                                is_wildcard: false,
+                            });
                         }
                     } else if trimmed.starts_with('"') && trimmed.ends_with('"') {
                         // Inside import block
                         let module = trimmed.trim_matches('"').to_string();
-                        imports.push(ImportEdge { module_path: module, symbols: vec![], is_wildcard: false });
+                        imports.push(ImportEdge {
+                            module_path: module,
+                            symbols: vec![],
+                            is_wildcard: false,
+                        });
                     }
                 }
                 CodeLanguage::Java => {
                     if trimmed.starts_with("import ") {
-                        let path = trimmed["import ".len()..].trim_end_matches(';')
-                            .trim_start_matches("static ").trim().to_string();
+                        let path = trimmed["import ".len()..]
+                            .trim_end_matches(';')
+                            .trim_start_matches("static ")
+                            .trim()
+                            .to_string();
                         let is_wildcard = path.ends_with(".*");
-                        imports.push(ImportEdge { module_path: path, symbols: vec![], is_wildcard });
+                        imports.push(ImportEdge {
+                            module_path: path,
+                            symbols: vec![],
+                            is_wildcard,
+                        });
                     }
                 }
                 CodeLanguage::C | CodeLanguage::Cpp => {
                     if trimmed.starts_with("#include") {
-                        let header = trimmed.split(|c| c == '<' || c == '"').nth(1)
+                        let header = trimmed
+                            .split(|c| c == '<' || c == '"')
+                            .nth(1)
                             .and_then(|s| s.split(|c| c == '>' || c == '"').next())
-                            .unwrap_or("").to_string();
-                        imports.push(ImportEdge { module_path: header, symbols: vec![], is_wildcard: false });
+                            .unwrap_or("")
+                            .to_string();
+                        imports.push(ImportEdge {
+                            module_path: header,
+                            symbols: vec![],
+                            is_wildcard: false,
+                        });
                     }
                 }
                 CodeLanguage::Unknown => {}
@@ -1299,7 +1552,8 @@ impl CodeAnalyzer {
 
     fn extract_call_sites(lines: &[&str], declarations: &[Declaration]) -> Vec<CallSite> {
         let mut sites = Vec::new();
-        let _decl_names: std::collections::HashSet<&str> = declarations.iter()
+        let _decl_names: std::collections::HashSet<&str> = declarations
+            .iter()
             .filter(|d| d.kind == DeclKind::Function)
             .map(|d| d.name.as_str())
             .collect();
@@ -1327,17 +1581,44 @@ impl CodeAnalyzer {
                     // Walk back to find the identifier
                     let end = i;
                     let mut start = i;
-                    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+                    while start > 0
+                        && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
+                    {
                         start -= 1;
                     }
                     if start < end {
                         let callee = &trimmed[start..end];
                         // Skip language keywords and self-referencing control flow
-                        if !["if", "for", "while", "match", "switch", "return", "print",
-                             "println", "eprintln", "eprint", "format", "write", "writeln",
-                             "vec", "assert", "assert_eq", "debug_assert", "panic",
-                             "Some", "Ok", "Err", "None", "Box", "Arc", "Rc",
-                        ].contains(&callee) && callee.len() > 1 {
+                        if ![
+                            "if",
+                            "for",
+                            "while",
+                            "match",
+                            "switch",
+                            "return",
+                            "print",
+                            "println",
+                            "eprintln",
+                            "eprint",
+                            "format",
+                            "write",
+                            "writeln",
+                            "vec",
+                            "assert",
+                            "assert_eq",
+                            "debug_assert",
+                            "panic",
+                            "Some",
+                            "Ok",
+                            "Err",
+                            "None",
+                            "Box",
+                            "Arc",
+                            "Rc",
+                        ]
+                        .contains(&callee)
+                            && callee.len() > 1
+                        {
                             sites.push(CallSite {
                                 caller_decl: current_fn.map(|s| s.to_string()),
                                 callee: callee.to_string(),
@@ -1353,7 +1634,11 @@ impl CodeAnalyzer {
         sites
     }
 
-    fn compute_metrics(lines: &[&str], declarations: &[Declaration], lang: CodeLanguage) -> CodeMetrics {
+    fn compute_metrics(
+        lines: &[&str],
+        declarations: &[Declaration],
+        lang: CodeLanguage,
+    ) -> CodeMetrics {
         let total_lines = lines.len();
         let mut code_lines = 0usize;
         let mut comment_lines = 0usize;
@@ -1372,7 +1657,9 @@ impl CodeAnalyzer {
 
             if in_block_comment {
                 comment_lines += 1;
-                if trimmed.contains("*/") { in_block_comment = false; }
+                if trimmed.contains("*/") {
+                    in_block_comment = false;
+                }
                 continue;
             }
 
@@ -1382,7 +1669,9 @@ impl CodeAnalyzer {
                 continue;
             }
 
-            if trimmed.starts_with("//") || trimmed.starts_with('#') && matches!(lang, CodeLanguage::Python) {
+            if trimmed.starts_with("//")
+                || trimmed.starts_with('#') && matches!(lang, CodeLanguage::Python)
+            {
                 comment_lines += 1;
                 continue;
             }
@@ -1390,8 +1679,10 @@ impl CodeAnalyzer {
             code_lines += 1;
 
             // Count branches for cyclomatic complexity
-            for kw in &["if ", "else if ", "elif ", "for ", "while ", "case ", "catch ",
-                        "match ", "&&", "||", "?"] {
+            for kw in &[
+                "if ", "else if ", "elif ", "for ", "while ", "case ", "catch ", "match ", "&&",
+                "||", "?",
+            ] {
                 branch_count += trimmed.matches(kw).count() as u32;
             }
 
@@ -1412,17 +1703,30 @@ impl CodeAnalyzer {
             }
         }
 
-        let fn_decls: Vec<&Declaration> = declarations.iter()
+        let fn_decls: Vec<&Declaration> = declarations
+            .iter()
             .filter(|d| d.kind == DeclKind::Function)
             .collect();
         let public_count = declarations.iter().filter(|d| d.is_public).count();
         let private_count = declarations.iter().filter(|d| !d.is_public).count();
-        let trait_impl_count = declarations.iter().filter(|d| d.kind == DeclKind::Impl).count();
-        let test_count = declarations.iter()
-            .filter(|d| d.kind == DeclKind::Function && (d.name.starts_with("test") || d.name.starts_with("test_")))
+        let trait_impl_count = declarations
+            .iter()
+            .filter(|d| d.kind == DeclKind::Impl)
             .count();
-        let assertion_count = lines.iter()
-            .map(|l| l.matches("assert").count() + l.matches("expect(").count() + l.matches("should").count())
+        let test_count = declarations
+            .iter()
+            .filter(|d| {
+                d.kind == DeclKind::Function
+                    && (d.name.starts_with("test") || d.name.starts_with("test_"))
+            })
+            .count();
+        let assertion_count = lines
+            .iter()
+            .map(|l| {
+                l.matches("assert").count()
+                    + l.matches("expect(").count()
+                    + l.matches("should").count()
+            })
             .sum::<usize>();
 
         let avg_fn_len = if fn_decls.len() >= 2 {
@@ -1458,7 +1762,8 @@ impl CodeAnalyzer {
     }
 
     fn extract_params_from_line(line: &str) -> Vec<String> {
-        line.split('(').nth(1)
+        line.split('(')
+            .nth(1)
             .and_then(|s| s.split(')').next())
             .unwrap_or("")
             .split(',')
@@ -1468,16 +1773,16 @@ impl CodeAnalyzer {
     }
 
     fn extract_rust_return_type(line: &str) -> Option<String> {
-        line.split("->").nth(1).map(|s| {
-            s.split(['{', 'w']).next().unwrap_or(s).trim().to_string()
-        })
+        line.split("->")
+            .nth(1)
+            .map(|s| s.split(['{', 'w']).next().unwrap_or(s).trim().to_string())
     }
 
     fn extract_python_return_type(line: &str) -> Option<String> {
         if line.contains("->") {
-            line.split("->").nth(1).map(|s| {
-                s.split(':').next().unwrap_or(s).trim().to_string()
-            })
+            line.split("->")
+                .nth(1)
+                .map(|s| s.split(':').next().unwrap_or(s).trim().to_string())
         } else {
             None
         }
@@ -1529,14 +1834,21 @@ impl HybridEmbedder {
         // L2-normalize to unit sphere before Leech quantization
         let norm: f32 = emb.iter().map(|v| v * v).sum::<f32>().sqrt();
         if norm > 1e-8 {
-            for v in emb.iter_mut() { *v /= norm; }
+            for v in emb.iter_mut() {
+                *v /= norm;
+            }
         }
 
         emb
     }
 
     /// Embed a specific symbol (function, type, etc.)
-    pub fn embed_symbol(path: &str, name: &str, body: &str, parent_structure: &CodeStructure) -> [f32; 24] {
+    pub fn embed_symbol(
+        path: &str,
+        name: &str,
+        body: &str,
+        parent_structure: &CodeStructure,
+    ) -> [f32; 24] {
         let sub_structure = CodeAnalyzer::analyze(path, body);
         let mut emb = [0.0f32; 24];
 
@@ -1547,18 +1859,24 @@ impl HybridEmbedder {
         Self::fill_semantic(&mut emb, body, &sub_structure);
 
         // Relational: look up the symbol in the parent structure
-        let decl = parent_structure.declarations.iter()
+        let decl = parent_structure
+            .declarations
+            .iter()
             .find(|d| d.name == name);
         if let Some(d) = decl {
             emb[8] = (d.nesting_depth as f32 / 5.0).min(1.0);
             emb[9] = if d.is_public { 0.8 } else { 0.2 };
             // Outgoing calls from this function
-            let my_calls: Vec<&CallSite> = parent_structure.call_sites.iter()
+            let my_calls: Vec<&CallSite> = parent_structure
+                .call_sites
+                .iter()
                 .filter(|c| c.caller_decl.as_deref() == Some(name))
                 .collect();
             emb[10] = (my_calls.len() as f32 / 15.0).min(1.0);
             // Incoming calls to this function
-            let incoming = parent_structure.call_sites.iter()
+            let incoming = parent_structure
+                .call_sites
+                .iter()
                 .filter(|c| c.callee == name)
                 .count();
             emb[11] = (incoming as f32 / 10.0).min(1.0);
@@ -1569,7 +1887,9 @@ impl HybridEmbedder {
 
         let norm: f32 = emb.iter().map(|v| v * v).sum::<f32>().sqrt();
         if norm > 1e-8 {
-            for v in emb.iter_mut() { *v /= norm; }
+            for v in emb.iter_mut() {
+                *v /= norm;
+            }
         }
 
         emb
@@ -1578,10 +1898,21 @@ impl HybridEmbedder {
     // --- Channel 1: Structural skeleton (dims 0-3) ---
     fn fill_structural(emb: &mut [f32; 24], structure: &CodeStructure) {
         let m = &structure.metrics;
-        let fn_count = structure.declarations.iter()
-            .filter(|d| d.kind == DeclKind::Function).count();
-        let type_count = structure.declarations.iter()
-            .filter(|d| matches!(d.kind, DeclKind::Struct | DeclKind::Enum | DeclKind::Class | DeclKind::Interface)).count();
+        let fn_count = structure
+            .declarations
+            .iter()
+            .filter(|d| d.kind == DeclKind::Function)
+            .count();
+        let type_count = structure
+            .declarations
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.kind,
+                    DeclKind::Struct | DeclKind::Enum | DeclKind::Class | DeclKind::Interface
+                )
+            })
+            .count();
 
         // dim 0: declaration density (functions per 100 lines)
         if m.code_lines > 0 {
@@ -1626,17 +1957,27 @@ impl HybridEmbedder {
         }
 
         // Content tokens (skip noise)
-        let stopwords = ["the", "a", "an", "and", "or", "to", "for", "of", "in", "on",
-            "with", "is", "are", "self", "let", "mut", "pub", "fn", "def", "class",
-            "return", "if", "else", "true", "false", "none", "some", "ok", "err"];
-        for word in content.split(|c: char| !c.is_alphanumeric() && c != '_').take(500) {
+        let stopwords = [
+            "the", "a", "an", "and", "or", "to", "for", "of", "in", "on", "with", "is", "are",
+            "self", "let", "mut", "pub", "fn", "def", "class", "return", "if", "else", "true",
+            "false", "none", "some", "ok", "err",
+        ];
+        for word in content
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .take(500)
+        {
             if word.len() > 2 && !stopwords.contains(&word.to_ascii_lowercase().as_str()) {
                 sig_tokens.push(word);
             }
         }
 
         // Project tokens into 4d via multiple independent hashes
-        let seeds: [u64; 4] = [0x9e3779b97f4a7c15, 0x517cc1b727220a95, 0x6c62272e07bb0142, 0xcbf29ce484222325];
+        let seeds: [u64; 4] = [
+            0x9e3779b97f4a7c15,
+            0x517cc1b727220a95,
+            0x6c62272e07bb0142,
+            0xcbf29ce484222325,
+        ];
         for (dim, seed) in seeds.iter().enumerate() {
             let mut acc = 0.0f64;
             for &token in &sig_tokens {
@@ -1664,9 +2005,14 @@ impl HybridEmbedder {
         }
 
         // dim 10: call graph density (unique callees / functions)
-        let fn_count = structure.declarations.iter()
-            .filter(|d| d.kind == DeclKind::Function).count();
-        let unique_callees: std::collections::HashSet<&str> = structure.call_sites.iter()
+        let fn_count = structure
+            .declarations
+            .iter()
+            .filter(|d| d.kind == DeclKind::Function)
+            .count();
+        let unique_callees: std::collections::HashSet<&str> = structure
+            .call_sites
+            .iter()
             .map(|c| c.callee.as_str())
             .collect();
         if fn_count > 0 {
@@ -1694,12 +2040,22 @@ impl HybridEmbedder {
         let m = &structure.metrics;
 
         // dim 16: is-test signal (binary + naming heuristic)
-        let is_test_file = path.contains("test") || path.contains("spec") || path.contains("_test.");
-        emb[16] = if is_test_file { 1.0 } else if m.test_function_count > 0 { 0.5 } else { 0.0 };
+        let is_test_file =
+            path.contains("test") || path.contains("spec") || path.contains("_test.");
+        emb[16] = if is_test_file {
+            1.0
+        } else if m.test_function_count > 0 {
+            0.5
+        } else {
+            0.0
+        };
 
         // dim 17: test density (test functions / total functions)
-        let fn_count = structure.declarations.iter()
-            .filter(|d| d.kind == DeclKind::Function).count();
+        let fn_count = structure
+            .declarations
+            .iter()
+            .filter(|d| d.kind == DeclKind::Function)
+            .count();
         if fn_count > 0 {
             emb[17] = m.test_function_count as f32 / fn_count as f32;
         }
@@ -1725,14 +2081,17 @@ impl HybridEmbedder {
         emb[20] = m.public_api_count as f32 / total;
 
         // dim 21: trait/interface implementation density — indicates pattern use
-        let type_count = decls.iter()
+        let type_count = decls
+            .iter()
             .filter(|d| matches!(d.kind, DeclKind::Struct | DeclKind::Class | DeclKind::Enum))
-            .count().max(1) as f32;
+            .count()
+            .max(1) as f32;
         emb[21] = (m.trait_impl_count as f32 / type_count).min(1.0);
 
         // dim 22: structural fingerprint — hash of the declaration sequence
         // Files with the same architectural pattern have similar fingerprints
-        let decl_sig: String = decls.iter()
+        let decl_sig: String = decls
+            .iter()
             .map(|d| match d.kind {
                 DeclKind::Function => "F",
                 DeclKind::Struct => "S",
@@ -1749,8 +2108,11 @@ impl HybridEmbedder {
         emb[22] = Self::fnv1a_hash(decl_sig.as_bytes(), 0xdeadbeef) as f32 / u64::MAX as f32;
 
         // dim 23: code-to-data ratio — how much is logic vs data/config
-        let logic_keywords = ["if", "for", "while", "match", "loop", "return", "break", "continue"];
-        let logic_count = logic_keywords.iter()
+        let logic_keywords = [
+            "if", "for", "while", "match", "loop", "return", "break", "continue",
+        ];
+        let logic_count = logic_keywords
+            .iter()
             .map(|kw| content.matches(kw).count())
             .sum::<usize>();
         if m.code_lines > 0 {
@@ -1811,13 +2173,17 @@ impl GitHistory {
                     history.recency.entry(f.clone()).or_insert(commit_idx);
                 }
                 commit_files.clear();
-                if trimmed == "---" { commit_idx += 1; }
+                if trimmed == "---" {
+                    commit_idx += 1;
+                }
                 continue;
             }
 
             // File path line
-            if !trimmed.starts_with("Author:") && !trimmed.starts_with("Date:")
-                && !trimmed.starts_with("commit ") && !trimmed.starts_with("Merge:")
+            if !trimmed.starts_with("Author:")
+                && !trimmed.starts_with("Date:")
+                && !trimmed.starts_with("commit ")
+                && !trimmed.starts_with("Merge:")
             {
                 commit_files.push(trimmed.to_string());
             }
@@ -1859,7 +2225,9 @@ impl GitHistory {
     /// Populate edit correlation dimensions (12-15) for a file's embedding.
     pub fn fill_edit_correlation(&self, emb: &mut [f32; 24], path: &str, _all_paths: &[&str]) {
         // dim 12: co-change fan-out (how many other files this changes with)
-        let cochange_partners: usize = self.cochange.keys()
+        let cochange_partners: usize = self
+            .cochange
+            .keys()
             .filter(|(a, b)| a == path || b == path)
             .count();
         emb[12] = (cochange_partners as f32 / 20.0).min(1.0);
@@ -1889,7 +2257,9 @@ impl GitHistory {
         for (i, seed) in [0x1234u64, 0x5678, 0x9abc, 0xdef0].iter().enumerate() {
             let mut acc = 0.0f64;
             for other in all_paths {
-                if *other == path { continue; }
+                if *other == path {
+                    continue;
+                }
                 let key = if path < *other {
                     (path.to_string(), other.to_string())
                 } else {
@@ -1905,7 +2275,9 @@ impl GitHistory {
         }
         let norm: f32 = vec.iter().map(|v| v * v).sum::<f32>().sqrt();
         if norm > 1e-8 {
-            for v in vec.iter_mut() { *v /= norm; }
+            for v in vec.iter_mut() {
+                *v /= norm;
+            }
         }
         vec
     }
@@ -1955,7 +2327,11 @@ pub struct ProjectModel {
 
 impl Default for ProjectModel {
     fn default() -> Self {
-        Self { entities: Vec::new(), git_history: None, quantized_cache: Vec::new() }
+        Self {
+            entities: Vec::new(),
+            git_history: None,
+            quantized_cache: Vec::new(),
+        }
     }
 }
 
@@ -1996,14 +2372,28 @@ impl ProjectModel {
         let quantized = LeechLattice::nearest_point(&emb);
 
         // Extract sub-entities (functions, types) from declarations
-        let sub_entities: Vec<(EntityKind, String)> = structure.declarations.iter()
-            .filter(|d| matches!(d.kind, DeclKind::Function | DeclKind::Struct | DeclKind::Enum |
-                                        DeclKind::Class | DeclKind::Interface | DeclKind::Trait))
+        let sub_entities: Vec<(EntityKind, String)> = structure
+            .declarations
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.kind,
+                    DeclKind::Function
+                        | DeclKind::Struct
+                        | DeclKind::Enum
+                        | DeclKind::Class
+                        | DeclKind::Interface
+                        | DeclKind::Trait
+                )
+            })
             .map(|d| {
                 let kind = match d.kind {
                     DeclKind::Function => EntityKind::Function,
-                    DeclKind::Struct | DeclKind::Enum | DeclKind::Class |
-                    DeclKind::Interface | DeclKind::Trait => EntityKind::Type,
+                    DeclKind::Struct
+                    | DeclKind::Enum
+                    | DeclKind::Class
+                    | DeclKind::Interface
+                    | DeclKind::Trait => EntityKind::Type,
                     _ => EntityKind::Function,
                 };
                 (kind, d.name.clone())
@@ -2037,7 +2427,9 @@ impl ProjectModel {
     /// Load git history and re-compute edit correlation for all indexed entities.
     pub fn load_git_history(&mut self, log_output: &str) {
         let history = GitHistory::from_git_log(log_output);
-        let all_paths: Vec<String> = self.entities.iter()
+        let all_paths: Vec<String> = self
+            .entities
+            .iter()
             .filter(|e| e.kind == EntityKind::File)
             .map(|e| e.path.clone())
             .collect();
@@ -2054,7 +2446,9 @@ impl ProjectModel {
         }
 
         // Rebuild quantized cache
-        self.quantized_cache = self.entities.iter()
+        self.quantized_cache = self
+            .entities
+            .iter()
             .map(|e| LeechLattice::nearest_point(&e.embedding))
             .collect();
 
@@ -2074,22 +2468,26 @@ impl ProjectModel {
 
     /// Find the k most related entities to a query embedding.
     pub fn find_related(&self, query: &[f32; 24], k: usize) -> Vec<(usize, f32)> {
-        if self.entities.is_empty() { return vec![]; }
+        if self.entities.is_empty() {
+            return vec![];
+        }
 
-        let points: Vec<[f32; 24]> = self.entities.iter()
-            .map(|e| e.embedding)
-            .collect();
+        let points: Vec<[f32; 24]> = self.entities.iter().map(|e| e.embedding).collect();
         LeechLattice::nearest_neighbors(query, &points, k)
     }
 
     /// Find all entities related to a file (by path), using Leech nearest-neighbor.
     pub fn context_for_file(&self, path: &str, k: usize) -> Vec<&ProjectEntity> {
-        let idx = self.entities.iter().position(|e| e.path == path && e.kind == EntityKind::File);
+        let idx = self
+            .entities
+            .iter()
+            .position(|e| e.path == path && e.kind == EntityKind::File);
         match idx {
             Some(i) => {
                 let query = self.entities[i].embedding;
                 let neighbors = self.find_related(&query, k + 1);
-                neighbors.iter()
+                neighbors
+                    .iter()
                     .filter(|(ni, _)| *ni != i)
                     .take(k)
                     .filter_map(|(ni, _)| self.entities.get(*ni))
@@ -2165,8 +2563,7 @@ pub fn dct_ii(signal: &[f32]) -> Vec<f32> {
     for k in 0..n {
         let mut sum = 0.0f32;
         for i in 0..n {
-            let angle =
-                std::f32::consts::PI * (2 * i + 1) as f32 * k as f32 / (2 * n) as f32;
+            let angle = std::f32::consts::PI * (2 * i + 1) as f32 * k as f32 / (2 * n) as f32;
             sum += signal[i] * angle.cos();
         }
         out[k] = sum * scale;
@@ -2187,8 +2584,7 @@ pub fn idct_iii(coeffs: &[f32]) -> Vec<f32> {
     for i in 0..n {
         let mut sum = coeffs[0] / std::f32::consts::SQRT_2;
         for k in 1..n {
-            let angle =
-                std::f32::consts::PI * k as f32 * (2 * i + 1) as f32 / (2 * n) as f32;
+            let angle = std::f32::consts::PI * k as f32 * (2 * i + 1) as f32 / (2 * n) as f32;
             sum += coeffs[k] * angle.cos();
         }
         out[i] = sum * scale;
@@ -2243,16 +2639,22 @@ pub fn from_gray(g: u16) -> u16 {
 /// are adjacent — meaning 1-bit Gray code errors land on related words.
 fn semantic_order(token_list: &[String], texts: &[&str], window: usize) -> Vec<usize> {
     let n = token_list.len();
-    if n <= 2 { return (0..n).collect(); }
+    if n <= 2 {
+        return (0..n).collect();
+    }
 
-    let tok_idx: HashMap<&str, usize> = token_list.iter().enumerate()
-        .map(|(i, t)| (t.as_str(), i)).collect();
+    let tok_idx: HashMap<&str, usize> = token_list
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.as_str(), i))
+        .collect();
 
     // Build co-occurrence matrix (sparse, stored as dense for simplicity with n <= 2048)
     let mut cooc = vec![vec![0u32; n]; n];
     for text in texts {
         let tokens = tokenize(text);
-        let ids: Vec<usize> = tokens.iter()
+        let ids: Vec<usize> = tokens
+            .iter()
             .filter_map(|t| tok_idx.get(t.as_str()).copied())
             .collect();
         for (i, &a) in ids.iter().enumerate() {
@@ -2267,7 +2669,8 @@ fn semantic_order(token_list: &[String], texts: &[&str], window: usize) -> Vec<u
     }
 
     // Compute norms for cosine similarity
-    let norms: Vec<f32> = cooc.iter()
+    let norms: Vec<f32> = cooc
+        .iter()
         .map(|row| {
             let s: f64 = row.iter().map(|&v| (v as f64) * (v as f64)).sum();
             s.sqrt() as f32
@@ -2276,9 +2679,14 @@ fn semantic_order(token_list: &[String], texts: &[&str], window: usize) -> Vec<u
 
     // Cosine similarity between two tokens
     let cosine = |a: usize, b: usize| -> f32 {
-        if norms[a] < 1e-9 || norms[b] < 1e-9 { return 0.0; }
-        let dot: f64 = cooc[a].iter().zip(cooc[b].iter())
-            .map(|(&x, &y)| x as f64 * y as f64).sum();
+        if norms[a] < 1e-9 || norms[b] < 1e-9 {
+            return 0.0;
+        }
+        let dot: f64 = cooc[a]
+            .iter()
+            .zip(cooc[b].iter())
+            .map(|(&x, &y)| x as f64 * y as f64)
+            .sum();
         (dot / (norms[a] as f64 * norms[b] as f64)) as f32
     };
 
@@ -2316,21 +2724,27 @@ fn semantic_order(token_list: &[String], texts: &[&str], window: usize) -> Vec<u
         let mut best_idx = usize::MAX;
         let mut best_sim = -1.0f32;
         for j in 0..n {
-            if visited[j] { continue; }
+            if visited[j] {
+                continue;
+            }
             let sim = cosine(last, j);
             if sim > best_sim {
                 best_sim = sim;
                 best_idx = j;
             }
         }
-        if best_idx == usize::MAX { break; }
+        if best_idx == usize::MAX {
+            break;
+        }
         order.push(best_idx);
         visited[best_idx] = true;
     }
 
     // Pick up any remaining (disconnected tokens with zero co-occurrence)
     for i in 0..n {
-        if !visited[i] { order.push(i); }
+        if !visited[i] {
+            order.push(i);
+        }
     }
 
     order
@@ -2388,7 +2802,12 @@ impl TokenDictionary {
             binary_to_gray[i as usize] = g;
         }
 
-        Self { tokens, lookup, gray_to_binary, binary_to_gray }
+        Self {
+            tokens,
+            lookup,
+            gray_to_binary,
+            binary_to_gray,
+        }
     }
 
     /// The Gray-coded ID for a token's internal index.
@@ -2400,7 +2819,10 @@ impl TokenDictionary {
     /// Recover internal index from a Gray-coded ID.
     /// Used by GroupGenEnv for decoding outputs.
     pub fn from_gray_id(&self, gray_id: u16) -> u16 {
-        self.gray_to_binary.get(gray_id as usize).copied().unwrap_or(0)
+        self.gray_to_binary
+            .get(gray_id as usize)
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn len(&self) -> usize {
@@ -2454,18 +2876,30 @@ impl TokenDictionary {
     /// char-decomposed OOV words) are detected: consecutive single alphabetic
     /// characters are treated as interior fragments.
     pub fn infer_word_boundaries(&self, ids: &[u16]) -> Vec<bool> {
-        ids.iter().enumerate().map(|(i, &id)| {
-            if i == 0 { return true; }
-            let tok = self.tokens.get(id as usize).map(|s| s.as_str()).unwrap_or("");
-            if tok.len() == 1 && tok.chars().next().map_or(false, |c| c.is_alphabetic()) {
-                let prev = self.tokens.get(ids[i - 1] as usize)
-                    .map(|s| s.as_str()).unwrap_or("");
-                if prev.len() == 1 && prev.chars().next().map_or(false, |c| c.is_alphabetic()) {
-                    return false;
+        ids.iter()
+            .enumerate()
+            .map(|(i, &id)| {
+                if i == 0 {
+                    return true;
                 }
-            }
-            true
-        }).collect()
+                let tok = self
+                    .tokens
+                    .get(id as usize)
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                if tok.len() == 1 && tok.chars().next().map_or(false, |c| c.is_alphabetic()) {
+                    let prev = self
+                        .tokens
+                        .get(ids[i - 1] as usize)
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    if prev.len() == 1 && prev.chars().next().map_or(false, |c| c.is_alphabetic()) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect()
     }
 
     /// Decode token IDs back to text. Stops at EOS_ID.
@@ -2473,7 +2907,8 @@ impl TokenDictionary {
     /// fragments) are rejoined into a single word — preserving the Dirac
     /// particle invariant even for data encoded before one-word-one-token.
     pub fn decode(&self, ids: &[u16]) -> String {
-        let toks: Vec<&str> = ids.iter()
+        let toks: Vec<&str> = ids
+            .iter()
             .take_while(|&&id| id != EOS_ID)
             .filter_map(|&id| self.tokens.get(id as usize).map(|s| s.as_str()))
             .collect();
@@ -2481,25 +2916,32 @@ impl TokenDictionary {
         let mut result = String::new();
         let mut i = 0;
         while i < toks.len() {
-            let is_sa = |s: &str| s.len() == 1 && s.chars().next().map_or(false, |c| c.is_alphabetic());
+            let is_sa =
+                |s: &str| s.len() == 1 && s.chars().next().map_or(false, |c| c.is_alphabetic());
 
             if is_sa(toks[i]) {
                 let start = i;
-                while i < toks.len() && is_sa(toks[i]) { i += 1; }
+                while i < toks.len() && is_sa(toks[i]) {
+                    i += 1;
+                }
                 let run = i - start;
                 if run >= 3 {
-                    if !result.is_empty() { result.push(' '); }
-                    for j in start..i { result.push_str(toks[j]); }
+                    if !result.is_empty() {
+                        result.push(' ');
+                    }
+                    for j in start..i {
+                        result.push_str(toks[j]);
+                    }
                 } else {
                     for j in start..i {
-                        if !result.is_empty() { result.push(' '); }
+                        if !result.is_empty() {
+                            result.push(' ');
+                        }
                         result.push_str(toks[j]);
                     }
                 }
             } else {
-                if !result.is_empty()
-                    && !toks[i].starts_with(|c: char| c.is_ascii_punctuation())
-                {
+                if !result.is_empty() && !toks[i].starts_with(|c: char| c.is_ascii_punctuation()) {
                     result.push(' ');
                 }
                 result.push_str(toks[i]);
@@ -2561,32 +3003,120 @@ pub enum SyntaxRole {
 
 const KEYWORDS: &[&str] = &[
     // Python
-    "def", "class", "if", "elif", "else", "for", "while", "return", "import", "from",
-    "try", "except", "finally", "with", "as", "yield", "lambda", "pass", "break",
-    "continue", "in", "not", "and", "or", "is", "None", "True", "False", "self",
-    "raise", "assert", "del", "global", "nonlocal", "async", "await", "print",
+    "def",
+    "class",
+    "if",
+    "elif",
+    "else",
+    "for",
+    "while",
+    "return",
+    "import",
+    "from",
+    "try",
+    "except",
+    "finally",
+    "with",
+    "as",
+    "yield",
+    "lambda",
+    "pass",
+    "break",
+    "continue",
+    "in",
+    "not",
+    "and",
+    "or",
+    "is",
+    "None",
+    "True",
+    "False",
+    "self",
+    "raise",
+    "assert",
+    "del",
+    "global",
+    "nonlocal",
+    "async",
+    "await",
+    "print",
     // Rust
-    "fn", "let", "mut", "pub", "struct", "enum", "impl", "trait", "use", "mod",
-    "crate", "super", "where", "match", "loop", "const", "static", "type", "move",
-    "ref", "unsafe", "extern", "dyn", "Box", "Vec", "String", "Option", "Result",
-    "Some", "Ok", "Err", "println", "macro_rules",
+    "fn",
+    "let",
+    "mut",
+    "pub",
+    "struct",
+    "enum",
+    "impl",
+    "trait",
+    "use",
+    "mod",
+    "crate",
+    "super",
+    "where",
+    "match",
+    "loop",
+    "const",
+    "static",
+    "type",
+    "move",
+    "ref",
+    "unsafe",
+    "extern",
+    "dyn",
+    "Box",
+    "Vec",
+    "String",
+    "Option",
+    "Result",
+    "Some",
+    "Ok",
+    "Err",
+    "println",
+    "macro_rules",
     // JavaScript/TypeScript
-    "function", "var", "const", "new", "this", "prototype", "extends",
-    "constructor", "export", "default", "typeof", "instanceof", "void",
-    "null", "undefined", "true", "false", "console", "log", "require",
+    "function",
+    "var",
+    "const",
+    "new",
+    "this",
+    "prototype",
+    "extends",
+    "constructor",
+    "export",
+    "default",
+    "typeof",
+    "instanceof",
+    "void",
+    "null",
+    "undefined",
+    "true",
+    "false",
+    "console",
+    "log",
+    "require",
     // Shared
-    "int", "float", "bool", "str", "char", "void", "static", "final",
-    "abstract", "interface", "override", "virtual", "template", "namespace",
+    "int",
+    "float",
+    "bool",
+    "str",
+    "char",
+    "void",
+    "static",
+    "final",
+    "abstract",
+    "interface",
+    "override",
+    "virtual",
+    "template",
+    "namespace",
 ];
 
-const STRUCTURE_CHARS: &[char] = &[
-    '(', ')', '{', '}', '[', ']', ':', ';', ',', '.', '#', '@',
-];
+const STRUCTURE_CHARS: &[char] = &['(', ')', '{', '}', '[', ']', ':', ';', ',', '.', '#', '@'];
 
 const OPERATOR_TOKENS: &[&str] = &[
-    "=", "==", "!=", "<", ">", "<=", ">=", "+", "-", "*", "/", "%",
-    "&", "|", "^", "!", "&&", "||", "<<", ">>", "+=", "-=", "*=", "/=",
-    "->", "=>", "::", "..", "..=", "**",
+    "=", "==", "!=", "<", ">", "<=", ">=", "+", "-", "*", "/", "%", "&", "|", "^", "!", "&&", "||",
+    "<<", ">>", "+=", "-=", "*=", "/=", "->", "=>", "::", "..", "..=", "**",
 ];
 
 /// Classify a token's syntactic role.
@@ -2606,9 +3136,13 @@ pub fn syntax_role(token: &str) -> SyntaxRole {
             return SyntaxRole::Literal;
         }
     }
-    if token.chars().all(|c| c.is_ascii_digit() || c == '.' || c == 'x' || c == 'X'
-        || (c.is_ascii_hexdigit() && token.starts_with("0x")))
-    {
+    if token.chars().all(|c| {
+        c.is_ascii_digit()
+            || c == '.'
+            || c == 'x'
+            || c == 'X'
+            || (c.is_ascii_hexdigit() && token.starts_with("0x"))
+    }) {
         return SyntaxRole::Literal;
     }
     SyntaxRole::Identifier
@@ -2623,13 +3157,14 @@ pub fn syntax_roles(tokens: &[String]) -> Vec<SyntaxRole> {
 /// with role placeholders, keep keywords/structure/operators as-is.
 /// Two code snippets with the same signature have the same syntactic structure.
 pub fn structural_signature(tokens: &[String]) -> Vec<String> {
-    tokens.iter().map(|t| {
-        match syntax_role(t) {
+    tokens
+        .iter()
+        .map(|t| match syntax_role(t) {
             SyntaxRole::Keyword | SyntaxRole::Structure | SyntaxRole::Operator => t.clone(),
             SyntaxRole::Literal => "_LIT_".to_string(),
             SyntaxRole::Identifier => "_ID_".to_string(),
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 /// Tokenizer: split on whitespace, separate punctuation (but keep _ as word char).
@@ -2701,7 +3236,10 @@ impl SpectralCodec {
     }
 
     pub fn with_max_seq(dictionary: TokenDictionary, max_seq: usize) -> Self {
-        Self { dictionary, max_seq }
+        Self {
+            dictionary,
+            max_seq,
+        }
     }
 
     /// Number of DCT coefficients produced (= max_seq).
@@ -2845,7 +3383,11 @@ mod tests {
         let dict = TokenDictionary::build(&["hello world"], 100);
         let ids = dict.encode("hello xyz");
         let text = dict.decode(&ids);
-        assert!(text.contains("hello"), "should contain known token: {}", text);
+        assert!(
+            text.contains("hello"),
+            "should contain known token: {}",
+            text
+        );
     }
 
     #[test]
@@ -2914,7 +3456,10 @@ mod tests {
         // An integer point with even sum is already an E8 lattice point
         let x = [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         let p = E8Lattice::nearest_point(&x);
-        assert_eq!(p, x, "integer point with even sum should be its own nearest");
+        assert_eq!(
+            p, x,
+            "integer point with even sum should be its own nearest"
+        );
     }
 
     #[test]
@@ -2927,9 +3472,17 @@ mod tests {
         // or all half-integers with even sum
         let is_integer = p.iter().all(|v| (v - v.round()).abs() < 1e-6);
         let is_half_int = p.iter().all(|v| (v - (v - 0.5).round() - 0.5).abs() < 1e-6);
-        assert!(is_integer || is_half_int, "should be integer or half-integer coords: {:?}", p);
+        assert!(
+            is_integer || is_half_int,
+            "should be integer or half-integer coords: {:?}",
+            p
+        );
         if is_integer {
-            assert!((sum.round() as i32) % 2 == 0, "integer coords must have even sum: sum={}", sum);
+            assert!(
+                (sum.round() as i32) % 2 == 0,
+                "integer coords must have even sum: sum={}",
+                sum
+            );
         }
     }
 
@@ -2939,7 +3492,11 @@ mod tests {
         let x = [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]; // sum = 4.0 (even)
         let p = E8Lattice::nearest_point(&x);
         let dist = E8Lattice::dist_sq(&x, &p);
-        assert!(dist < 1e-6, "half-integer E8 point should map to itself, dist={}", dist);
+        assert!(
+            dist < 1e-6,
+            "half-integer E8 point should map to itself, dist={}",
+            dist
+        );
     }
 
     #[test]
@@ -2951,10 +3508,17 @@ mod tests {
         // Each 8d block should be a valid E8 lattice point
         for sub in 0..8 {
             let offset = sub * 8;
-            let block: Vec<f32> = q[offset..offset+8].to_vec();
+            let block: Vec<f32> = q[offset..offset + 8].to_vec();
             let is_integer = block.iter().all(|v| (v - v.round()).abs() < 1e-6);
-            let is_half_int = block.iter().all(|v| (v - (v - 0.5).round() - 0.5).abs() < 1e-6);
-            assert!(is_integer || is_half_int, "block {} should be E8: {:?}", sub, block);
+            let is_half_int = block
+                .iter()
+                .all(|v| (v - (v - 0.5).round() - 0.5).abs() < 1e-6);
+            assert!(
+                is_integer || is_half_int,
+                "block {} should be E8: {:?}",
+                sub,
+                block
+            );
         }
     }
 
@@ -2965,10 +3529,17 @@ mod tests {
         assert_eq!(q.len(), 128);
         for sub in 0..16 {
             let offset = sub * 8;
-            let block: Vec<f32> = q[offset..offset+8].to_vec();
+            let block: Vec<f32> = q[offset..offset + 8].to_vec();
             let is_integer = block.iter().all(|v| (v - v.round()).abs() < 1e-6);
-            let is_half_int = block.iter().all(|v| (v - (v - 0.5).round() - 0.5).abs() < 1e-6);
-            assert!(is_integer || is_half_int, "block {} should be E8: {:?}", sub, block);
+            let is_half_int = block
+                .iter()
+                .all(|v| (v - (v - 0.5).round() - 0.5).abs() < 1e-6);
+            assert!(
+                is_integer || is_half_int,
+                "block {} should be E8: {:?}",
+                sub,
+                block
+            );
         }
     }
 
@@ -3010,10 +3581,18 @@ mod tests {
         let mut a = vec![0.0f32; 64];
         let mut b = vec![0.0f32; 64];
         // Put signal in different subspaces
-        for i in 0..8 { a[i] = 1.0; }
-        for i in 8..16 { b[i] = 1.0; }
+        for i in 0..8 {
+            a[i] = 1.0;
+        }
+        for i in 8..16 {
+            b[i] = 1.0;
+        }
         let score = E8Lattice::compatibility_score(&a, &b);
-        assert!(score < 2.0, "orthogonal patterns should have low compatibility: {}", score);
+        assert!(
+            score < 2.0,
+            "orthogonal patterns should have low compatibility: {}",
+            score
+        );
     }
 
     #[test]
@@ -3146,32 +3725,39 @@ mod tests {
         let nearest = LeechLattice::nearest_point(&point);
         // Should snap to the nearest valid lattice point
         let dist = LeechLattice::dist_sq_24(&point, &nearest);
-        assert!(dist < 0.1, "integer lattice point should have near-zero distance, got {dist}");
+        assert!(
+            dist < 0.1,
+            "integer lattice point should have near-zero distance, got {dist}"
+        );
     }
 
     #[test]
     fn test_leech_nearest_point_snaps() {
         let point: [f32; 24] = [
-            0.3, 0.7, -0.2, 1.1, 0.9, -0.5, 0.4, 0.8,
-            -0.1, 0.6, 0.3, -0.7, 1.2, 0.1, -0.3, 0.5,
+            0.3, 0.7, -0.2, 1.1, 0.9, -0.5, 0.4, 0.8, -0.1, 0.6, 0.3, -0.7, 1.2, 0.1, -0.3, 0.5,
             0.2, -0.4, 0.8, 0.1, -0.6, 0.9, 0.3, -0.2,
         ];
         let nearest = LeechLattice::nearest_point(&point);
         let dist = LeechLattice::dist_sq_24(&point, &nearest);
         // Leech lattice has covering radius sqrt(2), so max dist^2 = 2
-        assert!(dist <= 2.1, "distance should be within covering radius, got {dist}");
+        assert!(
+            dist <= 2.1,
+            "distance should be within covering radius, got {dist}"
+        );
         println!("Leech snap: dist²={dist:.4}");
     }
 
     #[test]
     fn test_leech_self_compatibility_maximal() {
         let point: [f32; 24] = [
-            1.0, 0.5, -0.3, 0.7, 0.2, 0.8, -0.1, 0.4,
-            0.6, -0.5, 0.3, 0.9, 0.1, -0.7, 0.4, 0.2,
+            1.0, 0.5, -0.3, 0.7, 0.2, 0.8, -0.1, 0.4, 0.6, -0.5, 0.3, 0.9, 0.1, -0.7, 0.4, 0.2,
             0.8, 0.3, -0.6, 0.5, -0.2, 0.7, 0.1, 0.4,
         ];
         let score = LeechLattice::compatibility_score(&point, &point);
-        assert!(score >= 3.5, "self-compatibility should be near-maximal, got {score}");
+        assert!(
+            score >= 3.5,
+            "self-compatibility should be near-maximal, got {score}"
+        );
     }
 
     #[test]
@@ -3183,11 +3769,13 @@ mod tests {
 
     #[test]
     fn test_leech_nearest_neighbors() {
-        let points: Vec<[f32; 24]> = (0..5).map(|i| {
-            let mut p = [0.0f32; 24];
-            p[0] = i as f32;
-            p
-        }).collect();
+        let points: Vec<[f32; 24]> = (0..5)
+            .map(|i| {
+                let mut p = [0.0f32; 24];
+                p[0] = i as f32;
+                p
+            })
+            .collect();
 
         let mut query = [0.0f32; 24];
         query[0] = 0.4;
@@ -3195,7 +3783,10 @@ mod tests {
         let neighbors = LeechLattice::nearest_neighbors(&query, &points, 2);
         assert_eq!(neighbors.len(), 2);
         assert_eq!(neighbors[0].0, 0, "closest should be first point (0.0)");
-        assert_eq!(neighbors[1].0, 1, "second closest should be second point (1.0)");
+        assert_eq!(
+            neighbors[1].0, 1,
+            "second closest should be second point (1.0)"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -3242,31 +3833,64 @@ mod tests {
         let structure = CodeAnalyzer::analyze("src/service.rs", code);
 
         assert_eq!(structure.language, CodeLanguage::Rust);
-        assert!(structure.imports.len() >= 2, "should find >= 2 imports, got {}", structure.imports.len());
-        assert!(structure.imports.iter().any(|i| i.module_path.contains("HashMap")),
-            "should find HashMap import");
+        assert!(
+            structure.imports.len() >= 2,
+            "should find >= 2 imports, got {}",
+            structure.imports.len()
+        );
+        assert!(
+            structure
+                .imports
+                .iter()
+                .any(|i| i.module_path.contains("HashMap")),
+            "should find HashMap import"
+        );
 
-        let fns: Vec<&Declaration> = structure.declarations.iter()
-            .filter(|d| d.kind == DeclKind::Function).collect();
-        assert!(fns.len() >= 3, "should find >= 3 functions, got {}: {:?}",
-            fns.len(), fns.iter().map(|f| &f.name).collect::<Vec<_>>());
+        let fns: Vec<&Declaration> = structure
+            .declarations
+            .iter()
+            .filter(|d| d.kind == DeclKind::Function)
+            .collect();
+        assert!(
+            fns.len() >= 3,
+            "should find >= 3 functions, got {}: {:?}",
+            fns.len(),
+            fns.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
 
         let pub_fns: Vec<_> = fns.iter().filter(|f| f.is_public).collect();
         assert!(pub_fns.len() >= 2, "should have >= 2 public functions");
 
-        let structs: Vec<_> = structure.declarations.iter()
-            .filter(|d| d.kind == DeclKind::Struct).collect();
+        let structs: Vec<_> = structure
+            .declarations
+            .iter()
+            .filter(|d| d.kind == DeclKind::Struct)
+            .collect();
         assert!(!structs.is_empty(), "should find LanguageService struct");
         assert_eq!(structs[0].name, "LanguageService");
 
-        assert!(structure.metrics.cyclomatic_complexity >= 2, "should have branches");
+        assert!(
+            structure.metrics.cyclomatic_complexity >= 2,
+            "should have branches"
+        );
         assert!(structure.metrics.code_lines > 10);
-        assert!(structure.call_sites.len() >= 2, "should find call sites: {:?}",
-            structure.call_sites.iter().map(|c| &c.callee).collect::<Vec<_>>());
+        assert!(
+            structure.call_sites.len() >= 2,
+            "should find call sites: {:?}",
+            structure
+                .call_sites
+                .iter()
+                .map(|c| &c.callee)
+                .collect::<Vec<_>>()
+        );
 
         println!("Rust analysis:");
-        println!("  {} declarations, {} imports, {} call sites",
-            structure.declarations.len(), structure.imports.len(), structure.call_sites.len());
+        println!(
+            "  {} declarations, {} imports, {} call sites",
+            structure.declarations.len(),
+            structure.imports.len(),
+            structure.call_sites.len()
+        );
         println!("  metrics: {:?}", structure.metrics);
     }
 
@@ -3303,22 +3927,42 @@ def standalone_function(items: List[str]) -> int:
         let structure = CodeAnalyzer::analyze("src/processor.py", code);
 
         assert_eq!(structure.language, CodeLanguage::Python);
-        assert!(structure.imports.len() >= 3, "should find >= 3 imports, got {}", structure.imports.len());
+        assert!(
+            structure.imports.len() >= 3,
+            "should find >= 3 imports, got {}",
+            structure.imports.len()
+        );
 
-        let classes: Vec<_> = structure.declarations.iter()
-            .filter(|d| d.kind == DeclKind::Class).collect();
+        let classes: Vec<_> = structure
+            .declarations
+            .iter()
+            .filter(|d| d.kind == DeclKind::Class)
+            .collect();
         assert_eq!(classes.len(), 1);
         assert_eq!(classes[0].name, "FileProcessor");
 
-        let fns: Vec<_> = structure.declarations.iter()
-            .filter(|d| d.kind == DeclKind::Function).collect();
-        assert!(fns.len() >= 4, "should find >= 4 functions (init, process, validate, standalone)");
+        let fns: Vec<_> = structure
+            .declarations
+            .iter()
+            .filter(|d| d.kind == DeclKind::Function)
+            .collect();
+        assert!(
+            fns.len() >= 4,
+            "should find >= 4 functions (init, process, validate, standalone)"
+        );
 
         let private_fns: Vec<_> = fns.iter().filter(|f| !f.is_public).collect();
-        assert!(private_fns.len() >= 2, "should have private functions (starting with _)");
+        assert!(
+            private_fns.len() >= 2,
+            "should have private functions (starting with _)"
+        );
 
         println!("Python analysis:");
-        println!("  {} declarations, {} imports", structure.declarations.len(), structure.imports.len());
+        println!(
+            "  {} declarations, {} imports",
+            structure.declarations.len(),
+            structure.imports.len()
+        );
     }
 
     #[test]
@@ -3359,20 +4003,33 @@ export function useAuth() {
         assert_eq!(structure.language, CodeLanguage::TypeScript);
         assert!(structure.imports.len() >= 2);
 
-        let interfaces: Vec<_> = structure.declarations.iter()
-            .filter(|d| d.kind == DeclKind::Interface).collect();
+        let interfaces: Vec<_> = structure
+            .declarations
+            .iter()
+            .filter(|d| d.kind == DeclKind::Interface)
+            .collect();
         assert!(!interfaces.is_empty(), "should find AuthService interface");
 
-        let classes: Vec<_> = structure.declarations.iter()
-            .filter(|d| d.kind == DeclKind::Class).collect();
+        let classes: Vec<_> = structure
+            .declarations
+            .iter()
+            .filter(|d| d.kind == DeclKind::Class)
+            .collect();
         assert!(!classes.is_empty(), "should find AuthServiceImpl class");
 
-        let fns: Vec<_> = structure.declarations.iter()
-            .filter(|d| d.kind == DeclKind::Function).collect();
+        let fns: Vec<_> = structure
+            .declarations
+            .iter()
+            .filter(|d| d.kind == DeclKind::Function)
+            .collect();
         assert!(!fns.is_empty(), "should find useAuth function");
 
         println!("TypeScript analysis:");
-        println!("  {} declarations, {} imports", structure.declarations.len(), structure.imports.len());
+        println!(
+            "  {} declarations, {} imports",
+            structure.declarations.len(),
+            structure.imports.len()
+        );
     }
 
     // -------------------------------------------------------------------
@@ -3381,12 +4038,13 @@ export function useAuth() {
 
     #[test]
     fn test_hybrid_embedder_different_files_different_embeddings() {
-        let emb1 = HybridEmbedder::embed_file("src/main.rs",
-            "fn main() { println!(\"hello\"); }");
+        let emb1 = HybridEmbedder::embed_file("src/main.rs", "fn main() { println!(\"hello\"); }");
         let emb2 = HybridEmbedder::embed_file("src/service.rs",
             "use std::collections::HashMap;\npub struct Service { map: HashMap<String, String> }\nimpl Service { pub fn new() -> Self { Self { map: HashMap::new() } } }");
-        let emb3 = HybridEmbedder::embed_file("tests/test_service.rs",
-            "#[test]\nfn test_service() { assert!(true); }");
+        let emb3 = HybridEmbedder::embed_file(
+            "tests/test_service.rs",
+            "#[test]\nfn test_service() { assert!(true); }",
+        );
 
         // Different files should have different embeddings
         assert_ne!(emb1, emb2, "main.rs and service.rs should differ");
@@ -3394,12 +4052,17 @@ export function useAuth() {
         assert_ne!(emb1, emb3, "main.rs and test_service.rs should differ");
 
         // Test file should have test signal in dim 16
-        assert!(emb3[16] > emb1[16], "test file should have higher test signal");
+        assert!(
+            emb3[16] > emb1[16],
+            "test file should have higher test signal"
+        );
     }
 
     #[test]
     fn test_hybrid_embedder_similar_files_close_embeddings() {
-        let service1 = HybridEmbedder::embed_file("src/service_a.rs", r#"
+        let service1 = HybridEmbedder::embed_file(
+            "src/service_a.rs",
+            r#"
 use std::collections::HashMap;
 pub struct ServiceA { data: HashMap<String, Vec<u8>> }
 impl ServiceA {
@@ -3407,8 +4070,11 @@ impl ServiceA {
     pub fn get(&self, key: &str) -> Option<&Vec<u8>> { self.data.get(key) }
     pub fn set(&mut self, key: String, val: Vec<u8>) { self.data.insert(key, val); }
 }
-"#);
-        let service2 = HybridEmbedder::embed_file("src/service_b.rs", r#"
+"#,
+        );
+        let service2 = HybridEmbedder::embed_file(
+            "src/service_b.rs",
+            r#"
 use std::collections::HashMap;
 pub struct ServiceB { cache: HashMap<String, Vec<u8>> }
 impl ServiceB {
@@ -3416,35 +4082,52 @@ impl ServiceB {
     pub fn fetch(&self, key: &str) -> Option<&Vec<u8>> { self.cache.get(key) }
     pub fn store(&mut self, key: String, val: Vec<u8>) { self.cache.insert(key, val); }
 }
-"#);
-        let test_file = HybridEmbedder::embed_file("tests/test_services.rs", r#"
+"#,
+        );
+        let test_file = HybridEmbedder::embed_file(
+            "tests/test_services.rs",
+            r#"
 #[test]
 fn test_service_a() { assert!(true); }
 #[test]
 fn test_service_b() { assert!(true); }
-"#);
+"#,
+        );
 
         // Similar service files should be closer to each other than to a test file
         let dist_ab = emb_dist(&service1, &service2);
         let dist_at = emb_dist(&service1, &test_file);
-        assert!(dist_ab < dist_at,
+        assert!(
+            dist_ab < dist_at,
             "similar services should be closer ({:.4}) than service-to-test ({:.4})",
-            dist_ab, dist_at);
+            dist_ab,
+            dist_at
+        );
     }
 
     #[test]
     fn test_hybrid_embedder_normalized() {
-        let emb = HybridEmbedder::embed_file("src/example.rs", r#"
+        let emb = HybridEmbedder::embed_file(
+            "src/example.rs",
+            r#"
 pub fn compute(x: f32, y: f32) -> f32 {
     if x > y { x - y } else { y - x }
 }
-"#);
+"#,
+        );
         let norm: f32 = emb.iter().map(|v| v * v).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 0.01, "embedding should be unit-normalized, got norm={norm}");
+        assert!(
+            (norm - 1.0).abs() < 0.01,
+            "embedding should be unit-normalized, got norm={norm}"
+        );
     }
 
     fn emb_dist(a: &[f32; 24], b: &[f32; 24]) -> f32 {
-        a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum::<f32>().sqrt()
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y) * (x - y))
+            .sum::<f32>()
+            .sqrt()
     }
 
     // -------------------------------------------------------------------
@@ -3458,12 +4141,16 @@ pub fn compute(x: f32, y: f32) -> f32 {
 
         // main.rs and service.rs co-changed in commits 0 and 2
         let key = ("src/main.rs".to_string(), "src/service.rs".to_string());
-        assert!(history.cochange.get(&key).copied().unwrap_or(0) >= 2,
-            "main.rs and service.rs should co-change >= 2 times");
+        assert!(
+            history.cochange.get(&key).copied().unwrap_or(0) >= 2,
+            "main.rs and service.rs should co-change >= 2 times"
+        );
 
         // service.rs should have high churn (appears in all 3 commits)
-        assert!(history.churn.get("src/service.rs").copied().unwrap_or(0) >= 3,
-            "service.rs should have churn >= 3");
+        assert!(
+            history.churn.get("src/service.rs").copied().unwrap_or(0) >= 3,
+            "service.rs should have churn >= 3"
+        );
     }
 
     #[test]
@@ -3478,8 +4165,10 @@ pub fn compute(x: f32, y: f32) -> f32 {
         history.fill_edit_correlation(&mut emb_c, "src/c.rs", &paths);
 
         // a.rs has co-change partners, c.rs doesn't
-        assert!(emb_a[12] > emb_c[12],
-            "a.rs should have higher co-change fan-out than c.rs");
+        assert!(
+            emb_a[12] > emb_c[12],
+            "a.rs should have higher co-change fan-out than c.rs"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -3490,15 +4179,20 @@ pub fn compute(x: f32, y: f32) -> f32 {
     fn test_project_model_hybrid_indexing() {
         let mut model = ProjectModel::new();
 
-        model.index_file_hybrid("src/main.rs", r#"
+        model.index_file_hybrid(
+            "src/main.rs",
+            r#"
 use crate::service::LanguageService;
 
 fn main() {
     let mut svc = LanguageService::new();
     svc.generation("hello");
 }
-"#);
-        model.index_file_hybrid("src/service.rs", r#"
+"#,
+        );
+        model.index_file_hybrid(
+            "src/service.rs",
+            r#"
 use std::collections::HashMap;
 
 pub struct LanguageService {
@@ -3509,20 +4203,33 @@ impl LanguageService {
     pub fn new() -> Self { Self { brains: HashMap::new() } }
     pub fn generation(&mut self, text: &str) -> String { text.to_string() }
 }
-"#);
-        model.index_file_hybrid("tests/test_service.rs", r#"
+"#,
+        );
+        model.index_file_hybrid(
+            "tests/test_service.rs",
+            r#"
 #[test]
 fn test_generation() {
     assert!(true);
 }
-"#);
+"#,
+        );
 
         let summary = model.summary();
-        println!("Hybrid index: {} total ({} files, {} functions, {} types)",
-            summary.total_entities, summary.files, summary.functions, summary.types);
+        println!(
+            "Hybrid index: {} total ({} files, {} functions, {} types)",
+            summary.total_entities, summary.files, summary.functions, summary.types
+        );
 
-        assert!(summary.files >= 3, "should index 3 files, got {}", summary.files);
-        assert!(summary.functions >= 2, "should index functions from declarations");
+        assert!(
+            summary.files >= 3,
+            "should index 3 files, got {}",
+            summary.files
+        );
+        assert!(
+            summary.functions >= 2,
+            "should index functions from declarations"
+        );
 
         // service.rs should relate more to main.rs than to test file
         let related = model.context_for_file("src/service.rs", 5);
@@ -3542,7 +4249,10 @@ fn test_generation() {
 
         let cond = model.context_conditioning(&emb, 1);
         assert_eq!(cond.len(), 24, "conditioning vector should be 24d");
-        assert!(cond.iter().any(|&v| v != 0.0), "conditioning should be non-zero");
+        assert!(
+            cond.iter().any(|&v| v != 0.0),
+            "conditioning should be non-zero"
+        );
     }
 
     #[test]

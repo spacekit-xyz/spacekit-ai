@@ -1,7 +1,7 @@
+use crate::neuron::Neuron;
+use crate::types::*;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use crate::types::*;
-use crate::neuron::Neuron;
 use std::collections::{HashMap, HashSet};
 
 /// System 1: Metabolic Pruning (parallelised with rayon)
@@ -20,30 +20,44 @@ pub fn apply_metabolic_pressure(
 ) -> usize {
     let pruned_per: Vec<(NeuronId, Vec<usize>)> = crate::maybe_par_iter!(neurons)
         .filter_map(|(&id, neuron)| {
-            if neuron.frozen { return None; }
-            if !neuron.over_budget() { return None; }
+            if neuron.frozen {
+                return None;
+            }
+            if !neuron.over_budget() {
+                return None;
+            }
             // Never prune synapses from input neurons — they carry raw signal.
             // Without both input coordinates, hidden neurons are geometrically blind.
-            if input_protected.contains(&id) { return None; }
+            if input_protected.contains(&id) {
+                return None;
+            }
 
-            let mut indexed: Vec<(usize, f32)> = neuron.synapses
+            let mut indexed: Vec<(usize, f32)> = neuron
+                .synapses
                 .iter()
                 .enumerate()
                 // Never prune synapses targeting the output layer
                 .filter(|(_, s)| !output_protected.contains(&s.target) && !s.frozen)
                 // Engram-consolidated synapses are memory traces — never pruned
-                .filter(|(_, s)| !(config.engram_enabled && s.consolidation >= config.engram_prune_threshold))
+                .filter(|(_, s)| {
+                    !(config.engram_enabled && s.consolidation >= config.engram_prune_threshold)
+                })
                 .map(|(i, s)| (i, s.metabolic_cost()))
                 .collect();
 
             indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
-            let to_prune: Vec<usize> = indexed.iter()
+            let to_prune: Vec<usize> = indexed
+                .iter()
                 .filter(|(_, cost)| *cost < config.pruning_threshold)
                 .map(|(i, _)| *i)
                 .collect();
 
-            if to_prune.is_empty() { None } else { Some((id, to_prune)) }
+            if to_prune.is_empty() {
+                None
+            } else {
+                Some((id, to_prune))
+            }
         })
         .collect();
 
@@ -56,7 +70,9 @@ pub fn apply_metabolic_pressure(
                     neuron.synapses.remove(idx);
                     total_pruned += 1;
                 }
-                if !neuron.over_budget() { break; }
+                if !neuron.over_budget() {
+                    break;
+                }
             }
             if neuron.over_budget() {
                 neuron.energy_budget *= 1.02;
@@ -66,9 +82,13 @@ pub fn apply_metabolic_pressure(
 
     // Age all synapses each tick (skip frozen — they are not updated)
     for neuron in neurons.values_mut() {
-        if neuron.frozen { continue; }
+        if neuron.frozen {
+            continue;
+        }
         for s in neuron.synapses.iter_mut() {
-            if s.frozen { continue; }
+            if s.frozen {
+                continue;
+            }
             s.age += 1;
             if s.age > 1000 && s.facilitation > 1.5 {
                 s.depression *= 0.999;

@@ -15,11 +15,19 @@ pub struct GeneratedResponse {
     pub confidence: f32,
 }
 
-fn default_confidence() -> f32 { 1.0 }
+fn default_confidence() -> f32 {
+    1.0
+}
 
 pub fn render_action_template(action: &ActionJson) -> GeneratedResponse {
     match (&action.action_type, &action.payload) {
-        (ActionType::SupportTicket, Some(ActionPayload::SupportTicket { issue_type, priority })) => {
+        (
+            ActionType::SupportTicket,
+            Some(ActionPayload::SupportTicket {
+                issue_type,
+                priority,
+            }),
+        ) => {
             let text = format!(
                 "[SupportTicket] Triage started for issue_type={} priority={}. Next step: collect account identifier and recent error details.",
                 issue_type, priority
@@ -31,7 +39,13 @@ pub fn render_action_template(action: &ActionJson) -> GeneratedResponse {
                 confidence: 1.0,
             }
         }
-        (ActionType::CodingAssist, Some(ActionPayload::CodingAssist { task, language_hint })) => {
+        (
+            ActionType::CodingAssist,
+            Some(ActionPayload::CodingAssist {
+                task,
+                language_hint,
+            }),
+        ) => {
             let text = format!(
                 "[CodingAssist] Task={} language_hint={}. Next step: provide minimal repro and failing logs/tests.",
                 task, language_hint
@@ -55,8 +69,15 @@ pub fn render_action_template(action: &ActionJson) -> GeneratedResponse {
                 confidence: 1.0,
             }
         }
-        (ActionType::ToolCall, Some(ActionPayload::ToolCall { tool_name, arguments })) => {
-            let args_str = arguments.iter()
+        (
+            ActionType::ToolCall,
+            Some(ActionPayload::ToolCall {
+                tool_name,
+                arguments,
+            }),
+        ) => {
+            let args_str = arguments
+                .iter()
                 .map(|(k, v)| format!("{}={}", k, v))
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -84,11 +105,11 @@ pub fn render_action_template(action: &ActionJson) -> GeneratedResponse {
             }
         }
         _ => GeneratedResponse {
-            text: "[Fallback] fallback_code=SCHEMA_MISMATCH. Clarify intent or hand off safely.".to_string(),
+            text: "[Fallback] fallback_code=SCHEMA_MISMATCH. Clarify intent or hand off safely."
+                .to_string(),
             template_id: "m4_template_schema_mismatch_v1".to_string(),
             traceable: false,
             confidence: 1.0,
         },
     }
 }
-

@@ -65,7 +65,11 @@ impl<N> CategoricalDAG<N> {
 
     /// Connect two existing nodes with a typed morphism.
     pub fn add_edge(&mut self, source: NodeId, target: NodeId, kind: MorphismKind) {
-        self.edges.push(Edge { source, target, kind });
+        self.edges.push(Edge {
+            source,
+            target,
+            kind,
+        });
     }
 
     /// Successors of a node in topological order (direct children only).
@@ -149,7 +153,11 @@ pub struct Composed<L1, L2, B> {
 
 impl<L1, L2, B> Composed<L1, L2, B> {
     pub fn new(first: L1, second: L2) -> Self {
-        Self { first, second, _mid: std::marker::PhantomData }
+        Self {
+            first,
+            second,
+            _mid: std::marker::PhantomData,
+        }
     }
 }
 
@@ -180,7 +188,9 @@ pub struct Network<Input, Output> {
 
 impl<I: 'static, O: 'static> Network<I, O> {
     pub fn new<F: Fn(I) -> O + 'static>(f: F) -> Self {
-        Self { forward: Box::new(f) }
+        Self {
+            forward: Box::new(f),
+        }
     }
 
     pub fn run(&self, input: I) -> O {

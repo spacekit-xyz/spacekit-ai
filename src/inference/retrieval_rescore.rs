@@ -220,7 +220,8 @@ mod tests {
     fn oi_climbing_danger_penalizes_bullish_coil_line() {
         let rules = default_rules_table();
         let q = "open interest climbing way too fast feels dangerous";
-        let tl = "rising oi suggests potential volatility with a bullish lean; cautiously optimistic.";
+        let tl =
+            "rising oi suggests potential volatility with a bullish lean; cautiously optimistic.";
         let mut matched = false;
         for rule in rules {
             if rule.id == "oi_climbing_danger_penalize_bullish_coil_template"
@@ -231,14 +232,18 @@ mod tests {
                 matched = true;
             }
         }
-        assert!(matched, "expected OI danger vs bullish-coil penalty to match");
+        assert!(
+            matched,
+            "expected OI danger vs bullish-coil penalty to match"
+        );
     }
 
     #[test]
     fn oi_coiled_spring_query_skips_danger_penalty() {
         let rules = default_rules_table();
         let q = "open interest climbing while price stays flat feels like a coiled spring";
-        let tl = "rising oi suggests potential volatility with a bullish lean; cautiously optimistic.";
+        let tl =
+            "rising oi suggests potential volatility with a bullish lean; cautiously optimistic.";
         for rule in rules {
             if rule.id == "oi_climbing_danger_penalize_bullish_coil_template" {
                 assert!(
@@ -300,6 +305,9 @@ mod tests {
                 matched = true;
             }
         }
-        assert!(matched, "expected fear/greed vs BTC-alt rotation penalty to match");
+        assert!(
+            matched,
+            "expected fear/greed vs BTC-alt rotation penalty to match"
+        );
     }
 }

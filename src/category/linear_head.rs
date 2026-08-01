@@ -133,7 +133,15 @@ mod tests {
         let h = LinearHead::new_zeros(2, 3);
         let x = vec![1.0f32, 0.0];
         let (idx, _, probs, conf) = h.predict_with_probs(&x);
-        assert_eq!(idx, probs.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0);
+        assert_eq!(
+            idx,
+            probs
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .unwrap()
+                .0
+        );
         assert!((probs[idx] - conf).abs() < 1e-5);
     }
 

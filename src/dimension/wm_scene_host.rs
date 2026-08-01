@@ -19,9 +19,13 @@ use super::wm_scene::{
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum SceneHostRequest {
-    LoadScene { path: String },
+    LoadScene {
+        path: String,
+    },
     /// Predictive energy route on a scene graph JSON body.
-    Step { scene: SceneGraph },
+    Step {
+        scene: SceneGraph,
+    },
     /// Plan discrete action for `block_idx` (defaults to first block if omitted).
     Act {
         scene: SceneGraph,
@@ -126,13 +130,7 @@ impl SceneHostSession {
                         note: "load_scene first".into(),
                     };
                 };
-                let bi = block_idx.unwrap_or_else(|| {
-                    if scene.nodes.len() > 1 {
-                        1
-                    } else {
-                        0
-                    }
-                });
+                let bi = block_idx.unwrap_or_else(|| if scene.nodes.len() > 1 { 1 } else { 0 });
                 match scene_act_step(b, &scene, bi) {
                     Ok(d) => SceneHostResponse {
                         ok: true,
@@ -183,9 +181,9 @@ impl SceneHostSession {
             Ok(req) => serde_json::to_string(&self.handle(req)).unwrap_or_else(|e| {
                 format!(r#"{{"ok":false,"error":"{e}","loaded":false,"note":"serialize"}}"#)
             }),
-            Err(e) => format!(
-                r#"{{"ok":false,"error":"{e}","loaded":false,"note":"bad request"}}"#
-            ),
+            Err(e) => {
+                format!(r#"{{"ok":false,"error":"{e}","loaded":false,"note":"bad request"}}"#)
+            }
         }
     }
 }

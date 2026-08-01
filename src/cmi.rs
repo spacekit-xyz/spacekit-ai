@@ -1,10 +1,10 @@
 //! Conditional mutual information estimators for Task E dissociation measurement.
 //! See docs/CMI_MEASUREMENT_SPEC.md (companion to COMPETENCE_ROUTING_SPEC).
 
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
 use rand::Rng;
 use rand::SeedableRng;
-use rand::seq::SliceRandom;
-use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
 
 const LN2: f32 = std::f32::consts::LN_2;
@@ -199,11 +199,7 @@ fn stratified_split(
     (train, test)
 }
 
-fn mlp_region_mi(
-    features: &[Vec<f32>],
-    labels: &[u8],
-    rng: &mut StdRng,
-) -> (f32, f32) {
+fn mlp_region_mi(features: &[Vec<f32>], labels: &[u8], rng: &mut StdRng) -> (f32, f32) {
     if features.is_empty() || labels.is_empty() {
         return (0.0, 0.0);
     }
@@ -320,8 +316,11 @@ pub fn estimate_cmi_seed(records: &[CmiPointRecord], seed: u64) -> CmiSeedEstima
         &region,
         &mut rng,
     );
-    let (i_r_y_circles_mlp, _) =
-        mlp_region_mi(&y_circles.iter().map(|&v| vec![v]).collect::<Vec<_>>(), &region, &mut rng);
+    let (i_r_y_circles_mlp, _) = mlp_region_mi(
+        &y_circles.iter().map(|&v| vec![v]).collect::<Vec<_>>(),
+        &region,
+        &mut rng,
+    );
     let (i_r_a_spiral_mlp, _) = mlp_region_mi(&a_spiral, &region, &mut rng);
     let (i_r_a_circles_mlp, _) = mlp_region_mi(&a_circles, &region, &mut rng);
     let (i_r_joint_y_mlp, _) = mlp_region_mi(&joint_y, &region, &mut rng);
@@ -474,7 +473,9 @@ pub fn format_cmi_report(estimates: &[CmiSeedEstimates]) -> String {
     if ds_m > 0.15 || dc_m > 0.15 {
         out.push_str("⚠ ΔCMI clearly > 0.15 — entanglement thesis may be WRONG; reopen competence routing.\n");
     } else {
-        out.push_str("ΔCMI ≈ 0 — entanglement thesis supported (conservative held-out classifiers).\n");
+        out.push_str(
+            "ΔCMI ≈ 0 — entanglement thesis supported (conservative held-out classifiers).\n",
+        );
     }
     if j_m < 0.1 {
         out.push_str("⚠ I(R;(Y₁,Y₂)) near zero — cross-specialist joint does not carry region; bivector direction dead.\n");

@@ -139,18 +139,8 @@ impl EnergyAdapter {
                 let e_pos = self.energy(z, z_next);
                 // Stronger pull on positives (home transitions must be low-energy).
                 accumulate_energy_grad(
-                    z,
-                    z_next,
-                    e_pos,
-                    2.0,
-                    &self.e_w1,
-                    &self.e_b1,
-                    &self.e_w2,
-                    self.e_b2,
-                    &mut eg_w1,
-                    &mut eg_b1,
-                    &mut eg_w2,
-                    &mut eg_b2,
+                    z, z_next, e_pos, 2.0, &self.e_w1, &self.e_b1, &self.e_w2, self.e_b2,
+                    &mut eg_w1, &mut eg_b1, &mut eg_w2, &mut eg_b2,
                 );
                 ecount += 1.0;
 
@@ -167,32 +157,12 @@ impl EnergyAdapter {
                     let gap = e_neg - e_pos;
                     if gap < margin {
                         accumulate_energy_grad(
-                            zn,
-                            zn_next,
-                            e_neg,
-                            -2.0,
-                            &self.e_w1,
-                            &self.e_b1,
-                            &self.e_w2,
-                            self.e_b2,
-                            &mut eg_w1,
-                            &mut eg_b1,
-                            &mut eg_w2,
-                            &mut eg_b2,
+                            zn, zn_next, e_neg, -2.0, &self.e_w1, &self.e_b1, &self.e_w2,
+                            self.e_b2, &mut eg_w1, &mut eg_b1, &mut eg_w2, &mut eg_b2,
                         );
                         accumulate_energy_grad(
-                            z,
-                            z_next,
-                            e_pos,
-                            1.0,
-                            &self.e_w1,
-                            &self.e_b1,
-                            &self.e_w2,
-                            self.e_b2,
-                            &mut eg_w1,
-                            &mut eg_b1,
-                            &mut eg_w2,
-                            &mut eg_b2,
+                            z, z_next, e_pos, 1.0, &self.e_w1, &self.e_b1, &self.e_w2, self.e_b2,
+                            &mut eg_w1, &mut eg_b1, &mut eg_w2, &mut eg_b2,
                         );
                         ecount += 1.0;
                     }
@@ -263,31 +233,15 @@ impl EnergyAdapter {
             let mut ac = 0.0f32;
             for (z, _) in pairs {
                 accumulate_affinity_grad(
-                    z,
-                    1.0,
-                    &self.a_w1,
-                    &self.a_b1,
-                    &self.a_w2,
-                    self.a_b2,
-                    &mut ag_w1,
-                    &mut ag_b1,
-                    &mut ag_w2,
-                    &mut ag_b2,
+                    z, 1.0, &self.a_w1, &self.a_b1, &self.a_w2, self.a_b2, &mut ag_w1, &mut ag_b1,
+                    &mut ag_w2, &mut ag_b2,
                 );
                 ac += 1.0;
             }
             for z in contrast_z {
                 accumulate_affinity_grad(
-                    z,
-                    0.0,
-                    &self.a_w1,
-                    &self.a_b1,
-                    &self.a_w2,
-                    self.a_b2,
-                    &mut ag_w1,
-                    &mut ag_b1,
-                    &mut ag_w2,
-                    &mut ag_b2,
+                    z, 0.0, &self.a_w1, &self.a_b1, &self.a_w2, self.a_b2, &mut ag_w1, &mut ag_b1,
+                    &mut ag_w2, &mut ag_b2,
                 );
                 ac += 1.0;
             }
@@ -310,7 +264,10 @@ pub struct EnergyPromotionBundle {
 }
 
 impl EnergyPromotionBundle {
-    pub fn promote(encoder: &FrozenJepaEncoder, adapters: Vec<EnergyAdapter>) -> Result<Self, String> {
+    pub fn promote(
+        encoder: &FrozenJepaEncoder,
+        adapters: Vec<EnergyAdapter>,
+    ) -> Result<Self, String> {
         for a in &adapters {
             if a.encoder_pin != encoder.fingerprint {
                 return Err(format!(
@@ -384,8 +341,22 @@ pub fn run_energy_wm_task_e_seed(seed: u64, train_n: usize) -> EnergyWmSeedResul
     let inner_z: Vec<_> = inner_pure.iter().map(|t| t.z.clone()).collect();
 
     let mut train_rng = StdRng::seed_from_u64(seed.wrapping_add(99));
-    e_inner.train(&inner_pairs, &outer_pairs, &outer_z, 500, 0.15, &mut train_rng);
-    e_outer.train(&outer_pairs, &inner_pairs, &inner_z, 500, 0.15, &mut train_rng);
+    e_inner.train(
+        &inner_pairs,
+        &outer_pairs,
+        &outer_z,
+        500,
+        0.15,
+        &mut train_rng,
+    );
+    e_outer.train(
+        &outer_pairs,
+        &inner_pairs,
+        &inner_z,
+        500,
+        0.15,
+        &mut train_rng,
+    );
 
     let bundle = EnergyPromotionBundle::promote(&encoder, vec![e_inner.clone(), e_outer.clone()])
         .expect("promote");

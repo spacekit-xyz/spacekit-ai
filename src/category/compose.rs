@@ -77,7 +77,8 @@ impl SentimentSlot {
             SentimentLabel::Mixed => Self {
                 label_phrase: "MIXED",
                 tone_marker: "dual-valence",
-                grounding_prefix: "Contrastive or dual-valence wording — read as MIXED when both poles appear.",
+                grounding_prefix:
+                    "Contrastive or dual-valence wording — read as MIXED when both poles appear.",
             },
         }
     }
@@ -123,7 +124,13 @@ impl CategoricalComposer {
         embed_dim: usize,
         branch_dim: usize,
     ) -> Self {
-        Self { composition, sentiment_head, aux_head, embed_dim, branch_dim }
+        Self {
+            composition,
+            sentiment_head,
+            aux_head,
+            embed_dim,
+            branch_dim,
+        }
     }
 
     /// Create with random initialization (for testing / bootstrap).
@@ -133,18 +140,24 @@ impl CategoricalComposer {
             .map(|_| (rng.gen_f32() * 2.0 - 1.0) * 0.1)
             .collect();
         let composition = PythagorasNode::leaf(weights, embed_dim);
-        let sentiment_head = LinearHead::new_random(branch_dim, SentimentLabel::num_classes(), &mut rng);
+        let sentiment_head =
+            LinearHead::new_random(branch_dim, SentimentLabel::num_classes(), &mut rng);
         let aux_head = LinearHead::new_random(branch_dim, AuxCategory::num_classes(), &mut rng);
-        Self { composition, sentiment_head, aux_head, embed_dim, branch_dim }
+        Self {
+            composition,
+            sentiment_head,
+            aux_head,
+            embed_dim,
+            branch_dim,
+        }
     }
 
     /// Decompose an embedding into disentangled sentiment and entity vectors
     /// using the trained Pythagoras tree + linear heads.
     pub fn decompose(&self, embedding: &[f32]) -> CategoricalDecomposition {
         let emb = align_to_dim(embedding, self.embed_dim);
-        let (sent_vec, ent_vec) = bifunctor_branch_vectors(
-            &self.composition, &emb, self.branch_dim,
-        );
+        let (sent_vec, ent_vec) =
+            bifunctor_branch_vectors(&self.composition, &emb, self.branch_dim);
 
         let (si, _sl, sp, sc) = self.sentiment_head.predict_with_probs(&sent_vec);
         let sentiment = SentimentLabel::from_class_index(si).unwrap_or(SentimentLabel::Neutral);
@@ -183,11 +196,13 @@ impl CategoricalComposer {
 
         let (explanation, conf, tid) = if let Some(tmpl) = template {
             let text = fill_template(tmpl, &slot, &entity_slot);
-            (text, tmpl.confidence * decomposition.sentiment_confidence, Some(tmpl.template_id))
+            (
+                text,
+                tmpl.confidence * decomposition.sentiment_confidence,
+                Some(tmpl.template_id),
+            )
         } else {
-            let text = compose_from_decomposition(
-                &slot, &entity_slot, user_text, &decomposition,
-            );
+            let text = compose_from_decomposition(&slot, &entity_slot, user_text, &decomposition);
             (text, decomposition.sentiment_confidence * 0.7, None)
         };
 
@@ -221,14 +236,12 @@ impl CategoricalComposer {
 /// Extract salient tokens from user text: lowercase, deduped, stopwords removed.
 fn extract_salient_tokens(text: &str, max: usize) -> Vec<String> {
     let stopwords: &[&str] = &[
-        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-        "have", "has", "had", "do", "does", "did", "will", "would", "could",
-        "should", "may", "might", "shall", "can", "to", "of", "in", "for",
-        "on", "with", "at", "by", "from", "as", "into", "about", "like",
-        "through", "after", "over", "between", "out", "against", "during",
-        "before", "it", "its", "this", "that", "these", "those", "i", "we",
-        "you", "he", "she", "they", "me", "him", "her", "us", "them", "my",
-        "your", "his", "our", "their", "and", "but", "or", "nor", "not",
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+        "do", "does", "did", "will", "would", "could", "should", "may", "might", "shall", "can",
+        "to", "of", "in", "for", "on", "with", "at", "by", "from", "as", "into", "about", "like",
+        "through", "after", "over", "between", "out", "against", "during", "before", "it", "its",
+        "this", "that", "these", "those", "i", "we", "you", "he", "she", "they", "me", "him",
+        "her", "us", "them", "my", "your", "his", "our", "their", "and", "but", "or", "nor", "not",
         "no", "so", "if", "than", "too", "very", "just", "also",
     ];
 
@@ -236,15 +249,22 @@ fn extract_salient_tokens(text: &str, max: usize) -> Vec<String> {
     let mut out = Vec::new();
 
     for word in text.split_whitespace() {
-        let clean: String = word.chars()
+        let clean: String = word
+            .chars()
             .filter(|c| c.is_alphanumeric() || *c == '\'' || *c == '-')
             .collect::<String>()
             .to_ascii_lowercase();
-        if clean.len() <= 2 { continue; }
-        if stopwords.contains(&clean.as_str()) { continue; }
+        if clean.len() <= 2 {
+            continue;
+        }
+        if stopwords.contains(&clean.as_str()) {
+            continue;
+        }
         if seen.insert(clean.clone()) {
             out.push(clean);
-            if out.len() >= max { break; }
+            if out.len() >= max {
+                break;
+            }
         }
     }
     out
@@ -284,10 +304,7 @@ fn compose_from_decomposition(
             }
         }
         SentimentLabel::Sarcastic => {
-            format!(
-                "{}{}",
-                slot.grounding_prefix, entity_phrase,
-            )
+            format!("{}{}", slot.grounding_prefix, entity_phrase,)
         }
         SentimentLabel::Neutral => {
             if has_factual_markers(user_text) {
@@ -303,48 +320,65 @@ fn compose_from_decomposition(
                     entity_phrase,
                 )
             } else {
-                format!(
-                    "{}{}",
-                    slot.grounding_prefix, entity_phrase,
-                )
+                format!("{}{}", slot.grounding_prefix, entity_phrase,)
             }
         }
         _ => {
-            format!(
-                "{}{}",
-                slot.grounding_prefix, entity_phrase,
-            )
+            format!("{}{}", slot.grounding_prefix, entity_phrase,)
         }
     }
 }
 
 fn detect_contrastive_marker(text: &str) -> Option<&'static str> {
     let lower = text.to_ascii_lowercase();
-    if lower.contains(" but ") || lower.contains(" but,") { return Some("but"); }
-    if lower.contains(" yet ") || lower.contains(" yet,") { return Some("yet"); }
-    if lower.contains(" however ") || lower.contains(" however,") { return Some("however"); }
-    if lower.contains(" although ") || lower.contains(" although,") { return Some("although"); }
-    if lower.contains(" though ") || lower.contains(" though,") { return Some("though"); }
-    if lower.contains(" despite ") { return Some("despite"); }
-    if lower.contains(" nevertheless ") { return Some("nevertheless"); }
-    if lower.contains(" instead ") { return Some("instead"); }
+    if lower.contains(" but ") || lower.contains(" but,") {
+        return Some("but");
+    }
+    if lower.contains(" yet ") || lower.contains(" yet,") {
+        return Some("yet");
+    }
+    if lower.contains(" however ") || lower.contains(" however,") {
+        return Some("however");
+    }
+    if lower.contains(" although ") || lower.contains(" although,") {
+        return Some("although");
+    }
+    if lower.contains(" though ") || lower.contains(" though,") {
+        return Some("though");
+    }
+    if lower.contains(" despite ") {
+        return Some("despite");
+    }
+    if lower.contains(" nevertheless ") {
+        return Some("nevertheless");
+    }
+    if lower.contains(" instead ") {
+        return Some("instead");
+    }
     None
 }
 
 fn has_factual_markers(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     let markers = [
-        "list ", "define ", "what is ", "what are ", "how many ", "how much ",
-        "what nominal", "which ", "name the ", "identify ", "describe the ",
+        "list ",
+        "define ",
+        "what is ",
+        "what are ",
+        "how many ",
+        "how much ",
+        "what nominal",
+        "which ",
+        "name the ",
+        "identify ",
+        "describe the ",
     ];
-    markers.iter().any(|m| lower.starts_with(m) || lower.contains(&format!(" {}", m)))
+    markers
+        .iter()
+        .any(|m| lower.starts_with(m) || lower.contains(&format!(" {}", m)))
 }
 
-fn fill_template(
-    tmpl: &ProgramTemplate,
-    slot: &SentimentSlot,
-    entity_slot: &EntitySlot,
-) -> String {
+fn fill_template(tmpl: &ProgramTemplate, slot: &SentimentSlot, entity_slot: &EntitySlot) -> String {
     let mut text = tmpl.skeleton.clone();
     text = text.replace("{sentiment}", slot.tone_marker);
     text = text.replace("{label}", slot.label_phrase);
@@ -417,7 +451,8 @@ mod tests {
             entity_vec: vec![0.0; 4],
         };
         let text = compose_from_decomposition(
-            &slot, &entity,
+            &slot,
+            &entity,
             "The earnings call sounded confident, yet the stock keeps bleeding",
             &decomp,
         );
@@ -453,11 +488,7 @@ mod tests {
             },
             confidence: 0.8,
         };
-        let output = composer.generate(
-            &embedding,
-            "Bitcoin price hits new high",
-            Some(&template),
-        );
+        let output = composer.generate(&embedding, "Bitcoin price hits new high", Some(&template));
         assert!(output.template_id == Some(7));
         assert!(output.text.contains("given"));
     }
@@ -478,7 +509,8 @@ mod tests {
             entity_vec: vec![0.0; 4],
         };
         let text = compose_from_decomposition(
-            &slot, &entity,
+            &slot,
+            &entity,
             "What nominal AC voltages are used for residential split-phase service?",
             &decomp,
         );

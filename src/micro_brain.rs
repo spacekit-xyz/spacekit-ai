@@ -5,15 +5,15 @@
 //! - `ArchetypeBrain`: global `InfraciliaryLattice` for archetype selection across groups
 //! - `MetaBrain`: centroid-based coordinator that fuses micro-brain outputs (zero backprop)
 
-use rand::Rng;
-use rand::rngs::StdRng;
-use rand::SeedableRng;
-use serde::{Deserialize, Serialize};
 use crate::dimension::action::ActionType;
 use crate::dimension::group_gen::GEN_COND_DIM;
-use crate::dimension::paramecium::{InfraciliaryLattice, BehavioralProgram, WaveState};
+use crate::dimension::paramecium::{BehavioralProgram, InfraciliaryLattice, WaveState};
 use crate::spectral::{E8Lattice, TokenDictionary};
 use crate::understanding::{TOPIC_EMBED_DIM, VERB_EMBED_DIM, VERB_LABELS};
+use rand::rngs::StdRng;
+use rand::Rng;
+use rand::SeedableRng;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // MicroBrain — Paramecium lattice for classification
@@ -61,7 +61,14 @@ impl MicroBrain {
         let label_strs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
         let dict = TokenDictionary::build(&label_strs, 64);
         let lattice = InfraciliaryLattice::new(dict);
-        Self { lattice, role, input_dim, output_dim, class_names, frozen: false }
+        Self {
+            lattice,
+            role,
+            input_dim,
+            output_dim,
+            class_names,
+            frozen: false,
+        }
     }
 
     /// Forward pass returning (best_class_idx, confidence, pseudo-logits).
@@ -82,7 +89,10 @@ impl MicroBrain {
         let mut best_sim = f32::NEG_INFINITY;
         for (i, prog) in self.lattice.programs.iter().enumerate() {
             let sim = cosine_sim_vecs(input, &prog.ema_centroid);
-            if sim > best_sim { best_sim = sim; best_idx = i; }
+            if sim > best_sim {
+                best_sim = sim;
+                best_idx = i;
+            }
         }
         let text = self.lattice.programs[best_idx].display_text(&self.lattice.dictionary);
         let cls = parse_cls(&text).unwrap_or(0);
@@ -105,7 +115,11 @@ impl MicroBrain {
         self.lattice.develop(&pairs, 0.90);
         let resp = self.lattice.respond(input);
         let predicted = parse_cls(&resp.text).unwrap_or(usize::MAX);
-        if predicted == target_idx { 0.0 } else { 1.0 }
+        if predicted == target_idx {
+            0.0
+        } else {
+            1.0
+        }
     }
 
     /// Build from labeled data in one pass.
@@ -120,18 +134,31 @@ impl MicroBrain {
         let labels: Vec<String> = (0..output_dim).map(|i| format!("cls_{}", i)).collect();
         let label_strs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
         let dict = TokenDictionary::build(&label_strs, 64);
-        let pairs: Vec<(Vec<f32>, String)> = samples.iter()
+        let pairs: Vec<(Vec<f32>, String)> = samples
+            .iter()
             .map(|(emb, idx)| (emb.to_vec(), format!("cls_{}", idx)))
             .collect();
         let mut lattice = InfraciliaryLattice::new(dict);
         lattice.develop(&pairs, 0.90);
-        Self { lattice, role, input_dim, output_dim, class_names, frozen: false }
+        Self {
+            lattice,
+            role,
+            input_dim,
+            output_dim,
+            class_names,
+            frozen: false,
+        }
     }
 
-    pub fn freeze(&mut self) { self.frozen = true; }
+    pub fn freeze(&mut self) {
+        self.frozen = true;
+    }
 
     pub fn class_name(&self, idx: usize) -> &str {
-        self.class_names.get(idx).map(|s| s.as_str()).unwrap_or("unknown")
+        self.class_names
+            .get(idx)
+            .map(|s| s.as_str())
+            .unwrap_or("unknown")
     }
 }
 
@@ -140,12 +167,16 @@ fn parse_cls(text: &str) -> Option<usize> {
 }
 
 fn softmax_argmax(logits: &[f32]) -> (usize, f32) {
-    if logits.is_empty() { return (0, 0.0); }
+    if logits.is_empty() {
+        return (0, 0.0);
+    }
     let max_l = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let exps: Vec<f32> = logits.iter().map(|l| (l - max_l).exp()).collect();
     let sum: f32 = exps.iter().sum();
     let probs: Vec<f32> = exps.iter().map(|e| e / sum.max(1e-10)).collect();
-    let (idx, &conf) = probs.iter().enumerate()
+    let (idx, &conf) = probs
+        .iter()
+        .enumerate()
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
         .unwrap_or((0, &0.0));
     (idx, conf)
@@ -216,7 +247,10 @@ impl ArchetypeBrain {
         }
         lattice.wave = WaveState::new(lattice.programs.len());
 
-        Self { lattice, program_meta }
+        Self {
+            lattice,
+            program_meta,
+        }
     }
 
     /// Sense + select: find the best archetype across all groups.
@@ -224,27 +258,43 @@ impl ArchetypeBrain {
     pub fn select(&mut self, embedding: &[f32]) -> ArchetypeResult {
         if self.lattice.programs.is_empty() {
             return ArchetypeResult {
-                group_idx: 0, archetype_idx: 0,
-                confidence: 0.0, wave_energy: 0.0, volley: Vec::new(),
+                group_idx: 0,
+                archetype_idx: 0,
+                confidence: 0.0,
+                wave_energy: 0.0,
+                volley: Vec::new(),
             };
         }
 
-        let mut scored: Vec<(usize, f32)> = self.lattice.programs.iter().enumerate()
+        let mut scored: Vec<(usize, f32)> = self
+            .lattice
+            .programs
+            .iter()
+            .enumerate()
             .map(|(i, prog)| (i, cosine_sim_vecs(embedding, &prog.ema_centroid)))
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let (best_idx, best_sim) = scored[0];
-        let meta = self.program_meta.get(best_idx)
+        let meta = self
+            .program_meta
+            .get(best_idx)
             .cloned()
-            .unwrap_or(ArchetypeProgram { group_idx: 0, archetype_idx: 0 });
+            .unwrap_or(ArchetypeProgram {
+                group_idx: 0,
+                archetype_idx: 0,
+            });
 
         let volley = if best_sim < 0.9 {
-            scored.iter().take(3).filter_map(|&(idx, sim)| {
-                self.program_meta.get(idx).map(|m| {
-                    (m.group_idx, m.archetype_idx, sim)
+            scored
+                .iter()
+                .take(3)
+                .filter_map(|&(idx, sim)| {
+                    self.program_meta
+                        .get(idx)
+                        .map(|m| (m.group_idx, m.archetype_idx, sim))
                 })
-            }).collect()
+                .collect()
         } else {
             vec![(meta.group_idx, meta.archetype_idx, best_sim)]
         };
@@ -292,7 +342,12 @@ pub struct CentroidCoordinator {
 
 impl CentroidCoordinator {
     pub fn new(input_dim: usize, output_dim: usize) -> Self {
-        Self { centroids: Vec::new(), outputs: Vec::new(), input_dim, output_dim }
+        Self {
+            centroids: Vec::new(),
+            outputs: Vec::new(),
+            input_dim,
+            output_dim,
+        }
     }
 
     /// Develop from (input, output) pairs in one pass.
@@ -329,7 +384,10 @@ impl CentroidCoordinator {
         let mut best_sim = f32::NEG_INFINITY;
         for (i, c) in self.centroids.iter().enumerate() {
             let sim = cosine_sim_vecs(input, c);
-            if sim > best_sim { best_sim = sim; best_idx = i; }
+            if sim > best_sim {
+                best_sim = sim;
+                best_idx = i;
+            }
         }
         self.outputs[best_idx].clone()
     }
@@ -339,9 +397,12 @@ impl CentroidCoordinator {
     pub fn train_step(&mut self, input: &[f32], target: &[f32]) -> f32 {
         self.develop(&[(input.to_vec(), target.to_vec())]);
         let pred = self.predict(input);
-        let mse: f32 = pred.iter().zip(target.iter())
+        let mse: f32 = pred
+            .iter()
+            .zip(target.iter())
             .map(|(p, t)| (p - t) * (p - t))
-            .sum::<f32>() / target.len().max(1) as f32;
+            .sum::<f32>()
+            / target.len().max(1) as f32;
         mse
     }
 }
@@ -358,7 +419,11 @@ fn cosine_sim_vecs(a: &[f32], b: &[f32]) -> f32 {
         nb += bi * bi;
     }
     let denom = na.sqrt() * nb.sqrt();
-    if denom < 1e-20 { 0.0 } else { (dot / denom) as f32 }
+    if denom < 1e-20 {
+        0.0
+    } else {
+        (dot / denom) as f32
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -378,15 +443,9 @@ pub struct MetaBrain {
 impl Default for MetaBrain {
     fn default() -> Self {
         let mut rng = StdRng::seed_from_u64(0);
-        let topic_brain = MicroBrain::new(
-            MicroBrainRole::Topic, 1, 1, 1, Vec::new(), &mut rng,
-        );
-        let verb_brain = MicroBrain::new(
-            MicroBrainRole::Verb, 1, 1, 1, Vec::new(), &mut rng,
-        );
-        let action_brain = MicroBrain::new(
-            MicroBrainRole::Action, 1, 1, 1, Vec::new(), &mut rng,
-        );
+        let topic_brain = MicroBrain::new(MicroBrainRole::Topic, 1, 1, 1, Vec::new(), &mut rng);
+        let verb_brain = MicroBrain::new(MicroBrainRole::Verb, 1, 1, 1, Vec::new(), &mut rng);
+        let action_brain = MicroBrain::new(MicroBrainRole::Action, 1, 1, 1, Vec::new(), &mut rng);
         let coordinator = CentroidCoordinator::new(0, 0);
         Self {
             coordinator,
@@ -430,19 +489,25 @@ impl MetaBrain {
 
         let topic_brain = MicroBrain::new(
             MicroBrainRole::Topic,
-            raw_dim, num_topics, 64,
+            raw_dim,
+            num_topics,
+            64,
             topic_names,
             rng,
         );
         let verb_brain = MicroBrain::new(
             MicroBrainRole::Verb,
-            raw_dim, num_verbs, 32,
+            raw_dim,
+            num_verbs,
+            32,
             VERB_LABELS.iter().map(|s| s.to_string()).collect(),
             rng,
         );
         let action_brain = MicroBrain::new(
             MicroBrainRole::Action,
-            raw_dim, num_actions, 32,
+            raw_dim,
+            num_actions,
+            32,
             ACTION_NAMES.iter().map(|s| s.to_string()).collect(),
             rng,
         );
@@ -466,11 +531,7 @@ impl MetaBrain {
     }
 
     /// Full inference pipeline: run all micro-brains, fuse via coordinator.
-    pub fn process(
-        &mut self,
-        h_raw: &[f32],
-        bridge_vec: &[f32],
-    ) -> MetaResult {
+    pub fn process(&mut self, h_raw: &[f32], bridge_vec: &[f32]) -> MetaResult {
         // Run micro-brains
         let (topic_idx, topic_conf, topic_logits) = self.topic_brain.predict(h_raw);
         let (verb_idx, verb_conf, verb_logits) = self.verb_brain.predict(h_raw);
@@ -483,7 +544,12 @@ impl MetaBrain {
         // Run archetype brain
         let arch_result = self.archetype_brain.as_mut().map(|ab| ab.select(h_raw));
         let (group_idx, arch_idx, arch_conf, volley) = match &arch_result {
-            Some(r) => (Some(r.group_idx), Some(r.archetype_idx), r.confidence, r.volley.clone()),
+            Some(r) => (
+                Some(r.group_idx),
+                Some(r.archetype_idx),
+                r.confidence,
+                r.volley.clone(),
+            ),
             None => (None, None, 0.0, Vec::new()),
         };
 
@@ -507,13 +573,18 @@ impl MetaBrain {
             || topic_name == "jailbreak"
             || topic_name == "system_prompt_leak";
         let topic_emb = if topic_conf >= 0.45 && !is_adversarial_topic {
-            self.topic_embeddings.get(topic_idx)
-                .cloned().unwrap_or_else(|| vec![0.0f32; TOPIC_EMBED_DIM])
+            self.topic_embeddings
+                .get(topic_idx)
+                .cloned()
+                .unwrap_or_else(|| vec![0.0f32; TOPIC_EMBED_DIM])
         } else {
             vec![0.0f32; TOPIC_EMBED_DIM]
         };
-        let verb_emb = self.verb_embeddings.get(verb_idx)
-            .cloned().unwrap_or_else(|| vec![0.0f32; VERB_EMBED_DIM]);
+        let verb_emb = self
+            .verb_embeddings
+            .get(verb_idx)
+            .cloned()
+            .unwrap_or_else(|| vec![0.0f32; VERB_EMBED_DIM]);
 
         let mut conditioning = Vec::with_capacity(GEN_COND_DIM);
         // First 128d: blend of bridge vector and coordinator output
@@ -542,12 +613,10 @@ impl MetaBrain {
 
     /// Train the coordinator: develop with this (micro-brain output, target conditioning) pair.
     #[cfg(feature = "training")]
-    pub fn train_coordinator_step(
-        &mut self,
-        h_raw: &[f32],
-        target_conditioning: &[f32],
-    ) -> f32 {
-        if self.frozen { return 0.0; }
+    pub fn train_coordinator_step(&mut self, h_raw: &[f32], target_conditioning: &[f32]) -> f32 {
+        if self.frozen {
+            return 0.0;
+        }
         let (_, _, topic_logits) = self.topic_brain.predict(h_raw);
         let (_, _, verb_logits) = self.verb_brain.predict(h_raw);
         let (_, _, action_logits) = self.action_brain.predict(h_raw);
@@ -565,7 +634,8 @@ impl MetaBrain {
         coord_input.push(ac);
         coord_input.resize(self.coordinator_input_dim, 0.0);
 
-        self.coordinator.train_step(&coord_input, target_conditioning)
+        self.coordinator
+            .train_step(&coord_input, target_conditioning)
     }
 
     pub fn freeze(&mut self) {
@@ -587,19 +657,18 @@ impl MetaBrain {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand::SeedableRng;
 
     #[test]
     fn test_micro_brain_predict_shape() {
         let input_a: Vec<f32> = (0..32).map(|i| if i < 16 { 1.0 } else { 0.0 }).collect();
         let input_b: Vec<f32> = (0..32).map(|i| if i >= 16 { 1.0 } else { 0.0 }).collect();
-        let samples = vec![
-            (input_a.as_slice(), 0usize),
-            (input_b.as_slice(), 1),
-        ];
+        let samples = vec![(input_a.as_slice(), 0usize), (input_b.as_slice(), 1)];
         let mut brain = MicroBrain::build_from_data(
-            MicroBrainRole::Topic, 32, 5,
+            MicroBrainRole::Topic,
+            32,
+            5,
             vec!["a".into(), "b".into(), "c".into(), "d".into(), "e".into()],
             &samples,
         );
@@ -612,7 +681,9 @@ mod tests {
     #[test]
     fn test_micro_brain_training_converges() {
         let input_a: Vec<f32> = (0..16).map(|i| if i < 5 { 1.0 } else { 0.0 }).collect();
-        let input_b: Vec<f32> = (0..16).map(|i| if i >= 5 && i < 10 { 1.0 } else { 0.0 }).collect();
+        let input_b: Vec<f32> = (0..16)
+            .map(|i| if i >= 5 && i < 10 { 1.0 } else { 0.0 })
+            .collect();
         let input_c: Vec<f32> = (0..16).map(|i| if i >= 10 { 1.0 } else { 0.0 }).collect();
 
         let samples: Vec<(&[f32], usize)> = vec![
@@ -621,7 +692,9 @@ mod tests {
             (input_c.as_slice(), 2),
         ];
         let mut brain = MicroBrain::build_from_data(
-            MicroBrainRole::Topic, 16, 3,
+            MicroBrainRole::Topic,
+            16,
+            3,
             vec!["a".into(), "b".into(), "c".into()],
             &samples,
         );
@@ -636,7 +709,10 @@ mod tests {
     fn test_micro_brain_freeze_blocks_training() {
         let mut rng = StdRng::seed_from_u64(42);
         let mut brain = MicroBrain::new(
-            MicroBrainRole::Verb, 8, 3, 4,
+            MicroBrainRole::Verb,
+            8,
+            3,
+            4,
             vec!["x".into(), "y".into(), "z".into()],
             &mut rng,
         );
@@ -666,9 +742,24 @@ mod tests {
     fn test_archetype_brain_volley_spans_groups() {
         let dict = TokenDictionary::build(&["a", "b", "c"], 100);
         let entries = vec![
-            (0, 0, vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dict.encode("a")),
-            (1, 0, vec![0.9, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dict.encode("b")),
-            (2, 0, vec![0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0], dict.encode("c")),
+            (
+                0,
+                0,
+                vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                dict.encode("a"),
+            ),
+            (
+                1,
+                0,
+                vec![0.9, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                dict.encode("b"),
+            ),
+            (
+                2,
+                0,
+                vec![0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                dict.encode("c"),
+            ),
         ];
         let mut ab = ArchetypeBrain::build(&entries, dict);
         // Input close to both group 0 and group 1 archetypes
@@ -718,17 +809,25 @@ mod tests {
         let loss1 = mb.train_coordinator_step(&h_raw, &target);
         let loss2 = mb.train_coordinator_step(&h_raw, &target);
         // After two develops, centroid regression should converge quickly
-        assert!(loss2 <= loss1 + 0.01, "coordinator loss should not diverge: {} -> {}", loss1, loss2);
+        assert!(
+            loss2 <= loss1 + 0.01,
+            "coordinator loss should not diverge: {} -> {}",
+            loss1,
+            loss2
+        );
     }
 
     #[test]
     fn test_meta_brain_freeze() {
         let mut rng = StdRng::seed_from_u64(42);
         let mut mb = MetaBrain::build(
-            8, 2, vec!["a".into(), "b".into()],
+            8,
+            2,
+            vec!["a".into(), "b".into()],
             vec![vec![0.0; TOPIC_EMBED_DIM]; 2],
             vec![vec![0.0; VERB_EMBED_DIM]; VERB_LABELS.len()],
-            5, &mut rng,
+            5,
+            &mut rng,
         );
         mb.freeze();
         assert!(mb.frozen);
@@ -741,10 +840,13 @@ mod tests {
     fn test_meta_brain_serialization() {
         let mut rng = StdRng::seed_from_u64(42);
         let mb = MetaBrain::build(
-            8, 2, vec!["a".into(), "b".into()],
+            8,
+            2,
+            vec!["a".into(), "b".into()],
             vec![vec![0.0; TOPIC_EMBED_DIM]; 2],
             vec![vec![0.0; VERB_EMBED_DIM]; VERB_LABELS.len()],
-            5, &mut rng,
+            5,
+            &mut rng,
         );
         let json = serde_json::to_string(&mb).unwrap();
         let restored: MetaBrain = serde_json::from_str(&json).unwrap();

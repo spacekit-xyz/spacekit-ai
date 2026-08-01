@@ -20,13 +20,22 @@ use crate::coherence::{band_coherence_mv, BandCoherence};
 /// Avoids pulling in rand for this hot path.
 struct FastRng(u64);
 impl FastRng {
-    fn new(seed: u64) -> Self { Self(seed) }
+    fn new(seed: u64) -> Self {
+        Self(seed)
+    }
     fn next_u32(&mut self) -> u32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (self.0 >> 33) as u32
     }
     fn rademacher(&mut self) -> f32 {
-        if self.next_u32() & 1 == 0 { 1.0 } else { -1.0 }
+        if self.next_u32() & 1 == 0 {
+            1.0
+        } else {
+            -1.0
+        }
     }
 }
 
@@ -121,11 +130,11 @@ impl GradientMemory {
         config: GradientMemoryConfig,
     ) -> Self {
         let n = sources.len().max(1);
-        let mut attention: Vec<f32> = sources.iter()
-            .map(|s| s.similarity.max(0.01))
-            .collect();
+        let mut attention: Vec<f32> = sources.iter().map(|s| s.similarity.max(0.01)).collect();
         let sum: f32 = attention.iter().sum();
-        for w in &mut attention { *w /= sum; }
+        for w in &mut attention {
+            *w /= sum;
+        }
 
         // Initialize bridge state as weighted combination of source centroids + query
         let dim = query.len().max(1);
@@ -182,8 +191,9 @@ impl GradientMemory {
         let mut best_attention = self.attention.clone();
 
         // Seed RNG from query hash for reproducibility per query
-        let seed = query.iter().take(8).enumerate()
-            .fold(0u64, |acc, (i, v)| acc ^ ((*v).to_bits() as u64).wrapping_shl(i as u32 * 8));
+        let seed = query.iter().take(8).enumerate().fold(0u64, |acc, (i, v)| {
+            acc ^ ((*v).to_bits() as u64).wrapping_shl(i as u32 * 8)
+        });
         let mut rng = FastRng::new(seed.wrapping_add(42));
 
         for step in 0..steps {
@@ -254,12 +264,18 @@ impl GradientMemory {
 
         // Diversity: entropy of attention weights (high entropy = diverse)
         let diversity_loss = {
-            let entropy: f32 = self.attention.iter()
+            let entropy: f32 = self
+                .attention
+                .iter()
                 .filter(|&&w| w > 1e-8)
                 .map(|&w| -w * w.ln())
                 .sum();
             let max_entropy = (self.attention.len() as f32).max(1.0).ln();
-            if max_entropy > 0.0 { 1.0 - entropy / max_entropy } else { 0.0 }
+            if max_entropy > 0.0 {
+                1.0 - entropy / max_entropy
+            } else {
+                0.0
+            }
         };
 
         self.config.w_relevance * relevance_loss
@@ -273,9 +289,7 @@ impl GradientMemory {
         let lr = self.config.lr;
 
         // Random Rademacher perturbation direction (different each step)
-        let perturbation: Vec<f32> = (0..n_components)
-            .map(|_| rng.rademacher())
-            .collect();
+        let perturbation: Vec<f32> = (0..n_components).map(|_| rng.rademacher()).collect();
 
         // Forward perturbation
         let mut state_plus = self.state.clone();
@@ -309,15 +323,15 @@ impl GradientMemory {
 
     /// SPSA step on the attention weights over source programs.
     fn spsa_attention_step(&mut self, query_mv: &Multivector, rng: &mut FastRng) {
-        if self.sources.len() <= 1 { return; }
+        if self.sources.len() <= 1 {
+            return;
+        }
 
         let eps = self.config.epsilon;
         let lr = self.config.lr * 0.5;
         let n = self.attention.len();
 
-        let perturbation: Vec<f32> = (0..n)
-            .map(|_| rng.rademacher())
-            .collect();
+        let perturbation: Vec<f32> = (0..n).map(|_| rng.rademacher()).collect();
 
         // Perturb attention and recompute STA state
         let saved_attention = self.attention.clone();
@@ -325,18 +339,26 @@ impl GradientMemory {
 
         // Plus perturbation
         let mut att_plus = saved_attention.clone();
-        for i in 0..n { att_plus[i] = (att_plus[i] + eps * perturbation[i]).max(0.01); }
+        for i in 0..n {
+            att_plus[i] = (att_plus[i] + eps * perturbation[i]).max(0.01);
+        }
         let sum: f32 = att_plus.iter().sum();
-        for w in &mut att_plus { *w /= sum; }
+        for w in &mut att_plus {
+            *w /= sum;
+        }
         self.attention = att_plus;
         self.rebuild_state_from_attention();
         let loss_plus = self.compute_loss(query_mv);
 
         // Minus perturbation
         let mut att_minus = saved_attention.clone();
-        for i in 0..n { att_minus[i] = (att_minus[i] - eps * perturbation[i]).max(0.01); }
+        for i in 0..n {
+            att_minus[i] = (att_minus[i] - eps * perturbation[i]).max(0.01);
+        }
         let sum: f32 = att_minus.iter().sum();
-        for w in &mut att_minus { *w /= sum; }
+        for w in &mut att_minus {
+            *w /= sum;
+        }
         self.attention = att_minus;
         self.rebuild_state_from_attention();
         let loss_minus = self.compute_loss(query_mv);
@@ -350,7 +372,9 @@ impl GradientMemory {
             self.attention[i] = (self.attention[i] - lr * grad_scale * perturbation[i]).max(0.01);
         }
         let sum: f32 = self.attention.iter().sum();
-        for w in &mut self.attention { *w /= sum; }
+        for w in &mut self.attention {
+            *w /= sum;
+        }
 
         self.rebuild_state_from_attention();
     }
@@ -383,16 +407,22 @@ impl GradientMemory {
     /// For each output position, selects the token from the highest-weighted
     /// source that has a token at that position, producing a novel composition.
     pub fn decode_tokens(&self) -> Vec<u16> {
-        if self.sources.is_empty() { return Vec::new(); }
+        if self.sources.is_empty() {
+            return Vec::new();
+        }
 
         // Determine output length from weighted sources
-        let max_len: usize = self.sources.iter()
+        let max_len: usize = self
+            .sources
+            .iter()
             .map(|s| s.token_ids.len())
             .max()
             .unwrap_or(0);
 
         let target_len = {
-            let weighted_len: f32 = self.sources.iter()
+            let weighted_len: f32 = self
+                .sources
+                .iter()
                 .zip(self.attention.iter())
                 .map(|(s, &w)| s.token_ids.len() as f32 * w)
                 .sum();
@@ -426,17 +456,19 @@ impl GradientMemory {
     /// Decode using sentence-level interleaving: pick whole sentences
     /// from sources based on attention weights, producing more coherent
     /// compositions than token-level blending.
-    pub fn decode_sentences(
-        &self,
-        dictionary: &crate::spectral::TokenDictionary,
-    ) -> String {
-        if self.sources.is_empty() { return String::new(); }
+    pub fn decode_sentences(&self, dictionary: &crate::spectral::TokenDictionary) -> String {
+        if self.sources.is_empty() {
+            return String::new();
+        }
 
-        let source_texts: Vec<String> = self.sources.iter()
+        let source_texts: Vec<String> = self
+            .sources
+            .iter()
             .map(|s| dictionary.decode(&s.token_ids))
             .collect();
 
-        let source_sentences: Vec<Vec<String>> = source_texts.iter()
+        let source_sentences: Vec<Vec<String>> = source_texts
+            .iter()
             .map(|text| {
                 text.split(". ")
                     .filter(|s| s.len() > 3)
@@ -454,11 +486,18 @@ impl GradientMemory {
             let mut best_src = 0;
             let mut best_score = -1.0f32;
 
-            for (idx, (sents, &w)) in source_sentences.iter().zip(self.attention.iter()).enumerate() {
+            for (idx, (sents, &w)) in source_sentences
+                .iter()
+                .zip(self.attention.iter())
+                .enumerate()
+            {
                 if used[idx] < sents.len() {
-                    let novelty = if result_sentences.is_empty() { 1.0 } else {
+                    let novelty = if result_sentences.is_empty() {
+                        1.0
+                    } else {
                         let candidate = &sents[used[idx]];
-                        let overlap: f32 = result_sentences.iter()
+                        let overlap: f32 = result_sentences
+                            .iter()
                             .map(|existing| bigram_overlap(candidate, existing))
                             .max_by(|a, b| a.partial_cmp(b).unwrap())
                             .unwrap_or(0.0);
@@ -472,7 +511,9 @@ impl GradientMemory {
                 }
             }
 
-            if best_score <= 0.0 { break; }
+            if best_score <= 0.0 {
+                break;
+            }
             if let Some(sent) = source_sentences[best_src].get(used[best_src]) {
                 result_sentences.push(sent.clone());
             }
@@ -492,18 +533,22 @@ impl GradientMemory {
 fn bigram_overlap(a: &str, b: &str) -> f32 {
     let a_words: Vec<&str> = a.split_whitespace().collect();
     let b_words: Vec<&str> = b.split_whitespace().collect();
-    if a_words.len() < 2 || b_words.len() < 2 { return 0.0; }
+    if a_words.len() < 2 || b_words.len() < 2 {
+        return 0.0;
+    }
 
-    let a_bigrams: std::collections::HashSet<(&str, &str)> = a_words.windows(2)
-        .map(|w| (w[0], w[1]))
-        .collect();
-    let b_bigrams: std::collections::HashSet<(&str, &str)> = b_words.windows(2)
-        .map(|w| (w[0], w[1]))
-        .collect();
+    let a_bigrams: std::collections::HashSet<(&str, &str)> =
+        a_words.windows(2).map(|w| (w[0], w[1])).collect();
+    let b_bigrams: std::collections::HashSet<(&str, &str)> =
+        b_words.windows(2).map(|w| (w[0], w[1])).collect();
 
     let intersection = a_bigrams.intersection(&b_bigrams).count();
     let union = a_bigrams.union(&b_bigrams).count();
-    if union == 0 { 0.0 } else { intersection as f32 / union as f32 }
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f32 / union as f32
+    }
 }
 
 // ===========================================================================
@@ -518,13 +563,13 @@ mod tests {
     }
 
     fn make_sources(n: usize, dim: usize) -> Vec<MemorySource> {
-        (0..n).map(|i| {
-            MemorySource {
+        (0..n)
+            .map(|i| MemorySource {
                 centroid: make_embedding(i as f32 * 50.0, dim),
                 token_ids: vec![1, 2, 3, 4, 5],
                 similarity: 0.9 - (i as f32 * 0.1),
-            }
-        }).collect()
+            })
+            .collect()
     }
 
     #[test]
@@ -536,7 +581,11 @@ mod tests {
         assert_eq!(gm.sources.len(), 3);
         assert_eq!(gm.attention.len(), 3);
         let sum: f32 = gm.attention.iter().sum();
-        assert!((sum - 1.0).abs() < 0.01, "attention should sum to 1.0: {}", sum);
+        assert!(
+            (sum - 1.0).abs() < 0.01,
+            "attention should sum to 1.0: {}",
+            sum
+        );
     }
 
     #[test]
@@ -551,8 +600,12 @@ mod tests {
         assert!(!result.loss_history.is_empty());
         let first_loss = result.loss_history[0];
         let last_loss = result.loss_history.last().copied().unwrap();
-        assert!(last_loss <= first_loss + 0.1,
-            "loss should not increase much: {} → {}", first_loss, last_loss);
+        assert!(
+            last_loss <= first_loss + 0.1,
+            "loss should not increase much: {} → {}",
+            first_loss,
+            last_loss
+        );
     }
 
     #[test]
@@ -564,8 +617,10 @@ mod tests {
         let result = gm.optimize(&query, 128);
 
         assert_eq!(result.conditioning.len(), 128);
-        assert!(result.conditioning.iter().any(|&v| v != 0.0),
-            "conditioning should not be all zeros");
+        assert!(
+            result.conditioning.iter().any(|&v| v != 0.0),
+            "conditioning should not be all zeros"
+        );
     }
 
     #[test]
@@ -573,7 +628,9 @@ mod tests {
         // Use very distant query to trigger low initial coherence
         let query = make_embedding(999.0, 128);
         let mut sources = make_sources(2, 128);
-        for s in &mut sources { s.similarity = 0.1; }
+        for s in &mut sources {
+            s.similarity = 0.1;
+        }
 
         let config = GradientMemoryConfig {
             max_steps: 4,
@@ -583,7 +640,10 @@ mod tests {
         let mut gm = GradientMemory::new(&query, sources, 128, config);
         let result = gm.optimize(&query, 128);
 
-        assert!(result.escalated, "should escalate when initial coherence is low");
+        assert!(
+            result.escalated,
+            "should escalate when initial coherence is low"
+        );
         assert!(result.steps_taken > 4, "escalated should take more steps");
     }
 
@@ -601,7 +661,11 @@ mod tests {
         let mut gm = GradientMemory::new(&query, sources, 128, config);
         let result = gm.optimize(&query, 128);
 
-        assert!(result.steps_taken < 20, "should stop early: took {} steps", result.steps_taken);
+        assert!(
+            result.steps_taken < 20,
+            "should stop early: took {} steps",
+            result.steps_taken
+        );
     }
 
     #[test]
@@ -616,7 +680,10 @@ mod tests {
         let tokens = gm.decode_tokens();
 
         assert!(!tokens.is_empty(), "should decode to non-empty tokens");
-        assert!(tokens.len() <= 4, "output length should be bounded by weighted avg");
+        assert!(
+            tokens.len() <= 4,
+            "output length should be bounded by weighted avg"
+        );
     }
 
     #[test]
@@ -628,30 +695,50 @@ mod tests {
         gm.optimize(&query, 128);
 
         let sum: f32 = gm.attention.iter().sum();
-        assert!((sum - 1.0).abs() < 0.05, "attention should stay normalized: {}", sum);
-        assert!(gm.attention.iter().all(|&w| w >= 0.0), "attention should be non-negative");
+        assert!(
+            (sum - 1.0).abs() < 0.05,
+            "attention should stay normalized: {}",
+            sum
+        );
+        assert!(
+            gm.attention.iter().all(|&w| w >= 0.0),
+            "attention should be non-negative"
+        );
     }
 
     #[test]
     fn test_blend_weights_reflect_similarity() {
         let query = make_embedding(0.5, 128);
         let sources = vec![
-            MemorySource { centroid: make_embedding(0.5, 128), token_ids: vec![1, 2], similarity: 0.95 },
-            MemorySource { centroid: make_embedding(100.0, 128), token_ids: vec![3, 4], similarity: 0.3 },
+            MemorySource {
+                centroid: make_embedding(0.5, 128),
+                token_ids: vec![1, 2],
+                similarity: 0.95,
+            },
+            MemorySource {
+                centroid: make_embedding(100.0, 128),
+                token_ids: vec![3, 4],
+                similarity: 0.3,
+            },
         ];
         let gm = GradientMemory::new(&query, sources, 128, GradientMemoryConfig::default());
 
-        assert!(gm.attention[0] > gm.attention[1],
+        assert!(
+            gm.attention[0] > gm.attention[1],
             "higher-similarity source should have higher initial attention: {} vs {}",
-            gm.attention[0], gm.attention[1]);
+            gm.attention[0],
+            gm.attention[1]
+        );
     }
 
     #[test]
     fn test_single_source_works() {
         let query = make_embedding(0.5, 128);
-        let sources = vec![
-            MemorySource { centroid: make_embedding(1.0, 128), token_ids: vec![1, 2, 3], similarity: 0.9 },
-        ];
+        let sources = vec![MemorySource {
+            centroid: make_embedding(1.0, 128),
+            token_ids: vec![1, 2, 3],
+            similarity: 0.9,
+        }];
         let mut gm = GradientMemory::new(&query, sources, 128, GradientMemoryConfig::default());
         let result = gm.optimize(&query, 128);
 

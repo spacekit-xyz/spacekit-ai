@@ -34,11 +34,7 @@ fn main() {
     eprintln!("Brain loaded: {}", brain_path);
     eprintln!(
         "  Agent: {} (by {}), {} groups, {} gen envs, {} code envs",
-        info.agent_name,
-        info.agent_creator,
-        info.num_groups,
-        info.gen_envs,
-        info.code_envs
+        info.agent_name, info.agent_creator, info.num_groups, info.gen_envs, info.code_envs
     );
 
     let json_mode = args.iter().any(|a| a == "--json");
@@ -148,7 +144,9 @@ fn run_repl(rt: &mut Runtime) {
                         }
                     }
                     match rt.respond_with_tool_result(trimmed, &result) {
-                        Ok(resp) if !resp.text.is_empty() && !resp.text.starts_with("[tool_call:") => {
+                        Ok(resp)
+                            if !resp.text.is_empty() && !resp.text.starts_with("[tool_call:") =>
+                        {
                             println!("\n  {}", resp.text);
                         }
                         _ => {}
@@ -157,10 +155,7 @@ fn run_repl(rt: &mut Runtime) {
                     match rt.converse(trimmed) {
                         Ok(resp) => {
                             if !resp.text.is_empty() {
-                                println!(
-                                    "\n  {} (conf={:.2})",
-                                    resp.text, resp.confidence
-                                );
+                                println!("\n  {} (conf={:.2})", resp.text, resp.confidence);
                             }
                             if let Ok(Some(code)) = rt.codegen(trimmed) {
                                 if !code.code.is_empty() {

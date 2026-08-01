@@ -4,9 +4,9 @@
 //! Each behavioral program stores (embedding, group_id). At inference, wave-propagation
 //! selects the nearest program and returns its group_id.
 
-use crate::types::GroupId;
-use crate::spectral::TokenDictionary;
 use crate::dimension::paramecium::InfraciliaryLattice;
+use crate::spectral::TokenDictionary;
+use crate::types::GroupId;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +23,73 @@ pub struct LearnedRouter {
     pub lattice: InfraciliaryLattice,
     pub num_groups: usize,
     pub input_dim: usize,
+}
+
+/// Input-only cosine k-NN router for frozen feature banks.
+///
+/// Unlike [`LearnedRouter`], this keeps the held-in routing examples instead of
+/// merging them into lattice programs. It is useful when a small frozen feature
+/// bank has overlapping task manifolds and prototype compression loses the
+/// few-neighbor structure needed to identify the task.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct KnnRouter {
+    samples: Vec<(Vec<f32>, GroupId)>,
+    pub num_groups: usize,
+    pub input_dim: usize,
+    pub k: usize,
+}
+
+impl KnnRouter {
+    pub fn build(
+        input_dim: usize,
+        num_groups: usize,
+        k: usize,
+        samples: &[(Vec<f32>, GroupId)],
+    ) -> Self {
+        Self {
+            samples: samples
+                .iter()
+                .filter(|(x, gid)| x.len() == input_dim && (*gid as usize) < num_groups)
+                .cloned()
+                .collect(),
+            num_groups,
+            input_dim,
+            k: k.max(1),
+        }
+    }
+
+    /// Weighted cosine votes. Inputs and the 4f frozen features are L2-normalized,
+    /// so cosine is a dot product; the implementation still normalizes defensively.
+    pub fn predict_logits(&self, input: &[f32]) -> Vec<f32> {
+        if input.len() != self.input_dim || self.num_groups == 0 {
+            return vec![];
+        }
+        let input_norm = input.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-8);
+        let mut nearest: Vec<(f32, GroupId)> = self
+            .samples
+            .iter()
+            .map(|(x, gid)| {
+                let x_norm = x.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-8);
+                let dot = input.iter().zip(x).map(|(a, b)| a * b).sum::<f32>();
+                (dot / (input_norm * x_norm), *gid)
+            })
+            .collect();
+        if nearest.is_empty() {
+            return vec![0.0; self.num_groups];
+        }
+        let nth = self.k.min(nearest.len()).saturating_sub(1);
+        nearest.select_nth_unstable_by(nth, |a, b| {
+            b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut logits = vec![0.0f32; self.num_groups];
+        for &(sim, gid) in nearest.iter().take(self.k) {
+            // Squaring positive cosine emphasizes local neighbors without letting
+            // a large set of weak matches dominate.
+            logits[gid as usize] += sim.max(0.0).powi(2);
+        }
+        logits
+    }
 }
 
 impl LearnedRouter {
@@ -42,16 +109,14 @@ impl LearnedRouter {
     }
 
     /// Build router from labeled training data in one pass.
-    pub fn build(
-        input_dim: usize,
-        num_groups: usize,
-        samples: &[(Vec<f32>, GroupId)],
-    ) -> Self {
+    pub fn build(input_dim: usize, num_groups: usize, samples: &[(Vec<f32>, GroupId)]) -> Self {
         let group_labels: Vec<String> = (0..num_groups).map(|g| format!("group_{}", g)).collect();
         let dict = TokenDictionary::build(
-            &group_labels.iter().map(|s| s.as_str()).collect::<Vec<_>>(), 64,
+            &group_labels.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            64,
         );
-        let pairs: Vec<(Vec<f32>, String)> = samples.iter()
+        let pairs: Vec<(Vec<f32>, String)> = samples
+            .iter()
             .map(|(emb, gid)| (emb.clone(), format!("group_{}", gid)))
             .collect();
         let mut lattice = InfraciliaryLattice::new(dict);
@@ -85,7 +150,11 @@ impl LearnedRouter {
         let k = 7.min(self.lattice.programs.len());
 
         // Score all programs by cosine similarity.
-        let mut scored: Vec<(usize, f32)> = self.lattice.programs.iter().enumerate()
+        let mut scored: Vec<(usize, f32)> = self
+            .lattice
+            .programs
+            .iter()
+            .enumerate()
             .map(|(i, prog)| (i, cosine_sim(input, &prog.ema_centroid)))
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -97,14 +166,18 @@ impl LearnedRouter {
         let mut gradient = vec![0.0f64; dim];
         let mut weight_sum = 0.0f64;
         for &(idx, sim) in scored.iter().take(k * 3) {
-            if sim < 0.01 { break; }
+            if sim < 0.01 {
+                break;
+            }
             let centroid = &self.lattice.programs[idx].ema_centroid;
             let mut disp_norm_sq = 0.0f64;
             for j in 0..dim.min(centroid.len()) {
                 let d = (input[j] - centroid[j]) as f64;
                 disp_norm_sq += d * d;
             }
-            if disp_norm_sq < 1e-20 { continue; }
+            if disp_norm_sq < 1e-20 {
+                continue;
+            }
             let green_w = (sim as f64) / disp_norm_sq;
             for j in 0..dim.min(centroid.len()) {
                 gradient[j] += green_w * (input[j] - centroid[j]) as f64;
@@ -112,14 +185,18 @@ impl LearnedRouter {
             weight_sum += green_w;
         }
         if weight_sum > 1e-20 {
-            for v in &mut gradient { *v /= weight_sum; }
+            for v in &mut gradient {
+                *v /= weight_sum;
+            }
         }
         let grad_mag: f64 = gradient.iter().map(|x| x * x).sum::<f64>().sqrt();
 
         // K-NN voting with gradient alignment bias (f64 accumulators).
         let mut logits_f64 = vec![0.0f64; self.num_groups];
         for &(idx, sim) in scored.iter().take(k) {
-            if sim < 0.0 { continue; }
+            if sim < 0.0 {
+                continue;
+            }
             let text = self.lattice.programs[idx].display_text(&self.lattice.dictionary);
             if let Some(gid) = Self::parse_group_id(&text) {
                 if gid < self.num_groups {
@@ -167,7 +244,11 @@ impl LearnedRouter {
 
         let resp = self.lattice.respond(input);
         let predicted = Self::parse_group_id(&resp.text).unwrap_or(usize::MAX);
-        if predicted == gid { 0.0 } else { 1.0 }
+        if predicted == gid {
+            0.0
+        } else {
+            1.0
+        }
     }
 
     /// Chosen group id (from nearest lattice program).
@@ -180,7 +261,11 @@ impl LearnedRouter {
             .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))?;
-        if val > 0.0 { Some(idx as GroupId) } else { None }
+        if val > 0.0 {
+            Some(idx as GroupId)
+        } else {
+            None
+        }
     }
 
     /// Merge multiple routers by combining their lattice programs.
@@ -220,7 +305,11 @@ fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
         nb += bi * bi;
     }
     let denom = na.sqrt() * nb.sqrt();
-    if denom < 1e-20 { 0.0 } else { (dot / denom) as f32 }
+    if denom < 1e-20 {
+        0.0
+    } else {
+        (dot / denom) as f32
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +375,11 @@ mod tests {
         apply_stickiness(&mut scores, Some(0), 0.2);
         assert_eq!(scores[0].1, 1.2);
         assert_eq!(scores[1].1, 1.0);
-        let best = scores.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap().0;
+        let best = scores
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap()
+            .0;
         assert_eq!(best, 0);
     }
 
@@ -330,23 +423,52 @@ mod tests {
         let mut scores = vec![(0u32, 1.0f32), (1u32, 1.0f32)];
         apply_tag_rerank(&mut scores, &embeddings, &query, 0.5);
         assert!(scores[0].1 > scores[1].1);
-        let best = scores.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap().0;
+        let best = scores
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap()
+            .0;
         assert_eq!(best, 0);
     }
 
     #[test]
     fn test_router_build_and_classify() {
         let samples: Vec<(Vec<f32>, GroupId)> = vec![
-            (vec![1.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0),
-            (vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 1),
-            (vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0], 2),
-            (vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0], 3),
+            (
+                vec![
+                    1.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                ],
+                0,
+            ),
+            (
+                vec![
+                    0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                ],
+                1,
+            ),
+            (
+                vec![
+                    0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                ],
+                2,
+            ),
+            (
+                vec![
+                    0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+                ],
+                3,
+            ),
         ];
         let mut router = LearnedRouter::build(16, 4, &samples);
         for (emb, expected_gid) in &samples {
             let chosen = router.choose_group(emb);
-            assert_eq!(chosen, Some(*expected_gid),
-                "router should route {:?} to group {}", emb, expected_gid);
+            assert_eq!(
+                chosen,
+                Some(*expected_gid),
+                "router should route {:?} to group {}",
+                emb,
+                expected_gid
+            );
         }
     }
 }

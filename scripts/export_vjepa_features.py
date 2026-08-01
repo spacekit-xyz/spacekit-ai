@@ -103,9 +103,17 @@ def mock_teacher_embed(pixels: np.ndarray, seed: int = 0x4EFA) -> np.ndarray:
 
 def hf_teacher_factory(model_id: str):
     import torch
-    from transformers import AutoModel, AutoVideoProcessor
+    from transformers import AutoModel
 
-    processor = AutoVideoProcessor.from_pretrained(model_id)
+    try:
+        from transformers import AutoVideoProcessor as _Proc
+    except ImportError:
+        try:
+            from transformers import AutoProcessor as _Proc
+        except ImportError:
+            from transformers import AutoImageProcessor as _Proc
+
+    processor = _Proc.from_pretrained(model_id)
     model = AutoModel.from_pretrained(model_id)
     model.eval()
     for p in model.parameters():
@@ -119,7 +127,13 @@ def hf_teacher_factory(model_id: str):
         rgb = np.stack([big, big, big], axis=-1)  # HWC
         # Duplicate as a short clip
         video = np.stack([rgb, rgb], axis=0)  # T,H,W,C
-        inputs = processor(video, return_tensors="pt")
+        try:
+            inputs = processor(video, return_tensors="pt")
+        except TypeError:
+            # Image processor path: pass a list of frames
+            inputs = processor(images=[rgb, rgb], return_tensors="pt")
+        if not isinstance(inputs, dict):
+            inputs = dict(inputs)
         out = model(**inputs)
         # Pool last hidden if present
         if hasattr(out, "last_hidden_state"):
@@ -178,6 +192,18 @@ def fit_student(pixels: np.ndarray, targets: np.ndarray, steps: int = 400):
     return w1, b1, w2, b2
 
 
+def load_log_frames(path: Path):
+    """Load JSONL visuomotor log (pixels / pixels_next / regime_left)."""
+    rows = []
+    with path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rows.append(json.loads(line))
+    return rows
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["mock", "hf"], default="mock")
@@ -185,6 +211,12 @@ def main():
     ap.add_argument("--out", type=Path, default=Path("data/wm/vjepa_export_v1.json"))
     ap.add_argument("--n", type=int, default=256)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument(
+        "--log",
+        type=Path,
+        default=None,
+        help="JSONL visuomotor log (real-log path). If set, frames come from the log, not online sampling.",
+    )
     args = ap.parse_args()
 
     rng = np.random.RandomState(args.seed)
@@ -198,27 +230,51 @@ def main():
     frames = []
     teacher_list = []
     pix_list = []
-    for _ in range(args.n):
-        gx, gy = rng.uniform(-0.8, 0.8), rng.uniform(-0.8, 0.8)
-        ox = rng.uniform(-0.85, -0.05) if rng.rand() < 0.5 else rng.uniform(0.05, 0.85)
-        oy = rng.uniform(-0.8, 0.8)
-        action = int(rng.randint(0, 4))
-        pix = render_visuomotor(gx, gy, ox, oy)
-        gx2, gy2, ox2, oy2 = step_visuomotor(gx, gy, ox, oy, action)
-        pix_n = render_visuomotor(gx2, gy2, ox2, oy2)
-        zt = embed(pix)
-        ztn = embed(pix_n)
-        teacher_list.append(zt)
-        pix_list.append(pix)
-        frames.append(
-            {
-                "pixels": pix.tolist(),
-                "pixels_next": pix_n.tolist(),
-                "regime_left": bool(ox < 0.0),
-                "z_teacher": zt.tolist(),
-                "z_teacher_next": ztn.tolist(),
-            }
-        )
+    if args.log is not None:
+        log_rows = load_log_frames(args.log)
+        if args.n > 0:
+            log_rows = log_rows[: args.n]
+        for row in log_rows:
+            pix = np.asarray(row["pixels"], dtype=np.float32)
+            pix_n = np.asarray(row["pixels_next"], dtype=np.float32)
+            zt = embed(pix)
+            ztn = embed(pix_n)
+            teacher_list.append(zt)
+            pix_list.append(pix)
+            frames.append(
+                {
+                    "pixels": pix.tolist(),
+                    "pixels_next": pix_n.tolist(),
+                    "regime_left": bool(row.get("regime_left", False)),
+                    "z_teacher": zt.tolist(),
+                    "z_teacher_next": ztn.tolist(),
+                }
+            )
+        export_mode = "hf" if args.mode == "hf" else "real_log"
+        source = f"{source}+log:{args.log.name}"
+    else:
+        for _ in range(args.n):
+            gx, gy = rng.uniform(-0.8, 0.8), rng.uniform(-0.8, 0.8)
+            ox = rng.uniform(-0.85, -0.05) if rng.rand() < 0.5 else rng.uniform(0.05, 0.85)
+            oy = rng.uniform(-0.8, 0.8)
+            action = int(rng.randint(0, 4))
+            pix = render_visuomotor(gx, gy, ox, oy)
+            gx2, gy2, ox2, oy2 = step_visuomotor(gx, gy, ox, oy, action)
+            pix_n = render_visuomotor(gx2, gy2, ox2, oy2)
+            zt = embed(pix)
+            ztn = embed(pix_n)
+            teacher_list.append(zt)
+            pix_list.append(pix)
+            frames.append(
+                {
+                    "pixels": pix.tolist(),
+                    "pixels_next": pix_n.tolist(),
+                    "regime_left": bool(ox < 0.0),
+                    "z_teacher": zt.tolist(),
+                    "z_teacher_next": ztn.tolist(),
+                }
+            )
+        export_mode = args.mode
 
     teacher = np.stack(teacher_list, axis=0)
     jepa_dim = int(teacher.shape[1])
@@ -248,7 +304,7 @@ def main():
 
     out = {
         "source_model": source,
-        "export_mode": args.mode,
+        "export_mode": export_mode,
         "jepa_dim": jepa_dim,
         "latent_dim": LATENT_DIM,
         "fingerprint": fp,
@@ -258,12 +314,12 @@ def main():
         "student_b1": sb1.tolist(),
         "student_w2": sw2.tolist(),
         "student_b2": sb2.tolist(),
-        "note": "Frozen V-JEPA export bank. Kill gate: any gradient into projector/student/backbone.",
+        "note": "Frozen V-JEPA export bank. Kill gate: any gradient into projector/student/backbone. Use --log for real-log path.",
         "frames": frames,
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(out))
-    print(f"Wrote {args.out} mode={args.mode} source={source} frames={len(frames)} fp={fp:#x}")
+    print(f"Wrote {args.out} mode={export_mode} source={source} frames={len(frames)} fp={fp:#x}")
 
 
 if __name__ == "__main__":

@@ -16,8 +16,7 @@
 //! well-defined grade-specific activations produce better coherence signals.
 
 use crate::clifford::{
-    embed_bridge_vector, Multivector, GRADE_DIMS, GRADE_OFFSETS,
-    BOOST_BIVECTOR_COUNT,
+    embed_bridge_vector, Multivector, BOOST_BIVECTOR_COUNT, GRADE_DIMS, GRADE_OFFSETS,
 };
 
 /// Per-band coherence scores between two programs, analogous to
@@ -93,14 +92,10 @@ pub fn band_coherence_mv(mv_a: &Multivector, mv_b: &Multivector) -> BandCoherenc
     // α/β band: grade 2 (bivectors) — split into boost and spatial
     let bv_a = mv_a.grade(2);
     let bv_b = mv_b.grade(2);
-    bc.alpha_beta_boost = grade_cosine(
-        &bv_a[..BOOST_BIVECTOR_COUNT],
-        &bv_b[..BOOST_BIVECTOR_COUNT],
-    );
-    bc.alpha_beta_spatial = grade_cosine(
-        &bv_a[BOOST_BIVECTOR_COUNT..],
-        &bv_b[BOOST_BIVECTOR_COUNT..],
-    );
+    bc.alpha_beta_boost =
+        grade_cosine(&bv_a[..BOOST_BIVECTOR_COUNT], &bv_b[..BOOST_BIVECTOR_COUNT]);
+    bc.alpha_beta_spatial =
+        grade_cosine(&bv_a[BOOST_BIVECTOR_COUNT..], &bv_b[BOOST_BIVECTOR_COUNT..]);
 
     // γ band: grade 3 (trivectors) — fine-grained semantic binding
     bc.gamma = grade_cosine(mv_a.grade(3), mv_b.grade(3));
@@ -132,8 +127,7 @@ pub fn band_power_mv(mv: &Multivector) -> BandPower {
 
     bp.gamma = l2_norm(mv.grade(3));
 
-    bp.total = bp.delta + bp.theta + bp.alpha_beta_boost
-        + bp.alpha_beta_spatial + bp.gamma;
+    bp.total = bp.delta + bp.theta + bp.alpha_beta_boost + bp.alpha_beta_spatial + bp.gamma;
     bp
 }
 
@@ -147,7 +141,13 @@ pub fn band_power_mv(mv: &Multivector) -> BandPower {
 pub fn ensemble_coherence(embeddings: &[&[f32]]) -> (f32, BandCoherence) {
     let n = embeddings.len();
     if n < 2 {
-        return (1.0, BandCoherence { combined: 1.0, ..Default::default() });
+        return (
+            1.0,
+            BandCoherence {
+                combined: 1.0,
+                ..Default::default()
+            },
+        );
     }
 
     // Pre-compute multivectors and band powers
@@ -200,13 +200,19 @@ pub fn coherence_select(
     min_coherence: f32,
 ) -> Vec<usize> {
     let n = embeddings.len();
-    if n == 0 { return Vec::new(); }
-    if n == 1 { return vec![0]; }
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
+        return vec![0];
+    }
 
     let mvs: Vec<Multivector> = embeddings.iter().map(|e| embed_bridge_vector(e)).collect();
 
     // Start with the highest-relevance candidate
-    let first = relevance_scores.iter().enumerate()
+    let first = relevance_scores
+        .iter()
+        .enumerate()
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(i, _)| i)
         .unwrap_or(0);
@@ -282,7 +288,9 @@ fn grade_cosine(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let na = l2_norm(a);
     let nb = l2_norm(b);
-    if na < 1e-10 || nb < 1e-10 { return 0.0; }
+    if na < 1e-10 || nb < 1e-10 {
+        return 0.0;
+    }
     (dot / (na * nb)).clamp(0.0, 1.0)
 }
 
@@ -301,8 +309,15 @@ mod tests {
         // Wedge product accumulation in embed_bridge_vector introduces some
         // numerical diffusion, so self-coherence may not be exactly 1.0 but
         // should still be the highest achievable value.
-        assert!(bc.combined > 0.60, "self-coherence should be high, got {}", bc.combined);
-        assert!(bc.alpha_beta_spatial > 0.0, "spatial coherence should be nonzero for self");
+        assert!(
+            bc.combined > 0.60,
+            "self-coherence should be high, got {}",
+            bc.combined
+        );
+        assert!(
+            bc.alpha_beta_spatial > 0.0,
+            "spatial coherence should be nonzero for self"
+        );
     }
 
     #[test]
@@ -312,16 +327,26 @@ mod tests {
         let b_different: Vec<f32> = (0..128).map(|i| (i as f32 * 0.43).cos()).collect();
         let bc_sim = band_coherence(&a, &b_similar);
         let bc_diff = band_coherence(&a, &b_different);
-        assert!(bc_sim.combined > bc_diff.combined,
-            "similar vectors should cohere more: {:.3} vs {:.3}", bc_sim.combined, bc_diff.combined);
+        assert!(
+            bc_sim.combined > bc_diff.combined,
+            "similar vectors should cohere more: {:.3} vs {:.3}",
+            bc_sim.combined,
+            bc_diff.combined
+        );
     }
 
     #[test]
     fn test_band_power_nonzero() {
         let v: Vec<f32> = (0..128).map(|i| (i as f32 * 0.05).cos()).collect();
         let bp = band_power(&v);
-        assert!(bp.total > 0.0, "band power should be nonzero for non-zero input");
-        assert!(bp.alpha_beta_spatial > 0.0, "spatial power should be nonzero");
+        assert!(
+            bp.total > 0.0,
+            "band power should be nonzero for non-zero input"
+        );
+        assert!(
+            bp.alpha_beta_spatial > 0.0,
+            "spatial power should be nonzero"
+        );
     }
 
     #[test]
@@ -329,14 +354,22 @@ mod tests {
         let v: Vec<f32> = (0..128).map(|i| (i as f32 * 0.03).sin()).collect();
         let refs: Vec<&[f32]> = vec![&v, &v, &v];
         let (combined, _) = ensemble_coherence(&refs);
-        assert!(combined > 0.60, "identical ensemble should have high coherence, got {}", combined);
+        assert!(
+            combined > 0.60,
+            "identical ensemble should have high coherence, got {}",
+            combined
+        );
     }
 
     #[test]
     fn test_coherence_select_respects_max() {
-        let vecs: Vec<Vec<f32>> = (0..5).map(|i| {
-            (0..128).map(|j| ((i * 17 + j) as f32 * 0.04).sin()).collect()
-        }).collect();
+        let vecs: Vec<Vec<f32>> = (0..5)
+            .map(|i| {
+                (0..128)
+                    .map(|j| ((i * 17 + j) as f32 * 0.04).sin())
+                    .collect()
+            })
+            .collect();
         let refs: Vec<&[f32]> = vecs.iter().map(|v| v.as_slice()).collect();
         let scores = vec![0.8, 0.6, 0.9, 0.5, 0.7];
         let selected = coherence_select(&refs, &scores, 3, 0.0);

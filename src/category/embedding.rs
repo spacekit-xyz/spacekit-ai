@@ -86,6 +86,9 @@ mod tests {
         let a = e.embed("hello world hello");
         let b = e.embed("hello world hello");
         assert_eq!(a, b);
-        assert!((a.iter().map(|x| x * x).sum::<f32>() - 1.0).abs() < 1e-4 || a.iter().all(|&x| x == 0.0));
+        assert!(
+            (a.iter().map(|x| x * x).sum::<f32>() - 1.0).abs() < 1e-4
+                || a.iter().all(|&x| x == 0.0)
+        );
     }
 }

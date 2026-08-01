@@ -54,8 +54,10 @@ pub fn load_lookup_graph_from_str(json: &str) -> Result<(), String> {
         edges.push([a, b, e[2].clone()]);
     }
 
-    let mut adjacency: HashMap<String, HashSet<String>> =
-        lex.keys().map(|w| (w.clone(), HashSet::from([w.clone()]))).collect();
+    let mut adjacency: HashMap<String, HashSet<String>> = lex
+        .keys()
+        .map(|w| (w.clone(), HashSet::from([w.clone()])))
+        .collect();
     for [a, b, _] in &edges {
         if let Some(set) = adjacency.get_mut(a) {
             set.insert(b.clone());
@@ -66,8 +68,14 @@ pub fn load_lookup_graph_from_str(json: &str) -> Result<(), String> {
     }
     let mut by_node: HashMap<String, Vec<[String; 3]>> = HashMap::new();
     for edge in &edges {
-        by_node.entry(edge[0].clone()).or_default().push(edge.clone());
-        by_node.entry(edge[1].clone()).or_default().push(edge.clone());
+        by_node
+            .entry(edge[0].clone())
+            .or_default()
+            .push(edge.clone());
+        by_node
+            .entry(edge[1].clone())
+            .or_default()
+            .push(edge.clone());
     }
 
     let graph = LookupGraph {
@@ -98,7 +106,9 @@ pub fn try_lookup(intent_text: &str, subject: &str) -> Option<String> {
         return None;
     }
     // Only serve bare lemma prompts (not multi-sentence queries).
-    if normalize_word(intent_text) != word && !intent_text.trim().eq_ignore_ascii_case(subject.trim()) {
+    if normalize_word(intent_text) != word
+        && !intent_text.trim().eq_ignore_ascii_case(subject.trim())
+    {
         return None;
     }
     Some(graph.payload_for(&word, DEFAULT_MAX_NEIGHBORS))
@@ -107,9 +117,7 @@ pub fn try_lookup(intent_text: &str, subject: &str) -> Option<String> {
 impl LookupGraph {
     fn payload_for(&self, word: &str, max_neighbors: usize) -> String {
         if !self.lex.contains_key(word) {
-            return format!(
-                r#"{{"center":"{word}","found":false,"lex":{{}},"edges":[]}}"#
-            );
+            return format!(r#"{{"center":"{word}","found":false,"lex":{{}},"edges":[]}}"#);
         }
 
         let priority = |rel: &str| match rel {

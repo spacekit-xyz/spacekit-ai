@@ -23,23 +23,21 @@ fn main() {
         .next()
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| manifest.join("data/sentiment"));
-    let steps: usize = args
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(400);
-    let embed_dim: usize = args
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(128);
+    let steps: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(400);
+    let embed_dim: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(128);
     let branch_dim: usize = (embed_dim / 2).max(32);
 
     if !data_dir.is_dir() {
-        eprintln!("Not a directory: {} (pass path to data/sentiment)", data_dir.display());
+        eprintln!(
+            "Not a directory: {} (pass path to data/sentiment)",
+            data_dir.display()
+        );
         std::process::exit(1);
     }
 
-    let mut batch = TrainingBatch::from_sentiment_jsonl_dir(&data_dir, SentimentJsonlSelection::TrainFilesOnly)
-        .unwrap_or_else(|e| panic!("load {:?}: {}", data_dir, e));
+    let mut batch =
+        TrainingBatch::from_sentiment_jsonl_dir(&data_dir, SentimentJsonlSelection::TrainFilesOnly)
+            .unwrap_or_else(|e| panic!("load {:?}: {}", data_dir, e));
 
     println!("Loaded {} training rows from {:?}", batch.len(), data_dir);
 

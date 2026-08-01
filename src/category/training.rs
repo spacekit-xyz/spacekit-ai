@@ -37,13 +37,13 @@ pub enum SentimentLabel {
 impl SentimentLabel {
     pub fn score(&self) -> f32 {
         match self {
-            Self::PositiveStrong =>  1.0,
-            Self::PositiveMild   =>  0.5,
-            Self::Neutral        =>  0.0,
-            Self::NegativeMild   => -0.5,
+            Self::PositiveStrong => 1.0,
+            Self::PositiveMild => 0.5,
+            Self::Neutral => 0.0,
+            Self::NegativeMild => -0.5,
             Self::NegativeStrong => -1.0,
-            Self::Sarcastic      => -0.35,
-            Self::Mixed          =>  0.08,
+            Self::Sarcastic => -0.35,
+            Self::Mixed => 0.08,
         }
     }
 
@@ -62,12 +62,12 @@ impl SentimentLabel {
     pub fn class_index(&self) -> usize {
         match self {
             Self::NegativeStrong => 0,
-            Self::NegativeMild   => 1,
-            Self::Neutral        => 2,
-            Self::PositiveMild   => 3,
+            Self::NegativeMild => 1,
+            Self::Neutral => 2,
+            Self::PositiveMild => 3,
             Self::PositiveStrong => 4,
-            Self::Sarcastic      => 5,
-            Self::Mixed          => 6,
+            Self::Sarcastic => 5,
+            Self::Mixed => 6,
         }
     }
 
@@ -104,27 +104,29 @@ impl AuxCategory {
     pub fn one_hot(&self) -> Vec<f32> {
         let idx = match self {
             Self::Temporal => 0,
-            Self::Weather  => 1,
-            Self::Event    => 2,
-            Self::Person   => 3,
-            Self::Place    => 4,
-            Self::Other    => 5,
+            Self::Weather => 1,
+            Self::Event => 2,
+            Self::Person => 3,
+            Self::Place => 4,
+            Self::Other => 5,
         };
         let mut v = vec![0.0f32; 6];
         v[idx] = 1.0;
         v
     }
 
-    pub fn num_classes() -> usize { 6 }
+    pub fn num_classes() -> usize {
+        6
+    }
 
     pub fn class_index(&self) -> usize {
         match self {
             Self::Temporal => 0,
-            Self::Weather  => 1,
-            Self::Event    => 2,
-            Self::Person   => 3,
-            Self::Place    => 4,
-            Self::Other    => 5,
+            Self::Weather => 1,
+            Self::Event => 2,
+            Self::Person => 3,
+            Self::Place => 4,
+            Self::Other => 5,
         }
     }
 
@@ -144,12 +146,10 @@ impl AuxCategory {
         let e = entity.to_lowercase();
         let e = e.trim_end_matches('s');
         match e {
-            "monday"|"tuesday"|"wednesday"|"thursday"|
-            "friday"|"saturday"|"sunday"|
-            "morning"|"evening"|"night"|"week"|"month" => Self::Temporal,
-            "rain"|"snow"|"sun"|"cloud"|"storm"|"wind" => Self::Weather,
-            "meeting"|"standup"|"call"|"presentation"|
-            "workshop"|"sprint"                         => Self::Event,
+            "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday"
+            | "morning" | "evening" | "night" | "week" | "month" => Self::Temporal,
+            "rain" | "snow" | "sun" | "cloud" | "storm" | "wind" => Self::Weather,
+            "meeting" | "standup" | "call" | "presentation" | "workshop" | "sprint" => Self::Event,
             _ => Self::Other,
         }
     }
@@ -300,7 +300,14 @@ pub struct TrainingRecord {
 
 impl TrainingRecord {
     pub fn new(input: impl Into<String>, sentiment: SentimentLabel, plural: bool) -> Self {
-        Self { input: input.into(), sentiment, plural, aux_category: None, embedding: None, causal: None }
+        Self {
+            input: input.into(),
+            sentiment,
+            plural,
+            aux_category: None,
+            embedding: None,
+            causal: None,
+        }
     }
 
     pub fn with_aux(mut self, cat: AuxCategory) -> Self {
@@ -334,10 +341,18 @@ pub struct TrainingBatch {
 }
 
 impl TrainingBatch {
-    pub fn new() -> Self { Self::default() }
-    pub fn push(&mut self, r: TrainingRecord) { self.records.push(r); }
-    pub fn len(&self) -> usize { self.records.len() }
-    pub fn is_empty(&self) -> bool { self.records.is_empty() }
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn push(&mut self, r: TrainingRecord) {
+        self.records.push(r);
+    }
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
 
     pub fn from_jsonl<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let reader = BufReader::new(File::open(path)?);
@@ -345,9 +360,11 @@ impl TrainingBatch {
         for (i, line) in reader.lines().enumerate() {
             let line = line?;
             let line = line.trim();
-            if line.is_empty() || line.starts_with("//") { continue; }
-            let record: TrainingRecord = serde_json::from_str(line)
-                .map_err(|e| format!("Line {}: {}", i + 1, e))?;
+            if line.is_empty() || line.starts_with("//") {
+                continue;
+            }
+            let record: TrainingRecord =
+                serde_json::from_str(line).map_err(|e| format!("Line {}: {}", i + 1, e))?;
             batch.push(record);
         }
         Ok(batch)
@@ -368,12 +385,10 @@ impl TrainingBatch {
             if line.is_empty() || line.starts_with("//") {
                 continue;
             }
-            let row: SentimentFileRow = serde_json::from_str(line).map_err(|e| {
-                format!("{} line {}: {}", path.display(), i + 1, e)
-            })?;
-            let sentiment = semantic_intent_to_label(&row.semantic_intent).map_err(|e| {
-                format!("{} line {}: {}", path.display(), i + 1, e)
-            })?;
+            let row: SentimentFileRow = serde_json::from_str(line)
+                .map_err(|e| format!("{} line {}: {}", path.display(), i + 1, e))?;
+            let sentiment = semantic_intent_to_label(&row.semantic_intent)
+                .map_err(|e| format!("{} line {}: {}", path.display(), i + 1, e))?;
             let mut rec = TrainingRecord::new(row.text, sentiment, row.plural);
             if let Some(emb) = row.embedding.filter(|e| !e.is_empty()) {
                 rec = rec.with_embedding(emb);
@@ -405,7 +420,9 @@ impl TrainingBatch {
     }
 
     /// Same as [`Self::append_from_sentiment_jsonl`] but returns a fresh batch.
-    pub fn from_sentiment_jsonl<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn from_sentiment_jsonl<P: AsRef<Path>>(
+        path: P,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut b = TrainingBatch::new();
         b.append_from_sentiment_jsonl(path)?;
         Ok(b)
@@ -446,14 +463,18 @@ impl TrainingBatch {
     pub fn to_jsonl<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
         use std::io::Write;
         let mut file = File::create(path)?;
-        for r in &self.records { writeln!(file, "{}", r.to_jsonl()?)?; }
+        for r in &self.records {
+            writeln!(file, "{}", r.to_jsonl()?)?;
+        }
         Ok(())
     }
 
     pub fn by_inferred_category(&self) -> HashMap<String, Vec<&TrainingRecord>> {
         let mut map: HashMap<String, Vec<&TrainingRecord>> = HashMap::new();
         for r in &self.records {
-            map.entry(format!("{:?}", r.resolved_aux_category())).or_default().push(r);
+            map.entry(format!("{:?}", r.resolved_aux_category()))
+                .or_default()
+                .push(r);
         }
         map
     }
@@ -470,15 +491,19 @@ impl TrainingBatch {
         self.by_inferred_category()
             .iter()
             .filter(|(_, recs)| recs.len() < min_count)
-            .map(|(cat, recs)| format!(
-                "Sparse: inferred category '{}' has {} example(s) (min: {})",
-                cat, recs.len(), min_count
-            ))
+            .map(|(cat, recs)| {
+                format!(
+                    "Sparse: inferred category '{}' has {} example(s) (min: {})",
+                    cat,
+                    recs.len(),
+                    min_count
+                )
+            })
             .collect()
     }
 
     pub fn coverage_report(&self) -> String {
-        let by_cat  = self.by_inferred_category();
+        let by_cat = self.by_inferred_category();
         let by_sent = self.by_sentiment();
         let mut lines = vec![format!("Training batch: {} records\n", self.len())];
         lines.push("Inferred category distribution (diagnostic, not supervision):".to_string());
@@ -505,60 +530,98 @@ pub fn combined_loss(
     entity_emb: &[f32],
     lambda: f32,
 ) -> f32 {
-    let dot: f32 = sentiment_emb.iter().zip(entity_emb.iter()).map(|(a, b)| a * b).sum();
+    let dot: f32 = sentiment_emb
+        .iter()
+        .zip(entity_emb.iter())
+        .map(|(a, b)| a * b)
+        .sum();
     let ns = sentiment_emb.iter().map(|x| x * x).sum::<f32>().sqrt();
     let ne = entity_emb.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let dis = if ns == 0.0 || ne == 0.0 { 0.0 } else { (dot / (ns * ne)).abs() };
+    let dis = if ns == 0.0 || ne == 0.0 {
+        0.0
+    } else {
+        (dot / (ns * ne)).abs()
+    };
     task_loss + lambda * dis
 }
 
 // ── Example training batch ────────────────────────────────────────────────────
 
 pub fn example_training_batch() -> TrainingBatch {
-    use SentimentLabel::*;
     use AuxCategory::*;
+    use SentimentLabel::*;
     let mut b = TrainingBatch::new();
 
     // Days — no aux hints; model must discover temporal clustering itself
     for (day, neg, pos) in [
-        ("mondays",    NegativeMild,   PositiveMild),
-        ("tuesdays",   NegativeMild,   PositiveMild),
-        ("wednesdays", Neutral,        PositiveMild),
-        ("thursdays",  Neutral,        PositiveMild),
-        ("fridays",    PositiveMild,   PositiveStrong),
-        ("saturdays",  PositiveStrong, PositiveStrong),
-        ("sundays",    PositiveMild,   PositiveStrong),
+        ("mondays", NegativeMild, PositiveMild),
+        ("tuesdays", NegativeMild, PositiveMild),
+        ("wednesdays", Neutral, PositiveMild),
+        ("thursdays", Neutral, PositiveMild),
+        ("fridays", PositiveMild, PositiveStrong),
+        ("saturdays", PositiveStrong, PositiveStrong),
+        ("sundays", PositiveMild, PositiveStrong),
     ] {
-        b.push(TrainingRecord::new(format!("I hate {}", day),          neg,           true));
-        b.push(TrainingRecord::new(format!("I love {}", day),          pos,           true));
-        b.push(TrainingRecord::new(format!("I really hate {}", day),   NegativeStrong,true));
-        b.push(TrainingRecord::new(format!("{} are the worst", day),   NegativeStrong,true));
+        b.push(TrainingRecord::new(format!("I hate {}", day), neg, true));
+        b.push(TrainingRecord::new(format!("I love {}", day), pos, true));
+        b.push(TrainingRecord::new(
+            format!("I really hate {}", day),
+            NegativeStrong,
+            true,
+        ));
+        b.push(TrainingRecord::new(
+            format!("{} are the worst", day),
+            NegativeStrong,
+            true,
+        ));
     }
 
     // Weather — weak aux hints present on some records to seed Stage 1
     for weather in ["rain", "snow", "storms", "sun"] {
         let plural = weather == "storms";
-        b.push(TrainingRecord::new(format!("I hate {}", weather),  NegativeMild, plural).with_aux(Weather));
-        b.push(TrainingRecord::new(format!("I love {}", weather),  PositiveMild, plural).with_aux(Weather));
+        b.push(
+            TrainingRecord::new(format!("I hate {}", weather), NegativeMild, plural)
+                .with_aux(Weather),
+        );
+        b.push(
+            TrainingRecord::new(format!("I love {}", weather), PositiveMild, plural)
+                .with_aux(Weather),
+        );
     }
 
     // Events — no aux hints
     for event in ["meetings", "standups", "presentations", "workshops"] {
-        b.push(TrainingRecord::new(format!("I hate {}", event),        NegativeMild,  true));
-        b.push(TrainingRecord::new(format!("I really hate {}", event), NegativeStrong,true));
+        b.push(TrainingRecord::new(
+            format!("I hate {}", event),
+            NegativeMild,
+            true,
+        ));
+        b.push(TrainingRecord::new(
+            format!("I really hate {}", event),
+            NegativeStrong,
+            true,
+        ));
     }
 
     // Cross-category: same template, diverse entities — forces entity-agnostic morphism
     for (entity, sentiment, plural) in [
-        ("traffic",   NegativeStrong, false),
+        ("traffic", NegativeStrong, false),
         ("deadlines", NegativeStrong, true),
-        ("coffee",    PositiveStrong, false),
-        ("weekends",  PositiveStrong, true),
-        ("commutes",  NegativeMild,   true),
-        ("holidays",  PositiveStrong, true),
+        ("coffee", PositiveStrong, false),
+        ("weekends", PositiveStrong, true),
+        ("commutes", NegativeMild, true),
+        ("holidays", PositiveStrong, true),
     ] {
-        b.push(TrainingRecord::new(format!("I hate {}", entity), NegativeMild, plural));
-        b.push(TrainingRecord::new(format!("I love {}", entity), sentiment,    plural));
+        b.push(TrainingRecord::new(
+            format!("I hate {}", entity),
+            NegativeMild,
+            plural,
+        ));
+        b.push(TrainingRecord::new(
+            format!("I love {}", entity),
+            sentiment,
+            plural,
+        ));
     }
 
     b
@@ -589,10 +652,8 @@ mod sentiment_loader_tests {
 
     #[test]
     fn append_from_sentiment_jsonl_minimal_line() {
-        let path = std::env::temp_dir().join(format!(
-            "growformer_sent_{}.jsonl",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("growformer_sent_{}.jsonl", std::process::id()));
         std::fs::write(
             &path,
             "{\"text\":\"ok\",\"semantic_intent\":\"neutral\",\"extra\":1}\n",
@@ -612,8 +673,9 @@ mod sentiment_loader_tests {
         if !dir.is_dir() {
             return;
         }
-        let b = TrainingBatch::from_sentiment_jsonl_dir(&dir, SentimentJsonlSelection::TrainFilesOnly)
-            .expect("load sentiment train jsonl");
+        let b =
+            TrainingBatch::from_sentiment_jsonl_dir(&dir, SentimentJsonlSelection::TrainFilesOnly)
+                .expect("load sentiment train jsonl");
         assert!(
             b.len() > 100,
             "expected many train rows from data/sentiment, got {}",

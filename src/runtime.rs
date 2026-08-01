@@ -6,11 +6,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::dimension::action::ActionJson;
-use crate::dimension::group_gen::RawLatticeDiagnosticReport;
 use crate::dimension::generation::GeneratedResponse;
+use crate::dimension::group_gen::RawLatticeDiagnosticReport;
 use crate::dimension::tool::{ToolCallInfo, ToolResult};
-use crate::service::AgentRuntimeState;
 use crate::dimension::LanguageConfig;
+use crate::service::AgentRuntimeState;
 use crate::service::{AgentMode, LanguageService, OceanProfile};
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -83,8 +83,7 @@ impl Runtime {
     /// Create an empty runtime (no brain loaded yet). Call [`Self::load_brain`] later.
     pub fn empty() -> Result<Self, String> {
         let config = LanguageConfig::default();
-        let svc =
-            LanguageService::new_with_config(config).map_err(|e| format!("init: {}", e))?;
+        let svc = LanguageService::new_with_config(config).map_err(|e| format!("init: {}", e))?;
         Ok(Self { svc })
     }
 
@@ -96,6 +95,12 @@ impl Runtime {
     /// Export current brain state as bytes (for caching / saving).
     pub fn export_brain(&mut self) -> Result<Vec<u8>, String> {
         self.svc.export_brain()
+    }
+
+    /// Export current brain state in the versioned lossless compression envelope.
+    #[cfg(feature = "brain-compression")]
+    pub fn export_brain_compressed(&mut self) -> Result<Vec<u8>, String> {
+        self.svc.export_brain_compressed()
     }
 
     // ─── Metadata ────────────────────────────────────────────────────────
@@ -184,7 +189,9 @@ impl Runtime {
         original_text: &str,
         result: &ToolResult,
     ) -> Result<RuntimeResponse, String> {
-        let (action, resp) = self.svc.generation_with_tool_result(original_text, result)?;
+        let (action, resp) = self
+            .svc
+            .generation_with_tool_result(original_text, result)?;
         Ok(pack_response(&action, &resp))
     }
 
@@ -221,8 +228,8 @@ impl Runtime {
     /// Set agent state from a JSON string. The state modulates the conversation
     /// context prefix injected before generation (arbitrary dimensions + profile).
     pub fn set_agent_state_from_json(&mut self, json_str: &str) -> Result<(), String> {
-        let state: AgentRuntimeState = serde_json::from_str(json_str)
-            .map_err(|e| format!("parse agent state JSON: {}", e))?;
+        let state: AgentRuntimeState =
+            serde_json::from_str(json_str).map_err(|e| format!("parse agent state JSON: {}", e))?;
         self.svc.agent_state = Some(state);
         Ok(())
     }

@@ -1,6 +1,6 @@
-use rand::Rng;
-use crate::types::*;
 use crate::neuron::Neuron;
+use crate::types::*;
+use rand::Rng;
 use std::collections::{HashMap, HashSet};
 
 /// System 2: Dynamic Synapse Growth
@@ -22,30 +22,37 @@ pub fn grow_synapses(
     layer_of: &HashMap<NeuronId, usize>,
 ) -> usize {
     let ids: Vec<NeuronId> = neurons.keys().cloned().collect();
-    let positions: HashMap<NeuronId, Vec3> = neurons
-        .iter().map(|(id, n)| (*id, n.geometry)).collect();
+    let positions: HashMap<NeuronId, Vec3> =
+        neurons.iter().map(|(id, n)| (*id, n.geometry)).collect();
 
     // Snapshot group_ids for gate check — avoids borrow conflict inside loop
-    let group_ids: HashMap<NeuronId, Option<GroupId>> = neurons
-        .iter().map(|(&id, n)| (id, n.group_id)).collect();
+    let group_ids: HashMap<NeuronId, Option<GroupId>> =
+        neurons.iter().map(|(&id, n)| (id, n.group_id)).collect();
 
     let mut formed = 0;
 
     for &id in &ids {
         let synapse_count = neurons[&id].synapses.len();
-        let over_budget   = neurons[&id].over_budget();
-        let src_layer     = *layer_of.get(&id).unwrap_or(&usize::MAX);
-        let src_group     = group_ids[&id];
+        let over_budget = neurons[&id].over_budget();
+        let src_layer = *layer_of.get(&id).unwrap_or(&usize::MAX);
+        let src_group = group_ids[&id];
 
-        if neurons[&id].frozen { continue; }
-        if synapse_count >= config.max_synapses_per_neuron || over_budget { continue; }
+        if neurons[&id].frozen {
+            continue;
+        }
+        if synapse_count >= config.max_synapses_per_neuron || over_budget {
+            continue;
+        }
 
         let pos = positions[&id];
 
-        let mut candidates: Vec<(NeuronId, f32)> = ids.iter()
+        let mut candidates: Vec<(NeuronId, f32)> = ids
+            .iter()
             .filter(|&&other| {
                 let tgt_layer = *layer_of.get(&other).unwrap_or(&usize::MAX);
-                if other == id || tgt_layer != src_layer + 1 { return false; }
+                if other == id || tgt_layer != src_layer + 1 {
+                    return false;
+                }
 
                 // GROUP BOUNDARY GATE
                 // Block cross-group connections when both neurons have an assigned group.
@@ -66,7 +73,9 @@ pub fn grow_synapses(
 
         let n_branches = config.dendritic_branches;
         for (target, dist) in candidates.iter().take(3) {
-            if neurons[&id].has_synapse_to(*target) { continue; }
+            if neurons[&id].has_synapse_to(*target) {
+                continue;
+            }
             let base = (1.0 - dist / config.growth_radius).max(0.1);
             let noise: f32 = rng.gen_range(-0.05..0.05);
             let w = (base + noise).clamp(0.05, 0.5);
@@ -88,7 +97,8 @@ pub fn grow_synapses(
                     .map(|(i, _)| i as u8)
                     .unwrap_or(0);
                 let n = neurons.get_mut(&id).unwrap();
-                if n.add_synapse_to_branch(*target, w, config.max_synapses_per_neuron, best_branch) {
+                if n.add_synapse_to_branch(*target, w, config.max_synapses_per_neuron, best_branch)
+                {
                     formed += 1;
                     break;
                 }
@@ -121,23 +131,33 @@ pub fn prune_three_phase(
     let input_ids: Vec<NeuronId> = input_protected.iter().cloned().collect();
 
     for neuron in neurons.values_mut() {
-        if neuron.frozen { continue; }
+        if neuron.frozen {
+            continue;
+        }
         // Input neurons' synapses carry raw signal to every hidden neuron.
         // Pruning them means hidden neurons become blind to one input coordinate.
         // Structurally protect all outgoing synapses from input layer neurons.
-        if input_ids.contains(&neuron.id) { continue; }
+        if input_ids.contains(&neuron.id) {
+            continue;
+        }
 
         // Minimum synapse protection: never prune a neuron's last connection.
         // Without this, KWTA losers accumulate low facilitation → all synapses
         // pruned → neuron permanently disconnected → zero gradient → dead weight.
         // A neuron with 1 synapse can still learn; a neuron with 0 cannot recover.
         let min_synapses = 2;
-        if neuron.synapses.len() <= min_synapses { continue; }
+        if neuron.synapses.len() <= min_synapses {
+            continue;
+        }
 
         neuron.synapses.retain(|s| {
-            if s.frozen { return true; }
+            if s.frozen {
+                return true;
+            }
             // Output-adjacent synapses are structurally protected — never pruned
-            if output_protected.contains(&s.target) { return true; }
+            if output_protected.contains(&s.target) {
+                return true;
+            }
             // Engram-consolidated synapses are memory traces — never pruned
             if config.engram_enabled && s.consolidation >= config.engram_prune_threshold {
                 return true;
@@ -148,19 +168,25 @@ pub fn prune_three_phase(
 
             if s.age < config.prune_early_age {
                 let keep = cost >= config.prune_early_threshold;
-                if !keep { p1 += 1; }
+                if !keep {
+                    p1 += 1;
+                }
                 keep
             } else if s.age < config.prune_long_age {
                 let consolidated = s.facilitation > config.prune_mid_facilitation_floor;
                 let strong = cost >= config.prune_mid_threshold;
                 let keep = strong || consolidated;
-                if !keep { p2 += 1; }
+                if !keep {
+                    p2 += 1;
+                }
                 keep
             } else {
                 let recently_active = dormancy < config.prune_long_dormancy as u64;
                 let structurally_strong = cost >= config.prune_long_threshold;
                 let keep = recently_active || structurally_strong;
-                if !keep { p3 += 1; }
+                if !keep {
+                    p3 += 1;
+                }
                 keep
             }
         });
@@ -185,22 +211,24 @@ pub fn potentiate_active_synapses(
     config: &EnvironmentConfig,
     _output_protected: &HashSet<NeuronId>,
 ) {
-    if config.facilitation_bonus <= 0.0 { return; }
+    if config.facilitation_bonus <= 0.0 {
+        return;
+    }
 
     let high_facilitation = config.prune_mid_facilitation_floor * 1.5;
 
     for neuron in neurons.values_mut() {
-        if neuron.frozen { continue; }
+        if neuron.frozen {
+            continue;
+        }
         for syn in neuron.synapses.iter_mut() {
-            if syn.frozen { continue; }
-            if syn.age >= config.prune_early_age
-                && syn.facilitation > high_facilitation
-            {
+            if syn.frozen {
+                continue;
+            }
+            if syn.age >= config.prune_early_age && syn.facilitation > high_facilitation {
                 let excess = (syn.facilitation - high_facilitation).min(1.0);
                 let bonus = config.facilitation_bonus * excess;
-                syn.strength = (syn.strength.abs() + bonus)
-                    .min(5.0)
-                    * syn.strength.signum();
+                syn.strength = (syn.strength.abs() + bonus).min(5.0) * syn.strength.signum();
             }
         }
     }
@@ -213,11 +241,13 @@ pub fn prune_dormant_synapses(
 ) -> usize {
     let mut pruned = 0;
     for neuron in neurons.values_mut() {
-        if neuron.frozen { continue; }
+        if neuron.frozen {
+            continue;
+        }
         let before = neuron.synapses.len();
-        neuron.synapses.retain(|s| {
-            s.frozen || !(s.age >= min_age && s.metabolic_cost() < min_strength)
-        });
+        neuron
+            .synapses
+            .retain(|s| s.frozen || !(s.age >= min_age && s.metabolic_cost() < min_strength));
         pruned += before - neuron.synapses.len();
     }
     pruned

@@ -2,9 +2,9 @@
 //! Requires MNIST data in `./data` (train-images-idx3-ubyte.gz etc.) or set base_path.
 
 use mnist::Mnist;
+use rand::rngs::StdRng;
 use rand::Rng;
 use rand::SeedableRng;
-use rand::rngs::StdRng;
 
 pub const MNIST_INPUT: usize = 28 * 28;
 pub const MNIST_PROJECTED: usize = 64;
@@ -66,7 +66,9 @@ pub fn filter_digit_pair_raw(
     digit_a: u8,
     digit_b: u8,
 ) -> Vec<(Vec<f32>, u8)> {
-    images.iter().zip(labels.iter())
+    images
+        .iter()
+        .zip(labels.iter())
         .filter(|(_, &lbl)| lbl == digit_a || lbl == digit_b)
         .map(|(img, &lbl)| (img.clone(), lbl))
         .collect()
@@ -107,7 +109,5 @@ impl RandomProjection {
 
 /// Project a dataset from 784 to 64 dimensions.
 pub fn project_dataset(proj: &RandomProjection, data: &[MnistSample]) -> Vec<MnistSample> {
-    data.iter()
-        .map(|(x, t)| (proj.project(x), *t))
-        .collect()
+    data.iter().map(|(x, t)| (proj.project(x), *t)).collect()
 }

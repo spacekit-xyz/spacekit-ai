@@ -4,17 +4,21 @@
 
 use std::collections::HashSet;
 
-use crate::infer_trace;
 use crate::brain::BrainPackageHeader;
 use crate::dimension::DimensionManager;
 use crate::growformer_lang::MetaConcept;
+use crate::infer_trace;
 use crate::micro_brain::MetaResult;
 
 use crate::inference::causal_hints;
 use crate::inference::grounding_expand;
-use crate::inference::harness::{BrainInferencePlugin, GenerationPreemptOutcome, TemplatePostprocessFlags};
+use crate::inference::harness::{
+    BrainInferencePlugin, GenerationPreemptOutcome, TemplatePostprocessFlags,
+};
 use crate::inference::inference_toml::inference_rules_runtime;
-use crate::inference::manifest::{resolved_inference_thresholds, BrainPluginsManifest, InferenceThresholds};
+use crate::inference::manifest::{
+    resolved_inference_thresholds, BrainPluginsManifest, InferenceThresholds,
+};
 
 /// `GeneratedResponse.template_id` when the user-anchored path is used.
 pub const TEMPLATE_ID_USER_ANCHORED: &str = "sentiment_user_anchored";
@@ -109,7 +113,12 @@ pub fn chat_passthrough_generation(inference_profile: Option<&str>, dm: &Dimensi
     }
     if matches!(
         normalize_inference_profile(inference_profile).as_deref(),
-        Some("off") | Some("none") | Some("disabled") | Some("pet_chat") | Some("chat") | Some("converse")
+        Some("off")
+            | Some("none")
+            | Some("disabled")
+            | Some("pet_chat")
+            | Some("chat")
+            | Some("converse")
     ) {
         return true;
     }
@@ -129,7 +138,10 @@ pub fn sentiment_toml_lexical_guards_active(
     dm: &DimensionManager,
     inference_profile: Option<&str>,
 ) -> bool {
-    match inference_profile.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+    match inference_profile
+        .map(|s| s.trim().to_ascii_lowercase())
+        .as_deref()
+    {
         Some("off") | Some("none") | Some("disabled") => return false,
         _ => {}
     }
@@ -141,7 +153,10 @@ pub fn shortcuts_enabled(dm: &DimensionManager, inference_profile: Option<&str>)
     if !is_lattice_shape(dm) {
         return false;
     }
-    match inference_profile.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+    match inference_profile
+        .map(|s| s.trim().to_ascii_lowercase())
+        .as_deref()
+    {
         Some("off") | Some("none") | Some("disabled") => false,
         _ => true,
     }
@@ -163,8 +178,7 @@ pub fn should_skip_weak_gk_for_meta_conditioning(
     matches!(
         concept,
         MetaConcept::GeneralKnowledge | MetaConcept::PetCompanion
-    )
-        && margin < cfg.meta_gk_margin
+    ) && margin < cfg.meta_gk_margin
         && confidence < cfg.meta_gk_confidence
 }
 
@@ -318,13 +332,21 @@ fn abbreviate_large_number(digits: &str) -> String {
     } else if n >= 1_000_000_000 {
         let whole = n / 1_000_000_000;
         let frac = (n % 1_000_000_000) / 100_000_000;
-        if frac > 0 { format!("{}.{}B", whole, frac) } else { format!("{}B", whole) }
+        if frac > 0 {
+            format!("{}.{}B", whole, frac)
+        } else {
+            format!("{}B", whole)
+        }
     } else if n >= 1_000_000 && n % 1_000_000 == 0 {
         format!("{}M", n / 1_000_000)
     } else if n >= 1_000_000 {
         let whole = n / 1_000_000;
         let frac = (n % 1_000_000) / 100_000;
-        if frac > 0 { format!("{}.{}M", whole, frac) } else { format!("{}M", whole) }
+        if frac > 0 {
+            format!("{}.{}M", whole, frac)
+        } else {
+            format!("{}M", whole)
+        }
     } else {
         digits.to_string()
     }
@@ -336,18 +358,29 @@ pub fn detokenize_money_pub(text: &str) -> String {
 
 fn detokenize_money(text: &str) -> String {
     static CCY_SYMBOLS: &[(&str, &str)] = &[
-        ("money_usd_", "$"), ("money_gbp_", "£"), ("money_eur_", "€"),
-        ("money_jpy_", "¥"), ("money_krw_", "₩"), ("money_inr_", "₹"),
-        ("money_btc_", "₿"), ("money_rub_", "₽"), ("money_php_", "₱"),
-        ("money_vnd_", "₫"), ("money_try_", "₺"), ("money_uah_", "₴"),
-        ("money_ngn_", "₦"), ("money_kzt_", "₸"), ("money_brl_", "R$"),
+        ("money_usd_", "$"),
+        ("money_gbp_", "£"),
+        ("money_eur_", "€"),
+        ("money_jpy_", "¥"),
+        ("money_krw_", "₩"),
+        ("money_inr_", "₹"),
+        ("money_btc_", "₿"),
+        ("money_rub_", "₽"),
+        ("money_php_", "₱"),
+        ("money_vnd_", "₫"),
+        ("money_try_", "₺"),
+        ("money_uah_", "₴"),
+        ("money_ngn_", "₦"),
+        ("money_kzt_", "₸"),
+        ("money_brl_", "R$"),
         ("money_sek_", "kr"),
     ];
     let mut out = text.to_string();
     for &(prefix, symbol) in CCY_SYMBOLS {
         while let Some(start) = out.find(prefix) {
             let num_start = start + prefix.len();
-            let num_end = out[num_start..].find(|c: char| !c.is_ascii_digit())
+            let num_end = out[num_start..]
+                .find(|c: char| !c.is_ascii_digit())
                 .map(|i| num_start + i)
                 .unwrap_or(out.len());
             let amount = &out[num_start..num_end];
@@ -389,7 +422,9 @@ pub fn try_user_anchored_line(
         } else {
             trimmed.to_string()
         };
-        infer_trace!("  [lattice-direct] out-of-scope pre-filter → NEUTRAL (no evaluative content)");
+        infer_trace!(
+            "  [lattice-direct] out-of-scope pre-filter → NEUTRAL (no evaluative content)"
+        );
         let text = format!(
             "{} — {}. Grounded in the user's own words: \"{}\"",
             header, body, excerpt
@@ -412,7 +447,9 @@ pub fn try_user_anchored_line(
         } else {
             trimmed.to_string()
         };
-        infer_trace!("  [lattice-direct] objective fact / status → NEUTRAL (bypass meta conf gate)");
+        infer_trace!(
+            "  [lattice-direct] objective fact / status → NEUTRAL (bypass meta conf gate)"
+        );
         let text = format!(
             "{} — {}. Grounded in the user's own words: \"{}\"",
             header, body, excerpt
@@ -447,9 +484,15 @@ pub fn try_user_anchored_line(
     if dm.find_causal_group().is_some() && headline_topic_override.is_none() {
         let causal_topic_routed = topic_hint.map_or(false, |th| {
             const CAUSAL_TOPICS: &[&str] = &[
-                "direct", "compensatory", "contrastive", "explanatory",
-                "concessive", "inferential", "retrospective_framing",
-                "interventional_counterfactual", "causal",
+                "direct",
+                "compensatory",
+                "contrastive",
+                "explanatory",
+                "concessive",
+                "inferential",
+                "retrospective_framing",
+                "interventional_counterfactual",
+                "causal",
             ];
             CAUSAL_TOPICS.iter().any(|ct| th.eq_ignore_ascii_case(ct))
         });
@@ -466,7 +509,10 @@ pub fn try_user_anchored_line(
         // because someone pushed to prod" should be SARCASTIC, not Explanatory.
         let sarcasm_fires = rules.has_sarcasm_template(&lower);
         if let Some(csr) = crate::inference::causal_relation::score_with_relation(intent_text) {
-            if (csr.confidence >= 0.9 || causal_topic_routed) && !toml_long_sentiment_match && !sarcasm_fires {
+            if (csr.confidence >= 0.9 || causal_topic_routed)
+                && !toml_long_sentiment_match
+                && !sarcasm_fires
+            {
                 let text = crate::inference::causal_relation::format_causal_sentiment_line(
                     &csr,
                     intent_text,
@@ -508,7 +554,9 @@ pub fn try_user_anchored_line(
         .map(|th| TOPIC_KEYS.iter().any(|k| th.eq_ignore_ascii_case(k)))
         .unwrap_or(false);
     if !topic_in_sentiment_keys
-        && (headline_topic_override.is_some() || lex_polar_early.is_some() || (contrast_early && bipolar_early))
+        && (headline_topic_override.is_some()
+            || lex_polar_early.is_some()
+            || (contrast_early && bipolar_early))
     {
         // Headline-lexical-topic rules are the most specific: they encode
         // multi-keyword CNF patterns ("surge in" + "scams" → negative) that
@@ -521,7 +569,9 @@ pub fn try_user_anchored_line(
         } else if contrast_early && bipolar_early {
             "mixed".to_string()
         } else {
-            let raw = lex_polar_early.clone().unwrap_or_else(|| "neutral".to_string());
+            let raw = lex_polar_early
+                .clone()
+                .unwrap_or_else(|| "neutral".to_string());
             rules.apply_degree_modifiers(&lower, &raw)
         };
         let header = label_header(key.as_str());
@@ -611,8 +661,8 @@ pub fn try_user_anchored_line(
     }
 
     let lex_polar = lex_polar_early;
-    let mixed_structurally_ok = th.eq_ignore_ascii_case("mixed")
-        && rules.sentiment_allow_forced_mixed_topic(intent_text);
+    let mixed_structurally_ok =
+        th.eq_ignore_ascii_case("mixed") && rules.sentiment_allow_forced_mixed_topic(intent_text);
     if mr.confidence < cfg.min_meta_confidence_user_anchored
         && lex_polar.is_none()
         && !mixed_structurally_ok
@@ -854,7 +904,9 @@ pub fn try_user_anchored_line(
         );
     }
     if disappointment_override {
-        infer_trace!("  [lattice-direct] disappointment cue → NEGATIVE (mild) (override meta topic)");
+        infer_trace!(
+            "  [lattice-direct] disappointment cue → NEGATIVE (mild) (override meta topic)"
+        );
     }
     if lexical_polarity_override {
         infer_trace!(
@@ -905,7 +957,9 @@ impl BrainInferencePlugin for LatticeShortcutsPlugin {
         // elsewhere — it must not skip world grounding or BM25 query enrichment (fintech has
         // identity + sentiment groups and many topic keys).
         if matches!(
-            inference_profile.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+            inference_profile
+                .map(|s| s.trim().to_ascii_lowercase())
+                .as_deref(),
             Some("off") | Some("none") | Some("disabled")
         ) {
             return;
@@ -982,13 +1036,17 @@ impl BrainInferencePlugin for LatticeShortcutsPlugin {
 #[cfg(test)]
 mod sentiment_format_tests {
     use super::{
-        format_retrieved_sentiment_line, sentiment_display_header, sentiment_line_already_has_display_header,
+        format_retrieved_sentiment_line, sentiment_display_header,
+        sentiment_line_already_has_display_header,
     };
 
     #[test]
     fn display_header_extended_intents() {
         assert_eq!(sentiment_display_header("neutral_chop"), "NEUTRAL (chop)");
-        assert_eq!(sentiment_display_header("cautiously_negative"), "CAUTIOUSLY NEGATIVE");
+        assert_eq!(
+            sentiment_display_header("cautiously_negative"),
+            "CAUTIOUSLY NEGATIVE"
+        );
     }
 
     #[test]
@@ -1020,10 +1078,7 @@ mod sentiment_format_tests {
     fn format_line_strips_chained_legacy_headers() {
         let body = "POSITIVE (mild) — POSITIVE( mild) — Security improvement acknowledged.";
         let out = format_retrieved_sentiment_line("positive_mild", body);
-        assert_eq!(
-            out,
-            "POSITIVE (mild) — Security improvement acknowledged."
-        );
+        assert_eq!(out, "POSITIVE (mild) — Security improvement acknowledged.");
         assert!(!out.contains("POSITIVE( mild)"));
     }
 }

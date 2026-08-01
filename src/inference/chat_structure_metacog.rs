@@ -12,9 +12,7 @@ use crate::inference::inference_toml::inference_toml_loaded;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatStructureOutcome {
     Accept,
-    Retry {
-        reason: &'static str,
-    },
+    Retry { reason: &'static str },
 }
 
 /// Evaluate a composed candidate for pet-chat contract fit.
@@ -56,9 +54,7 @@ fn shaping_violation(text: &str) -> Option<&'static str> {
     if shaping.forbid_asterisks && text.contains('*') {
         return Some("asterisk_action");
     }
-    if shaping.require_sensory_or_vocalization
-        && !has_required_signal(&lower, shaping, fragment)
-    {
+    if shaping.require_sensory_or_vocalization && !has_required_signal(&lower, shaping, fragment) {
         return Some("missing_required_signal");
     }
     None
@@ -124,8 +120,7 @@ mod tests {
 forbid_asterisks = true
 require_sensory_or_vocalization = false
 "#;
-        crate::inference::inference_toml::reload_inference_toml_from_str(toml)
-            .expect("reload");
+        crate::inference::inference_toml::reload_inference_toml_from_str(toml).expect("reload");
         let h = default_inference_harness();
         let out = evaluate("hi", "*pounces*", Some("en"), &h);
         assert!(matches!(

@@ -29,7 +29,10 @@ pub enum EncoderPreset {
     BertClass,
     /// MLP-free encoder: 256-d hash → E8 quantize → Cl(1,7) embed → 128-d grade extract.
     CliffordE8,
-    Custom { model_name: String, output_dim: usize },
+    Custom {
+        model_name: String,
+        output_dim: usize,
+    },
 }
 
 impl EncoderPreset {
@@ -255,7 +258,13 @@ pub fn sentiment_lattice_index_body_with_causal(
     let u_trunc = u_trunc.trim_end().replace(['\n', '\r'], " ");
     let causal_chunk = causal
         .filter(|c| c.is_active())
-        .map(|c| format!(" {} {}", SENTIMENT_CAUSAL_INDEX_CORE, c.joint_index_tokens()))
+        .map(|c| {
+            format!(
+                " {} {}",
+                SENTIMENT_CAUSAL_INDEX_CORE,
+                c.joint_index_tokens()
+            )
+        })
         .unwrap_or_default();
     format!(
         "{}{} {} {}",
@@ -408,15 +417,16 @@ pub fn load_language_samples_jsonl(path: &str) -> Result<Vec<LanguageSample>, St
             .filter(|h| !h.text.trim().is_empty())
             .map(|h| (h.role, h.text))
             .collect();
-        let conversation_turn =
-            conv_turn.unwrap_or(if history.is_empty() { 1 } else { 2 });
+        let conversation_turn = conv_turn.unwrap_or(if history.is_empty() { 1 } else { 2 });
         out.push(LanguageSample {
             domain: rec.domain.unwrap_or_else(|| "custom".to_string()),
             text: rec.text,
             semantic_intent: intent,
             action_target: rec.action_target,
             policy_regime: rec.policy_regime.unwrap_or_else(|| "default".to_string()),
-            language_channel: rec.language_channel.unwrap_or_else(|| "english".to_string()),
+            language_channel: rec
+                .language_channel
+                .unwrap_or_else(|| "english".to_string()),
             expected_response: rec.expected_response,
             expected_code: rec.expected_code,
             causal: rec.causal,
@@ -490,7 +500,9 @@ impl CalibrationDataset {
                 || s.policy_regime.is_empty()
                 || s.language_channel.is_empty()
             {
-                return Err("calibration samples must include intent/policy/language labels".to_string());
+                return Err(
+                    "calibration samples must include intent/policy/language labels".to_string(),
+                );
             }
         }
         if counts.len() < req.min_domains {
@@ -562,35 +574,84 @@ impl LanguageEncoder for HashingLanguageEncoder {
         // Real deployments should replace this with a true transformer encoder runtime.
         // Domain-family anchors used by the synthetic dataset in main.rs.
         let customer_support_keywords = [
-            "customer", "support", "account", "password", "billing", "ticket", "refund", "login",
-            "unlock", "subscription", "recovery", "helpdesk",
+            "customer",
+            "support",
+            "account",
+            "password",
+            "billing",
+            "ticket",
+            "refund",
+            "login",
+            "unlock",
+            "subscription",
+            "recovery",
+            "helpdesk",
         ];
         let coding_tool_keywords = [
             "coding", "code", "rust", "function", "debug", "compiler", "sql", "query", "parser",
             "tool", "stack", "pointer", "serde", "index", "module",
         ];
         let knowledge_qa_keywords = [
-            "knowledge", "qa", "fact", "explain", "definition", "what", "why", "how", "answer",
-            "reference", "documentation",
+            "knowledge",
+            "qa",
+            "fact",
+            "explain",
+            "definition",
+            "what",
+            "why",
+            "how",
+            "answer",
+            "reference",
+            "documentation",
         ];
         let safety_refusal_keywords = [
-            "safety", "policy", "refuse", "blocked", "forbidden", "harmful", "disallowed",
-            "compliance", "unsafe", "restricted",
+            "safety",
+            "policy",
+            "refuse",
+            "blocked",
+            "forbidden",
+            "harmful",
+            "disallowed",
+            "compliance",
+            "unsafe",
+            "restricted",
         ];
         let procedural_instruction_keywords = [
-            "procedure", "instruction", "step", "follow", "sequence", "workflow", "checklist",
-            "process", "guide",
+            "procedure",
+            "instruction",
+            "step",
+            "follow",
+            "sequence",
+            "workflow",
+            "checklist",
+            "process",
+            "guide",
         ];
         let short_conversation_keywords = [
-            "hello", "hi", "thanks", "ok", "yes", "no", "greetings", "bye", "chat",
+            "hello",
+            "hi",
+            "thanks",
+            "ok",
+            "yes",
+            "no",
+            "greetings",
+            "bye",
+            "chat",
         ];
         let multi_turn_followup_keywords = [
             "followup", "continue", "previous", "earlier", "context", "as-said", "next", "again",
             "clarify", "thread",
         ];
         let adversarial_noisy_keywords = [
-            "adversarial", "noisy", "jailbreak", "prompt-injection", "ignore", "override",
-            "garbled", "nonsense", "obfuscated",
+            "adversarial",
+            "noisy",
+            "jailbreak",
+            "prompt-injection",
+            "ignore",
+            "override",
+            "garbled",
+            "nonsense",
+            "obfuscated",
         ];
         // Sentiment anchors: loaded once from inference TOML (single source of truth).
         // Union of positive_anchor_tokens + bipolar_positive_tokens (and negative equivalents)
@@ -791,8 +852,8 @@ pub struct GroupAdapter {
     pub raw_dim: usize,
     pub bridge_dim: usize,
     pub rank: usize,
-    pub b_down: Vec<Vec<f32>>,  // rank × raw_dim
-    pub a_up: Vec<Vec<f32>>,    // bridge_dim × rank
+    pub b_down: Vec<Vec<f32>>, // rank × raw_dim
+    pub a_up: Vec<Vec<f32>>,   // bridge_dim × rank
     pub l2_weight: f32,
     pub frozen: bool,
 }
@@ -812,10 +873,18 @@ impl GroupAdapter {
         for (o, row) in a_up.iter_mut().enumerate() {
             for (r, w) in row.iter_mut().enumerate() {
                 let hash = ((o * 13 + r * 29) % 1000) as f32 / 1000.0 - 0.5;
-                *w = hash * scale * 0.1;  // near-zero init so adapter starts as identity-ish
+                *w = hash * scale * 0.1; // near-zero init so adapter starts as identity-ish
             }
         }
-        Self { raw_dim, bridge_dim, rank, b_down, a_up, l2_weight: DEFAULT_ADAPTER_L2, frozen: false }
+        Self {
+            raw_dim,
+            bridge_dim,
+            rank,
+            b_down,
+            a_up,
+            l2_weight: DEFAULT_ADAPTER_L2,
+            frozen: false,
+        }
     }
 
     /// Forward: returns the adapter delta to add to z_shared.
@@ -828,7 +897,7 @@ impl GroupAdapter {
             for (i, &w) in row.iter().enumerate() {
                 acc += w * h_raw[i];
             }
-            hidden[r] = if acc > 0.0 { acc } else { 0.01 * acc };  // LeakyReLU
+            hidden[r] = if acc > 0.0 { acc } else { 0.01 * acc }; // LeakyReLU
         }
         // delta = A @ hidden  (bridge_dim)
         let mut delta = vec![0.0f32; self.bridge_dim];
@@ -845,7 +914,11 @@ impl GroupAdapter {
     /// Adapt z_shared using raw embedding: z_g = z_shared + adapter.forward(h_raw)
     pub fn adapt(&self, z_shared: &[f32], h_raw: &[f32]) -> Vec<f32> {
         let delta = self.forward(h_raw);
-        z_shared.iter().zip(delta.iter()).map(|(&z, &d)| z + d).collect()
+        z_shared
+            .iter()
+            .zip(delta.iter())
+            .map(|(&z, &d)| z + d)
+            .collect()
     }
 
     /// SGD training step: given the gradient signal from gen head loss.
@@ -853,7 +926,9 @@ impl GroupAdapter {
     /// `h_raw` is the raw encoder vector for this sample.
     #[cfg(feature = "training")]
     pub fn train_step(&mut self, h_raw: &[f32], cond_grad: &[f32], lr: f32) {
-        if self.frozen { return; }
+        if self.frozen {
+            return;
+        }
         debug_assert_eq!(h_raw.len(), self.raw_dim);
         debug_assert_eq!(cond_grad.len(), self.bridge_dim);
 
@@ -885,7 +960,11 @@ impl GroupAdapter {
             for (o, row) in self.a_up.iter().enumerate() {
                 acc += cond_grad[o] * row[r];
             }
-            d_hidden[r] = if hidden_pre_relu[r] > 0.0 { acc } else { 0.01 * acc };
+            d_hidden[r] = if hidden_pre_relu[r] > 0.0 {
+                acc
+            } else {
+                0.01 * acc
+            };
         }
 
         // grad_B[r][i] = d_hidden[r] * h_raw[i]
@@ -1070,7 +1149,12 @@ pub fn route_language_embedding(
     let mut sims: Vec<(GroupId, f32)> = embedding_library
         .iter()
         .filter(|e| !e.language_vector.is_empty() && e.language_vector.len() == language_vec.len())
-        .map(|e| (e.group_id, cosine_similarity(language_vec, &e.language_vector)))
+        .map(|e| {
+            (
+                e.group_id,
+                cosine_similarity(language_vec, &e.language_vector),
+            )
+        })
         .collect();
     sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -1125,9 +1209,9 @@ impl LanguageRuntime {
         requirements: &CalibrationRequirements,
     ) -> Result<CalibrationReport, String> {
         let encoder = self.build_encoder();
-        let mut report = self
-            .bridge
-            .calibrate_global(encoder.as_ref(), dataset, requirements, true)?;
+        let mut report =
+            self.bridge
+                .calibrate_global(encoder.as_ref(), dataset, requirements, true)?;
         report.encoder_model = self.config.encoder.model_name();
         Ok(report)
     }
@@ -1481,13 +1565,87 @@ const SEM_NEIGHBOR_W: usize = 3;
 /// Function/boilerplate words that should not dominate a request's meaning vector
 /// (so "how do i implement binary search in python" centers on binary/search).
 const ENCODER_STOPWORDS: &[&str] = &[
-    "a", "an", "the", "of", "to", "in", "on", "at", "for", "and", "or", "is", "are", "be", "was",
-    "were", "this", "that", "these", "those", "it", "its", "i", "we", "you", "they", "he", "she",
-    "how", "do", "does", "did", "with", "without", "as", "into", "from", "by", "not", "no", "so",
-    "such", "please", "can", "could", "would", "should", "will", "may", "might", "me", "my", "your",
-    "our", "their", "there", "here", "then", "than", "write", "implement", "create", "make", "build",
-    "give", "want", "need", "code", "program", "python", "function", "func", "def", "class", "method",
-    "using", "use", "some", "any", "get", "have",
+    "a",
+    "an",
+    "the",
+    "of",
+    "to",
+    "in",
+    "on",
+    "at",
+    "for",
+    "and",
+    "or",
+    "is",
+    "are",
+    "be",
+    "was",
+    "were",
+    "this",
+    "that",
+    "these",
+    "those",
+    "it",
+    "its",
+    "i",
+    "we",
+    "you",
+    "they",
+    "he",
+    "she",
+    "how",
+    "do",
+    "does",
+    "did",
+    "with",
+    "without",
+    "as",
+    "into",
+    "from",
+    "by",
+    "not",
+    "no",
+    "so",
+    "such",
+    "please",
+    "can",
+    "could",
+    "would",
+    "should",
+    "will",
+    "may",
+    "might",
+    "me",
+    "my",
+    "your",
+    "our",
+    "their",
+    "there",
+    "here",
+    "then",
+    "than",
+    "write",
+    "implement",
+    "create",
+    "make",
+    "build",
+    "give",
+    "want",
+    "need",
+    "code",
+    "program",
+    "python",
+    "function",
+    "func",
+    "def",
+    "class",
+    "method",
+    "using",
+    "use",
+    "some",
+    "any",
+    "get",
+    "have",
 ];
 
 fn content_weight(token: &str) -> f32 {
@@ -1558,7 +1716,10 @@ struct CliffordLanguageEncoder {
     /// lexical anchor dimensions v[0..9] which are always injected).
     base: HashingLanguageEncoder,
     /// Vocabulary-grounded CDMA codec, built from training corpus.
-    codec: Option<(crate::spectral::TokenDictionary, crate::text_autoencoder::ChunkCodec)>,
+    codec: Option<(
+        crate::spectral::TokenDictionary,
+        crate::text_autoencoder::ChunkCodec,
+    )>,
 }
 
 impl std::fmt::Debug for CliffordLanguageEncoder {
@@ -1715,7 +1876,11 @@ fn sigmoid(x: f32) -> f32 {
 }
 
 fn l2_normalize(v: &mut [f32]) {
-    let n = v.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+    let n = v
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        .sqrt();
     if n > 1e-20 {
         for x in v.iter_mut() {
             *x = (*x as f64 / n) as f32;
@@ -1787,7 +1952,10 @@ mod tests {
         let h_raw: Vec<f32> = (0..384).map(|i| (i as f32 * 0.013).sin()).collect();
         let delta = adapter.forward(&h_raw);
         assert_eq!(delta.len(), 128);
-        assert!(delta.iter().any(|&v| v != 0.0), "adapter output should be non-zero");
+        assert!(
+            delta.iter().any(|&v| v != 0.0),
+            "adapter output should be non-zero"
+        );
     }
 
     #[test]
@@ -1807,25 +1975,42 @@ mod tests {
         let z_shared = vec![0.5f32; 16];
 
         let target_delta: Vec<f32> = (0..16).map(|i| (i as f32) * 0.1).collect();
-        let target: Vec<f32> = z_shared.iter().zip(target_delta.iter()).map(|(z, d)| z + d).collect();
+        let target: Vec<f32> = z_shared
+            .iter()
+            .zip(target_delta.iter())
+            .map(|(z, d)| z + d)
+            .collect();
 
         let initial_adapted = adapter.adapt(&z_shared, &h_raw);
-        let initial_err: f32 = initial_adapted.iter().zip(target.iter())
-            .map(|(a, t)| (a - t).powi(2)).sum();
+        let initial_err: f32 = initial_adapted
+            .iter()
+            .zip(target.iter())
+            .map(|(a, t)| (a - t).powi(2))
+            .sum();
 
         for _ in 0..200 {
             let adapted = adapter.adapt(&z_shared, &h_raw);
-            let grad: Vec<f32> = adapted.iter().zip(target.iter())
-                .map(|(a, t)| 2.0 * (a - t)).collect();
+            let grad: Vec<f32> = adapted
+                .iter()
+                .zip(target.iter())
+                .map(|(a, t)| 2.0 * (a - t))
+                .collect();
             adapter.train_step(&h_raw, &grad, 0.01);
         }
 
         let final_adapted = adapter.adapt(&z_shared, &h_raw);
-        let final_err: f32 = final_adapted.iter().zip(target.iter())
-            .map(|(a, t)| (a - t).powi(2)).sum();
+        let final_err: f32 = final_adapted
+            .iter()
+            .zip(target.iter())
+            .map(|(a, t)| (a - t).powi(2))
+            .sum();
 
-        assert!(final_err < initial_err * 0.5,
-            "adapter should reduce error: initial={:.4} final={:.4}", initial_err, final_err);
+        assert!(
+            final_err < initial_err * 0.5,
+            "adapter should reduce error: initial={:.4} final={:.4}",
+            initial_err,
+            final_err
+        );
     }
 
     #[test]
@@ -1854,7 +2039,10 @@ mod tests {
 
         let out1 = a1.adapt(&z_shared, &h_raw);
         let out2 = a2.adapt(&z_shared, &h_raw);
-        assert_ne!(out1, out2, "different adapters should produce different outputs after training");
+        assert_ne!(
+            out1, out2,
+            "different adapters should produce different outputs after training"
+        );
     }
 
     #[test]

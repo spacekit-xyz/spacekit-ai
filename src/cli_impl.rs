@@ -1,25 +1,25 @@
 //! Growformer CLI implementation exposed as a library entry point for embedding
 //! (e.g. SpaceKit CLI). The standalone `growformer` binary delegates here too.
 
-use crate::dimension::{
-    LanguageSample, action_target_to_type, append_language_samples_from_training_jsonl_dir,
-};
+use crate::clifford::GroupRotor;
+use crate::dimension::group_gen::{AlgebraicCodebook, HopfCompositionTable};
 use crate::dimension::language::{
     sentiment_lattice_index_body_with_causal, should_use_sentiment_joint_index, DEFAULT_BRIDGE_DIM,
 };
-use crate::clifford::GroupRotor;
-use crate::dimension::group_gen::{AlgebraicCodebook, HopfCompositionTable};
 use crate::dimension::paramecium::InfraciliaryLattice;
+use crate::dimension::{
+    action_target_to_type, append_language_samples_from_training_jsonl_dir, LanguageSample,
+};
 use crate::reasoning::{CognitiveMap, ReasoningEngine};
-use crate::spectral::TokenDictionary;
-use std::collections::HashMap;
 use crate::service::LanguageService;
+use crate::spectral::TokenDictionary;
+use clap::{error::ErrorKind, Parser, Subcommand};
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use rand::SeedableRng;
-use rand::seq::SliceRandom;
-use rand::rngs::StdRng;
-use clap::{error::ErrorKind, Parser, Subcommand};
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -121,15 +121,30 @@ struct Args {
     /// (e.g. dollar amounts), use **single quotes** in the shell or use `--prompt-file` —
     /// double quotes cause the shell to expand `$` and drop the amount before it reaches the binary.
     /// For many prompts, use `--prompts-file` instead.
-    #[arg(long, value_name = "TEXT", conflicts_with = "prompt_file", conflicts_with = "prompts_file")]
+    #[arg(
+        long,
+        value_name = "TEXT",
+        conflicts_with = "prompt_file",
+        conflicts_with = "prompts_file"
+    )]
     prompt: Option<String>,
 
     /// Read the inference prompt from a UTF-8 file (exact text; avoids shell `$` expansion).
-    #[arg(long, value_name = "PATH", conflicts_with = "prompt", conflicts_with = "prompts_file")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with = "prompt",
+        conflicts_with = "prompts_file"
+    )]
     prompt_file: Option<PathBuf>,
 
     /// Batch inference: one prompt per non-empty line (plain text; optional matching `"`/`'`/`“…”` wrappers are stripped). Lines starting with `#` are comments. Use with `--infer` (`-v` for traces).
-    #[arg(long, value_name = "PATH", conflicts_with = "prompt", conflicts_with = "prompt_file")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with = "prompt",
+        conflicts_with = "prompt_file"
+    )]
     prompts_file: Option<PathBuf>,
 
     /// Retrain only the gen env for a specific group index (loads existing brain, retrains one group, re-exports).
@@ -360,8 +375,7 @@ fn apply_gf_project(args: &mut Args, project_path: &Path) -> Result<GfOverlay, S
         }
         if args.inference_defaults_toml.is_none() {
             if let Some(t) = inf.defaults_toml.as_deref() {
-                args.inference_defaults_toml =
-                    Some(crate::project_gf::resolve_against(&base, t));
+                args.inference_defaults_toml = Some(crate::project_gf::resolve_against(&base, t));
             }
         }
         if args.inference_guardrails_jsonl.is_none() {
@@ -472,15 +486,16 @@ fn strip_outer_wrapping_quotes(line: &str) -> String {
     let last = *chars.last().unwrap();
     let paired = matches!(
         (first, last),
-        ('"', '"')
-            | ('\u{201c}', '\u{201d}')
-            | ('\u{2018}', '\u{2019}')
-            | ('\'', '\'')
+        ('"', '"') | ('\u{201c}', '\u{201d}') | ('\u{2018}', '\u{2019}') | ('\'', '\'')
     );
     if !paired {
         return t.to_string();
     }
-    chars[1..chars.len() - 1].iter().collect::<String>().trim().to_string()
+    chars[1..chars.len() - 1]
+        .iter()
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 /// Heuristic: prompt text often seen after zsh/bash expands `$12` / `$74` inside double-quoted `--prompt "..."`.
@@ -651,8 +666,15 @@ where
         .brain_output
         .clone()
         .unwrap_or_else(|| "brain.bin".to_string());
-    let brain_path = args.brain.clone().unwrap_or_else(|| "brain.bin".to_string());
-    let auto = args.auto || gf_overlay.as_ref().and_then(|o| o.train_auto).unwrap_or(false);
+    let brain_path = args
+        .brain
+        .clone()
+        .unwrap_or_else(|| "brain.bin".to_string());
+    let auto = args.auto
+        || gf_overlay
+            .as_ref()
+            .and_then(|o| o.train_auto)
+            .unwrap_or(false);
     let brain_epochs = gf_overlay
         .as_ref()
         .and_then(|o| o.brain_epochs)
@@ -736,10 +758,7 @@ where
                                 e
                             );
                         } else if args.infer && args.verbose {
-                            println!(
-                                "Grounding graph: loaded from {}",
-                                gpath.display()
-                            );
+                            println!("Grounding graph: loaded from {}", gpath.display());
                         }
                     }
                     Err(e) => eprintln!(
@@ -811,7 +830,8 @@ where
             args.brain_plugins_toml.as_deref(),
             train_code_lattice,
             args.no_progress,
-        ).map_err(|e| format!("Failed to train brain: {}", e))?;
+        )
+        .map_err(|e| format!("Failed to train brain: {}", e))?;
     } else if let Some(group_idx) = args.retrain_gen {
         crate::entitlement::require_capability(crate::entitlement::CAP_TRAIN)?;
         println!("=============================================================");
@@ -828,20 +848,21 @@ where
             args.brain_description.as_deref(),
             args.brain_author.as_deref(),
             args.brain_plugins_toml.as_deref(),
-        ).map_err(|e| format!("Retrain failed: {}", e))?;
+        )
+        .map_err(|e| format!("Retrain failed: {}", e))?;
     } else if args.train_fingerprint_adapter {
         crate::entitlement::require_capability(crate::entitlement::CAP_TRAIN)?;
         println!("=============================================================");
         println!("  Growformer — Fingerprint Adapter (augment, don't override)");
         println!("=============================================================\n");
-        let out = args.brain_output.clone().unwrap_or_else(|| brain_out.clone());
-        let data_dir = args
-            .data_dir
-            .as_deref()
-            .ok_or_else(|| {
-                "--train-fingerprint-adapter requires --data-dir (or [train].data_dir via --project)"
-                    .to_string()
-            })?;
+        let out = args
+            .brain_output
+            .clone()
+            .unwrap_or_else(|| brain_out.clone());
+        let data_dir = args.data_dir.as_deref().ok_or_else(|| {
+            "--train-fingerprint-adapter requires --data-dir (or [train].data_dir via --project)"
+                .to_string()
+        })?;
         train_fingerprint_adapter(
             &brain_path,
             &out,
@@ -859,14 +880,14 @@ where
         println!("=============================================================");
         println!("  Growformer — Router Adapter (drop-in LearnedRouter)");
         println!("=============================================================\n");
-        let out = args.brain_output.clone().unwrap_or_else(|| brain_out.clone());
-        let data_dir = args
-            .data_dir
-            .as_deref()
-            .ok_or_else(|| {
-                "--train-router-adapter requires --data-dir (or [train].data_dir via --project)"
-                    .to_string()
-            })?;
+        let out = args
+            .brain_output
+            .clone()
+            .unwrap_or_else(|| brain_out.clone());
+        let data_dir = args.data_dir.as_deref().ok_or_else(|| {
+            "--train-router-adapter requires --data-dir (or [train].data_dir via --project)"
+                .to_string()
+        })?;
         train_router_adapter(
             &brain_path,
             &out,
@@ -884,16 +905,25 @@ where
         .map_err(|e| format!("Router adapter failed: {}", e))?;
     } else if args.merge_brain {
         crate::entitlement::require_capability(crate::entitlement::CAP_MERGE)?;
-        let overlay_path = args.overlay_brain.clone()
+        let overlay_path = args
+            .overlay_brain
+            .clone()
             .ok_or_else(|| "--merge-brain requires --overlay-brain <path>".to_string())?;
-        let output = args.brain_output.clone().unwrap_or_else(|| "merged-brain.bin".to_string());
-        merge_brains(&brain_path, overlay_path.to_str().ok_or("overlay path not UTF-8")?, &output)
-            .map_err(|e| format!("Merge failed: {}", e))?;
+        let output = args
+            .brain_output
+            .clone()
+            .unwrap_or_else(|| "merged-brain.bin".to_string());
+        merge_brains(
+            &brain_path,
+            overlay_path.to_str().ok_or("overlay path not UTF-8")?,
+            &output,
+        )
+        .map_err(|e| format!("Merge failed: {}", e))?;
     } else if args.rules_info {
-        let data = std::fs::read(&brain_path)
-            .map_err(|e| format!("Failed to read brain: {}", e))?;
-        let mut svc = LanguageService::new_default()
-            .map_err(|e| format!("Failed to init: {}", e))?;
+        let data =
+            std::fs::read(&brain_path).map_err(|e| format!("Failed to read brain: {}", e))?;
+        let mut svc =
+            LanguageService::new_default().map_err(|e| format!("Failed to init: {}", e))?;
         svc.load_brain(&data)
             .map_err(|e| format!("Failed to load brain: {}", e))?;
         let loaded = crate::inference::inference_toml::inference_toml_loaded();
@@ -901,20 +931,32 @@ where
         println!("{}", rules.rules_summary_json());
         return Ok(());
     } else if args.debug_embedding {
-        let prompt_text = args.prompt.as_deref()
+        let prompt_text = args
+            .prompt
+            .as_deref()
             .ok_or_else(|| "--debug-embedding requires --prompt 'text'".to_string())?;
-        let data = std::fs::read(&brain_path)
-            .map_err(|e| format!("Failed to read brain: {}", e))?;
+        let data =
+            std::fs::read(&brain_path).map_err(|e| format!("Failed to read brain: {}", e))?;
         let rt = crate::runtime::Runtime::from_brain_bytes(&data)
             .map_err(|e| format!("Failed to load: {}", e))?;
         let dm = rt.svc.active_dm();
-        let (raw_enc, bridged) = dm.language_runtime.encode_and_bridge(prompt_text)
+        let (raw_enc, bridged) = dm
+            .language_runtime
+            .encode_and_bridge(prompt_text)
             .map_err(|e| format!("Encode failed: {}", e))?;
         let raw_first8: Vec<f32> = raw_enc.iter().take(8).copied().collect();
-        let raw_norm: f64 = raw_enc.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>().sqrt();
+        let raw_norm: f64 = raw_enc
+            .iter()
+            .map(|x| (*x as f64) * (*x as f64))
+            .sum::<f64>()
+            .sqrt();
         let br_vec = &bridged.routed_vector;
         let br_first8: Vec<f32> = br_vec.iter().take(8).copied().collect();
-        let br_norm: f64 = br_vec.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>().sqrt();
+        let br_norm: f64 = br_vec
+            .iter()
+            .map(|x| (*x as f64) * (*x as f64))
+            .sum::<f64>()
+            .sqrt();
         println!(
             "{{\"raw_dim\":{},\"raw_norm\":{:.10},\"raw_first8\":{:?},\"bridge_dim\":{},\"bridge_confidence\":{:.6},\"bridge_norm\":{:.10},\"bridge_first8\":{:?}}}",
             raw_enc.len(), raw_norm, raw_first8,
@@ -932,7 +974,8 @@ where
             args.brain_name.as_deref(),
             args.brain_description.as_deref(),
             args.brain_author.as_deref(),
-        ).map_err(|e| format!("Repack failed: {}", e))?;
+        )
+        .map_err(|e| format!("Repack failed: {}", e))?;
     } else if args.infer {
         crate::entitlement::require_capability(crate::entitlement::CAP_INFER)?;
         let infer_mode = resolve_infer_mode(&args)?;
@@ -945,7 +988,8 @@ where
             gf_overlay
                 .as_ref()
                 .and_then(|o| o.fragments_jsonl.as_deref()),
-        ).map_err(|e| format!("Inference failed: {}", e))?;
+        )
+        .map_err(|e| format!("Inference failed: {}", e))?;
     } else {
         return Err(
             "no action specified. Use --train-brain, --infer, --merge-brain, or `init`. See --help.".to_string()
@@ -965,12 +1009,16 @@ fn repack_brain(
     brain_description: Option<&str>,
     brain_author: Option<&str>,
 ) -> Result<(), String> {
-    let data = std::fs::read(brain_path)
-        .map_err(|e| format!("Failed to read {}: {}", brain_path, e))?;
+    let data =
+        std::fs::read(brain_path).map_err(|e| format!("Failed to read {}: {}", brain_path, e))?;
     let mut svc = LanguageService::new_default()?;
     svc.load_brain(&data)?;
     apply_brain_package_cli(&mut svc, brain_name, brain_description, brain_author);
-    println!("Loaded brain from {} ({} KB)", brain_path, data.len() / 1024);
+    println!(
+        "Loaded brain from {} ({} KB)",
+        brain_path,
+        data.len() / 1024
+    );
 
     let loaded = crate::inference::inference_toml::inference_toml_loaded();
     let n_headline = loaded.rules().headline_lexical_topic.len();
@@ -1011,7 +1059,10 @@ fn apply_optional_brain_plugins_toml(
         );
     }
     svc.set_brain_plugins_manifest(Some(m));
-    println!("  [brain-plugins] will embed manifest from {}", path.display());
+    println!(
+        "  [brain-plugins] will embed manifest from {}",
+        path.display()
+    );
     Ok(())
 }
 
@@ -1281,8 +1332,8 @@ fn load_brain_for_adapter(
     brain_author: Option<&str>,
     brain_plugins_toml: Option<&std::path::Path>,
 ) -> Result<LanguageService, String> {
-    let data = std::fs::read(brain_path)
-        .map_err(|e| format!("Failed to read {}: {}", brain_path, e))?;
+    let data =
+        std::fs::read(brain_path).map_err(|e| format!("Failed to read {}: {}", brain_path, e))?;
     let mut svc = LanguageService::new_default()?;
     svc.load_brain(&data)?;
     apply_brain_package_cli(&mut svc, brain_name, brain_description, brain_author);
@@ -1393,7 +1444,11 @@ fn augment_neural_fingerprints(
             "  group {}: {} samples → fingerprint {} (α={:.3})",
             gidx,
             embs.len(),
-            if had { "EMA-blended" } else { "registered (no prior)" },
+            if had {
+                "EMA-blended"
+            } else {
+                "registered (no prior)"
+            },
             alpha
         );
     }
@@ -1467,22 +1522,33 @@ fn retrain_single_gen(
     brain_author: Option<&str>,
     brain_plugins_toml: Option<&std::path::Path>,
 ) -> Result<(), String> {
-    let data = std::fs::read(brain_path)
-        .map_err(|e| format!("Failed to read {}: {}", brain_path, e))?;
+    let data =
+        std::fs::read(brain_path).map_err(|e| format!("Failed to read {}: {}", brain_path, e))?;
 
     let mut svc = LanguageService::new_default()?;
     svc.load_brain(&data)?;
     apply_brain_package_cli(&mut svc, brain_name, brain_description, brain_author);
     apply_optional_brain_plugins_toml(&mut svc, brain_plugins_toml)?;
-    println!("Loaded brain from {} ({} KB)", brain_path, data.len() / 1024);
+    println!(
+        "Loaded brain from {} ({} KB)",
+        brain_path,
+        data.len() / 1024
+    );
 
     let dm = svc.active_dm();
     let num_groups = dm.main.group_order.len();
-    println!("  Groups: {}, gen envs: {:?}", num_groups, dm.group_gen_envs.keys().collect::<Vec<_>>());
+    println!(
+        "  Groups: {}, gen envs: {:?}",
+        num_groups,
+        dm.group_gen_envs.keys().collect::<Vec<_>>()
+    );
 
     if !dm.group_gen_envs.contains_key(&target_group) {
-        return Err(format!("Group {} not found in brain (available: {:?})",
-            target_group, dm.group_gen_envs.keys().collect::<Vec<_>>()));
+        return Err(format!(
+            "Group {} not found in brain (available: {:?})",
+            target_group,
+            dm.group_gen_envs.keys().collect::<Vec<_>>()
+        ));
     }
 
     // Load training data
@@ -1490,8 +1556,17 @@ fn retrain_single_gen(
     println!("Loaded {} training samples", samples.len());
 
     // Build group lookup from the loaded brain's group names
-    let brain_group_names: Vec<String> = dm.main.group_order.iter()
-        .map(|gid| dm.main.groups.get(gid).map(|g| g.task_name.clone()).unwrap_or_default())
+    let brain_group_names: Vec<String> = dm
+        .main
+        .group_order
+        .iter()
+        .map(|gid| {
+            dm.main
+                .groups
+                .get(gid)
+                .map(|g| g.task_name.clone())
+                .unwrap_or_default()
+        })
         .collect();
     let group_lookup = build_group_lookup(&brain_group_names);
     let group_map = |s: &LanguageSample| -> usize {
@@ -1504,12 +1579,16 @@ fn retrain_single_gen(
     let runtime = &svc.dm.language_runtime;
     let mut gen_pairs: Vec<(Vec<f32>, String, String)> = Vec::new();
     for s in &samples {
-        if group_map(s) != target_group { continue; }
+        if group_map(s) != target_group {
+            continue;
+        }
         if let Some(r) = s.expected_response.as_deref() {
             match runtime.encode_and_bridge(&s.text) {
                 Ok((raw, bridged)) => {
                     let cond = svc.dm.adapt_for_group_clifford(
-                        target_group, &bridged.routed_vector, &raw,
+                        target_group,
+                        &bridged.routed_vector,
+                        &raw,
                         crate::dimension::group_gen::GEN_COND_DIM,
                     );
                     let lattice_text = if should_use_sentiment_joint_index(s) {
@@ -1534,7 +1613,11 @@ fn retrain_single_gen(
             }
         }
     }
-    println!("  {} gen samples for group {}", gen_pairs.len(), target_group);
+    println!(
+        "  {} gen samples for group {}",
+        gen_pairs.len(),
+        target_group
+    );
 
     if gen_pairs.is_empty() {
         return Err(format!("No gen training data for group {}", target_group));
@@ -1555,9 +1638,14 @@ fn retrain_single_gen(
     } else {
         1500
     };
-    let _k_replicas = if let Some(ac) = &auto_cfg { ac.replicas } else { (gen_replicas as usize).max(1) };
-    let gen_overrides = auto_cfg.as_ref().map(|ac| {
-        crate::dimension::group_gen::GenEnvOverrides {
+    let _k_replicas = if let Some(ac) = &auto_cfg {
+        ac.replicas
+    } else {
+        (gen_replicas as usize).max(1)
+    };
+    let gen_overrides = auto_cfg
+        .as_ref()
+        .map(|ac| crate::dimension::group_gen::GenEnvOverrides {
             max_tokens: Some(ac.max_tokens),
             hidden: Some(ac.gen_hidden),
             k: Some(ac.gen_k),
@@ -1565,8 +1653,7 @@ fn retrain_single_gen(
             energy_budget: Some(ac.energy_budget),
             hex_mode: Some(true),
             ..Default::default()
-        }
-    });
+        });
 
     // let early_stop_window = auto_cfg.as_ref().map(|ac| ac.early_stop_window).unwrap_or(0);
     // let early_stop_min_imp = auto_cfg.as_ref().map(|ac| ac.early_stop_min_improvement).unwrap_or(0.0);
@@ -1574,7 +1661,10 @@ fn retrain_single_gen(
 
     // Build dictionary, codebook, Hopf table for the target group
     use crate::dimension::group_gen::{bits_for_dict, MAX_TOKENS};
-    let effective_max_tokens = gen_overrides.as_ref().and_then(|o| o.max_tokens).unwrap_or(MAX_TOKENS);
+    let effective_max_tokens = gen_overrides
+        .as_ref()
+        .and_then(|o| o.max_tokens)
+        .unwrap_or(MAX_TOKENS);
 
     let texts: Vec<&str> = gen_pairs.iter().map(|(_, t, _)| t.as_str()).collect();
     let embs: Vec<&[f32]> = gen_pairs.iter().map(|(e, _, _)| e.as_slice()).collect();
@@ -1582,8 +1672,13 @@ fn retrain_single_gen(
     let max_dict = if texts.len() >= 100 { 2048 } else { 1024 };
     let dict = TokenDictionary::build(&texts, max_dict);
     let bits = bits_for_dict(dict.len());
-    println!("  dict: {} tokens from {} texts, {} bits/token, output={}",
-        dict.len(), texts.len(), bits, effective_max_tokens * bits);
+    println!(
+        "  dict: {} tokens from {} texts, {} bits/token, output={}",
+        dict.len(),
+        texts.len(),
+        bits,
+        effective_max_tokens * bits
+    );
 
     let base_archetypes = 16usize;
     let gen_max_arch = if texts.len() > 150 {
@@ -1594,9 +1689,20 @@ fn retrain_single_gen(
         base_archetypes
     };
     let cb = AlgebraicCodebook::build(&texts, &dict, gen_max_arch, Some(&embs));
-    let mode = if cb.has_prototypes() { "SLOT-ONLY" } else { "FULL" };
-    println!("  codebook: {} archetypes (max={}), {} slots max, {} total/{} slot bits [{}]",
-        cb.archetypes.len(), gen_max_arch, cb.max_slot_count, cb.total_bits, cb.slot_only_bits, mode);
+    let mode = if cb.has_prototypes() {
+        "SLOT-ONLY"
+    } else {
+        "FULL"
+    };
+    println!(
+        "  codebook: {} archetypes (max={}), {} slots max, {} total/{} slot bits [{}]",
+        cb.archetypes.len(),
+        gen_max_arch,
+        cb.max_slot_count,
+        cb.total_bits,
+        cb.slot_only_bits,
+        mode
+    );
 
     // Build Hopf composition table
     let hopf_segments = 3;
@@ -1609,8 +1715,11 @@ fn retrain_single_gen(
         }
         clusters.retain(|c| !c.is_empty());
         let hopf = HopfCompositionTable::build(&cb, Some(&embs), &clusters, hopf_segments);
-        println!("  Hopf table: {} fragments, {} transition entries",
-            hopf.fragments.len(), hopf.transition.len());
+        println!(
+            "  Hopf table: {} fragments, {} transition entries",
+            hopf.fragments.len(),
+            hopf.transition.len()
+        );
         Some(hopf)
     } else {
         None
@@ -1618,7 +1727,11 @@ fn retrain_single_gen(
 
     // Build IndexedGenEnv: one-pass Paramecium lattice development
     use crate::dimension::group_gen::IndexedGenEnv as RetrainIndexedGenEnv;
-    println!("\n--- Building indexed gen g{} ({} pairs, Paramecium lattice) ---", target_group, gen_pairs.len());
+    println!(
+        "\n--- Building indexed gen g{} ({} pairs, Paramecium lattice) ---",
+        target_group,
+        gen_pairs.len()
+    );
 
     let mut indexed_env = RetrainIndexedGenEnv::from_tagged_parts(
         dict.clone(),
@@ -1632,7 +1745,11 @@ fn retrain_single_gen(
         topic.lattice.autogamy(TOPIC_AUTOGAMY_MERGE);
     }
     indexed_env.freeze();
-    println!("  Indexed gen g{}: {} lattice programs, frozen", target_group, indexed_env.program_count());
+    println!(
+        "  Indexed gen g{}: {} lattice programs, frozen",
+        target_group,
+        indexed_env.program_count()
+    );
 
     // Replace the gen env in the brain
     let dm = svc.active_dm_mut();
@@ -1675,8 +1792,15 @@ fn merge_brains(base_path: &str, overlay_path: &str, output_path: &str) -> Resul
     let base_groups = base_dm.main.group_order.len();
     let base_gen_envs = base_dm.group_gen_envs.len();
     let overlay_gen_envs = overlay_dm.group_gen_envs.len();
-    println!("  Base:    {} groups, {} gen_envs", base_groups, base_gen_envs);
-    println!("  Overlay: {} groups, {} gen_envs", overlay_dm.main.group_order.len(), overlay_gen_envs);
+    println!(
+        "  Base:    {} groups, {} gen_envs",
+        base_groups, base_gen_envs
+    );
+    println!(
+        "  Overlay: {} groups, {} gen_envs",
+        overlay_dm.main.group_order.len(),
+        overlay_gen_envs
+    );
 
     let summary = base_dm.merge_overlay_brain(overlay_dm);
 
@@ -1713,13 +1837,15 @@ fn merge_brains(base_path: &str, overlay_path: &str, output_path: &str) -> Resul
 
     let out_bytes = merged_package.encode_to_bytes()?;
     if let Some(parent) = std::path::Path::new(output_path).parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create output dir: {}", e))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("create output dir: {}", e))?;
     }
-    std::fs::write(output_path, &out_bytes)
-        .map_err(|e| format!("write merged brain: {}", e))?;
+    std::fs::write(output_path, &out_bytes).map_err(|e| format!("write merged brain: {}", e))?;
 
-    println!("\n  Merged brain written to {} ({} bytes)", output_path, out_bytes.len());
+    println!(
+        "\n  Merged brain written to {} ({} bytes)",
+        output_path,
+        out_bytes.len()
+    );
     println!("\n=== Merge Complete ===");
     Ok(())
 }
@@ -1736,8 +1862,8 @@ fn run_inference(
     reload_disk_inference_after_brain: bool,
     fragments_override: Option<&std::path::Path>,
 ) -> Result<(), String> {
-    let data = std::fs::read(brain_path)
-        .map_err(|e| format!("Failed to read {}: {}", brain_path, e))?;
+    let data =
+        std::fs::read(brain_path).map_err(|e| format!("Failed to read {}: {}", brain_path, e))?;
 
     let mut rt = crate::runtime::Runtime::from_brain_bytes(&data)?;
     if reload_disk_inference_after_brain {
@@ -1746,10 +1872,13 @@ fn run_inference(
 
     #[cfg(feature = "categorical")]
     if let Some(data_dir) = categorical_data {
-        rt.svc.bootstrap_categorical_composer(data_dir, categorical_steps);
+        rt.svc
+            .bootstrap_categorical_composer(data_dir, categorical_steps);
     }
     #[cfg(not(feature = "categorical"))]
-    { let _ = (categorical_data, categorical_steps); }
+    {
+        let _ = (categorical_data, categorical_steps);
+    }
 
     // Load typed-fragment library when enabled in inference TOML (or GROWFORMER_FRAGMENTS).
     let frag_loaded = if let Some(explicit) = fragments_override {
@@ -1779,7 +1908,10 @@ fn run_inference(
         if !explicit.trim().is_empty() {
             match rt.svc.load_fragments_from_path(&explicit) {
                 Ok(n) => {
-                    println!("Fragment composer: loaded {} fragments from {}", n, explicit);
+                    println!(
+                        "Fragment composer: loaded {} fragments from {}",
+                        n, explicit
+                    );
                     true
                 }
                 Err(e) => {
@@ -1796,7 +1928,9 @@ fn run_inference(
     if !frag_loaded {
         let fc_cfg = crate::inference::inference_toml::inference_toml_loaded();
         if fc_cfg.fragment_compose().enabled {
-            if let Some(path) = crate::service::LanguageService::resolve_fragments_library(brain_path) {
+            if let Some(path) =
+                crate::service::LanguageService::resolve_fragments_library(brain_path)
+            {
                 match rt.svc.load_fragments_from_path(&path) {
                     Ok(n) => println!(
                         "Fragment composer: loaded {} fragments from {}",
@@ -1832,15 +1966,39 @@ fn run_inference(
 
         let dm = rt.svc.active_dm();
         for (gidx, env) in &dm.group_gen_envs {
-            let hopf_info = if env.hopf_table.is_some() { "hopf=yes" } else { "hopf=no" };
-            let cb_info = env.codebook.as_ref().map(|cb| format!("proto={} arch={}", cb.has_prototypes(), cb.archetypes.len())).unwrap_or_else(|| "no-codebook".to_string());
-            let sub_names: Vec<&str> = env.topic_subindex.iter().map(|t| t.topic_name.as_str()).collect();
-            println!("    gen[{}]: {} tokens, {} progs, {} topics {:?}, {}, {}",
-                gidx, env.dictionary.len(), env.program_count(), env.topic_subindex.len(), sub_names, hopf_info, cb_info);
+            let hopf_info = if env.hopf_table.is_some() {
+                "hopf=yes"
+            } else {
+                "hopf=no"
+            };
+            let cb_info = env
+                .codebook
+                .as_ref()
+                .map(|cb| format!("proto={} arch={}", cb.has_prototypes(), cb.archetypes.len()))
+                .unwrap_or_else(|| "no-codebook".to_string());
+            let sub_names: Vec<&str> = env
+                .topic_subindex
+                .iter()
+                .map(|t| t.topic_name.as_str())
+                .collect();
+            println!(
+                "    gen[{}]: {} tokens, {} progs, {} topics {:?}, {}, {}",
+                gidx,
+                env.dictionary.len(),
+                env.program_count(),
+                env.topic_subindex.len(),
+                sub_names,
+                hopf_info,
+                cb_info
+            );
         }
         for (gidx, env) in &dm.group_code_envs {
-            println!("    code[{}]: {} tokens in dict, {} lattice programs",
-                gidx, env.dictionary.len(), env.program_count());
+            println!(
+                "    code[{}]: {} tokens in dict, {} lattice programs",
+                gidx,
+                env.dictionary.len(),
+                env.program_count()
+            );
         }
     } else {
         println!(
@@ -1887,7 +2045,11 @@ fn run_inference(
 }
 
 /// `skip_duplicate_prompt_echo`: when true, the caller already printed the prompt (batch mode).
-fn run_single_prompt(rt: &mut crate::runtime::Runtime, prompt: &str, skip_duplicate_prompt_echo: bool) {
+fn run_single_prompt(
+    rt: &mut crate::runtime::Runtime,
+    prompt: &str,
+    skip_duplicate_prompt_echo: bool,
+) {
     let trace = crate::infer_log::infer_trace_enabled();
     if trace {
         if shell_dollar_expansion_likely_corruption(prompt) {
@@ -1937,8 +2099,10 @@ fn run_conversation_repl(rt: &mut crate::runtime::Runtime) {
     let ocean = svc.personality.as_vec();
     println!("\n=== Growformer Conversation REPL ===");
     println!("  Agent: {} (by {})", svc.agent_name, svc.agent_creator);
-    println!("  Personality [O={:.1} C={:.1} E={:.1} A={:.1} N={:.1}]",
-        ocean[0], ocean[1], ocean[2], ocean[3], ocean[4]);
+    println!(
+        "  Personality [O={:.1} C={:.1} E={:.1} A={:.1} N={:.1}]",
+        ocean[0], ocean[1], ocean[2], ocean[3], ocean[4]
+    );
     println!();
     println!("Commands:");
     println!("  /personality <preset>   Switch: assistant, creative, engineer, analyst");
@@ -1962,8 +2126,12 @@ fn run_conversation_repl(rt: &mut crate::runtime::Runtime) {
             Ok(0) => break,
             Ok(_) => {
                 let trimmed = line.trim();
-                if trimmed.is_empty() { continue; }
-                if trimmed == "quit" || trimmed == "exit" { break; }
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if trimmed == "quit" || trimmed == "exit" {
+                    break;
+                }
 
                 if let Some(cmd) = trimmed.strip_prefix('/') {
                     handle_repl_command(rt, cmd);
@@ -1984,7 +2152,9 @@ fn run_conversation_repl(rt: &mut crate::runtime::Runtime) {
                     }
 
                     match rt.respond_with_tool_result(trimmed, &result) {
-                        Ok(resp) if !resp.text.is_empty() && !resp.text.starts_with("[tool_call:") => {
+                        Ok(resp)
+                            if !resp.text.is_empty() && !resp.text.starts_with("[tool_call:") =>
+                        {
                             println!();
                             println!("  {}", resp.text);
                         }
@@ -2064,11 +2234,15 @@ fn handle_repl_command(rt: &mut crate::runtime::Runtime, cmd: &str) {
                 rt.set_personality(p);
             }
             let v = rt.personality().as_vec();
-            println!("  [O={:.1} C={:.1} E={:.1} A={:.1} N={:.1}]", v[0], v[1], v[2], v[3], v[4]);
+            println!(
+                "  [O={:.1} C={:.1} E={:.1} A={:.1} N={:.1}]",
+                v[0], v[1], v[2], v[3], v[4]
+            );
         }
         Some("ocean") => {
             if parts.len() == 6 {
-                let vals: Vec<f32> = parts[1..6].iter()
+                let vals: Vec<f32> = parts[1..6]
+                    .iter()
                     .filter_map(|s| s.parse::<f32>().ok())
                     .collect();
                 if vals.len() == 5 {
@@ -2080,14 +2254,19 @@ fn handle_repl_command(rt: &mut crate::runtime::Runtime, cmd: &str) {
                         neuroticism: vals[4].clamp(0.0, 1.0),
                     });
                     let v = rt.personality().as_vec();
-                    println!("  Custom OCEAN: [O={:.1} C={:.1} E={:.1} A={:.1} N={:.1}]",
-                        v[0], v[1], v[2], v[3], v[4]);
+                    println!(
+                        "  Custom OCEAN: [O={:.1} C={:.1} E={:.1} A={:.1} N={:.1}]",
+                        v[0], v[1], v[2], v[3], v[4]
+                    );
                 } else {
                     println!("  Usage: /ocean 0.5 0.7 0.5 0.6 0.3");
                 }
             } else {
                 let v = rt.personality().as_vec();
-                println!("  Current: [O={:.1} C={:.1} E={:.1} A={:.1} N={:.1}]", v[0], v[1], v[2], v[3], v[4]);
+                println!(
+                    "  Current: [O={:.1} C={:.1} E={:.1} A={:.1} N={:.1}]",
+                    v[0], v[1], v[2], v[3], v[4]
+                );
                 println!("  Usage: /ocean <O> <C> <E> <A> <N>  (each 0.0-1.0)");
             }
         }
@@ -2127,14 +2306,27 @@ fn handle_repl_command(rt: &mut crate::runtime::Runtime, cmd: &str) {
             let dm = svc.active_dm();
             println!("  Agent: {} (by {})", svc.agent_name, svc.agent_creator);
             let v = svc.personality.as_vec();
-            println!("  Personality: [O={:.1} C={:.1} E={:.1} A={:.1} N={:.1}]", v[0], v[1], v[2], v[3], v[4]);
+            println!(
+                "  Personality: [O={:.1} C={:.1} E={:.1} A={:.1} N={:.1}]",
+                v[0], v[1], v[2], v[3], v[4]
+            );
             println!("  Conversation turns: {}", svc.conversation.turn_count());
-            println!("  EMA alpha: {:.2} (base) -> {:.2} (modulated)",
+            println!(
+                "  EMA alpha: {:.2} (base) -> {:.2} (modulated)",
                 dm.language_runtime.config.ema_alpha,
-                svc.personality.modulated_ema_alpha(dm.language_runtime.config.ema_alpha));
-            println!("  Hopf diversity bonus: {:.2}", svc.personality.hopf_diversity_bonus());
-            println!("  Groups: {}, Gen envs: {}, Code envs: {}",
-                dm.main.group_order.len(), dm.group_gen_envs.len(), dm.group_code_envs.len());
+                svc.personality
+                    .modulated_ema_alpha(dm.language_runtime.config.ema_alpha)
+            );
+            println!(
+                "  Hopf diversity bonus: {:.2}",
+                svc.personality.hopf_diversity_bonus()
+            );
+            println!(
+                "  Groups: {}, Gen envs: {}, Code envs: {}",
+                dm.main.group_order.len(),
+                dm.group_gen_envs.len(),
+                dm.group_code_envs.len()
+            );
             println!("  Project: {}", svc.project_status());
         }
         Some("index") => {
@@ -2146,7 +2338,10 @@ fn handle_repl_command(rt: &mut crate::runtime::Runtime, cmd: &str) {
                 let svc = &mut rt.svc;
                 let mut count = 0usize;
                 index_directory(svc, path_buf, &mut count);
-                println!("  Indexed {} files (hybrid AST-lite + semantic + relational)", count);
+                println!(
+                    "  Indexed {} files (hybrid AST-lite + semantic + relational)",
+                    count
+                );
 
                 let git_dir = find_git_root(path_buf);
                 if let Some(ref git_root) = git_dir {
@@ -2224,24 +2419,51 @@ fn handle_repl_command(rt: &mut crate::runtime::Runtime, cmd: &str) {
 }
 
 fn find_git_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
-    let mut dir = if start.is_file() { start.parent()? } else { start };
+    let mut dir = if start.is_file() {
+        start.parent()?
+    } else {
+        start
+    };
     loop {
-        if dir.join(".git").exists() { return Some(dir.to_path_buf()); }
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
         dir = dir.parent()?;
     }
 }
 
 fn index_directory(svc: &mut LanguageService, dir: &std::path::Path, count: &mut usize) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name.starts_with('.') || name == "target" || name == "node_modules" { continue; }
+            if name.starts_with('.') || name == "target" || name == "node_modules" {
+                continue;
+            }
             index_directory(svc, &path, count);
         } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            let indexable = matches!(ext, "rs" | "py" | "ts" | "tsx" | "js" | "jsx" |
-                "go" | "c" | "cpp" | "h" | "hpp" | "java" | "rb" | "toml" | "yaml" | "yml" | "md");
+            let indexable = matches!(
+                ext,
+                "rs" | "py"
+                    | "ts"
+                    | "tsx"
+                    | "js"
+                    | "jsx"
+                    | "go"
+                    | "c"
+                    | "cpp"
+                    | "h"
+                    | "hpp"
+                    | "java"
+                    | "rb"
+                    | "toml"
+                    | "yaml"
+                    | "yml"
+                    | "md"
+            );
             if indexable {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     let path_str = path.to_string_lossy();
@@ -2325,25 +2547,35 @@ fn profile_training_data(
     for s in samples {
         let gidx = group_map_fn(s);
         let gp = groups.entry(gidx).or_insert(GroupProfile {
-            gen_count: 0, code_count: 0,
-            max_response_tokens: 0, max_code_tokens: 0,
-            avg_response_tokens: 0.0, avg_code_tokens: 0.0,
+            gen_count: 0,
+            code_count: 0,
+            max_response_tokens: 0,
+            max_code_tokens: 0,
+            avg_response_tokens: 0.0,
+            avg_code_tokens: 0.0,
             unique_intents: 0,
         });
-        intent_sets.entry(gidx).or_default().insert(s.semantic_intent.clone());
+        intent_sets
+            .entry(gidx)
+            .or_default()
+            .insert(s.semantic_intent.clone());
 
         if let Some(r) = s.expected_response.as_deref() {
             let n_tok = tokenize(r).len();
             gp.gen_count += 1;
             gp.avg_response_tokens += n_tok as f32;
-            if n_tok > gp.max_response_tokens { gp.max_response_tokens = n_tok; }
+            if n_tok > gp.max_response_tokens {
+                gp.max_response_tokens = n_tok;
+            }
         }
         if let Some(c) = s.expected_code.as_deref() {
             if !c.is_empty() && c != "null" {
                 let n_tok = tokenize(c).len();
                 gp.code_count += 1;
                 gp.avg_code_tokens += n_tok as f32;
-                if n_tok > gp.max_code_tokens { gp.max_code_tokens = n_tok; }
+                if n_tok > gp.max_code_tokens {
+                    gp.max_code_tokens = n_tok;
+                }
             }
         }
     }
@@ -2353,20 +2585,33 @@ fn profile_training_data(
     let mut has_code = false;
 
     for (gidx, gp) in groups.iter_mut() {
-        if gp.gen_count > 0 { gp.avg_response_tokens /= gp.gen_count as f32; }
+        if gp.gen_count > 0 {
+            gp.avg_response_tokens /= gp.gen_count as f32;
+        }
         if gp.code_count > 0 {
             gp.avg_code_tokens /= gp.code_count as f32;
             has_code = true;
         }
         gp.unique_intents = intent_sets.get(gidx).map_or(0, |s| s.len());
-        if gp.max_response_tokens > global_max_resp { global_max_resp = gp.max_response_tokens; }
-        if gp.max_code_tokens > global_max_code { global_max_code = gp.max_code_tokens; }
+        if gp.max_response_tokens > global_max_resp {
+            global_max_resp = gp.max_response_tokens;
+        }
+        if gp.max_code_tokens > global_max_code {
+            global_max_code = gp.max_code_tokens;
+        }
     }
 
-    let group_counts: Vec<usize> = groups.values().map(|g| g.gen_count + g.code_count).collect();
+    let group_counts: Vec<usize> = groups
+        .values()
+        .map(|g| g.gen_count + g.code_count)
+        .collect();
     let max_count = *group_counts.iter().max().unwrap_or(&1) as f32;
     let min_count = *group_counts.iter().min().unwrap_or(&1) as f32;
-    let imbalance = if min_count > 0.0 { max_count / min_count } else { 10.0 };
+    let imbalance = if min_count > 0.0 {
+        max_count / min_count
+    } else {
+        10.0
+    };
 
     DataProfile {
         total_samples: samples.len(),
@@ -2411,13 +2656,21 @@ fn auto_configure(profile: &DataProfile, include_code_tasks: bool) -> AutoConfig
     };
 
     // Compensate for class imbalance: more epochs if heavily imbalanced
-    let imbalance_mult = if profile.class_imbalance_ratio > 3.0 { 1.3 } else { 1.0 };
+    let imbalance_mult = if profile.class_imbalance_ratio > 3.0 {
+        1.3
+    } else {
+        1.0
+    };
     let gen_epochs = (base_epochs as f64 * imbalance_mult) as usize;
 
     // Router/classifier: scale with number of classes
     let router_epochs = (profile.num_groups * 250).clamp(600, 1500);
     let classifier_epochs = (profile.num_groups * 200).clamp(500, 1200);
-    let classifier_lr = if profile.total_samples > 300 { 0.02 } else { 0.03 };
+    let classifier_lr = if profile.total_samples > 300 {
+        0.02
+    } else {
+        0.03
+    };
 
     let max_synapses = if est_output > 800 { 250 } else { 200 };
     let energy_budget = if est_output > 800 { 30.0 } else { 25.0 };
@@ -2445,24 +2698,38 @@ fn auto_configure(profile: &DataProfile, include_code_tasks: bool) -> AutoConfig
     println!("\n=== Auto-Configuration ===");
     println!(
         "  Data: {} samples, {} groups, code_in_data={}, include_code_tasks={}",
-        profile.total_samples,
-        profile.num_groups,
-        profile.has_code,
-        include_code_tasks
+        profile.total_samples, profile.num_groups, profile.has_code, include_code_tasks
     );
     println!(
         "  Max tokens in data: response={}, code={}",
-        profile.global_max_response_tokens,
-        profile.global_max_code_tokens
+        profile.global_max_response_tokens, profile.global_max_code_tokens
     );
-    println!("  Class imbalance ratio: {:.1}", profile.class_imbalance_ratio);
+    println!(
+        "  Class imbalance ratio: {:.1}",
+        profile.class_imbalance_ratio
+    );
     println!("  -> MAX_TOKENS={}", max_tokens);
     println!("  -> GEN_HIDDEN={}, GEN_K={}", gen_hidden, gen_k);
-    println!("  -> gen_epochs={} (base={}, imbalance_mult={:.1})", gen_epochs, base_epochs, imbalance_mult);
-    println!("  -> router_epochs={}, classifier_epochs={}, classifier_lr={}", router_epochs, classifier_epochs, classifier_lr);
-    println!("  -> max_synapses={}, energy_budget={}", max_synapses, energy_budget);
-    println!("  -> replicas={} (cpus={}, tasks={})", replicas, available_cpus, num_tasks);
-    println!("  -> early_stop: window={}, min_improvement={:.4}, min_epochs={}", early_stop_window, early_stop_min_improvement, early_stop_min_epochs);
+    println!(
+        "  -> gen_epochs={} (base={}, imbalance_mult={:.1})",
+        gen_epochs, base_epochs, imbalance_mult
+    );
+    println!(
+        "  -> router_epochs={}, classifier_epochs={}, classifier_lr={}",
+        router_epochs, classifier_epochs, classifier_lr
+    );
+    println!(
+        "  -> max_synapses={}, energy_budget={}",
+        max_synapses, energy_budget
+    );
+    println!(
+        "  -> replicas={} (cpus={}, tasks={})",
+        replicas, available_cpus, num_tasks
+    );
+    println!(
+        "  -> early_stop: window={}, min_improvement={:.4}, min_epochs={}",
+        early_stop_window, early_stop_min_improvement, early_stop_min_epochs
+    );
 
     AutoConfig {
         max_tokens,
@@ -2483,15 +2750,21 @@ fn auto_configure(profile: &DataProfile, include_code_tasks: bool) -> AutoConfig
 
 fn next_power_of_two_or_round(n: usize) -> usize {
     for &p in &[32, 48, 64, 96, 128, 160, 192, 256] {
-        if n <= p { return p; }
+        if n <= p {
+            return p;
+        }
     }
     256
 }
 
 fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> usize {
-    if max_bytes >= s.len() { return s.len(); }
+    if max_bytes >= s.len() {
+        return s.len();
+    }
     let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) { end -= 1; }
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
     end
 }
 /// Discover the unique group names from the training data's action_target field.
@@ -2506,8 +2779,12 @@ fn discover_group_names(samples: &[crate::dimension::LanguageSample]) -> Vec<Str
     // Canonical ordering: support first, coding second, then the rest alphabetically.
     // This ensures support_gid=0 and coding_gid=1 align with LanguageService expectations.
     let mut ordered: Vec<String> = Vec::with_capacity(seen.len());
-    if seen.remove("support") { ordered.push("support".to_string()); }
-    if seen.remove("coding") { ordered.push("coding".to_string()); }
+    if seen.remove("support") {
+        ordered.push("support".to_string());
+    }
+    if seen.remove("coding") {
+        ordered.push("coding".to_string());
+    }
     for name in seen {
         ordered.push(name);
     }
@@ -2517,10 +2794,18 @@ fn discover_group_names(samples: &[crate::dimension::LanguageSample]) -> Vec<Str
 /// Build a lookup table from action_target name → group index, matching
 /// the canonical ordering produced by `discover_group_names`.
 fn build_group_lookup(group_names: &[String]) -> HashMap<String, usize> {
-    group_names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect()
+    group_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.clone(), i))
+        .collect()
 }
 
-fn action_target_to_group(target: Option<&str>, lookup: &HashMap<String, usize>, num_groups: usize) -> usize {
+fn action_target_to_group(
+    target: Option<&str>,
+    lookup: &HashMap<String, usize>,
+    num_groups: usize,
+) -> usize {
     let Some(t) = target else {
         return 0.min(num_groups.saturating_sub(1));
     };
@@ -2535,7 +2820,10 @@ fn action_target_to_group(target: Option<&str>, lookup: &HashMap<String, usize>,
         // Prefer a group whose name looks chat-like.
         for (name, &idx) in lookup {
             let n = name.to_ascii_lowercase();
-            if n.contains("chat") || n.contains("pet") || n.contains("support") || n.contains("companion")
+            if n.contains("chat")
+                || n.contains("pet")
+                || n.contains("support")
+                || n.contains("companion")
             {
                 return idx.min(num_groups.saturating_sub(1));
             }
@@ -2591,17 +2879,32 @@ fn train_brain(
     if max_samples > 0 && samples.len() > max_samples {
         samples.shuffle(&mut rng);
         samples.truncate(max_samples);
-        let support_n = samples.iter().filter(|s| s.action_target.as_deref() == Some("support")).count();
-        let coding_n = samples.iter().filter(|s| s.action_target.as_deref() == Some("coding")).count();
+        let support_n = samples
+            .iter()
+            .filter(|s| s.action_target.as_deref() == Some("support"))
+            .count();
+        let coding_n = samples
+            .iter()
+            .filter(|s| s.action_target.as_deref() == Some("coding"))
+            .count();
         let other_n = samples.len() - support_n - coding_n;
-        println!("  shuffled and truncated to {} (support={}, coding={}, other={})", samples.len(), support_n, coding_n, other_n);
+        println!(
+            "  shuffled and truncated to {} (support={}, coding={}, other={})",
+            samples.len(),
+            support_n,
+            coding_n,
+            other_n
+        );
     }
 
     // Build saliency lexicon from knowledge graph for training augmentation.
     let saliency_lexicon = crate::growformer_lang::topic_graph().map(|graph| {
         let keywords = graph.all_keywords();
         let lexicon = crate::training_objectives::SaliencyLexicon::from_keywords(keywords);
-        println!("  [saliency] Built lexicon with {} keywords for training augmentation", lexicon.keyword_count());
+        println!(
+            "  [saliency] Built lexicon with {} keywords for training augmentation",
+            lexicon.keyword_count()
+        );
         lexicon
     });
 
@@ -2621,7 +2924,10 @@ fn train_brain(
             }
             if let Some(ref response) = sample.expected_response {
                 let masked_versions = crate::training_objectives::mask_salient_spans(
-                    response, lexicon, 2, (i as u64).wrapping_mul(0x517cc1b727220a95),
+                    response,
+                    lexicon,
+                    2,
+                    (i as u64).wrapping_mul(0x517cc1b727220a95),
                 );
                 for masked_resp in masked_versions {
                     let mut aug = sample.clone();
@@ -2631,8 +2937,11 @@ fn train_brain(
             }
         }
         if !augmented_samples.is_empty() {
-            println!("  [salient-mask] Generated {} augmented samples from {} originals",
-                augmented_samples.len(), original_count);
+            println!(
+                "  [salient-mask] Generated {} augmented samples from {} originals",
+                augmented_samples.len(),
+                original_count
+            );
             samples.extend(augmented_samples);
         }
 
@@ -2640,7 +2949,10 @@ fn train_brain(
         // as hard negatives. The corrupted texts are added as additional training
         // samples that the lattice should NOT match to the original query.
         let rtd_dict = TokenDictionary::build(
-            &samples.iter().filter_map(|s| s.expected_response.as_deref()).collect::<Vec<_>>(),
+            &samples
+                .iter()
+                .filter_map(|s| s.expected_response.as_deref())
+                .collect::<Vec<_>>(),
             4096,
         );
         let mut rtd_augmented = Vec::new();
@@ -2652,7 +2964,10 @@ fn train_brain(
             }
             if let Some(ref response) = sample.expected_response {
                 if let Some((corrupted, _mask)) = crate::training_objectives::replace_salient_tokens(
-                    response, lexicon, &rtd_dict, 0.15,
+                    response,
+                    lexicon,
+                    &rtd_dict,
+                    0.15,
                     (i as u64).wrapping_mul(0x94d049bb133111eb),
                 ) {
                     let mut neg = sample.clone();
@@ -2662,14 +2977,21 @@ fn train_brain(
             }
         }
         if !rtd_augmented.is_empty() {
-            println!("  [rtd] Generated {} RTD hard-negative samples", rtd_augmented.len());
+            println!(
+                "  [rtd] Generated {} RTD hard-negative samples",
+                rtd_augmented.len()
+            );
             samples.extend(rtd_augmented);
         }
     }
 
     // Discover groups dynamically from the training data's action_target values.
     let discovered_group_names = discover_group_names(&samples);
-    println!("Discovered {} groups from data: {:?}", discovered_group_names.len(), discovered_group_names);
+    println!(
+        "Discovered {} groups from data: {:?}",
+        discovered_group_names.len(),
+        discovered_group_names
+    );
     let group_name_refs: Vec<&str> = discovered_group_names.iter().map(|s| s.as_str()).collect();
     let mut svc = LanguageService::new_with_groups(&group_name_refs)?;
     apply_brain_package_cli(&mut svc, brain_name, brain_description, brain_author);
@@ -2677,12 +2999,18 @@ fn train_brain(
 
     // Build a global TokenDictionary from all training texts for the Clifford+CATA encoder.
     // Must happen before embedding computation so the encoder has vocabulary-grounded features.
-    if matches!(svc.dm.language_runtime.config.encoder, crate::dimension::language::EncoderPreset::CliffordE8) {
+    if matches!(
+        svc.dm.language_runtime.config.encoder,
+        crate::dimension::language::EncoderPreset::CliffordE8
+    ) {
         let all_texts: Vec<&str> = samples.iter().map(|s| s.text.as_str()).collect();
         let max_dict = if all_texts.len() >= 100 { 2048 } else { 1024 };
         let encoder_dict = TokenDictionary::build(&all_texts, max_dict);
-        println!("  [clifford] Built encoder dictionary: {} tokens from {} training texts",
-            encoder_dict.len(), all_texts.len());
+        println!(
+            "  [clifford] Built encoder dictionary: {} tokens from {} training texts",
+            encoder_dict.len(),
+            all_texts.len()
+        );
         svc.dm.language_runtime.preloaded_dictionary = Some(encoder_dict);
     }
 
@@ -2713,8 +3041,15 @@ fn train_brain(
         }
     }
     let raw_dim = raw_embeddings.first().map_or(384, |e| e.len());
-    let bridge_dim = bridged_embeddings.first().map_or(DEFAULT_BRIDGE_DIM, |e| e.len());
-    println!("  {} samples: raw={}d, bridged={}d", samples.len(), raw_dim, bridge_dim);
+    let bridge_dim = bridged_embeddings
+        .first()
+        .map_or(DEFAULT_BRIDGE_DIM, |e| e.len());
+    println!(
+        "  {} samples: raw={}d, bridged={}d",
+        samples.len(),
+        raw_dim,
+        bridge_dim
+    );
 
     // History-aware generation conditioning for multi-turn samples.
     //
@@ -2802,27 +3137,42 @@ fn train_brain(
     // ---------------------------------------------------------------
     bump_train_phase(&ui, &mut major_phase, "Paramecium pre-lattice");
     println!("\n--- Paramecium Pre-Training Lattice ---");
-    let fallback_dict = svc.dm.gen_dictionary.clone()
-        .unwrap_or_else(|| TokenDictionary::build(
-            &samples.iter().filter_map(|s| s.expected_response.as_deref()).collect::<Vec<_>>(),
+    let fallback_dict = svc.dm.gen_dictionary.clone().unwrap_or_else(|| {
+        TokenDictionary::build(
+            &samples
+                .iter()
+                .filter_map(|s| s.expected_response.as_deref())
+                .collect::<Vec<_>>(),
             1024,
-        ));
+        )
+    });
     let mut pre_lattice = InfraciliaryLattice::new(fallback_dict.clone());
-    let lattice_pairs: Vec<(Vec<f32>, String)> = bridged_embeddings.iter()
+    let lattice_pairs: Vec<(Vec<f32>, String)> = bridged_embeddings
+        .iter()
         .zip(samples.iter())
         .filter_map(|(emb, s)| {
-            s.expected_response.as_deref().map(|r| (emb.clone(), r.to_string()))
+            s.expected_response
+                .as_deref()
+                .map(|r| (emb.clone(), r.to_string()))
         })
         .collect();
     pre_lattice.develop(&lattice_pairs, 0.85);
-    println!("  lattice programs: {} from {} samples", pre_lattice.program_count(), lattice_pairs.len());
+    println!(
+        "  lattice programs: {} from {} samples",
+        pre_lattice.program_count(),
+        lattice_pairs.len()
+    );
     println!("  lattice memory: {} bytes", pre_lattice.memory_bytes());
 
     let (discovered_groups, _assignments) = pre_lattice.discover_groups(&bridged_embeddings, 0.85);
-    println!("  discovered natural clusters: {} (hand-labeled groups: {})",
-        discovered_groups, svc.dm.main.group_order.len());
+    println!(
+        "  discovered natural clusters: {} (hand-labeled groups: {})",
+        discovered_groups,
+        svc.dm.main.group_order.len()
+    );
 
-    let novelty_scores: Vec<f32> = bridged_embeddings.iter()
+    let novelty_scores: Vec<f32> = bridged_embeddings
+        .iter()
         .map(|emb| {
             let (conf, _) = pre_lattice.novelty_score(emb);
             conf
@@ -2830,8 +3180,14 @@ fn train_brain(
         .collect();
     let avg_novelty: f32 = novelty_scores.iter().sum::<f32>() / novelty_scores.len().max(1) as f32;
     let min_novelty = novelty_scores.iter().cloned().fold(f32::INFINITY, f32::min);
-    let max_novelty = novelty_scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    println!("  novelty scores: avg={:.3} min={:.3} max={:.3}", avg_novelty, min_novelty, max_novelty);
+    let max_novelty = novelty_scores
+        .iter()
+        .cloned()
+        .fold(f32::NEG_INFINITY, f32::max);
+    println!(
+        "  novelty scores: avg={:.3} min={:.3} max={:.3}",
+        avg_novelty, min_novelty, max_novelty
+    );
 
     bump_train_phase(&ui, &mut major_phase, "Data profile, auto-config & router");
     let num_groups = svc.dm.main.group_order.len();
@@ -2847,12 +3203,12 @@ fn train_brain(
         let profile = profile_training_data(&samples, &group_map, num_groups.max(1));
         println!(
             "  Data: {} samples, {} groups, expected_code present in data={}",
-            profile.total_samples,
-            profile.num_groups,
-            profile.has_code
+            profile.total_samples, profile.num_groups, profile.has_code
         );
         if train_code_lattice {
-            println!("  Auto-config: code tasks included (replicas/gen budget may reflect gen+code).");
+            println!(
+                "  Auto-config: code tasks included (replicas/gen budget may reflect gen+code)."
+            );
         } else {
             println!("  Auto-config: code tasks excluded (expected_code ignored even if present in JSONL).");
         }
@@ -2878,11 +3234,15 @@ fn train_brain(
     // Oversample minority class to balance support vs coding.
     // ---------------------------------------------------------------
     println!("\n--- Stage 1: LearnedRouter Training ---");
-    let router_samples_raw: Vec<(Vec<f32>, usize)> = bridged_embeddings.iter().zip(samples.iter())
+    let router_samples_raw: Vec<(Vec<f32>, usize)> = bridged_embeddings
+        .iter()
+        .zip(samples.iter())
         .map(|(emb, s)| (emb.clone(), group_map(s)))
         .collect();
     let mut class_counts: HashMap<usize, usize> = HashMap::new();
-    for (_, g) in &router_samples_raw { *class_counts.entry(*g).or_default() += 1; }
+    for (_, g) in &router_samples_raw {
+        *class_counts.entry(*g).or_default() += 1;
+    }
     let max_class_count = class_counts.values().copied().max().unwrap_or(1);
     let mut router_samples: Vec<(Vec<f32>, usize)> = Vec::new();
     let mut class_buckets: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -2902,18 +3262,33 @@ fn train_brain(
             router_samples.push(router_samples_raw[i].clone());
         }
     }
-    println!("  Router training: {} raw samples, {} after oversampling (balanced)",
-        router_samples_raw.len(), router_samples.len());
-    let router_epochs = if let Some(ac) = &auto_cfg { ac.router_epochs } else { (epochs as usize).max(500) };
+    println!(
+        "  Router training: {} raw samples, {} after oversampling (balanced)",
+        router_samples_raw.len(),
+        router_samples.len()
+    );
+    let router_epochs = if let Some(ac) = &auto_cfg {
+        ac.router_epochs
+    } else {
+        (epochs as usize).max(500)
+    };
     let (router_loss, router_acc) = svc.dm.train_language_router(
         &router_samples,
         router_epochs,
         &mut rng,
         brain_parallel_batch_size(),
     );
-    println!("  Router loss={:.4} accuracy={:.1}% (Paramecium one-pass, {} programs)",
-        router_loss, router_acc * 100.0,
-        svc.dm.observer.learned_router.as_ref().map(|r| r.program_count()).unwrap_or(0));
+    println!(
+        "  Router loss={:.4} accuracy={:.1}% (Paramecium one-pass, {} programs)",
+        router_loss,
+        router_acc * 100.0,
+        svc.dm
+            .observer
+            .learned_router
+            .as_ref()
+            .map(|r| r.program_count())
+            .unwrap_or(0)
+    );
 
     // ---------------------------------------------------------------
     // Stage 2: Train ActionClassifier
@@ -2928,11 +3303,24 @@ fn train_brain(
             (emb.clone(), at)
         })
         .collect();
-    let (clf_epochs, clf_lr) = if let Some(ac) = &auto_cfg { (ac.classifier_epochs, ac.classifier_lr) } else { (500, 0.03) };
-    let (clf_loss, clf_acc) = svc.dm.train_action_classifier(&action_samples, clf_epochs, clf_lr);
-    println!("  Classifier loss={:.4} accuracy={:.1}% (Paramecium one-pass, {} programs)",
-        clf_loss, clf_acc * 100.0,
-        svc.dm.action_classifier.as_ref().map(|c| c.program_count()).unwrap_or(0));
+    let (clf_epochs, clf_lr) = if let Some(ac) = &auto_cfg {
+        (ac.classifier_epochs, ac.classifier_lr)
+    } else {
+        (500, 0.03)
+    };
+    let (clf_loss, clf_acc) = svc
+        .dm
+        .train_action_classifier(&action_samples, clf_epochs, clf_lr);
+    println!(
+        "  Classifier loss={:.4} accuracy={:.1}% (Paramecium one-pass, {} programs)",
+        clf_loss,
+        clf_acc * 100.0,
+        svc.dm
+            .action_classifier
+            .as_ref()
+            .map(|c| c.program_count())
+            .unwrap_or(0)
+    );
 
     // ---------------------------------------------------------------
     // Stage 2b: GrowformerLang MetaCodebook (code-brain / --train-code-lattice only)
@@ -2940,7 +3328,7 @@ fn train_brain(
     bump_train_phase(&ui, &mut major_phase, "MetaCodebook (2b)");
     if train_code_lattice {
         println!("\n--- Stage 2b: GrowformerLang MetaCodebook ---");
-        use crate::growformer_lang::{infer_concept, detect_language, MetaCodebook};
+        use crate::growformer_lang::{detect_language, infer_concept, MetaCodebook};
         let meta_samples: Vec<_> = bridged_embeddings
             .iter()
             .zip(samples.iter())
@@ -2978,9 +3366,14 @@ fn train_brain(
     } else {
         (epochs as usize * 50).max(500)
     };
-    let k_replicas = if let Some(ac) = &auto_cfg { ac.replicas } else { (gen_replicas as usize).max(1) };
-    let gen_overrides = auto_cfg.as_ref().map(|ac| {
-        crate::dimension::group_gen::GenEnvOverrides {
+    let k_replicas = if let Some(ac) = &auto_cfg {
+        ac.replicas
+    } else {
+        (gen_replicas as usize).max(1)
+    };
+    let gen_overrides = auto_cfg
+        .as_ref()
+        .map(|ac| crate::dimension::group_gen::GenEnvOverrides {
             max_tokens: Some(ac.max_tokens),
             hidden: Some(ac.gen_hidden),
             k: Some(ac.gen_k),
@@ -2988,10 +3381,12 @@ fn train_brain(
             energy_budget: Some(ac.energy_budget),
             hex_mode: Some(true),
             ..Default::default()
-        }
-    });
+        });
     println!("\n--- Stages 3+4: Per-Group Generation Envs (single-pass token prediction) ---");
-    println!("  gen_epochs={}, num_groups={}, replicas_per_task={}", gen_epochs, num_groups, k_replicas);
+    println!(
+        "  gen_epochs={}, num_groups={}, replicas_per_task={}",
+        gen_epochs, num_groups, k_replicas
+    );
 
     // Partition training data by (group, kind), carrying novelty scores per sample.
     // Each pair now carries (bridged, raw, target) so per-group adapters can specialize conditioning.
@@ -3003,7 +3398,12 @@ fn train_brain(
     let mut code_raw_by_group: HashMap<usize, Vec<&[f32]>> = HashMap::new();
     let mut code_topic_by_group: HashMap<usize, Vec<&str>> = HashMap::new();
     let mut code_novelty_by_group: HashMap<usize, Vec<f32>> = HashMap::new();
-    for (i, ((bridged, raw), s)) in bridged_embeddings.iter().zip(raw_embeddings.iter()).zip(samples.iter()).enumerate() {
+    for (i, ((bridged, raw), s)) in bridged_embeddings
+        .iter()
+        .zip(raw_embeddings.iter())
+        .zip(samples.iter())
+        .enumerate()
+    {
         let gidx = group_map(s);
         let nov = novelty_scores.get(i).copied().unwrap_or(0.0);
         if let Some(r) = s.expected_response.as_deref() {
@@ -3019,16 +3419,31 @@ fn train_brain(
                 .entry(gidx)
                 .or_default()
                 .push((gen_cond_embeddings[i].clone(), lattice_text));
-            gen_raw_by_group.entry(gidx).or_default().push(raw.as_slice());
-            gen_topic_by_group.entry(gidx).or_default().push(s.semantic_intent.as_str());
+            gen_raw_by_group
+                .entry(gidx)
+                .or_default()
+                .push(raw.as_slice());
+            gen_topic_by_group
+                .entry(gidx)
+                .or_default()
+                .push(s.semantic_intent.as_str());
             gen_novelty_by_group.entry(gidx).or_default().push(nov);
         }
         if train_code_lattice {
             if let Some(c) = s.expected_code.as_deref() {
                 if !c.is_empty() && c != "null" {
-                    code_by_group.entry(gidx).or_default().push((bridged.as_slice(), c));
-                    code_raw_by_group.entry(gidx).or_default().push(raw.as_slice());
-                    code_topic_by_group.entry(gidx).or_default().push(s.semantic_intent.as_str());
+                    code_by_group
+                        .entry(gidx)
+                        .or_default()
+                        .push((bridged.as_slice(), c));
+                    code_raw_by_group
+                        .entry(gidx)
+                        .or_default()
+                        .push(raw.as_slice());
+                    code_topic_by_group
+                        .entry(gidx)
+                        .or_default()
+                        .push(s.semantic_intent.as_str());
                     code_novelty_by_group.entry(gidx).or_default().push(nov);
                 }
             }
@@ -3040,23 +3455,33 @@ fn train_brain(
     let mut group_adapters: HashMap<usize, GroupAdapter> = HashMap::new();
     for &gidx in gen_by_group.keys().chain(code_by_group.keys()) {
         if !group_adapters.contains_key(&gidx) {
-            group_adapters.insert(gidx, GroupAdapter::new(raw_dim, bridge_dim, DEFAULT_ADAPTER_RANK));
+            group_adapters.insert(
+                gidx,
+                GroupAdapter::new(raw_dim, bridge_dim, DEFAULT_ADAPTER_RANK),
+            );
         }
     }
     let adapter_params: usize = group_adapters.values().map(|a| a.param_count()).sum();
-    println!("  per-group adapters: {} groups, rank={}, {}d->{}d, {} params total",
-        group_adapters.len(), DEFAULT_ADAPTER_RANK, raw_dim, bridge_dim, adapter_params);
+    println!(
+        "  per-group adapters: {} groups, rank={}, {}d->{}d, {} params total",
+        group_adapters.len(),
+        DEFAULT_ADAPTER_RANK,
+        raw_dim,
+        bridge_dim,
+        adapter_params
+    );
 
     // Stage 2.5: Understanding Layer + MetaBrain — Paramecium one-pass build.
     // All classifiers use Paramecium lattice develop(), zero iterative epochs.
     bump_train_phase(&ui, &mut major_phase, "Understanding + MetaBrain");
     println!("\n--- Stage 2.5: Understanding Layer + MetaBrain (Paramecium one-pass) ---");
     {
-        use crate::understanding::UnderstandingLayer;
-        use crate::micro_brain::{MetaBrain, MicroBrain, MicroBrainRole};
         use crate::dimension::action_classifier::NUM_ACTION_TYPES;
+        use crate::micro_brain::{MetaBrain, MicroBrain, MicroBrainRole};
+        use crate::understanding::UnderstandingLayer;
 
-        let understanding_samples: Vec<(&[f32], &str)> = raw_embeddings.iter()
+        let understanding_samples: Vec<(&[f32], &str)> = raw_embeddings
+            .iter()
             .zip(samples.iter())
             .map(|(raw, s)| (raw.as_slice(), s.semantic_intent.as_str()))
             .collect();
@@ -3065,8 +3490,11 @@ fn train_brain(
         } else {
             let mut ul = UnderstandingLayer::build(&understanding_samples, raw_dim);
             ul.freeze();
-            println!("  understanding layer: {} topics, {} verbs, Paramecium one-pass, frozen=true",
-                ul.topic_count(), ul.verb_count());
+            println!(
+                "  understanding layer: {} topics, {} verbs, Paramecium one-pass, frozen=true",
+                ul.topic_count(),
+                ul.verb_count()
+            );
 
             let mut mb_rng = rand::rngs::StdRng::seed_from_u64(314);
             let mut mb = MetaBrain::build(
@@ -3080,7 +3508,8 @@ fn train_brain(
             );
 
             // One-pass action brain from action_samples
-            let action_data: Vec<(&[f32], usize)> = action_samples.iter()
+            let action_data: Vec<(&[f32], usize)> = action_samples
+                .iter()
                 .map(|(emb, at)| {
                     let idx = match at {
                         crate::dimension::action::ActionType::SupportTicket => 0,
@@ -3093,29 +3522,50 @@ fn train_brain(
                 })
                 .collect();
             mb.action_brain = MicroBrain::build_from_data(
-                MicroBrainRole::Action, raw_dim, NUM_ACTION_TYPES,
-                vec!["support".into(), "coding".into(), "general".into(), "tool".into(), "fallback".into()],
+                MicroBrainRole::Action,
+                raw_dim,
+                NUM_ACTION_TYPES,
+                vec![
+                    "support".into(),
+                    "coding".into(),
+                    "general".into(),
+                    "tool".into(),
+                    "fallback".into(),
+                ],
                 &action_data,
             );
-            println!("  action brain: {} programs (one-pass)", mb.action_brain.lattice.program_count());
+            println!(
+                "  action brain: {} programs (one-pass)",
+                mb.action_brain.lattice.program_count()
+            );
 
             // One-pass topic + verb brains
-            let mut topic_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            let mut topic_map: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
             for (i, name) in ul.topic_names.iter().enumerate() {
                 topic_map.insert(name.clone(), i);
             }
-            let verb_map: std::collections::HashMap<String, usize> = ul.verb_names.iter().enumerate()
-                .map(|(i, v)| (v.clone(), i)).collect();
+            let verb_map: std::collections::HashMap<String, usize> = ul
+                .verb_names
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (v.clone(), i))
+                .collect();
 
-            let topic_data: Vec<(&[f32], usize)> = understanding_samples.iter()
+            let topic_data: Vec<(&[f32], usize)> = understanding_samples
+                .iter()
                 .filter_map(|&(raw, intent)| topic_map.get(intent).map(|&idx| (raw, idx)))
                 .collect();
             mb.topic_brain = MicroBrain::build_from_data(
-                MicroBrainRole::Topic, raw_dim, ul.topic_count(),
-                ul.topic_names.clone(), &topic_data,
+                MicroBrainRole::Topic,
+                raw_dim,
+                ul.topic_count(),
+                ul.topic_names.clone(),
+                &topic_data,
             );
 
-            let verb_data: Vec<(&[f32], usize)> = understanding_samples.iter()
+            let verb_data: Vec<(&[f32], usize)> = understanding_samples
+                .iter()
                 .map(|&(raw, intent)| {
                     let verb = crate::understanding::intent_to_verb(intent);
                     let idx = verb_map.get(verb).copied().unwrap_or(0);
@@ -3123,14 +3573,21 @@ fn train_brain(
                 })
                 .collect();
             mb.verb_brain = MicroBrain::build_from_data(
-                MicroBrainRole::Verb, raw_dim, ul.verb_count(),
-                ul.verb_names.clone(), &verb_data,
+                MicroBrainRole::Verb,
+                raw_dim,
+                ul.verb_count(),
+                ul.verb_names.clone(),
+                &verb_data,
             );
-            println!("  topic brain: {} programs, verb brain: {} programs (one-pass)",
-                mb.topic_brain.lattice.program_count(), mb.verb_brain.lattice.program_count());
+            println!(
+                "  topic brain: {} programs, verb brain: {} programs (one-pass)",
+                mb.topic_brain.lattice.program_count(),
+                mb.verb_brain.lattice.program_count()
+            );
 
             // One-pass coordinator: develop from all (raw → conditioning) pairs
-            let coord_pairs: Vec<(Vec<f32>, Vec<f32>)> = raw_embeddings.iter()
+            let coord_pairs: Vec<(Vec<f32>, Vec<f32>)> = raw_embeddings
+                .iter()
                 .zip(bridged_embeddings.iter())
                 .map(|(raw, bridged)| {
                     let (_, _, topic_logits) = mb.topic_brain.predict(raw);
@@ -3143,18 +3600,25 @@ fn train_brain(
                     ci.extend_from_slice(&topic_logits);
                     ci.extend_from_slice(&verb_logits);
                     ci.extend_from_slice(&action_logits);
-                    ci.push(tc); ci.push(vc); ci.push(ac);
+                    ci.push(tc);
+                    ci.push(vc);
+                    ci.push(ac);
                     let mut target = bridged.clone();
                     target.resize(crate::dimension::group_gen::GEN_COND_DIM, 0.0);
                     (ci, target)
                 })
                 .collect();
             mb.coordinator.develop(&coord_pairs);
-            println!("  coordinator: {} centroids (one-pass)", mb.coordinator.centroids.len());
+            println!(
+                "  coordinator: {} centroids (one-pass)",
+                mb.coordinator.centroids.len()
+            );
 
             mb.freeze();
-            println!("  MetaBrain: frozen, topic={}cls verb={}cls action={}cls",
-                mb.topic_brain.output_dim, mb.verb_brain.output_dim, mb.action_brain.output_dim);
+            println!(
+                "  MetaBrain: frozen, topic={}cls verb={}cls action={}cls",
+                mb.topic_brain.output_dim, mb.verb_brain.output_dim, mb.action_brain.output_dim
+            );
 
             svc.dm.understanding = Some(ul);
             svc.dm.meta_brain = Some(mb);
@@ -3165,28 +3629,55 @@ fn train_brain(
     // Larger groups get larger dictionaries (2048 max), smaller groups get 1024.
     bump_train_phase(&ui, &mut major_phase, "Dictionaries & codebooks");
     use crate::dimension::group_gen::{bits_for_dict, MAX_TOKENS};
-    let effective_max_tokens = gen_overrides.as_ref().and_then(|o| o.max_tokens).unwrap_or(MAX_TOKENS);
+    let effective_max_tokens = gen_overrides
+        .as_ref()
+        .and_then(|o| o.max_tokens)
+        .unwrap_or(MAX_TOKENS);
     let mut gen_dicts: HashMap<usize, TokenDictionary> = HashMap::new();
     let mut code_dicts: HashMap<usize, TokenDictionary> = HashMap::new();
     let pairs_threshold_for_large_dict: usize = 100;
     for (&gidx, pairs) in &gen_by_group {
-        if pairs.is_empty() { continue; }
+        if pairs.is_empty() {
+            continue;
+        }
         let texts: Vec<&str> = pairs.iter().map(|(_emb, text)| text.as_str()).collect();
-        let max_dict = if pairs.len() >= pairs_threshold_for_large_dict { 2048 } else { 1024 };
+        let max_dict = if pairs.len() >= pairs_threshold_for_large_dict {
+            2048
+        } else {
+            1024
+        };
         let dict = TokenDictionary::build(&texts, max_dict);
         let bits = bits_for_dict(dict.len());
-        println!("  gen dict[g{}]: {} tokens from {} texts, {} bits/token, output={}",
-            gidx, dict.len(), texts.len(), bits, effective_max_tokens * bits);
+        println!(
+            "  gen dict[g{}]: {} tokens from {} texts, {} bits/token, output={}",
+            gidx,
+            dict.len(),
+            texts.len(),
+            bits,
+            effective_max_tokens * bits
+        );
         gen_dicts.insert(gidx, dict);
     }
     for (&gidx, pairs) in &code_by_group {
-        if pairs.is_empty() { continue; }
+        if pairs.is_empty() {
+            continue;
+        }
         let texts: Vec<&str> = pairs.iter().map(|(_emb, text)| *text).collect();
-        let max_dict = if pairs.len() >= pairs_threshold_for_large_dict { 2048 } else { 1024 };
+        let max_dict = if pairs.len() >= pairs_threshold_for_large_dict {
+            2048
+        } else {
+            1024
+        };
         let dict = TokenDictionary::build(&texts, max_dict);
         let bits = bits_for_dict(dict.len());
-        println!("  code dict[g{}]: {} tokens from {} texts, {} bits/token, output={}",
-            gidx, dict.len(), texts.len(), bits, effective_max_tokens * bits);
+        println!(
+            "  code dict[g{}]: {} tokens from {} texts, {} bits/token, output={}",
+            gidx,
+            dict.len(),
+            texts.len(),
+            bits,
+            effective_max_tokens * bits
+        );
         code_dicts.insert(gidx, dict);
     }
     // Build algebraic codebooks: factorize each group's response space into
@@ -3197,36 +3688,49 @@ fn train_brain(
     let mut gen_codebooks: HashMap<usize, AlgebraicCodebook> = HashMap::new();
     let mut code_codebooks: HashMap<usize, AlgebraicCodebook> = HashMap::new();
     for (&gidx, pairs) in &gen_by_group {
-        if pairs.is_empty() { continue; }
+        if pairs.is_empty() {
+            continue;
+        }
         let texts: Vec<&str> = pairs.iter().map(|(_emb, text)| text.as_str()).collect();
         let embs: Vec<&[f32]> = pairs.iter().map(|(emb, _text)| emb.as_slice()).collect();
         let dict = gen_dicts.get(&gidx).unwrap();
-        let intent_count = data_profile.as_ref()
+        let intent_count = data_profile
+            .as_ref()
             .and_then(|p| p.groups.get(&gidx))
             .map(|g| g.unique_intents)
             .unwrap_or(0);
         let gen_max_arch = if texts.len() > 150 || intent_count > 40 {
-            base_archetypes * 4  // 128 for large/high-diversity groups
+            base_archetypes * 4 // 128 for large/high-diversity groups
         } else if texts.len() > 50 || intent_count > 12 {
-            base_archetypes * 3  // 96 for medium groups or high intent diversity
+            base_archetypes * 3 // 96 for medium groups or high intent diversity
         } else {
-            base_archetypes      // 32 for small groups
+            base_archetypes // 32 for small groups
         };
         let cb = AlgebraicCodebook::build(&texts, dict, gen_max_arch, Some(&embs));
-        let mode = if cb.has_prototypes() { "SLOT-ONLY" } else { "FULL" };
+        let mode = if cb.has_prototypes() {
+            "SLOT-ONLY"
+        } else {
+            "FULL"
+        };
         println!("  gen codebook[g{}]: {} archetypes (max={}), {} slots max, {} total/{} slot bits (was {}) [{}]",
             gidx, cb.archetypes.len(), gen_max_arch, cb.max_slot_count, cb.total_bits, cb.slot_only_bits,
             effective_max_tokens * bits_for_dict(dict.len()), mode);
         gen_codebooks.insert(gidx, cb);
     }
     for (&gidx, pairs) in &code_by_group {
-        if pairs.is_empty() { continue; }
+        if pairs.is_empty() {
+            continue;
+        }
         let texts: Vec<&str> = pairs.iter().map(|(_emb, text)| *text).collect();
         let embs: Vec<&[f32]> = pairs.iter().map(|(emb, _text)| *emb).collect();
         let dict = code_dicts.get(&gidx).unwrap();
         let code_max_arch = base_archetypes * 2;
         let cb = AlgebraicCodebook::build_syntax_aware(&texts, dict, code_max_arch, Some(&embs));
-        let mode = if cb.has_prototypes() { "SYNTAX+SLOT-ONLY" } else { "SYNTAX-AWARE" };
+        let mode = if cb.has_prototypes() {
+            "SYNTAX+SLOT-ONLY"
+        } else {
+            "SYNTAX-AWARE"
+        };
         println!("  code codebook[g{}]: {} archetypes, {} slots max, {} total/{} slot bits (was {}) [{}]",
             gidx, cb.archetypes.len(), cb.max_slot_count, cb.total_bits, cb.slot_only_bits,
             effective_max_tokens * bits_for_dict(dict.len()), mode);
@@ -3239,36 +3743,54 @@ fn train_brain(
     let mut gen_hopf: HashMap<usize, HopfCompositionTable> = HashMap::new();
     let mut code_hopf: HashMap<usize, HopfCompositionTable> = HashMap::new();
     for (&gidx, pairs) in &gen_by_group {
-        if pairs.is_empty() { continue; }
+        if pairs.is_empty() {
+            continue;
+        }
         if let Some(cb) = gen_codebooks.get(&gidx) {
-            if !cb.has_prototypes() || cb.archetypes.len() < 2 { continue; }
+            if !cb.has_prototypes() || cb.archetypes.len() < 2 {
+                continue;
+            }
             let dict = gen_dicts.get(&gidx).unwrap();
             let embs: Vec<&[f32]> = pairs.iter().map(|(emb, _)| emb.as_slice()).collect();
             let mut clusters: Vec<Vec<usize>> = vec![vec![]; cb.archetypes.len()];
             for (i, (_emb, text)) in pairs.iter().enumerate() {
                 let ids = dict.encode(text.as_str());
                 let (arch_idx, _) = cb.match_best(&ids);
-                if arch_idx < clusters.len() { clusters[arch_idx].push(i); }
+                if arch_idx < clusters.len() {
+                    clusters[arch_idx].push(i);
+                }
             }
             let hopf = HopfCompositionTable::build(cb, Some(&embs), &clusters, hopf_segments);
-            println!("  gen hopf[g{}]: {} segments, {} response_len", gidx, hopf.num_segments, hopf.response_length);
+            println!(
+                "  gen hopf[g{}]: {} segments, {} response_len",
+                gidx, hopf.num_segments, hopf.response_length
+            );
             gen_hopf.insert(gidx, hopf);
         }
     }
     for (&gidx, pairs) in &code_by_group {
-        if pairs.is_empty() { continue; }
+        if pairs.is_empty() {
+            continue;
+        }
         if let Some(cb) = code_codebooks.get(&gidx) {
-            if !cb.has_prototypes() || cb.archetypes.len() < 2 { continue; }
+            if !cb.has_prototypes() || cb.archetypes.len() < 2 {
+                continue;
+            }
             let dict = code_dicts.get(&gidx).unwrap();
             let embs: Vec<&[f32]> = pairs.iter().map(|(emb, _)| *emb).collect();
             let mut clusters: Vec<Vec<usize>> = vec![vec![]; cb.archetypes.len()];
             for (i, (_emb, text)) in pairs.iter().enumerate() {
                 let ids = dict.encode(text);
                 let (arch_idx, _) = cb.match_best(&ids);
-                if arch_idx < clusters.len() { clusters[arch_idx].push(i); }
+                if arch_idx < clusters.len() {
+                    clusters[arch_idx].push(i);
+                }
             }
             let hopf = HopfCompositionTable::build(cb, Some(&embs), &clusters, hopf_segments);
-            println!("  code hopf[g{}]: {} segments, {} response_len", gidx, hopf.num_segments, hopf.response_length);
+            println!(
+                "  code hopf[g{}]: {} segments, {} response_len",
+                gidx, hopf.num_segments, hopf.response_length
+            );
             code_hopf.insert(gidx, hopf);
         }
     }
@@ -3287,21 +3809,30 @@ fn train_brain(
         use crate::micro_brain::ArchetypeBrain;
         let mut archetype_entries: Vec<(usize, usize, Vec<f32>, Vec<u16>)> = Vec::new();
         for (&gidx, cb) in &gen_codebooks {
-            if !cb.has_prototypes() { continue; }
-            if gen_dicts.get(&gidx).is_none() { continue; }
+            if !cb.has_prototypes() {
+                continue;
+            }
+            if gen_dicts.get(&gidx).is_none() {
+                continue;
+            }
             for (ai, arch) in cb.archetypes.iter().enumerate() {
-                let proto = cb.archetype_prototypes.get(ai)
-                    .cloned().unwrap_or_else(|| vec![0.0f32; bridge_dim]);
-                let tokens: Vec<u16> = arch.fixed.iter()
-                    .map(|&(_, tok)| tok).collect();
+                let proto = cb
+                    .archetype_prototypes
+                    .get(ai)
+                    .cloned()
+                    .unwrap_or_else(|| vec![0.0f32; bridge_dim]);
+                let tokens: Vec<u16> = arch.fixed.iter().map(|&(_, tok)| tok).collect();
                 archetype_entries.push((gidx, ai, proto, tokens));
             }
         }
         if !archetype_entries.is_empty() {
             let ref_dict = gen_dicts.values().next().unwrap().clone();
             let ab = ArchetypeBrain::build(&archetype_entries, ref_dict);
-            println!("\n  ArchetypeBrain: {} programs across {} groups",
-                ab.program_count(), gen_codebooks.len());
+            println!(
+                "\n  ArchetypeBrain: {} programs across {} groups",
+                ab.program_count(),
+                gen_codebooks.len()
+            );
             if let Some(ref mut mb) = svc.dm.meta_brain {
                 mb.archetype_brain = Some(ab);
             }
@@ -3338,7 +3869,10 @@ fn train_brain(
         if gen_by_group.get(&gidx).map_or(false, |p| !p.is_empty()) {
             index_jobs += 1;
         }
-        if code_by_group.get(&gidx).map_or(false, |p| p.len() >= min_code_for_index) {
+        if code_by_group
+            .get(&gidx)
+            .map_or(false, |p| p.len() >= min_code_for_index)
+        {
             index_jobs += 1;
         }
     }
@@ -3364,7 +3898,9 @@ fn train_brain(
     // apply the same Clifford + understanding conditioning used at inference time.
     for &gidx in gen_by_group.keys().chain(code_by_group.keys()) {
         if !svc.dm.group_adapters.contains_key(&gidx) {
-            let adapter = group_adapters.get(&gidx).cloned()
+            let adapter = group_adapters
+                .get(&gidx)
+                .cloned()
                 .unwrap_or_else(|| GroupAdapter::new(raw_dim, bridge_dim, DEFAULT_ADAPTER_RANK));
             svc.dm.group_adapters.insert(gidx, adapter);
             svc.dm.group_rotors.insert(gidx, GroupRotor::new());
@@ -3377,7 +3913,9 @@ fn train_brain(
     let t_index_start = std::time::Instant::now();
     for gidx in 0..num_groups {
         if let Some(pairs) = gen_by_group.get(&gidx) {
-            if pairs.is_empty() { continue; }
+            if pairs.is_empty() {
+                continue;
+            }
             let raw_vecs = gen_raw_by_group.get(&gidx).unwrap();
             let topic_names = gen_topic_by_group.get(&gidx).unwrap();
             let dict = gen_dicts.get(&gidx).unwrap().clone();
@@ -3386,12 +3924,16 @@ fn train_brain(
                 AlgebraicCodebook::build(&text_refs, &dict, 32, None)
             });
             let hopf = gen_hopf.get(&gidx).cloned().unwrap_or_default();
-            let training_pairs: Vec<(Vec<f32>, String, String)> = pairs.iter()
+            let training_pairs: Vec<(Vec<f32>, String, String)> = pairs
+                .iter()
                 .zip(raw_vecs.iter())
                 .zip(topic_names.iter())
                 .map(|(((bridged, text), raw), topic_name)| {
                     let cond = svc.dm.adapt_for_group_clifford(
-                        gidx, bridged.as_slice(), raw, crate::dimension::group_gen::GEN_COND_DIM,
+                        gidx,
+                        bridged.as_slice(),
+                        raw,
+                        crate::dimension::group_gen::GEN_COND_DIM,
                     );
                     (cond, text.clone(), (*topic_name).to_string())
                 })
@@ -3408,15 +3950,17 @@ fn train_brain(
                 .len();
             let is_chat_group = !is_sentiment_group
                 && unique_topic_count >= 5
-                && training_pairs.iter().all(|(_, text, _)| !text.contains("fn ") && !text.contains("def "));
+                && training_pairs
+                    .iter()
+                    .all(|(_, text, _)| !text.contains("fn ") && !text.contains("def "));
             let is_lookup_group = topic_names.iter().any(|t| {
                 t.eq_ignore_ascii_case("wordnet_lookup")
                     || t.eq_ignore_ascii_case("auto_tag")
                     || t.eq_ignore_ascii_case("summarize")
                     || t.eq_ignore_ascii_case("link_suggest")
-            }) || training_pairs.iter().any(|(_, text, _)| {
-                text.starts_with("{\"center\":") || text.starts_with("[")
-            });
+            }) || training_pairs
+                .iter()
+                .any(|(_, text, _)| text.starts_with("{\"center\":") || text.starts_with("["));
             let effective_spawn = if is_lookup_group {
                 2.0 // never merge — each labeled row keeps its own program
             } else if is_sentiment_group {
@@ -3426,9 +3970,17 @@ fn train_brain(
             } else {
                 spawn_threshold
             };
-            println!("  gen[g{}]: spawn_threshold={:.3} (sentiment={} chat={} lookup={} topics={})",
-                gidx, effective_spawn, is_sentiment_group, is_chat_group, is_lookup_group, unique_topic_count);
-            let mut env = IndexedGenEnv::from_tagged_parts(dict, cb, hopf, &training_pairs, effective_spawn);
+            println!(
+                "  gen[g{}]: spawn_threshold={:.3} (sentiment={} chat={} lookup={} topics={})",
+                gidx,
+                effective_spawn,
+                is_sentiment_group,
+                is_chat_group,
+                is_lookup_group,
+                unique_topic_count
+            );
+            let mut env =
+                IndexedGenEnv::from_tagged_parts(dict, cb, hopf, &training_pairs, effective_spawn);
             const TOPIC_AUTOGAMY_MERGE: f32 = 0.96;
             const SCENARIO_TOPIC_AUTOGAMY: f32 = 0.88;
             const SCENARIO_TOPICS: &[&str] = &[
@@ -3453,7 +4005,9 @@ fn train_brain(
             env.freeze();
             println!(
                 "  gen[g{}]: {} lattice programs, {} topic sub-lattices, frozen",
-                gidx, env.program_count(), env.topic_subindex.len()
+                gidx,
+                env.program_count(),
+                env.topic_subindex.len()
             );
             svc.dm.group_gen_envs.insert(gidx, env);
             if let Some(u) = &ui {
@@ -3465,25 +4019,37 @@ fn train_brain(
 
         if let Some(pairs) = code_by_group.get(&gidx) {
             let min_code_samples = 10;
-            if pairs.len() < min_code_samples { continue; }
+            if pairs.len() < min_code_samples {
+                continue;
+            }
             let raw_vecs = code_raw_by_group.get(&gidx).unwrap();
             let topic_names = code_topic_by_group.get(&gidx).unwrap();
             let dict = code_dicts.get(&gidx).unwrap().clone();
-            let cb = code_codebooks.get(&gidx).cloned().unwrap_or_else(|| AlgebraicCodebook::build_syntax_aware(
-                &pairs.iter().map(|(_, t)| *t).collect::<Vec<_>>(), &dict, 32, None,
-            ));
+            let cb = code_codebooks.get(&gidx).cloned().unwrap_or_else(|| {
+                AlgebraicCodebook::build_syntax_aware(
+                    &pairs.iter().map(|(_, t)| *t).collect::<Vec<_>>(),
+                    &dict,
+                    32,
+                    None,
+                )
+            });
             let hopf = code_hopf.get(&gidx).cloned().unwrap_or_default();
-            let training_pairs: Vec<(Vec<f32>, String, String)> = pairs.iter()
+            let training_pairs: Vec<(Vec<f32>, String, String)> = pairs
+                .iter()
                 .zip(raw_vecs.iter())
                 .zip(topic_names.iter())
                 .map(|(((bridged, text), raw), topic_name)| {
                     let cond = svc.dm.adapt_for_group_clifford(
-                        gidx, bridged, raw, crate::dimension::group_gen::GEN_COND_DIM,
+                        gidx,
+                        bridged,
+                        raw,
+                        crate::dimension::group_gen::GEN_COND_DIM,
                     );
                     (cond, text.to_string(), (*topic_name).to_string())
                 })
                 .collect();
-            let mut env = IndexedGenEnv::from_tagged_parts(dict, cb, hopf, &training_pairs, spawn_threshold);
+            let mut env =
+                IndexedGenEnv::from_tagged_parts(dict, cb, hopf, &training_pairs, spawn_threshold);
             const TOPIC_AUTOGAMY_MERGE: f32 = 0.96;
             for topic in &mut env.topic_subindex {
                 topic.lattice.autogamy(TOPIC_AUTOGAMY_MERGE);
@@ -3491,7 +4057,9 @@ fn train_brain(
             env.freeze();
             println!(
                 "  code[g{}]: {} lattice programs, {} topic sub-lattices, frozen",
-                gidx, env.program_count(), env.topic_subindex.len()
+                gidx,
+                env.program_count(),
+                env.topic_subindex.len()
             );
             svc.dm.group_code_envs.insert(gidx, env);
             if let Some(u) = &ui {
@@ -3505,8 +4073,12 @@ fn train_brain(
     if let Some(u) = &ui {
         u.detail_finish_clear();
     }
-    println!("  Indexed {} gen + {} code groups in {:?}",
-        svc.dm.group_gen_envs.len(), svc.dm.group_code_envs.len(), t_index_elapsed);
+    println!(
+        "  Indexed {} gen + {} code groups in {:?}",
+        svc.dm.group_gen_envs.len(),
+        svc.dm.group_code_envs.len(),
+        t_index_elapsed
+    );
 
     // Contrastive refinement: push apart program centroids within each group's
     // topic sub-lattices that are too similar but represent different content.
@@ -3518,28 +4090,41 @@ fn train_brain(
     for (&gidx, env) in svc.dm.group_gen_envs.iter_mut() {
         let mut group_repulsions = 0;
         for topic in &mut env.topic_subindex {
-            let r = topic.lattice.contrastive_refine(contrastive_margin, contrastive_rate);
+            let r = topic
+                .lattice
+                .contrastive_refine(contrastive_margin, contrastive_rate);
             group_repulsions += r;
         }
-        env.lattice.contrastive_refine(contrastive_margin, contrastive_rate);
+        env.lattice
+            .contrastive_refine(contrastive_margin, contrastive_rate);
         if group_repulsions > 0 {
-            println!("  gen[g{}]: {} contrastive repulsions", gidx, group_repulsions);
+            println!(
+                "  gen[g{}]: {} contrastive repulsions",
+                gidx, group_repulsions
+            );
         }
         total_repulsions += group_repulsions;
     }
     for (&gidx, env) in svc.dm.group_code_envs.iter_mut() {
         let mut group_repulsions = 0;
         for topic in &mut env.topic_subindex {
-            let r = topic.lattice.contrastive_refine(contrastive_margin, contrastive_rate);
+            let r = topic
+                .lattice
+                .contrastive_refine(contrastive_margin, contrastive_rate);
             group_repulsions += r;
         }
         if group_repulsions > 0 {
-            println!("  code[g{}]: {} contrastive repulsions", gidx, group_repulsions);
+            println!(
+                "  code[g{}]: {} contrastive repulsions",
+                gidx, group_repulsions
+            );
         }
         total_repulsions += group_repulsions;
     }
-    println!("  Total: {} contrastive repulsions (margin={}, rate={})",
-        total_repulsions, contrastive_margin, contrastive_rate);
+    println!(
+        "  Total: {} contrastive repulsions (margin={}, rate={})",
+        total_repulsions, contrastive_margin, contrastive_rate
+    );
 
     // ---------------------------------------------------------------
     // STA-CALM Orchestrated Training: per-grade semantic pressure
@@ -3553,7 +4138,8 @@ fn train_brain(
         let mut total_programs = 0usize;
         for (&gidx, env) in svc.dm.group_gen_envs.iter_mut() {
             let vocab_size = env.dictionary.tokens.len();
-            let mut orchestrator = crate::training_objectives::TrainingOrchestrator::new(vocab_size);
+            let mut orchestrator =
+                crate::training_objectives::TrainingOrchestrator::new(vocab_size);
 
             let mut programs: Vec<(String, Vec<u16>, Vec<f32>)> = Vec::new();
             for topic in &env.topic_subindex {
@@ -3566,13 +4152,15 @@ fn train_brain(
                 }
             }
 
-            if programs.len() < 4 { continue; }
+            if programs.len() < 4 {
+                continue;
+            }
 
             let diags = orchestrator.run_full_pipeline(
                 &mut programs,
-                3,  // phase 1: grade pretraining epochs
-                2,  // phase 2: rotor predictor epochs
-                2,  // phase 3: joint fine-tuning epochs
+                3, // phase 1: grade pretraining epochs
+                2, // phase 2: rotor predictor epochs
+                2, // phase 3: joint fine-tuning epochs
             );
 
             // Write back adjusted centroids to the lattice programs
@@ -3588,11 +4176,17 @@ fn train_brain(
 
             total_programs += prog_idx;
             if let Some(last) = diags.last() {
-                println!("  gen[g{}]: {} programs, final loss={:.4}, rotor_conf={:.3}",
-                    gidx, prog_idx, last.avg_total_loss, last.rotor_prediction_confidence);
+                println!(
+                    "  gen[g{}]: {} programs, final loss={:.4}, rotor_conf={:.3}",
+                    gidx, prog_idx, last.avg_total_loss, last.rotor_prediction_confidence
+                );
             }
         }
-        println!("  STA-CALM: {} total programs trained in {:?}", total_programs, t_sta.elapsed());
+        println!(
+            "  STA-CALM: {} total programs trained in {:?}",
+            total_programs,
+            t_sta.elapsed()
+        );
     }
 
     // Register per-group structural fingerprints (grade-2 bivectors in Cl(8))
@@ -3609,7 +4203,11 @@ fn train_brain(
         }
         if !all_raw.is_empty() {
             svc.dm.register_group_fingerprint(gidx, &all_raw);
-            println!("  group {}: fingerprint from {} embeddings", gidx, all_raw.len());
+            println!(
+                "  group {}: fingerprint from {} embeddings",
+                gidx,
+                all_raw.len()
+            );
         }
     }
 
@@ -3619,13 +4217,23 @@ fn train_brain(
     bump_train_phase(&ui, &mut major_phase, "Cognitive map");
     println!("\n--- Building Cognitive Map (Reasoning Engine) ---");
     let cog_map = CognitiveMap::build(&svc.dm.group_gen_envs, &svc.dm.group_rotors);
-    println!("  nodes: {}, edges: {} (cross-group structural links)", cog_map.node_count(), cog_map.edge_count());
-    let group_dicts: HashMap<usize, TokenDictionary> = svc.dm.group_gen_envs.iter()
+    println!(
+        "  nodes: {}, edges: {} (cross-group structural links)",
+        cog_map.node_count(),
+        cog_map.edge_count()
+    );
+    let group_dicts: HashMap<usize, TokenDictionary> = svc
+        .dm
+        .group_gen_envs
+        .iter()
         .map(|(&gidx, env)| (gidx, env.dictionary.clone()))
         .collect();
     let reasoning_engine = ReasoningEngine::new(cog_map, group_dicts);
     svc.reasoning = Some(reasoning_engine);
-    println!("  ReasoningEngine: active, settling_rounds=4, system2_max_steps={}", svc.system2_config.max_steps);
+    println!(
+        "  ReasoningEngine: active, settling_rounds=4, system2_max_steps={}",
+        svc.system2_config.max_steps
+    );
 
     // ---------------------------------------------------------------
     // Build MetaCognition: reflective quality gate on generation output.
@@ -3665,7 +4273,9 @@ fn train_brain(
         }
         println!(
             "  MetaCognition: {} pairs absorbed, {} topic centroids, ready={}",
-            pair_count, mc.topic_count(), mc.is_ready()
+            pair_count,
+            mc.topic_count(),
+            mc.is_ready()
         );
         svc.metacognition = Some(mc);
     }
@@ -3687,15 +4297,26 @@ fn train_brain(
         let cap_u64 = cloze::DEFAULT_MAX_CLOZE_TASKS_PER_GROUP as u64;
         let mut cloze_units: u64 = 0;
         for (_g, env) in &svc.dm.group_gen_envs {
-            if env.codebook.as_ref().filter(|cb| !cb.archetypes.is_empty()).is_some() {
+            if env
+                .codebook
+                .as_ref()
+                .filter(|cb| !cb.archetypes.is_empty())
+                .is_some()
+            {
                 let corpus = gen_by_group.get(_g).map(|p| p.len()).unwrap_or(0);
                 let task_est = corpus.max(env.lattice.programs.len()) as u64;
                 cloze_units += task_est.min(cap_u64) * (cloze_rounds as u64);
             }
         }
         for (_g, env) in &svc.dm.group_code_envs {
-            if env.codebook.as_ref().filter(|cb| !cb.archetypes.is_empty()).is_some() {
-                cloze_units += (env.lattice.programs.len() as u64).min(cap_u64) * (cloze_rounds as u64);
+            if env
+                .codebook
+                .as_ref()
+                .filter(|cb| !cb.archetypes.is_empty())
+                .is_some()
+            {
+                cloze_units +=
+                    (env.lattice.programs.len() as u64).min(cap_u64) * (cloze_rounds as u64);
             }
         }
         if let Some(u) = &ui {
@@ -3707,7 +4328,8 @@ fn train_brain(
         // One IndexedGenEnv per routing group; each has its own AlgebraicCodebook (`env.codebook`:
         // archetypes + slots — not related to `group_code_envs`). Cloze needs that structure per group.
         for (gidx, env) in svc.dm.group_gen_envs.iter_mut() {
-            let Some(algebraic) = env.codebook.as_ref().filter(|cb| !cb.archetypes.is_empty()) else {
+            let Some(algebraic) = env.codebook.as_ref().filter(|cb| !cb.archetypes.is_empty())
+            else {
                 continue;
             };
             let is_sentiment_lattice = env.topic_subindex.iter().any(|t| {
@@ -3735,16 +4357,29 @@ fn train_brain(
             // Falls back to the distilled programs if the corpus is unavailable.
             let training_pairs: Vec<(Vec<f32>, String)> = match gen_by_group.get(gidx) {
                 Some(pairs) if !pairs.is_empty() => pairs.clone(),
-                _ => env.lattice.programs.iter()
-                    .map(|prog| (prog.ema_centroid.clone(), prog.display_text(&env.dictionary)))
+                _ => env
+                    .lattice
+                    .programs
+                    .iter()
+                    .map(|prog| {
+                        (
+                            prog.ema_centroid.clone(),
+                            prog.display_text(&env.dictionary),
+                        )
+                    })
                     .collect(),
             };
             println!(
                 "  cloze[g{}]: {} corpus pairs (was {} distilled programs)",
-                gidx, training_pairs.len(), env.lattice.programs.len()
+                gidx,
+                training_pairs.len(),
+                env.lattice.programs.len()
             );
-            let mut tasks = cloze::generate_cloze_tasks(algebraic, &env.dictionary, &training_pairs);
-            if tasks.is_empty() { continue; }
+            let mut tasks =
+                cloze::generate_cloze_tasks(algebraic, &env.dictionary, &training_pairs);
+            if tasks.is_empty() {
+                continue;
+            }
             if tasks.len() > cloze::DEFAULT_MAX_CLOZE_TASKS_PER_GROUP {
                 println!(
                     "  cloze[g{}]: capping {} → {} tasks (each task walks the full lattice)",
@@ -3781,7 +4416,13 @@ fn train_brain(
                 round_stats.punishment_applied += stats.punishment_applied;
             }
             env.frozen = true;
-            println!("  cloze[g{}]: {} rounds x {} tasks, {}", gidx, cloze_rounds, tasks.len(), round_stats);
+            println!(
+                "  cloze[g{}]: {} rounds x {} tasks, {}",
+                gidx,
+                cloze_rounds,
+                tasks.len(),
+                round_stats
+            );
             total_stats.games_played += round_stats.games_played;
             total_stats.total_slots += round_stats.total_slots;
             total_stats.correct_slots += round_stats.correct_slots;
@@ -3790,7 +4431,8 @@ fn train_brain(
         }
         // Same cloze pass for code-output groups (each env has its own algebraic codebook).
         for (gidx, env) in svc.dm.group_code_envs.iter_mut() {
-            let Some(algebraic) = env.codebook.as_ref().filter(|cb| !cb.archetypes.is_empty()) else {
+            let Some(algebraic) = env.codebook.as_ref().filter(|cb| !cb.archetypes.is_empty())
+            else {
                 continue;
             };
             println!(
@@ -3798,14 +4440,20 @@ fn train_brain(
                 gidx,
                 env.lattice.programs.len()
             );
-            let training_pairs: Vec<(Vec<f32>, String)> = env.lattice.programs.iter()
+            let training_pairs: Vec<(Vec<f32>, String)> = env
+                .lattice
+                .programs
+                .iter()
                 .map(|prog| {
                     let text = prog.display_text(&env.dictionary);
                     (prog.ema_centroid.clone(), text)
                 })
                 .collect();
-            let mut tasks = cloze::generate_cloze_tasks(algebraic, &env.dictionary, &training_pairs);
-            if tasks.is_empty() { continue; }
+            let mut tasks =
+                cloze::generate_cloze_tasks(algebraic, &env.dictionary, &training_pairs);
+            if tasks.is_empty() {
+                continue;
+            }
             if tasks.len() > cloze::DEFAULT_MAX_CLOZE_TASKS_PER_GROUP {
                 println!(
                     "  cloze[code_g{}]: capping {} → {} tasks",
@@ -3841,7 +4489,13 @@ fn train_brain(
                 round_stats.punishment_applied += stats.punishment_applied;
             }
             env.frozen = true;
-            println!("  cloze[code_g{}]: {} rounds × {} tasks, {}", gidx, cloze_rounds, tasks.len(), round_stats);
+            println!(
+                "  cloze[code_g{}]: {} rounds × {} tasks, {}",
+                gidx,
+                cloze_rounds,
+                tasks.len(),
+                round_stats
+            );
             total_stats.games_played += round_stats.games_played;
             total_stats.total_slots += round_stats.total_slots;
             total_stats.correct_slots += round_stats.correct_slots;
@@ -3863,7 +4517,11 @@ fn train_brain(
     println!("\n--- Building Post-Training Paramecium ---");
     svc.build_paramecium();
     if let Some(ref pm) = svc.paramecium {
-        println!("  programs: {}, memory: {} bytes", pm.program_count(), pm.memory_bytes());
+        println!(
+            "  programs: {}, memory: {} bytes",
+            pm.program_count(),
+            pm.memory_bytes()
+        );
     }
 
     // ---------------------------------------------------------------
@@ -3878,22 +4536,33 @@ fn train_brain(
     println!("  Groups: {}", svc.dm.main.group_order.len());
     println!("  Router: {}", svc.dm.observer.learned_router.is_some());
     println!("  ActionClassifier: {}", svc.dm.action_classifier.is_some());
-    println!("  GenerationHead (legacy): {}", svc.dm.generation_head.is_some());
+    println!(
+        "  GenerationHead (legacy): {}",
+        svc.dm.generation_head.is_some()
+    );
     println!("  CodegenHead (legacy): {}", svc.dm.codegen_head.is_some());
     println!("  GroupGenEnvs: {} groups", svc.dm.group_gen_envs.len());
     println!("  GroupCodeEnvs: {} groups", svc.dm.group_code_envs.len());
     for (gidx, env) in &svc.dm.group_gen_envs {
-        println!("    gen[{}]: {} lattice programs, frozen={}", gidx, env.program_count(), env.frozen);
+        println!(
+            "    gen[{}]: {} lattice programs, frozen={}",
+            gidx,
+            env.program_count(),
+            env.frozen
+        );
     }
     for (gidx, env) in &svc.dm.group_code_envs {
-        println!("    code[{}]: {} lattice programs, frozen={}", gidx, env.program_count(), env.frozen);
+        println!(
+            "    code[{}]: {} lattice programs, frozen={}",
+            gidx,
+            env.program_count(),
+            env.frozen
+        );
     }
 
     println!("\n--- Post-Training Inference Check ---");
     let skip_prompts = true; // Set to true to skip prompts
     if !skip_prompts {
-
-
         let test_prompts = [
             "help me reset my password",
             "implement binary search in Python",
@@ -3917,12 +4586,20 @@ fn train_brain(
                 Ok(ref a) if matches!(a.action_type, crate::dimension::action::ActionType::CodingAssist)
             );
             if let Ok(ref action) = action_result {
-                println!("  action: {:?} (conf={:.2}) group={:?}", action.action_type, action.confidence, action.target_group_id);
+                println!(
+                    "  action: {:?} (conf={:.2}) group={:?}",
+                    action.action_type, action.confidence, action.target_group_id
+                );
             }
             if let Ok((_, resp)) = svc.generation(prompt) {
                 let r = &resp.text;
                 let r_end = truncate_to_char_boundary(r, 200);
-                println!("  gen [{}] (conf={:.2}): {:?}", resp.template_id, resp.confidence, &r[..r_end]);
+                println!(
+                    "  gen [{}] (conf={:.2}): {:?}",
+                    resp.template_id,
+                    resp.confidence,
+                    &r[..r_end]
+                );
             }
             if is_coding {
                 if let Ok((_, Some(code))) = svc.codegen(prompt) {
@@ -3937,11 +4614,17 @@ fn train_brain(
             use crate::dimension::action::ActionType;
             let checks: [(&str, ActionType); 3] = [
                 ("help me reset my password", ActionType::SupportTicket),
-                ("implement binary search in Python", ActionType::CodingAssist),
+                (
+                    "implement binary search in Python",
+                    ActionType::CodingAssist,
+                ),
                 ("explain the observer pattern", ActionType::CodingAssist),
             ];
             for (prompt, expected) in &checks {
-                let action = svc.dm.route_text_to_action_stateless(prompt).map_err(|e| format!("route_text_to_action failed: {}", e))?;
+                let action = svc
+                    .dm
+                    .route_text_to_action_stateless(prompt)
+                    .map_err(|e| format!("route_text_to_action failed: {}", e))?;
                 if action.action_type != *expected {
                     return Err(format!(
                         "validate: prompt {:?} expected action {:?}, got {:?}",
@@ -3950,7 +4633,7 @@ fn train_brain(
                 }
             }
             println!("\n  Validate: action routing checks passed.");
-        }    
+        }
     }
     println!("\n=== Brain training complete ===");
     if let Some(u) = &ui {
@@ -3982,5 +4665,3 @@ fn load_all_m5_training_data() -> Result<Vec<LanguageSample>, String> {
     }
     Ok(all)
 }
-
-

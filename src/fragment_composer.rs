@@ -132,7 +132,11 @@ impl ComposeExcludes {
                 return true;
             }
         }
-        if fragment.intent_affinity.iter().any(|a| self.fragment_intents.contains(a)) {
+        if fragment
+            .intent_affinity
+            .iter()
+            .any(|a| self.fragment_intents.contains(a))
+        {
             return true;
         }
         if !self.keywords.is_empty() {
@@ -176,9 +180,9 @@ impl Fragment {
     }
 
     fn matches_lore_topic_anchor(&self, ctx: &ComposeContext) -> bool {
-        self.intent_affinity.iter().any(|a| {
-            is_lore_topic_anchor(a) && ctx.graph_anchors.iter().any(|g| g == a)
-        })
+        self.intent_affinity
+            .iter()
+            .any(|a| is_lore_topic_anchor(a) && ctx.graph_anchors.iter().any(|g| g == a))
     }
 
     fn is_eligible_for(&self, ctx: &ComposeContext, opener_strict: bool) -> bool {
@@ -208,9 +212,7 @@ impl Fragment {
                     false
                 } else {
                     self.intent_affinity.iter().any(|a| {
-                        a != "*"
-                            && !is_meta_anchor(a)
-                            && ctx.graph_anchors.iter().any(|g| g == a)
+                        a != "*" && !is_meta_anchor(a) && ctx.graph_anchors.iter().any(|g| g == a)
                     })
                 };
                 if !direct && !anchor {
@@ -443,7 +445,11 @@ impl FragmentComposer {
         }
 
         let pool = |role: SlotRole| -> Vec<&Fragment> {
-            eligible.iter().copied().filter(|f| f.role == role).collect()
+            eligible
+                .iter()
+                .copied()
+                .filter(|f| f.role == role)
+                .collect()
         };
 
         let opener_pool: Vec<&Fragment> = if ctx.use_opener {
@@ -558,8 +564,7 @@ impl FragmentComposer {
                 .filter(|f| f.body_slot.as_deref() == Some(slot.as_str()))
                 .filter(|f| !already(f, &picked_bodies))
                 .filter(|f| {
-                    !ctx.require_distinct_voices
-                        || picked_bodies.iter().all(|p| p.voice != f.voice)
+                    !ctx.require_distinct_voices || picked_bodies.iter().all(|p| p.voice != f.voice)
                 })
                 .collect();
 
@@ -569,8 +574,7 @@ impl FragmentComposer {
                 .filter(|f| f.body_slot.is_none())
                 .filter(|f| !already(f, &picked_bodies))
                 .filter(|f| {
-                    !ctx.require_distinct_voices
-                        || picked_bodies.iter().all(|p| p.voice != f.voice)
+                    !ctx.require_distinct_voices || picked_bodies.iter().all(|p| p.voice != f.voice)
                 })
                 .collect();
 
@@ -682,21 +686,47 @@ mod tests {
 
     fn sample_library() -> FragmentComposer {
         FragmentComposer::new(vec![
-            frag("id_gaze", Voice::Identity, SlotRole::Body,
-                 "I sit and look at you.", &["open_ended_chat"], &[]),
-            frag("act_knock", Voice::Activity, SlotRole::Body,
-                 "I knock the pen off the table.", &["open_ended_chat"], &[("energy", [0.5, 1.0])]),
-            frag("drive_hungry", Voice::Drive, SlotRole::Body,
-                 "My stomach has opinions.", &["open_ended_chat"], &[("hunger", [0.65, 1.0])]),
-            frag("coda_trill", Voice::Identity, SlotRole::Coda,
-                 "Trill.", &["*"], &[]),
+            frag(
+                "id_gaze",
+                Voice::Identity,
+                SlotRole::Body,
+                "I sit and look at you.",
+                &["open_ended_chat"],
+                &[],
+            ),
+            frag(
+                "act_knock",
+                Voice::Activity,
+                SlotRole::Body,
+                "I knock the pen off the table.",
+                &["open_ended_chat"],
+                &[("energy", [0.5, 1.0])],
+            ),
+            frag(
+                "drive_hungry",
+                Voice::Drive,
+                SlotRole::Body,
+                "My stomach has opinions.",
+                &["open_ended_chat"],
+                &[("hunger", [0.65, 1.0])],
+            ),
+            frag(
+                "coda_trill",
+                Voice::Identity,
+                SlotRole::Coda,
+                "Trill.",
+                &["*"],
+                &[],
+            ),
         ])
     }
 
     #[test]
     fn composes_some_text() {
         let lib = sample_library();
-        let out = lib.compose(&ctx(&[("hunger", 0.3), ("energy", 0.8)], 42)).unwrap();
+        let out = lib
+            .compose(&ctx(&[("hunger", 0.3), ("energy", 0.8)], 42))
+            .unwrap();
         assert!(!out.text.is_empty());
         assert!(out.fragment_ids.len() >= 1);
     }
@@ -706,7 +736,9 @@ mod tests {
         let lib = sample_library();
         // Low hunger: the hungry drive fragment must never appear.
         for seed in 0..50u64 {
-            let out = lib.compose(&ctx(&[("hunger", 0.1), ("energy", 0.9)], seed)).unwrap();
+            let out = lib
+                .compose(&ctx(&[("hunger", 0.1), ("energy", 0.9)], seed))
+                .unwrap();
             assert!(
                 !out.fragment_ids.iter().any(|id| id == "drive_hungry"),
                 "hungry fragment leaked while sated: {:?}",
@@ -729,8 +761,12 @@ mod tests {
     #[test]
     fn composition_is_deterministic_per_seed() {
         let lib = sample_library();
-        let a = lib.compose(&ctx(&[("hunger", 0.9), ("energy", 0.9)], 7)).unwrap();
-        let b = lib.compose(&ctx(&[("hunger", 0.9), ("energy", 0.9)], 7)).unwrap();
+        let a = lib
+            .compose(&ctx(&[("hunger", 0.9), ("energy", 0.9)], 7))
+            .unwrap();
+        let b = lib
+            .compose(&ctx(&[("hunger", 0.9), ("energy", 0.9)], 7))
+            .unwrap();
         assert_eq!(a.text, b.text);
     }
 
@@ -760,10 +796,22 @@ mod tests {
         // A fragment gating a dimension absent from ctx.state must be ineligible
         // (not assumed satisfied via an implicit default).
         let lib = FragmentComposer::new(vec![
-            frag("needs_social", Voice::Drive, SlotRole::Body, "lonely.",
-                 &["open_ended_chat"], &[("social", [0.5, 1.0])]),
-            frag("ungated", Voice::Identity, SlotRole::Body, "here.",
-                 &["open_ended_chat"], &[]),
+            frag(
+                "needs_social",
+                Voice::Drive,
+                SlotRole::Body,
+                "lonely.",
+                &["open_ended_chat"],
+                &[("social", [0.5, 1.0])],
+            ),
+            frag(
+                "ungated",
+                Voice::Identity,
+                SlotRole::Body,
+                "here.",
+                &["open_ended_chat"],
+                &[],
+            ),
         ]);
         for seed in 0..30u64 {
             // ctx provides only "hunger" — never "social".
@@ -780,10 +828,22 @@ mod tests {
     #[test]
     fn opener_requires_direct_intent_not_shared_anchor() {
         let lib = FragmentComposer::new(vec![
-            frag("open_lulu", Voice::Identity, SlotRole::Opener,
-                 "Lulu — the soft name.", &["bonding_moment"], &[]),
-            frag("body_school", Voice::Identity, SlotRole::Body,
-                 "School is loud in your head.", &["school_stress"], &[]),
+            frag(
+                "open_lulu",
+                Voice::Identity,
+                SlotRole::Opener,
+                "Lulu — the soft name.",
+                &["bonding_moment"],
+                &[],
+            ),
+            frag(
+                "body_school",
+                Voice::Identity,
+                SlotRole::Body,
+                "School is loud in your head.",
+                &["school_stress"],
+                &[],
+            ),
         ]);
         let mut c = ctx(&[("mood", 0.4)], 42);
         c.intent = "school_stress".to_string();
@@ -801,10 +861,22 @@ mod tests {
     #[test]
     fn meta_anchor_does_not_unlock_open_ended_fragments() {
         let lib = FragmentComposer::new(vec![
-            frag("school_only", Voice::Identity, SlotRole::Body,
-                 "School is loud in your head.", &["school_stress"], &[]),
-            frag("generic_helping", Voice::Identity, SlotRole::Body,
-                 "That is helping.", &["open_ended_chat"], &[]),
+            frag(
+                "school_only",
+                Voice::Identity,
+                SlotRole::Body,
+                "School is loud in your head.",
+                &["school_stress"],
+                &[],
+            ),
+            frag(
+                "generic_helping",
+                Voice::Identity,
+                SlotRole::Body,
+                "That is helping.",
+                &["open_ended_chat"],
+                &[],
+            ),
         ]);
         let mut c = ctx(&[("mood", 0.4)], 99);
         c.intent = "school_stress".to_string();
@@ -817,10 +889,22 @@ mod tests {
     #[test]
     fn skips_opener_when_disabled() {
         let lib = FragmentComposer::new(vec![
-            frag("open_there", Voice::Identity, SlotRole::Opener,
-                 "There you are.", &["open_ended_chat"], &[]),
-            frag("body_here", Voice::Identity, SlotRole::Body,
-                 "I sit and look at you.", &["open_ended_chat"], &[]),
+            frag(
+                "open_there",
+                Voice::Identity,
+                SlotRole::Opener,
+                "There you are.",
+                &["open_ended_chat"],
+                &[],
+            ),
+            frag(
+                "body_here",
+                Voice::Identity,
+                SlotRole::Body,
+                "I sit and look at you.",
+                &["open_ended_chat"],
+                &[],
+            ),
         ]);
         let mut c = ctx(&[("hunger", 0.5)], 42);
         c.use_opener = false;

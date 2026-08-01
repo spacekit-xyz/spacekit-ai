@@ -19,7 +19,10 @@ pub fn generate_code_from_action(action: &ActionJson, text: &str) -> Option<Code
         Some(ActionPayload::CodingAssist {
             task,
             language_hint,
-        }) => (task.to_ascii_lowercase(), language_hint.to_ascii_lowercase()),
+        }) => (
+            task.to_ascii_lowercase(),
+            language_hint.to_ascii_lowercase(),
+        ),
         _ => ("implement".to_string(), "python".to_string()),
     };
     let lower = text.to_ascii_lowercase();
@@ -57,45 +60,201 @@ struct TemplateRule {
 }
 
 const TEMPLATES: &[TemplateRule] = &[
-    TemplateRule { keywords: &["sort", "list"],           require_all: true,  generate: sort_list },
-    TemplateRule { keywords: &["bubble sort"],            require_all: false, generate: bubble_sort },
-    TemplateRule { keywords: &["quick sort", "quicksort"],require_all: false, generate: quicksort },
-    TemplateRule { keywords: &["merge sort", "mergesort"],require_all: false, generate: merge_sort },
-    TemplateRule { keywords: &["binary search"],          require_all: false, generate: binary_search },
-    TemplateRule { keywords: &["fibonacci", "fib"],       require_all: false, generate: fibonacci },
-    TemplateRule { keywords: &["factorial"],              require_all: false, generate: factorial },
-    TemplateRule { keywords: &["palindrome"],             require_all: false, generate: palindrome },
-    TemplateRule { keywords: &["fizzbuzz", "fizz buzz"],  require_all: false, generate: fizzbuzz },
-    TemplateRule { keywords: &["reverse", "string"],      require_all: true,  generate: reverse_string },
-    TemplateRule { keywords: &["reverse", "list"],        require_all: true,  generate: reverse_list },
-    TemplateRule { keywords: &["flatten", "list"],        require_all: true,  generate: flatten_list },
-    TemplateRule { keywords: &["flatten", "nested"],      require_all: true,  generate: flatten_list },
-    TemplateRule { keywords: &["two sum", "two-sum"],     require_all: false, generate: two_sum },
-    TemplateRule { keywords: &["prime", "number"],        require_all: true,  generate: is_prime },
-    TemplateRule { keywords: &["gcd", "greatest common"], require_all: false, generate: gcd },
-    TemplateRule { keywords: &["anagram"],                require_all: false, generate: is_anagram },
-    TemplateRule { keywords: &["linked list"],            require_all: false, generate: linked_list },
-    TemplateRule { keywords: &["stack"],                  require_all: false, generate: stack },
-    TemplateRule { keywords: &["queue"],                  require_all: false, generate: queue },
-    TemplateRule { keywords: &["matrix", "multiply"],     require_all: true,  generate: matrix_multiply },
-    TemplateRule { keywords: &["depth first", "dfs"],     require_all: false, generate: dfs },
-    TemplateRule { keywords: &["breadth first", "bfs"],   require_all: false, generate: bfs },
-    TemplateRule { keywords: &["lru cache"],              require_all: false, generate: lru_cache },
-    TemplateRule { keywords: &["dedup", "duplicate"],     require_all: false, generate: dedup },
-    TemplateRule { keywords: &["web server", "http server"], require_all: false, generate: web_server },
-    TemplateRule { keywords: &["topological sort"],       require_all: false, generate: topological_sort },
-    TemplateRule { keywords: &["debounce"],               require_all: false, generate: debounce },
-    TemplateRule { keywords: &["interval", "merge"],      require_all: true,  generate: interval_merge },
-    TemplateRule { keywords: &["retry"],                  require_all: false, generate: retry_test },
-    TemplateRule { keywords: &["state machine", "enum"],  require_all: false, generate: state_machine },
-    TemplateRule { keywords: &["calculator"],             require_all: false, generate: calculator },
-    TemplateRule { keywords: &["csv", "parse"],           require_all: true,  generate: csv_parser },
-    TemplateRule { keywords: &["rate limit", "throttle"], require_all: false, generate: rate_limiter },
-    TemplateRule { keywords: &["memoize", "cache", "decorator"], require_all: false, generate: memoize },
-    TemplateRule { keywords: &["binary tree", "bst"],     require_all: false, generate: binary_tree },
-    TemplateRule { keywords: &["hash map", "hash table", "dictionary"], require_all: false, generate: hash_map },
-    TemplateRule { keywords: &["countdown", "timer"],     require_all: false, generate: countdown },
-    TemplateRule { keywords: &["hello world"],            require_all: false, generate: hello_world },
+    TemplateRule {
+        keywords: &["sort", "list"],
+        require_all: true,
+        generate: sort_list,
+    },
+    TemplateRule {
+        keywords: &["bubble sort"],
+        require_all: false,
+        generate: bubble_sort,
+    },
+    TemplateRule {
+        keywords: &["quick sort", "quicksort"],
+        require_all: false,
+        generate: quicksort,
+    },
+    TemplateRule {
+        keywords: &["merge sort", "mergesort"],
+        require_all: false,
+        generate: merge_sort,
+    },
+    TemplateRule {
+        keywords: &["binary search"],
+        require_all: false,
+        generate: binary_search,
+    },
+    TemplateRule {
+        keywords: &["fibonacci", "fib"],
+        require_all: false,
+        generate: fibonacci,
+    },
+    TemplateRule {
+        keywords: &["factorial"],
+        require_all: false,
+        generate: factorial,
+    },
+    TemplateRule {
+        keywords: &["palindrome"],
+        require_all: false,
+        generate: palindrome,
+    },
+    TemplateRule {
+        keywords: &["fizzbuzz", "fizz buzz"],
+        require_all: false,
+        generate: fizzbuzz,
+    },
+    TemplateRule {
+        keywords: &["reverse", "string"],
+        require_all: true,
+        generate: reverse_string,
+    },
+    TemplateRule {
+        keywords: &["reverse", "list"],
+        require_all: true,
+        generate: reverse_list,
+    },
+    TemplateRule {
+        keywords: &["flatten", "list"],
+        require_all: true,
+        generate: flatten_list,
+    },
+    TemplateRule {
+        keywords: &["flatten", "nested"],
+        require_all: true,
+        generate: flatten_list,
+    },
+    TemplateRule {
+        keywords: &["two sum", "two-sum"],
+        require_all: false,
+        generate: two_sum,
+    },
+    TemplateRule {
+        keywords: &["prime", "number"],
+        require_all: true,
+        generate: is_prime,
+    },
+    TemplateRule {
+        keywords: &["gcd", "greatest common"],
+        require_all: false,
+        generate: gcd,
+    },
+    TemplateRule {
+        keywords: &["anagram"],
+        require_all: false,
+        generate: is_anagram,
+    },
+    TemplateRule {
+        keywords: &["linked list"],
+        require_all: false,
+        generate: linked_list,
+    },
+    TemplateRule {
+        keywords: &["stack"],
+        require_all: false,
+        generate: stack,
+    },
+    TemplateRule {
+        keywords: &["queue"],
+        require_all: false,
+        generate: queue,
+    },
+    TemplateRule {
+        keywords: &["matrix", "multiply"],
+        require_all: true,
+        generate: matrix_multiply,
+    },
+    TemplateRule {
+        keywords: &["depth first", "dfs"],
+        require_all: false,
+        generate: dfs,
+    },
+    TemplateRule {
+        keywords: &["breadth first", "bfs"],
+        require_all: false,
+        generate: bfs,
+    },
+    TemplateRule {
+        keywords: &["lru cache"],
+        require_all: false,
+        generate: lru_cache,
+    },
+    TemplateRule {
+        keywords: &["dedup", "duplicate"],
+        require_all: false,
+        generate: dedup,
+    },
+    TemplateRule {
+        keywords: &["web server", "http server"],
+        require_all: false,
+        generate: web_server,
+    },
+    TemplateRule {
+        keywords: &["topological sort"],
+        require_all: false,
+        generate: topological_sort,
+    },
+    TemplateRule {
+        keywords: &["debounce"],
+        require_all: false,
+        generate: debounce,
+    },
+    TemplateRule {
+        keywords: &["interval", "merge"],
+        require_all: true,
+        generate: interval_merge,
+    },
+    TemplateRule {
+        keywords: &["retry"],
+        require_all: false,
+        generate: retry_test,
+    },
+    TemplateRule {
+        keywords: &["state machine", "enum"],
+        require_all: false,
+        generate: state_machine,
+    },
+    TemplateRule {
+        keywords: &["calculator"],
+        require_all: false,
+        generate: calculator,
+    },
+    TemplateRule {
+        keywords: &["csv", "parse"],
+        require_all: true,
+        generate: csv_parser,
+    },
+    TemplateRule {
+        keywords: &["rate limit", "throttle"],
+        require_all: false,
+        generate: rate_limiter,
+    },
+    TemplateRule {
+        keywords: &["memoize", "cache", "decorator"],
+        require_all: false,
+        generate: memoize,
+    },
+    TemplateRule {
+        keywords: &["binary tree", "bst"],
+        require_all: false,
+        generate: binary_tree,
+    },
+    TemplateRule {
+        keywords: &["hash map", "hash table", "dictionary"],
+        require_all: false,
+        generate: hash_map,
+    },
+    TemplateRule {
+        keywords: &["countdown", "timer"],
+        require_all: false,
+        generate: countdown,
+    },
+    TemplateRule {
+        keywords: &["hello world"],
+        require_all: false,
+        generate: hello_world,
+    },
 ];
 
 fn match_template(text: &str, language: &str, task: &str) -> String {
@@ -129,20 +288,51 @@ fn smart_fallback(text: &str, lang: &str, _task: &str) -> String {
 }
 
 fn extract_function_name(text: &str) -> String {
-    let stop = &["a","an","the","that","which","to","for","in","of","with","and","or","my","your","me"];
-    let verbs = &["write","create","build","make","implement","generate","code","design","develop","define","craft","produce"];
+    let stop = &[
+        "a", "an", "the", "that", "which", "to", "for", "in", "of", "with", "and", "or", "my",
+        "your", "me",
+    ];
+    let verbs = &[
+        "write",
+        "create",
+        "build",
+        "make",
+        "implement",
+        "generate",
+        "code",
+        "design",
+        "develop",
+        "define",
+        "craft",
+        "produce",
+    ];
 
-    let words: Vec<&str> = text.split_whitespace()
+    let words: Vec<&str> = text
+        .split_whitespace()
         .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
         .filter(|w| !w.is_empty())
         .collect();
 
-    let meaningful: Vec<&str> = words.iter()
+    let meaningful: Vec<&str> = words
+        .iter()
         .copied()
         .filter(|w| {
             let l = w.to_ascii_lowercase();
-            !stop.contains(&l.as_str()) && !verbs.contains(&l.as_str())
-                && !["function","class","method","python","rust","javascript","typescript","program","script","code"].contains(&l.as_str())
+            !stop.contains(&l.as_str())
+                && !verbs.contains(&l.as_str())
+                && ![
+                    "function",
+                    "class",
+                    "method",
+                    "python",
+                    "rust",
+                    "javascript",
+                    "typescript",
+                    "program",
+                    "script",
+                    "code",
+                ]
+                .contains(&l.as_str())
         })
         .take(4)
         .collect();
@@ -151,7 +341,8 @@ fn extract_function_name(text: &str) -> String {
         return "solve".to_string();
     }
 
-    meaningful.iter()
+    meaningful
+        .iter()
         .map(|w| w.to_ascii_lowercase())
         .collect::<Vec<_>>()
         .join("_")
@@ -417,16 +608,33 @@ fn lru_cache(l: &str) -> String {
     }
 }
 
-fn dedup(l: &str) -> String { match l { "rust" => "use std::collections::HashSet;\n\npub fn dedup_preserve_order<T: Eq + std::hash::Hash + Clone>(items: &[T]) -> Vec<T> {\n    let mut seen = HashSet::new();\n    items.iter().filter(|i| seen.insert((*i).clone())).cloned().collect()\n}\n".into(), "javascript" => "function dedupPreserveOrder(items) {\n  return [...new Set(items)];\n}\n".into(), _ => "def dedup_preserve_order(items: list) -> list:\n    seen = set()\n    return [x for x in items if not (x in seen or seen.add(x))]\n".into() } }
+fn dedup(l: &str) -> String {
+    match l { "rust" => "use std::collections::HashSet;\n\npub fn dedup_preserve_order<T: Eq + std::hash::Hash + Clone>(items: &[T]) -> Vec<T> {\n    let mut seen = HashSet::new();\n    items.iter().filter(|i| seen.insert((*i).clone())).cloned().collect()\n}\n".into(), "javascript" => "function dedupPreserveOrder(items) {\n  return [...new Set(items)];\n}\n".into(), _ => "def dedup_preserve_order(items: list) -> list:\n    seen = set()\n    return [x for x in items if not (x in seen or seen.add(x))]\n".into() }
+}
 
-fn web_server(l: &str) -> String { match l { "rust" => "use std::io::{Read, Write};\nuse std::net::TcpListener;\n\npub fn run_server(addr: &str) -> std::io::Result<()> {\n    let listener = TcpListener::bind(addr)?;\n    for stream in listener.incoming().flatten() {\n        let mut buf = [0; 1024];\n        let _ = stream.read(&mut buf);\n        let resp = \"HTTP/1.1 200 OK\\r\\nContent-Length: 13\\r\\n\\r\\nHello, world!\";\n        let _ = (&stream).write_all(resp.as_bytes());\n    }\n    Ok(())\n}\n".into(), "javascript" => "const http = require('http');\nhttp.createServer((req, res) => {\n  res.writeHead(200, { 'Content-Type': 'text/plain' });\n  res.end('Hello, world!');\n}).listen(3000, () => console.log('listening on :3000'));\n".into(), _ => "from http.server import BaseHTTPRequestHandler, HTTPServer\n\nclass Handler(BaseHTTPRequestHandler):\n    def do_GET(self):\n        self.send_response(200)\n        self.end_headers()\n        self.wfile.write(b'Hello, world!')\n\nHTTPServer(('127.0.0.1', 8000), Handler).serve_forever()\n".into() } }
+fn web_server(l: &str) -> String {
+    match l { "rust" => "use std::io::{Read, Write};\nuse std::net::TcpListener;\n\npub fn run_server(addr: &str) -> std::io::Result<()> {\n    let listener = TcpListener::bind(addr)?;\n    for stream in listener.incoming().flatten() {\n        let mut buf = [0; 1024];\n        let _ = stream.read(&mut buf);\n        let resp = \"HTTP/1.1 200 OK\\r\\nContent-Length: 13\\r\\n\\r\\nHello, world!\";\n        let _ = (&stream).write_all(resp.as_bytes());\n    }\n    Ok(())\n}\n".into(), "javascript" => "const http = require('http');\nhttp.createServer((req, res) => {\n  res.writeHead(200, { 'Content-Type': 'text/plain' });\n  res.end('Hello, world!');\n}).listen(3000, () => console.log('listening on :3000'));\n".into(), _ => "from http.server import BaseHTTPRequestHandler, HTTPServer\n\nclass Handler(BaseHTTPRequestHandler):\n    def do_GET(self):\n        self.send_response(200)\n        self.end_headers()\n        self.wfile.write(b'Hello, world!')\n\nHTTPServer(('127.0.0.1', 8000), Handler).serve_forever()\n".into() }
+}
 
-fn topological_sort(l: &str) -> String { match l { "rust" => "use std::collections::{HashMap, VecDeque};\n\npub fn topo_sort(graph: &HashMap<String, Vec<String>>) -> Vec<String> {\n    let mut indeg: HashMap<&str, usize> = HashMap::new();\n    for (u, vs) in graph { indeg.entry(u).or_insert(0); for v in vs { *indeg.entry(v).or_insert(0) += 1; } }\n    let mut q: VecDeque<String> = indeg.iter().filter(|(_, &d)| d == 0).map(|(&k, _)| k.to_string()).collect();\n    let mut out = Vec::new();\n    while let Some(u) = q.pop_front() { out.push(u.clone()); for v in graph.get(&u).into_iter().flatten() { let d = indeg.get_mut(v.as_str()).unwrap(); *d -= 1; if *d == 0 { q.push_back(v.clone()); } } }\n    out\n}\n".into(), "javascript" => "function topoSort(graph) {\n  const indeg = new Map();\n  for (const [u, vs] of Object.entries(graph)) { if (!indeg.has(u)) indeg.set(u, 0); for (const v of vs) indeg.set(v, (indeg.get(v)||0)+1); }\n  const q = [...indeg].filter(([,d])=>d===0).map(([k])=>k), out = [];\n  while (q.length) { const u = q.shift(); out.push(u); for (const v of graph[u]||[]) { indeg.set(v, indeg.get(v)-1); if (!indeg.get(v)) q.push(v); } }\n  return out;\n}\n".into(), _ => "from collections import deque\n\ndef topo_sort(graph: dict[str, list[str]]) -> list[str]:\n    indeg: dict[str, int] = {}\n    for u, vs in graph.items():\n        indeg.setdefault(u, 0)\n        for v in vs: indeg[v] = indeg.get(v, 0) + 1\n    q = deque(k for k, d in indeg.items() if d == 0)\n    out = []\n    while q:\n        u = q.popleft(); out.append(u)\n        for v in graph.get(u, []):\n            indeg[v] -= 1\n            if indeg[v] == 0: q.append(v)\n    return out\n".into() } }
+fn topological_sort(l: &str) -> String {
+    match l { "rust" => "use std::collections::{HashMap, VecDeque};\n\npub fn topo_sort(graph: &HashMap<String, Vec<String>>) -> Vec<String> {\n    let mut indeg: HashMap<&str, usize> = HashMap::new();\n    for (u, vs) in graph { indeg.entry(u).or_insert(0); for v in vs { *indeg.entry(v).or_insert(0) += 1; } }\n    let mut q: VecDeque<String> = indeg.iter().filter(|(_, &d)| d == 0).map(|(&k, _)| k.to_string()).collect();\n    let mut out = Vec::new();\n    while let Some(u) = q.pop_front() { out.push(u.clone()); for v in graph.get(&u).into_iter().flatten() { let d = indeg.get_mut(v.as_str()).unwrap(); *d -= 1; if *d == 0 { q.push_back(v.clone()); } } }\n    out\n}\n".into(), "javascript" => "function topoSort(graph) {\n  const indeg = new Map();\n  for (const [u, vs] of Object.entries(graph)) { if (!indeg.has(u)) indeg.set(u, 0); for (const v of vs) indeg.set(v, (indeg.get(v)||0)+1); }\n  const q = [...indeg].filter(([,d])=>d===0).map(([k])=>k), out = [];\n  while (q.length) { const u = q.shift(); out.push(u); for (const v of graph[u]||[]) { indeg.set(v, indeg.get(v)-1); if (!indeg.get(v)) q.push(v); } }\n  return out;\n}\n".into(), _ => "from collections import deque\n\ndef topo_sort(graph: dict[str, list[str]]) -> list[str]:\n    indeg: dict[str, int] = {}\n    for u, vs in graph.items():\n        indeg.setdefault(u, 0)\n        for v in vs: indeg[v] = indeg.get(v, 0) + 1\n    q = deque(k for k, d in indeg.items() if d == 0)\n    out = []\n    while q:\n        u = q.popleft(); out.append(u)\n        for v in graph.get(u, []):\n            indeg[v] -= 1\n            if indeg[v] == 0: q.append(v)\n    return out\n".into() }
+}
 
-fn debounce(l: &str) -> String { if l == "javascript" { "function debounce(fn, waitMs) {\n  let timer = null;\n  return (...args) => {\n    if (timer) clearTimeout(timer);\n    timer = setTimeout(() => fn(...args), waitMs);\n  };\n}\n".into() } else { smart_fallback("debounce", l, "implement") } }
+fn debounce(l: &str) -> String {
+    if l == "javascript" {
+        "function debounce(fn, waitMs) {\n  let timer = null;\n  return (...args) => {\n    if (timer) clearTimeout(timer);\n    timer = setTimeout(() => fn(...args), waitMs);\n  };\n}\n".into()
+    } else {
+        smart_fallback("debounce", l, "implement")
+    }
+}
 
-fn interval_merge(l: &str) -> String { match l { "rust" => "pub fn merge_intervals(mut ranges: Vec<(i32,i32)>) -> Vec<(i32,i32)> {\n    ranges.sort_by_key(|r| r.0);\n    let mut out = vec![ranges[0]];\n    for (s, e) in ranges.into_iter().skip(1) {\n        let last = out.last_mut().unwrap();\n        if s <= last.1 { last.1 = last.1.max(e); } else { out.push((s,e)); }\n    }\n    out\n}\n".into(), "javascript" => "function mergeIntervals(ranges) {\n  ranges.sort((a,b)=>a[0]-b[0]);\n  const out = [ranges[0].slice()];\n  for (const [s,e] of ranges.slice(1)) {\n    const last = out.at(-1);\n    if (s <= last[1]) last[1] = Math.max(last[1], e);\n    else out.push([s,e]);\n  }\n  return out;\n}\n".into(), _ => "def merge_intervals(ranges: list[tuple[int,int]]) -> list[tuple[int,int]]:\n    ranges.sort()\n    out = [ranges[0]]\n    for s, e in ranges[1:]:\n        if s <= out[-1][1]: out[-1] = (out[-1][0], max(out[-1][1], e))\n        else: out.append((s, e))\n    return out\n".into() } }
+fn interval_merge(l: &str) -> String {
+    match l { "rust" => "pub fn merge_intervals(mut ranges: Vec<(i32,i32)>) -> Vec<(i32,i32)> {\n    ranges.sort_by_key(|r| r.0);\n    let mut out = vec![ranges[0]];\n    for (s, e) in ranges.into_iter().skip(1) {\n        let last = out.last_mut().unwrap();\n        if s <= last.1 { last.1 = last.1.max(e); } else { out.push((s,e)); }\n    }\n    out\n}\n".into(), "javascript" => "function mergeIntervals(ranges) {\n  ranges.sort((a,b)=>a[0]-b[0]);\n  const out = [ranges[0].slice()];\n  for (const [s,e] of ranges.slice(1)) {\n    const last = out.at(-1);\n    if (s <= last[1]) last[1] = Math.max(last[1], e);\n    else out.push([s,e]);\n  }\n  return out;\n}\n".into(), _ => "def merge_intervals(ranges: list[tuple[int,int]]) -> list[tuple[int,int]]:\n    ranges.sort()\n    out = [ranges[0]]\n    for s, e in ranges[1:]:\n        if s <= out[-1][1]: out[-1] = (out[-1][0], max(out[-1][1], e))\n        else: out.append((s, e))\n    return out\n".into() }
+}
 
-fn retry_test(l: &str) -> String { smart_fallback("retry with backoff test", l, "test") }
-fn state_machine(l: &str) -> String { smart_fallback("state machine with enum transitions", l, "implement") }
-
+fn retry_test(l: &str) -> String {
+    smart_fallback("retry with backoff test", l, "test")
+}
+fn state_machine(l: &str) -> String {
+    smart_fallback("state machine with enum transitions", l, "implement")
+}

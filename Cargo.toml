@@ -63,11 +63,12 @@ name = "basal_ganglia_ab"
 path = "examples/basal_ganglia_ab.rs"
 
 [features]
-default = ["native", "server", "parallel", "cli"]
+default = ["native", "server", "parallel", "cli", "brain-compression"]
 native = ["reqwest"]
 server = ["axum", "tokio", "tower-http", "async-stream", "futures-core", "uuid"]
 parallel = ["rayon"]
 training = []
+brain-compression = ["dep:spacekit-compressor"]
 # Categorical DAG + Pythagoras sentiment trainer (disable with --no-default-features for lean builds).
 categorical = []
 cli = ["clap", "indicatif", "mnist", "kiddo", "training"]
@@ -96,6 +97,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = tr
 tower-http = { version = "0.5", features = ["cors"], optional = true }
 async-stream = { version = "0.3", optional = true }
 futures-core = { version = "0.3", optional = true }
+spacekit-compressor = { path = "../../spacekit/spacekit-ai/spacekit-compressor", optional = true }
 
 # Pin to match `wasm-bindgen-cli` (schema versions must match exactly).
 wasm-bindgen = { version = "=0.2.115", optional = true }

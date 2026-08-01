@@ -232,10 +232,7 @@ impl ContextFrame {
     }
 }
 
-fn mood_from_state_and_affect(
-    state: &HashMap<String, f32>,
-    affect: &UserAffect,
-) -> MoodGradient {
+fn mood_from_state_and_affect(state: &HashMap<String, f32>, affect: &UserAffect) -> MoodGradient {
     let mood = state.get("mood").copied().unwrap_or(0.65);
     let energy = state.get("energy").copied().unwrap_or(0.55);
     let hunger = state.get("hunger").copied().unwrap_or(0.3);
@@ -249,8 +246,8 @@ fn mood_from_state_and_affect(
     arousal = arousal.clamp(0.0, 1.0);
 
     // Social: content mood + low distress → engaged; distress alone → seeking comfort.
-    let social = ((mood * 0.6) + (1.0 - affect.distress) * 0.25 + affect.excitement * 0.15)
-        .clamp(0.0, 1.0);
+    let social =
+        ((mood * 0.6) + (1.0 - affect.distress) * 0.25 + affect.excitement * 0.15).clamp(0.0, 1.0);
 
     MoodGradient {
         valence,
@@ -325,10 +322,7 @@ fn soft_intent_masses(
             scored.push((rule.intent.clone(), hit));
         }
     }
-    scored.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.dedup_by(|a, b| a.0 == b.0);
 
     let top: Vec<(String, f32)> = scored.into_iter().take(3).collect();
@@ -477,7 +471,9 @@ fn blend_ocean(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inference::inference_toml::{FragmentComposeConfig, FragmentIntentHint, FragmentIntentRuleToml};
+    use crate::inference::inference_toml::{
+        FragmentComposeConfig, FragmentIntentHint, FragmentIntentRuleToml,
+    };
 
     fn hints(intent: &str) -> FragmentIntentHint {
         FragmentIntentHint {
@@ -506,8 +502,14 @@ mod tests {
         );
         assert_eq!(frame.speech_act, SpeechAct::ComfortSeek);
         assert!(frame.mood.valence < 0.0);
-        assert!(frame.ocean_blended[4] > base[4], "N should rise under distress");
-        assert!(frame.ocean_blended[3] >= base[3], "A should not drop under comfort-seek");
+        assert!(
+            frame.ocean_blended[4] > base[4],
+            "N should rise under distress"
+        );
+        assert!(
+            frame.ocean_blended[3] >= base[3],
+            "A should not drop under comfort-seek"
+        );
     }
 
     #[test]
@@ -525,7 +527,10 @@ mod tests {
             &cfg,
         );
         assert_eq!(frame.speech_act, SpeechAct::Query);
-        assert!(frame.ocean_blended[1] > base[1], "C should rise for status report");
+        assert!(
+            frame.ocean_blended[1] > base[1],
+            "C should rise for status report"
+        );
         assert!(frame.mood.valence > 0.0);
     }
 

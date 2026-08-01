@@ -23,7 +23,9 @@ pub fn norm(a: &[f32]) -> f32 {
 pub fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
     let na = norm(a);
     let nb = norm(b);
-    if na == 0.0 || nb == 0.0 { return 0.0; }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
     dot(a, b) / (na * nb)
 }
 
@@ -63,17 +65,32 @@ impl Default for DisentanglementWeights {
 impl DisentanglementWeights {
     pub fn stage_1() -> Self {
         // Scaffold: light disentanglement, auxiliary labels carry more weight
-        Self { cosine: 0.05, ortho: 0.05, contrastive: 0.05, contrastive_margin: 0.5 }
+        Self {
+            cosine: 0.05,
+            ortho: 0.05,
+            contrastive: 0.05,
+            contrastive_margin: 0.5,
+        }
     }
 
     pub fn stage_2() -> Self {
         // Loosen: full disentanglement pressure, no auxiliary labels
-        Self { cosine: 0.15, ortho: 0.15, contrastive: 0.3, contrastive_margin: 0.3 }
+        Self {
+            cosine: 0.15,
+            ortho: 0.15,
+            contrastive: 0.3,
+            contrastive_margin: 0.3,
+        }
     }
 
     pub fn stage_3() -> Self {
         // Harden: reduced contrastive (clusters already formed), tighter ortho
-        Self { cosine: 0.1, ortho: 0.2, contrastive: 0.1, contrastive_margin: 0.2 }
+        Self {
+            cosine: 0.1,
+            ortho: 0.2,
+            contrastive: 0.1,
+            contrastive_margin: 0.2,
+        }
     }
 }
 
@@ -104,24 +121,35 @@ impl DisentanglementLoss {
         entity_batch: &[Vec<f32>],
         sentiment_labels: &[SentimentLabel],
     ) -> LossBreakdown {
-        assert_eq!(sentiment_batch.len(), entity_batch.len(),
-            "Sentiment and entity batch sizes must match");
-        assert_eq!(sentiment_batch.len(), sentiment_labels.len(),
-            "Batch size and label count must match");
+        assert_eq!(
+            sentiment_batch.len(),
+            entity_batch.len(),
+            "Sentiment and entity batch sizes must match"
+        );
+        assert_eq!(
+            sentiment_batch.len(),
+            sentiment_labels.len(),
+            "Batch size and label count must match"
+        );
 
         if sentiment_batch.is_empty() {
             return LossBreakdown::zero();
         }
 
-        let cosine   = self.cosine_term(sentiment_batch, entity_batch);
-        let ortho    = self.orthogonality_term(sentiment_batch, entity_batch);
+        let cosine = self.cosine_term(sentiment_batch, entity_batch);
+        let ortho = self.orthogonality_term(sentiment_batch, entity_batch);
         let contrast = self.contrastive_term(sentiment_batch, sentiment_labels);
 
-        let total = self.weights.cosine      * cosine
-                  + self.weights.ortho       * ortho
-                  + self.weights.contrastive * contrast;
+        let total = self.weights.cosine * cosine
+            + self.weights.ortho * ortho
+            + self.weights.contrastive * contrast;
 
-        LossBreakdown { total, cosine, ortho, contrastive: contrast }
+        LossBreakdown {
+            total,
+            cosine,
+            ortho,
+            contrastive: contrast,
+        }
     }
 
     // ── Term 1: per-sample cosine separation ─────────────────────────────────
@@ -129,7 +157,9 @@ impl DisentanglementLoss {
     /// Mean absolute cosine similarity between sentiment and entity embeddings.
     /// We want this → 0 (branches point in orthogonal directions).
     fn cosine_term(&self, s: &[Vec<f32>], e: &[Vec<f32>]) -> f32 {
-        let sum: f32 = s.iter().zip(e.iter())
+        let sum: f32 = s
+            .iter()
+            .zip(e.iter())
             .map(|(si, ei)| cosine_sim(si, ei).abs())
             .sum();
         sum / s.len() as f32
@@ -142,9 +172,7 @@ impl DisentanglementLoss {
     /// is zero, not just that each pair is roughly orthogonal.
     fn orthogonality_term(&self, s: &[Vec<f32>], e: &[Vec<f32>]) -> f32 {
         let n = s.len() as f32;
-        let sum: f32 = s.iter().zip(e.iter())
-            .map(|(si, ei)| dot(si, ei))
-            .sum();
+        let sum: f32 = s.iter().zip(e.iter()).map(|(si, ei)| dot(si, ei)).sum();
         (sum / n).abs()
     }
 
@@ -156,11 +184,7 @@ impl DisentanglementLoss {
     ///
     /// Operates over all unique pairs in the batch — O(n²) but batches are
     /// small enough that this is fine during training.
-    fn contrastive_term(
-        &self,
-        s: &[Vec<f32>],
-        labels: &[SentimentLabel],
-    ) -> f32 {
+    fn contrastive_term(&self, s: &[Vec<f32>], labels: &[SentimentLabel]) -> f32 {
         let mut loss = 0.0f32;
         let mut count = 0usize;
 
@@ -179,7 +203,11 @@ impl DisentanglementLoss {
             }
         }
 
-        if count == 0 { 0.0 } else { loss / count as f32 }
+        if count == 0 {
+            0.0
+        } else {
+            loss / count as f32
+        }
     }
 }
 
@@ -212,22 +240,24 @@ impl LossBreakdown {
 /// Result of a forward pass through the bifunctor split with dropout applied.
 #[derive(Debug)]
 pub struct BifunctorOutput<A> {
-    pub left: Option<A>,   // sentiment branch (None = dropped)
-    pub right: Option<A>,  // entity branch    (None = dropped)
+    pub left: Option<A>,  // sentiment branch (None = dropped)
+    pub right: Option<A>, // entity branch    (None = dropped)
     pub both_active: bool,
 }
 
 impl<A: Default + Clone> BifunctorOutput<A> {
     /// Return left output, falling back to right if dropped, then default.
     pub fn sentiment_or_fallback(&self) -> A {
-        self.left.clone()
+        self.left
+            .clone()
             .or_else(|| self.right.clone())
             .unwrap_or_default()
     }
 
     /// Return right output, falling back to left if dropped, then default.
     pub fn entity_or_fallback(&self) -> A {
-        self.right.clone()
+        self.right
+            .clone()
             .or_else(|| self.left.clone())
             .unwrap_or_default()
     }
@@ -242,15 +272,31 @@ pub fn cross_branch_dropout<A: Clone>(
     rng: &mut SimpleRng,
 ) -> BifunctorOutput<A> {
     if dropout_p <= 0.0 {
-        return BifunctorOutput { left: Some(left), right: Some(right), both_active: true };
+        return BifunctorOutput {
+            left: Some(left),
+            right: Some(right),
+            both_active: true,
+        };
     }
     let r = rng.gen_f32();
     if r < dropout_p / 2.0 {
-        BifunctorOutput { left: None, right: Some(right), both_active: false }
+        BifunctorOutput {
+            left: None,
+            right: Some(right),
+            both_active: false,
+        }
     } else if r < dropout_p {
-        BifunctorOutput { left: Some(left), right: None, both_active: false }
+        BifunctorOutput {
+            left: Some(left),
+            right: None,
+            both_active: false,
+        }
     } else {
-        BifunctorOutput { left: Some(left), right: Some(right), both_active: true }
+        BifunctorOutput {
+            left: Some(left),
+            right: Some(right),
+            both_active: true,
+        }
     }
 }
 
@@ -325,6 +371,9 @@ mod tests {
         let a = vec![1.0f32, 0.0, 0.0];
         let b = vec![0.0f32, 1.0, 0.0];
         let (t2, _) = combined_loss_full(0.0, &[a], &[b], &labels, &dis);
-        assert!(t2 < t1, "orthogonal branches should lower disentanglement loss");
+        assert!(
+            t2 < t1,
+            "orthogonal branches should lower disentanglement loss"
+        );
     }
 }

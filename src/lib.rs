@@ -32,58 +32,58 @@ macro_rules! maybe_par_iter_mut {
     };
 }
 
-pub mod clifford;
-pub mod cloze;
-pub mod coherence;
-/// Categorical DAG, Pythagoras-node training scaffolding, and sentiment functor experiments.
-#[cfg(feature = "categorical")]
-pub mod category;
-#[cfg(feature = "training")]
-pub mod gradient_memory;
-pub mod predictive_coder;
-pub mod drive_field;
-pub mod reflective_field;
-pub mod fragment_composer;
-pub mod basal_ganglia;
-pub mod dimension;
-pub mod growformer_lang;
-pub mod text_keywords;
-pub mod topic_graph;
-#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
-pub mod semantic_router;
-pub mod micro_brain;
-pub mod understanding;
-pub mod environment;
-#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
-pub mod mnist;
-#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
-pub mod cifar10;
-#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
-pub mod cifar_patch;
-#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
-pub mod cifar100;
-#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
-pub mod clifford_mnist;
-#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
-pub mod pathmnist;
+/// Active Inference spine: belief, Markov blanket I/O, episode loop (Phases 0–3).
+pub mod active_inference;
 #[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 pub mod arc_agi;
 #[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 pub mod arc_brain;
 #[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 pub mod arc_dsl;
-pub mod neuron;
-pub mod systems;
+pub mod basal_ganglia;
 pub mod brain;
+/// Categorical DAG, Pythagoras-node training scaffolding, and sentiment functor experiments.
+#[cfg(feature = "categorical")]
+pub mod category;
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+pub mod cifar10;
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+pub mod cifar100;
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+pub mod cifar_patch;
+pub mod clifford;
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+pub mod clifford_mnist;
+pub mod cloze;
 pub mod cmi;
 pub mod cmi_spiral;
-pub mod types;
-pub mod metacognition;
-/// Active Inference spine: belief, Markov blanket I/O, episode loop (Phases 0–3).
-pub mod active_inference;
-pub mod reasoning;
-pub mod inference;
+pub mod coherence;
+pub mod dimension;
+pub mod drive_field;
+pub mod environment;
+pub mod fragment_composer;
+#[cfg(feature = "training")]
+pub mod gradient_memory;
+pub mod growformer_lang;
 pub mod infer_log;
+pub mod inference;
+pub mod metacognition;
+pub mod micro_brain;
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+pub mod mnist;
+pub mod neuron;
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+pub mod pathmnist;
+pub mod predictive_coder;
+pub mod reasoning;
+pub mod reflective_field;
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+pub mod semantic_router;
+pub mod systems;
+pub mod text_keywords;
+pub mod topic_graph;
+pub mod types;
+pub mod understanding;
 
 /// Print inference diagnostics only when `infer_log::infer_trace_enabled()` (see CLI `--verbose` / quiet `--infer`).
 #[macro_export]
@@ -94,11 +94,11 @@ macro_rules! infer_trace {
         }
     };
 }
-#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
-pub mod project_gf;
 /// Full Growformer train / merge / infer CLI (same as the `growformer` binary). Used by SpaceKit and tests.
 #[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 mod cli_impl;
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+pub mod project_gf;
 
 /// Entitlement gate for embedded distribution (SpaceKit CLI).
 #[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
@@ -136,13 +136,13 @@ where
     entitlement::clear_context();
     result
 }
-pub mod service;
 pub mod runtime;
+pub mod service;
 pub mod spectral;
 pub mod text_autoencoder;
-#[cfg(feature = "training")]
-pub mod training_objectives;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tools_builtin;
+#[cfg(feature = "training")]
+pub mod training_objectives;
 #[cfg(feature = "wasm-bindgen")]
 pub mod wasm;

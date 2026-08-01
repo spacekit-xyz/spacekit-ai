@@ -1,10 +1,12 @@
-use std::path::Path;
 use std::collections::HashMap;
+use std::path::Path;
 
 use rand::Rng;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
-use crate::arc_agi::{load_arc_tasks, ArcExample, ArcTask, Grid, NUM_COLORS, encode_grid, solve_task, flow_diagnostic};
+use crate::arc_agi::{
+    encode_grid, flow_diagnostic, load_arc_tasks, solve_task, ArcExample, ArcTask, Grid, NUM_COLORS,
+};
 use crate::arc_dsl::astar_dsl_solve;
 use crate::clifford::Multivector;
 use crate::dimension::language::LanguageRuntime;
@@ -22,7 +24,7 @@ fn relative_position_vector(dr: isize, dc: isize) -> Multivector {
     let u = (dr as f32 + HALF_K as f32) / (NEIGHBORHOOD as f32 - 1.0);
     let v = (dc as f32 + HALF_K as f32) / (NEIGHBORHOOD as f32 - 1.0);
     let pv = [
-        0.0,                            // e₀ = 0: no timelike
+        0.0, // e₀ = 0: no timelike
         (pi * u).sin(),
         (pi * u).cos(),
         (pi * v).sin(),
@@ -33,7 +35,9 @@ fn relative_position_vector(dr: isize, dc: isize) -> Multivector {
     ];
     let norm: f32 = pv.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
     let mut normed = [0.0f32; 8];
-    for i in 0..8 { normed[i] = pv[i] / norm; }
+    for i in 0..8 {
+        normed[i] = pv[i] / norm;
+    }
     Multivector::vector(&normed)
 }
 
@@ -51,7 +55,9 @@ fn color_vector_full(color: u8) -> Multivector {
             v[0] = 1.0;
             v[(c - 1) as usize] += 0.3;
             let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-            for x in v.iter_mut() { *x /= norm; }
+            for x in v.iter_mut() {
+                *x /= norm;
+            }
             Multivector::vector(&v)
         }
         9 => {
@@ -60,7 +66,9 @@ fn color_vector_full(color: u8) -> Multivector {
             v[1] = 0.15;
             v[2] = 0.15;
             let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-            for x in v.iter_mut() { *x /= norm; }
+            for x in v.iter_mut() {
+                *x /= norm;
+            }
             Multivector::vector(&v)
         }
         _ => Multivector::zero(),
@@ -73,18 +81,21 @@ fn encode_cell_neighborhood(grid: &Grid, r: usize, c: usize) -> Vec<f32> {
         for dc in -(HALF_K as isize)..=(HALF_K as isize) {
             let gr = r as isize + dr;
             let gc = c as isize + dc;
-            let color = if gr >= 0 && gr < grid.height as isize && gc >= 0 && gc < grid.width as isize {
-                grid.cells[gr as usize][gc as usize]
-            } else {
-                0
-            };
+            let color =
+                if gr >= 0 && gr < grid.height as isize && gc >= 0 && gc < grid.width as isize {
+                    grid.cells[gr as usize][gc as usize]
+                } else {
+                    0
+                };
             let pos = relative_position_vector(dr, dc);
             let col = color_vector_full(color);
             mv = mv.add(&pos.geo(&col));
         }
     }
     let n = mv.component_norm();
-    if n > 1e-8 { mv = mv.scale(1.0 / n); }
+    if n > 1e-8 {
+        mv = mv.scale(1.0 / n);
+    }
     mv.components.to_vec()
 }
 
@@ -108,43 +119,68 @@ fn task_to_text(task: &ArcTask) -> String {
 
     let mut in_colors = [0u32; NUM_COLORS];
     for row in &ex.input.cells {
-        for &c in row { in_colors[c as usize] += 1; }
+        for &c in row {
+            in_colors[c as usize] += 1;
+        }
     }
     let mut out_colors = [0u32; NUM_COLORS];
     for row in &ex.output.cells {
-        for &c in row { out_colors[c as usize] += 1; }
+        for &c in row {
+            out_colors[c as usize] += 1;
+        }
     }
     let in_distinct = in_colors.iter().filter(|&&c| c > 0).count();
     let out_distinct = out_colors.iter().filter(|&&c| c > 0).count();
     let total = (ih * iw) as f32;
 
     let dim_relation = if ih == oh && iw == ow {
-        let changed = (0..ih).flat_map(|r| (0..iw).map(move |c| (r, c)))
+        let changed = (0..ih)
+            .flat_map(|r| (0..iw).map(move |c| (r, c)))
             .filter(|&(r, c)| ex.input.cells[r][c] != ex.output.cells[r][c])
             .count();
-        format!("same dimensions, {:.0}% cells changed", changed as f32 / total * 100.0)
+        format!(
+            "same dimensions, {:.0}% cells changed",
+            changed as f32 / total * 100.0
+        )
     } else if oh > ih && ow > iw {
         let rh = oh as f32 / ih as f32;
         let rw = ow as f32 / iw as f32;
         if (rh - rw).abs() < 0.01 {
             format!("output scaled up {:.1}x uniformly", rh)
         } else {
-            format!("output grows {}x{} to {}x{}, ratio {:.1}h {:.1}w", ih, iw, oh, ow, rh, rw)
+            format!(
+                "output grows {}x{} to {}x{}, ratio {:.1}h {:.1}w",
+                ih, iw, oh, ow, rh, rw
+            )
         }
     } else if oh < ih && ow < iw {
-        format!("output shrinks {}x{} to {}x{}, extraction or summary", ih, iw, oh, ow)
+        format!(
+            "output shrinks {}x{} to {}x{}, extraction or summary",
+            ih, iw, oh, ow
+        )
     } else {
         format!("asymmetric resize {}x{} to {}x{}", ih, iw, oh, ow)
     };
 
-    let bg = in_colors.iter().enumerate().max_by_key(|(_, &c)| c).map(|(i, _)| i).unwrap_or(0);
+    let bg = in_colors
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, &c)| c)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
     let bg_frac = in_colors[bg] as f32 / total;
 
     format!(
         "grid transformation: input {}x{} with {} colors (bg color {} at {:.0}%), \
          output {}x{} with {} colors. {} examples. {}",
-        ih, iw, in_distinct, bg, bg_frac * 100.0,
-        oh, ow, out_distinct,
+        ih,
+        iw,
+        in_distinct,
+        bg,
+        bg_frac * 100.0,
+        oh,
+        ow,
+        out_distinct,
         task.train.len(),
         dim_relation,
     )
@@ -153,9 +189,8 @@ fn task_to_text(task: &ArcTask) -> String {
 fn encode_task(task: &ArcTask, lang_rt: Option<&LanguageRuntime>) -> Vec<f32> {
     let bridge_dim = 128;
     let raw_dim = 768;
-    let mut features = Vec::with_capacity(
-        raw_dim + bridge_dim + 256 * 2 + 32 + MONOPOLE_TASK_ENCODING_EXTRA_DIM,
-    );
+    let mut features =
+        Vec::with_capacity(raw_dim + bridge_dim + 256 * 2 + 32 + MONOPOLE_TASK_ENCODING_EXTRA_DIM);
 
     // Path B: Language bridge (cross-domain knowledge from brain.bin)
     // Include BOTH raw 768d embedding and 128d bridged to minimize information loss
@@ -195,12 +230,18 @@ fn encode_task(task: &ArcTask, lang_rt: Option<&LanguageRuntime>) -> Vec<f32> {
     features.push(ow / 30.0);
     features.push(if ih > 0.0 { oh / ih } else { 0.0 });
     features.push(if iw > 0.0 { ow / iw } else { 0.0 });
-    features.push(if (ih - oh).abs() < 0.5 && (iw - ow).abs() < 0.5 { 1.0 } else { 0.0 });
+    features.push(if (ih - oh).abs() < 0.5 && (iw - ow).abs() < 0.5 {
+        1.0
+    } else {
+        0.0
+    });
 
     let mut color_counts = [0u32; NUM_COLORS];
     let total_cells = (ex.input.height * ex.input.width) as f32;
     for row in &ex.input.cells {
-        for &c in row { color_counts[c as usize] += 1; }
+        for &c in row {
+            color_counts[c as usize] += 1;
+        }
     }
     for c in 0..NUM_COLORS {
         features.push(color_counts[c] as f32 / total_cells.max(1.0));
@@ -209,7 +250,9 @@ fn encode_task(task: &ArcTask, lang_rt: Option<&LanguageRuntime>) -> Vec<f32> {
     let in_colors = color_counts.iter().filter(|&&c| c > 0).count() as f32 / NUM_COLORS as f32;
     let mut out_counts = [0u32; NUM_COLORS];
     for row in &ex.output.cells {
-        for &c in row { out_counts[c as usize] += 1; }
+        for &c in row {
+            out_counts[c as usize] += 1;
+        }
     }
     let out_colors = out_counts.iter().filter(|&&c| c > 0).count() as f32 / NUM_COLORS as f32;
     features.push(in_colors);
@@ -219,7 +262,9 @@ fn encode_task(task: &ArcTask, lang_rt: Option<&LanguageRuntime>) -> Vec<f32> {
         let mut changed = 0u32;
         for r in 0..ex.input.height {
             for c in 0..ex.input.width {
-                if ex.input.cells[r][c] != ex.output.cells[r][c] { changed += 1; }
+                if ex.input.cells[r][c] != ex.output.cells[r][c] {
+                    changed += 1;
+                }
             }
         }
         features.push(changed as f32 / total_cells.max(1.0));
@@ -229,7 +274,12 @@ fn encode_task(task: &ArcTask, lang_rt: Option<&LanguageRuntime>) -> Vec<f32> {
 
     features.push(task.train.len() as f32 / 5.0);
 
-    let bg = color_counts.iter().enumerate().max_by_key(|(_, &c)| c).map(|(i, _)| i).unwrap_or(0);
+    let bg = color_counts
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, &c)| c)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
     features.push(color_counts[bg] as f32 / total_cells.max(1.0));
 
     // Path C: Flow diagnostic features (Schrödinger continuity)
@@ -239,8 +289,11 @@ fn encode_task(task: &ArcTask, lang_rt: Option<&LanguageRuntime>) -> Vec<f32> {
     features.push(flow.spatial_bias());
     features.push(if flow.converging { 1.0 } else { 0.0 });
     features.push(if flow.is_degenerate() { 1.0 } else { 0.0 });
-    let mean_mag = if flow.flow_magnitudes.is_empty() { 0.0 }
-        else { flow.flow_magnitudes.iter().sum::<f32>() / flow.flow_magnitudes.len() as f32 };
+    let mean_mag = if flow.flow_magnitudes.is_empty() {
+        0.0
+    } else {
+        flow.flow_magnitudes.iter().sum::<f32>() / flow.flow_magnitudes.len() as f32
+    };
     features.push(mean_mag);
 
     // Path D: Global monopole / Wilson plaquette field (first train pair)
@@ -294,7 +347,13 @@ fn encode_cell_rich(input: &Grid, out_r: usize, out_c: usize, oh: usize, ow: usi
 }
 
 /// SHRINK: encode the entire input block that maps to this output cell.
-fn encode_cell_shrink_block(input: &Grid, out_r: usize, out_c: usize, oh: usize, ow: usize) -> Vec<f32> {
+fn encode_cell_shrink_block(
+    input: &Grid,
+    out_r: usize,
+    out_c: usize,
+    oh: usize,
+    ow: usize,
+) -> Vec<f32> {
     let ih = input.height;
     let iw = input.width;
     let bh = ih / oh;
@@ -318,7 +377,9 @@ fn encode_cell_shrink_block(input: &Grid, out_r: usize, out_c: usize, oh: usize,
     }
 
     let n = block_mv.component_norm();
-    if n > 1e-8 { block_mv = block_mv.scale(1.0 / n); }
+    if n > 1e-8 {
+        block_mv = block_mv.scale(1.0 / n);
+    }
 
     let mut features = Vec::with_capacity(NUM_COLORS * 2 + 256 + 16);
 
@@ -327,7 +388,12 @@ fn encode_cell_shrink_block(input: &Grid, out_r: usize, out_c: usize, oh: usize,
         features.push(hist[c] as f32 / total.max(1) as f32);
     }
     // Dominant color one-hot
-    let dominant = hist.iter().enumerate().max_by_key(|(_, &v)| v).map(|(i, _)| i).unwrap_or(0);
+    let dominant = hist
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, &v)| v)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
     for c in 0..NUM_COLORS {
         features.push(if c == dominant { 1.0 } else { 0.0 });
     }
@@ -342,7 +408,9 @@ fn encode_cell_shrink_block(input: &Grid, out_r: usize, out_c: usize, oh: usize,
     // Neighbor blocks: encode the dominant color of each neighboring output cell's block
     for dr in -1i32..=1 {
         for dc in -1i32..=1 {
-            if dr == 0 && dc == 0 { continue; }
+            if dr == 0 && dc == 0 {
+                continue;
+            }
             let nr = out_r as i32 + dr;
             let nc = out_c as i32 + dc;
             if nr >= 0 && nr < oh as i32 && nc >= 0 && nc < ow as i32 {
@@ -356,7 +424,12 @@ fn encode_cell_shrink_block(input: &Grid, out_r: usize, out_c: usize, oh: usize,
                         nhist[input.cells[r][c] as usize] += 1;
                     }
                 }
-                let ndom = nhist.iter().enumerate().max_by_key(|(_, &v)| v).map(|(i, _)| i).unwrap_or(0);
+                let ndom = nhist
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, &v)| v)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
                 features.push(ndom as f32 / (NUM_COLORS - 1).max(1) as f32);
             } else {
                 features.push(-1.0);
@@ -376,7 +449,13 @@ fn encode_cell_shrink_block(input: &Grid, out_r: usize, out_c: usize, oh: usize,
 }
 
 /// GROW: encode the source input cell + sub-block position within expanded cell.
-fn encode_cell_grow_subcell(input: &Grid, out_r: usize, out_c: usize, oh: usize, ow: usize) -> Vec<f32> {
+fn encode_cell_grow_subcell(
+    input: &Grid,
+    out_r: usize,
+    out_c: usize,
+    oh: usize,
+    ow: usize,
+) -> Vec<f32> {
     let ih = input.height;
     let iw = input.width;
     let sh = oh / ih;
@@ -407,9 +486,21 @@ fn encode_cell_grow_subcell(input: &Grid, out_r: usize, out_c: usize, oh: usize,
     features.push(if sub_r == sh - 1 { 1.0 } else { 0.0 }); // bottom edge
     features.push(if sub_c == sw - 1 { 1.0 } else { 0.0 }); // right edge
     features.push(if sub_r == 0 && sub_c == 0 { 1.0 } else { 0.0 }); // corner: TL
-    features.push(if sub_r == 0 && sub_c == sw - 1 { 1.0 } else { 0.0 }); // corner: TR
-    features.push(if sub_r == sh - 1 && sub_c == 0 { 1.0 } else { 0.0 }); // corner: BL
-    features.push(if sub_r == sh - 1 && sub_c == sw - 1 { 1.0 } else { 0.0 }); // corner: BR
+    features.push(if sub_r == 0 && sub_c == sw - 1 {
+        1.0
+    } else {
+        0.0
+    }); // corner: TR
+    features.push(if sub_r == sh - 1 && sub_c == 0 {
+        1.0
+    } else {
+        0.0
+    }); // corner: BL
+    features.push(if sub_r == sh - 1 && sub_c == sw - 1 {
+        1.0
+    } else {
+        0.0
+    }); // corner: BR
 
     // Scale factors
     features.push(sh as f32 / 4.0);
@@ -422,13 +513,27 @@ fn encode_cell_grow_subcell(input: &Grid, out_r: usize, out_c: usize, oh: usize,
 }
 
 /// ARBITRARY dim change: fractional mapping with full neighborhood + positional context.
-fn encode_cell_fractional(input: &Grid, out_r: usize, out_c: usize, oh: usize, ow: usize) -> Vec<f32> {
+fn encode_cell_fractional(
+    input: &Grid,
+    out_r: usize,
+    out_c: usize,
+    oh: usize,
+    ow: usize,
+) -> Vec<f32> {
     let ih = input.height;
     let iw = input.width;
 
     // Fractional mapping to input space
-    let fr = if oh > 1 { out_r as f32 * (ih - 1) as f32 / (oh - 1).max(1) as f32 } else { ih as f32 / 2.0 };
-    let fc = if ow > 1 { out_c as f32 * (iw - 1) as f32 / (ow - 1).max(1) as f32 } else { iw as f32 / 2.0 };
+    let fr = if oh > 1 {
+        out_r as f32 * (ih - 1) as f32 / (oh - 1).max(1) as f32
+    } else {
+        ih as f32 / 2.0
+    };
+    let fc = if ow > 1 {
+        out_c as f32 * (iw - 1) as f32 / (ow - 1).max(1) as f32
+    } else {
+        iw as f32 / 2.0
+    };
     let ir = (fr.round() as usize).min(ih - 1);
     let ic = (fc.round() as usize).min(iw - 1);
 
@@ -441,14 +546,18 @@ fn encode_cell_fractional(input: &Grid, out_r: usize, out_c: usize, oh: usize, o
             let gc = ic as isize + dc;
             let color = if gr >= 0 && gr < ih as isize && gc >= 0 && gc < iw as isize {
                 input.cells[gr as usize][gc as usize]
-            } else { 0 };
+            } else {
+                0
+            };
             let pos = relative_position_vector(dr, dc);
             let col = color_vector_full(color);
             mv = mv.add(&pos.geo(&col));
         }
     }
     let n = mv.component_norm();
-    if n > 1e-8 { mv = mv.scale(1.0 / n); }
+    if n > 1e-8 {
+        mv = mv.scale(1.0 / n);
+    }
 
     let mut features = Vec::with_capacity(256 + NUM_COLORS + 16);
     features.extend_from_slice(&mv.components);
@@ -475,11 +584,14 @@ fn encode_cell_fractional(input: &Grid, out_r: usize, out_c: usize, oh: usize, o
 
 /// Train one-pass cell Paramecium on `task.train`, then predict for each `predict_on` example.
 fn solve_task_onepass_for_examples(task: &ArcTask, predict_on: &[ArcExample]) -> Option<Vec<Grid>> {
-    if task.train.is_empty() || predict_on.is_empty() { return None; }
+    if task.train.is_empty() || predict_on.is_empty() {
+        return None;
+    }
 
-    let same_dim = task.train.iter().all(|ex|
-        ex.input.height == ex.output.height && ex.input.width == ex.output.width
-    );
+    let same_dim = task
+        .train
+        .iter()
+        .all(|ex| ex.input.height == ex.output.height && ex.input.width == ex.output.width);
 
     let class_names: Vec<String> = (0..NUM_COLORS).map(|c| format!("c{}", c)).collect();
     let mut embeddings: Vec<Vec<f32>> = Vec::new();
@@ -500,7 +612,9 @@ fn solve_task_onepass_for_examples(task: &ArcTask, predict_on: &[ArcExample]) ->
         }
     }
 
-    if embeddings.is_empty() { return None; }
+    if embeddings.is_empty() {
+        return None;
+    }
 
     let max_len = embeddings.iter().map(|e| e.len()).max().unwrap_or(0);
     for emb in &mut embeddings {
@@ -508,7 +622,8 @@ fn solve_task_onepass_for_examples(task: &ArcTask, predict_on: &[ArcExample]) ->
     }
 
     let emb_dim = max_len;
-    let sample_refs: Vec<(&[f32], usize)> = embeddings.iter()
+    let sample_refs: Vec<(&[f32], usize)> = embeddings
+        .iter()
         .zip(targets.iter())
         .map(|(e, &t)| (e.as_slice(), t))
         .collect();
@@ -521,34 +636,43 @@ fn solve_task_onepass_for_examples(task: &ArcTask, predict_on: &[ArcExample]) ->
         &sample_refs,
     );
 
-    let results: Vec<Grid> = predict_on.iter().map(|test_ex| {
-        let oh = test_ex.output.height;
-        let ow = test_ex.output.width;
-        let pred_h = if same_dim { test_ex.input.height } else { oh };
-        let pred_w = if same_dim { test_ex.input.width } else { ow };
+    let results: Vec<Grid> = predict_on
+        .iter()
+        .map(|test_ex| {
+            let oh = test_ex.output.height;
+            let ow = test_ex.output.width;
+            let pred_h = if same_dim { test_ex.input.height } else { oh };
+            let pred_w = if same_dim { test_ex.input.width } else { ow };
 
-        let mut cells = vec![vec![0u8; pred_w]; pred_h];
-        let mut brain_local = brain.clone();
-        for r in 0..pred_h {
-            for c in 0..pred_w {
-                let mut emb = if same_dim {
-                    encode_cell_neighborhood(&test_ex.input, r, c)
-                } else {
-                    encode_cell_rich(&test_ex.input, r, c, pred_h, pred_w)
-                };
-                emb.resize(emb_dim, 0.0);
-                let (cls, _conf, _logits) = brain_local.predict(&emb);
-                cells[r][c] = cls as u8;
+            let mut cells = vec![vec![0u8; pred_w]; pred_h];
+            let mut brain_local = brain.clone();
+            for r in 0..pred_h {
+                for c in 0..pred_w {
+                    let mut emb = if same_dim {
+                        encode_cell_neighborhood(&test_ex.input, r, c)
+                    } else {
+                        encode_cell_rich(&test_ex.input, r, c, pred_h, pred_w)
+                    };
+                    emb.resize(emb_dim, 0.0);
+                    let (cls, _conf, _logits) = brain_local.predict(&emb);
+                    cells[r][c] = cls as u8;
+                }
             }
-        }
-        Grid { cells, height: pred_h, width: pred_w }
-    }).collect();
+            Grid {
+                cells,
+                height: pred_h,
+                width: pred_w,
+            }
+        })
+        .collect();
 
     Some(results)
 }
 
 fn solve_task_onepass(task: &ArcTask) -> Option<Vec<Grid>> {
-    if task.test.is_empty() { return None; }
+    if task.test.is_empty() {
+        return None;
+    }
     solve_task_onepass_for_examples(task, &task.test)
 }
 
@@ -570,8 +694,16 @@ fn solve_task_onepass(task: &ArcTask) -> Option<Vec<Grid>> {
 /// Position spinor for a cell, normalized by grid dims. Pure spatial, no color.
 fn grid_position_spinor(r: usize, c: usize, h: usize, w: usize) -> Multivector {
     let pi = std::f32::consts::PI;
-    let u = if h > 1 { r as f32 / (h - 1) as f32 } else { 0.5 };
-    let v = if w > 1 { c as f32 / (w - 1) as f32 } else { 0.5 };
+    let u = if h > 1 {
+        r as f32 / (h - 1) as f32
+    } else {
+        0.5
+    };
+    let v = if w > 1 {
+        c as f32 / (w - 1) as f32
+    } else {
+        0.5
+    };
     let pv = [
         0.0,
         (pi * u).sin(),
@@ -584,7 +716,9 @@ fn grid_position_spinor(r: usize, c: usize, h: usize, w: usize) -> Multivector {
     ];
     let norm: f32 = pv.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
     let mut normed = [0.0f32; 8];
-    for i in 0..8 { normed[i] = pv[i] / norm; }
+    for i in 0..8 {
+        normed[i] = pv[i] / norm;
+    }
     Multivector::vector(&normed)
 }
 
@@ -759,7 +893,11 @@ pub fn monopole_field_features(grid: &Grid) -> Vec<f32> {
     out[22] = spread_r;
     out[23] = spread_c;
     out[24] = (nf + 1.0).ln() / 6.0;
-    out[25] = if max_abs > 1e-12 { var_q / max_abs } else { 0.0 };
+    out[25] = if max_abs > 1e-12 {
+        var_q / max_abs
+    } else {
+        0.0
+    };
     out
 }
 
@@ -793,18 +931,36 @@ pub fn cell_monopole_features(grid: &Grid, r: usize, c: usize) -> Vec<f32> {
 // ─── Particle topology: per-color spatial structure of the entire grid ────────
 
 /// Flood-fill to measure a connected component. Returns component size.
-fn flood_fill_size(grid: &Grid, visited: &mut Vec<Vec<bool>>, sr: usize, sc: usize, color: u8) -> usize {
+fn flood_fill_size(
+    grid: &Grid,
+    visited: &mut Vec<Vec<bool>>,
+    sr: usize,
+    sc: usize,
+    color: u8,
+) -> usize {
     let mut stack = vec![(sr, sc)];
     let mut size = 0;
     while let Some((r, c)) = stack.pop() {
-        if r >= grid.height || c >= grid.width { continue; }
-        if visited[r][c] || grid.cells[r][c] != color { continue; }
+        if r >= grid.height || c >= grid.width {
+            continue;
+        }
+        if visited[r][c] || grid.cells[r][c] != color {
+            continue;
+        }
         visited[r][c] = true;
         size += 1;
-        if r > 0 { stack.push((r - 1, c)); }
-        if r + 1 < grid.height { stack.push((r + 1, c)); }
-        if c > 0 { stack.push((r, c - 1)); }
-        if c + 1 < grid.width { stack.push((r, c + 1)); }
+        if r > 0 {
+            stack.push((r - 1, c));
+        }
+        if r + 1 < grid.height {
+            stack.push((r + 1, c));
+        }
+        if c > 0 {
+            stack.push((r, c - 1));
+        }
+        if c + 1 < grid.width {
+            stack.push((r, c + 1));
+        }
     }
     size
 }
@@ -840,10 +996,18 @@ fn grid_topology_features(grid: &Grid) -> Vec<f32> {
                     sum_c += cf;
                     sum_r2 += rf * rf;
                     sum_c2 += cf * cf;
-                    if r < min_r { min_r = r; }
-                    if r > max_r { max_r = r; }
-                    if c < min_c { min_c = c; }
-                    if c > max_c { max_c = c; }
+                    if r < min_r {
+                        min_r = r;
+                    }
+                    if r > max_r {
+                        max_r = r;
+                    }
+                    if c < min_c {
+                        min_c = c;
+                    }
+                    if c > max_c {
+                        max_c = c;
+                    }
                 }
             }
         }
@@ -861,7 +1025,7 @@ fn grid_topology_features(grid: &Grid) -> Vec<f32> {
             features.push(centroid_c);
             features.push(var_r.sqrt()); // spread_r
             features.push(var_c.sqrt()); // spread_c
-            // Bbox span (normalized)
+                                         // Bbox span (normalized)
             features.push((max_r - min_r) as f32 / h.max(1) as f32);
             features.push((max_c - min_c) as f32 / w.max(1) as f32);
         } else {
@@ -882,12 +1046,18 @@ fn grid_topology_features(grid: &Grid) -> Vec<f32> {
                 if grid.cells[r][c] == color && !visited[r][c] {
                     let sz = flood_fill_size(grid, &mut visited, r, c, color);
                     n_components += 1;
-                    if sz > largest_component { largest_component = sz; }
+                    if sz > largest_component {
+                        largest_component = sz;
+                    }
                 }
             }
         }
         features.push(n_components as f32 / 10.0);
-        let largest_frac = if count > 0 { largest_component as f32 / count as f32 } else { 0.0 };
+        let largest_frac = if count > 0 {
+            largest_component as f32 / count as f32
+        } else {
+            0.0
+        };
         features.push(largest_frac);
     }
 
@@ -898,11 +1068,17 @@ fn grid_topology_features(grid: &Grid) -> Vec<f32> {
             let color = grid.cells[r][c] as usize;
             if r + 1 < h {
                 let nb = grid.cells[r + 1][c] as usize;
-                if nb != color { adj_matrix[color][nb] = true; adj_matrix[nb][color] = true; }
+                if nb != color {
+                    adj_matrix[color][nb] = true;
+                    adj_matrix[nb][color] = true;
+                }
             }
             if c + 1 < w {
                 let nb = grid.cells[r][c + 1] as usize;
-                if nb != color { adj_matrix[color][nb] = true; adj_matrix[nb][color] = true; }
+                if nb != color {
+                    adj_matrix[color][nb] = true;
+                    adj_matrix[nb][color] = true;
+                }
             }
         }
     }
@@ -914,15 +1090,16 @@ fn grid_topology_features(grid: &Grid) -> Vec<f32> {
     // Grid-level symmetry
     let h_sym = (0..h).all(|r| (0..w).all(|c| grid.cells[r][c] == grid.cells[r][w - 1 - c]));
     let v_sym = (0..h).all(|r| (0..w).all(|c| grid.cells[r][c] == grid.cells[h - 1 - r][c]));
-    let rot_sym = h == w && (0..h).all(|r| (0..w).all(|c| grid.cells[r][c] == grid.cells[w - 1 - c][r]));
+    let rot_sym =
+        h == w && (0..h).all(|r| (0..w).all(|c| grid.cells[r][c] == grid.cells[w - 1 - c][r]));
     features.push(if h_sym { 1.0 } else { 0.0 });
     features.push(if v_sym { 1.0 } else { 0.0 });
     features.push(if rot_sym { 1.0 } else { 0.0 });
 
     // Distinct color count
-    let distinct = (0..NUM_COLORS as u8).filter(|&c|
-        grid.cells.iter().any(|row| row.contains(&c))
-    ).count();
+    let distinct = (0..NUM_COLORS as u8)
+        .filter(|&c| grid.cells.iter().any(|row| row.contains(&c)))
+        .count();
     features.push(distinct as f32 / NUM_COLORS as f32);
 
     features
@@ -935,11 +1112,35 @@ fn cell_charges(grid: &Grid, r: usize, c: usize) -> (f32, f32) {
     let w = grid.width;
     let mut same = 0u8;
     let mut diff = 0u8;
-    if r > 0     { if grid.cells[r-1][c] == color { same += 1; } else { diff += 1; } }
-    if r+1 < h   { if grid.cells[r+1][c] == color { same += 1; } else { diff += 1; } }
-    if c > 0     { if grid.cells[r][c-1] == color { same += 1; } else { diff += 1; } }
-    if c+1 < w   { if grid.cells[r][c+1] == color { same += 1; } else { diff += 1; } }
-    let boundary = if diff > 0 { 1.0 } else { -1.0 };  // +1 boundary, -1 interior
+    if r > 0 {
+        if grid.cells[r - 1][c] == color {
+            same += 1;
+        } else {
+            diff += 1;
+        }
+    }
+    if r + 1 < h {
+        if grid.cells[r + 1][c] == color {
+            same += 1;
+        } else {
+            diff += 1;
+        }
+    }
+    if c > 0 {
+        if grid.cells[r][c - 1] == color {
+            same += 1;
+        } else {
+            diff += 1;
+        }
+    }
+    if c + 1 < w {
+        if grid.cells[r][c + 1] == color {
+            same += 1;
+        } else {
+            diff += 1;
+        }
+    }
+    let boundary = if diff > 0 { 1.0 } else { -1.0 }; // +1 boundary, -1 interior
     let connectivity = same as f32 / 4.0;
     (boundary, connectivity)
 }
@@ -955,15 +1156,37 @@ struct ColorBlockField {
     connectivity_sum: [f32; NUM_COLORS],
 }
 
-fn color_layer_block_charged(grid: &Grid, r0: usize, c0: usize, bh: usize, bw: usize) -> ColorBlockField {
-    let mut accums = [Multivector::zero(), Multivector::zero(), Multivector::zero(),
-                      Multivector::zero(), Multivector::zero(), Multivector::zero(),
-                      Multivector::zero(), Multivector::zero(), Multivector::zero(),
-                      Multivector::zero()];
-    let mut charged_accums = [Multivector::zero(), Multivector::zero(), Multivector::zero(),
-                              Multivector::zero(), Multivector::zero(), Multivector::zero(),
-                              Multivector::zero(), Multivector::zero(), Multivector::zero(),
-                              Multivector::zero()];
+fn color_layer_block_charged(
+    grid: &Grid,
+    r0: usize,
+    c0: usize,
+    bh: usize,
+    bw: usize,
+) -> ColorBlockField {
+    let mut accums = [
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+    ];
+    let mut charged_accums = [
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+    ];
     let mut counts = [0u32; NUM_COLORS];
     let mut boundary_counts = [0u32; NUM_COLORS];
     let mut conn_sums = [0.0f32; NUM_COLORS];
@@ -979,7 +1202,9 @@ fn color_layer_block_charged(grid: &Grid, r0: usize, c0: usize, bh: usize, bw: u
                 accums[color] = accums[color].add(&pos);
                 charged_accums[color] = charged_accums[color].add(&pos.scale(boundary_charge));
                 counts[color] += 1;
-                if boundary_charge > 0.0 { boundary_counts[color] += 1; }
+                if boundary_charge > 0.0 {
+                    boundary_counts[color] += 1;
+                }
                 conn_sums[color] += connectivity;
             }
         }
@@ -994,24 +1219,51 @@ fn color_layer_block_charged(grid: &Grid, r0: usize, c0: usize, bh: usize, bw: u
         }
     }
 
-    ColorBlockField { strength, charged_strength, count: counts, boundary_count: boundary_counts, connectivity_sum: conn_sums }
+    ColorBlockField {
+        strength,
+        charged_strength,
+        count: counts,
+        boundary_count: boundary_counts,
+        connectivity_sum: conn_sums,
+    }
 }
 
 /// Per-color charged field in a neighborhood.
-fn color_layer_neighborhood_charged(grid: &Grid, cr: usize, cc: usize, radius: usize) -> ColorBlockField {
+fn color_layer_neighborhood_charged(
+    grid: &Grid,
+    cr: usize,
+    cc: usize,
+    radius: usize,
+) -> ColorBlockField {
     let r_start = if cr >= radius { cr - radius } else { 0 };
     let c_start = if cc >= radius { cc - radius } else { 0 };
     let r_end = (cr + radius + 1).min(grid.height);
     let c_end = (cc + radius + 1).min(grid.width);
 
-    let mut accums = [Multivector::zero(), Multivector::zero(), Multivector::zero(),
-                      Multivector::zero(), Multivector::zero(), Multivector::zero(),
-                      Multivector::zero(), Multivector::zero(), Multivector::zero(),
-                      Multivector::zero()];
-    let mut charged_accums = [Multivector::zero(), Multivector::zero(), Multivector::zero(),
-                              Multivector::zero(), Multivector::zero(), Multivector::zero(),
-                              Multivector::zero(), Multivector::zero(), Multivector::zero(),
-                              Multivector::zero()];
+    let mut accums = [
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+    ];
+    let mut charged_accums = [
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+        Multivector::zero(),
+    ];
     let mut counts = [0u32; NUM_COLORS];
     let mut boundary_counts = [0u32; NUM_COLORS];
     let mut conn_sums = [0.0f32; NUM_COLORS];
@@ -1025,7 +1277,9 @@ fn color_layer_neighborhood_charged(grid: &Grid, cr: usize, cc: usize, radius: u
                 accums[color] = accums[color].add(&pos);
                 charged_accums[color] = charged_accums[color].add(&pos.scale(boundary_charge));
                 counts[color] += 1;
-                if boundary_charge > 0.0 { boundary_counts[color] += 1; }
+                if boundary_charge > 0.0 {
+                    boundary_counts[color] += 1;
+                }
                 conn_sums[color] += connectivity;
             }
         }
@@ -1040,14 +1294,24 @@ fn color_layer_neighborhood_charged(grid: &Grid, cr: usize, cc: usize, radius: u
         }
     }
 
-    ColorBlockField { strength, charged_strength, count: counts, boundary_count: boundary_counts, connectivity_sum: conn_sums }
+    ColorBlockField {
+        strength,
+        charged_strength,
+        count: counts,
+        boundary_count: boundary_counts,
+        connectivity_sum: conn_sums,
+    }
 }
 
 /// Build a COMPACT feature vector from charged particle fields.
 /// Designed for few-shot learning: keep features low-dimensional but maximally
 /// discriminative via particle charges and local Wilson-plaquette context.
 fn dirac_cell_features(
-    grid: &Grid, out_r: usize, out_c: usize, oh: usize, ow: usize,
+    grid: &Grid,
+    out_r: usize,
+    out_c: usize,
+    oh: usize,
+    ow: usize,
     mode: DiracMode,
 ) -> Vec<f32> {
     let ih = grid.height;
@@ -1071,14 +1335,18 @@ fn dirac_cell_features(
             for c in 0..NUM_COLORS {
                 features.push(if field.count[c] > 0 {
                     field.boundary_count[c] as f32 / field.count[c] as f32
-                } else { 0.0 });
+                } else {
+                    0.0
+                });
             }
 
             // Connectivity: mean connectivity per color (clustered vs scattered)
             for c in 0..NUM_COLORS {
                 features.push(if field.count[c] > 0 {
                     field.connectivity_sum[c] / field.count[c] as f32
-                } else { 0.0 });
+                } else {
+                    0.0
+                });
             }
 
             // Charged field polarity: sign of charged vs uncharged strength
@@ -1120,7 +1388,9 @@ fn dirac_cell_features(
             features.push(nbr.count[src_color as usize] as f32 / 9.0);
             features.push(if nbr.count[src_color as usize] > 0 {
                 nbr.boundary_count[src_color as usize] as f32 / nbr.count[src_color as usize] as f32
-            } else { 0.0 });
+            } else {
+                0.0
+            });
             // How many distinct colors in neighborhood
             let distinct_nbr = nbr.count.iter().filter(|&&v| v > 0).count();
             features.push(distinct_nbr as f32 / NUM_COLORS as f32);
@@ -1142,8 +1412,16 @@ fn dirac_cell_features(
             let (ir, ic) = if oh == ih && ow == iw {
                 (out_r, out_c)
             } else {
-                let fr = if oh > 1 { out_r * (ih - 1) / (oh - 1).max(1) } else { ih / 2 };
-                let fc = if ow > 1 { out_c * (iw - 1) / (ow - 1).max(1) } else { iw / 2 };
+                let fr = if oh > 1 {
+                    out_r * (ih - 1) / (oh - 1).max(1)
+                } else {
+                    ih / 2
+                };
+                let fc = if ow > 1 {
+                    out_c * (iw - 1) / (ow - 1).max(1)
+                } else {
+                    iw / 2
+                };
                 (fr.min(ih - 1), fc.min(iw - 1))
             };
 
@@ -1163,7 +1441,9 @@ fn dirac_cell_features(
             for c in 0..NUM_COLORS {
                 features.push(if nbr.count[c] > 0 {
                     nbr.connectivity_sum[c] / nbr.count[c] as f32
-                } else { 0.0 });
+                } else {
+                    0.0
+                });
             }
 
             // Position (3 features)
@@ -1189,7 +1469,9 @@ enum DiracMode {
 /// Train Dirac cell field on `task.train`, then predict outputs for each grid in `inputs`
 /// (same output shape `(oh,ow)` as the first train pair).
 pub fn solve_task_dirac_predict_inputs(task: &ArcTask, inputs: &[Grid]) -> Option<Vec<Grid>> {
-    if task.train.is_empty() || inputs.is_empty() { return None; }
+    if task.train.is_empty() || inputs.is_empty() {
+        return None;
+    }
 
     let ex0 = &task.train[0];
     let ih = ex0.input.height;
@@ -1197,14 +1479,22 @@ pub fn solve_task_dirac_predict_inputs(task: &ArcTask, inputs: &[Grid]) -> Optio
     let oh = ex0.output.height;
     let ow = ex0.output.width;
 
-    if ih == 0 || iw == 0 || oh == 0 || ow == 0 { return None; }
+    if ih == 0 || iw == 0 || oh == 0 || ow == 0 {
+        return None;
+    }
 
     let mode = if ih == oh && iw == ow {
         DiracMode::SameDim
     } else if oh < ih && ow < iw && ih % oh == 0 && iw % ow == 0 {
-        DiracMode::Shrink { bh: ih / oh, bw: iw / ow }
+        DiracMode::Shrink {
+            bh: ih / oh,
+            bw: iw / ow,
+        }
     } else if oh > ih && ow > iw && oh % ih == 0 && ow % iw == 0 {
-        DiracMode::Grow { sh: oh / ih, sw: ow / iw }
+        DiracMode::Grow {
+            sh: oh / ih,
+            sw: ow / iw,
+        }
     } else {
         DiracMode::Arbitrary
     };
@@ -1221,13 +1511,18 @@ pub fn solve_task_dirac_predict_inputs(task: &ArcTask, inputs: &[Grid]) -> Optio
         }
     }
 
-    if embeddings.is_empty() { return None; }
+    if embeddings.is_empty() {
+        return None;
+    }
 
     let max_len = embeddings.iter().map(|e| e.len()).max().unwrap_or(0);
-    for emb in &mut embeddings { emb.resize(max_len, 0.0); }
+    for emb in &mut embeddings {
+        emb.resize(max_len, 0.0);
+    }
 
     let class_names: Vec<String> = (0..NUM_COLORS).map(|c| format!("c{}", c)).collect();
-    let sample_refs: Vec<(&[f32], usize)> = embeddings.iter()
+    let sample_refs: Vec<(&[f32], usize)> = embeddings
+        .iter()
         .zip(targets.iter())
         .map(|(e, &t)| (e.as_slice(), t))
         .collect();
@@ -1240,26 +1535,35 @@ pub fn solve_task_dirac_predict_inputs(task: &ArcTask, inputs: &[Grid]) -> Optio
         &sample_refs,
     );
 
-    let results: Vec<Grid> = inputs.iter().map(|inp| {
-        let mut cells = vec![vec![0u8; ow]; oh];
-        let mut brain_local = brain.clone();
-        for r in 0..oh {
-            for c in 0..ow {
-                let mut emb = dirac_cell_features(inp, r, c, oh, ow, mode);
-                emb.resize(max_len, 0.0);
-                let (cls, _conf, _logits) = brain_local.predict(&emb);
-                cells[r][c] = cls as u8;
+    let results: Vec<Grid> = inputs
+        .iter()
+        .map(|inp| {
+            let mut cells = vec![vec![0u8; ow]; oh];
+            let mut brain_local = brain.clone();
+            for r in 0..oh {
+                for c in 0..ow {
+                    let mut emb = dirac_cell_features(inp, r, c, oh, ow, mode);
+                    emb.resize(max_len, 0.0);
+                    let (cls, _conf, _logits) = brain_local.predict(&emb);
+                    cells[r][c] = cls as u8;
+                }
             }
-        }
-        Grid { cells, height: oh, width: ow }
-    }).collect();
+            Grid {
+                cells,
+                height: oh,
+                width: ow,
+            }
+        })
+        .collect();
 
     Some(results)
 }
 
 /// Dirac solver: train on `task.train`, predict `task.test`.
 pub fn solve_task_dirac(task: &ArcTask) -> Option<Vec<Grid>> {
-    if task.test.is_empty() { return None; }
+    if task.test.is_empty() {
+        return None;
+    }
     let inputs: Vec<Grid> = task.test.iter().map(|e| e.input.clone()).collect();
     solve_task_dirac_predict_inputs(task, &inputs)
 }
@@ -1269,7 +1573,9 @@ pub fn solve_task_dirac(task: &ArcTask) -> Option<Vec<Grid>> {
 const ASTAR_ROUTER_MS: u64 = 3000;
 
 fn train_cell_accuracy_fraction(preds: &[Grid], task: &ArcTask) -> Option<f32> {
-    if preds.len() != task.train.len() { return None; }
+    if preds.len() != task.train.len() {
+        return None;
+    }
     let mut correct = 0usize;
     let mut total = 0usize;
     for (ex, g) in task.train.iter().zip(preds.iter()) {
@@ -1288,7 +1594,9 @@ fn train_cell_accuracy_fraction(preds: &[Grid], task: &ArcTask) -> Option<f32> {
             }
         }
     }
-    if total == 0 { return None; }
+    if total == 0 {
+        return None;
+    }
     Some(correct as f32 / total as f32)
 }
 
@@ -1360,7 +1668,9 @@ pub fn apply_learned_solver(task: &ArcTask, name: &str) -> Option<Vec<Grid>> {
 /// (3) majority count, (4) majority non-background count, (5) min non-zero field.
 /// Validates each rule on training, returns first that passes.
 pub fn solve_task_dirac_direct(task: &ArcTask) -> Option<Vec<Grid>> {
-    if task.train.is_empty() || task.test.is_empty() { return None; }
+    if task.train.is_empty() || task.test.is_empty() {
+        return None;
+    }
 
     let ex0 = &task.train[0];
     let ih = ex0.input.height;
@@ -1375,9 +1685,16 @@ pub fn solve_task_dirac_direct(task: &ArcTask) -> Option<Vec<Grid>> {
     // Detect background color (most common in input)
     let mut global_counts = [0u32; NUM_COLORS];
     for row in &ex0.input.cells {
-        for &v in row { global_counts[v as usize] += 1; }
+        for &v in row {
+            global_counts[v as usize] += 1;
+        }
     }
-    let bg = global_counts.iter().enumerate().max_by_key(|(_, &v)| v).map(|(i, _)| i).unwrap_or(0);
+    let bg = global_counts
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, &v)| v)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
 
     // Decode rules: each takes the full charged field + bg color, returns predicted color.
     // Enumerate many physics-based observables of the particle field.
@@ -1385,63 +1702,180 @@ pub fn solve_task_dirac_direct(task: &ArcTask) -> Option<Vec<Grid>> {
 
     let rules: Vec<(DecodeRule, &str)> = vec![
         // Count-based
-        (|f, _| f.count.iter().enumerate().max_by_key(|(_, &v)| v).map(|(i, _)| i as u8).unwrap_or(0),
-         "majority"),
-        (|f, bg| f.count.iter().enumerate().filter(|&(i, _)| i != bg).max_by_key(|(_, &v)| v).map(|(i, _)| i as u8).unwrap_or(0),
-         "majority_nobg"),
-        (|f, bg| f.count.iter().enumerate().filter(|&(i, &v)| i != bg && v > 0).min_by_key(|(_, &v)| v).map(|(i, _)| i as u8).unwrap_or(0),
-         "minority_nobg"),
+        (
+            |f, _| {
+                f.count
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, &v)| v)
+                    .map(|(i, _)| i as u8)
+                    .unwrap_or(0)
+            },
+            "majority",
+        ),
+        (
+            |f, bg| {
+                f.count
+                    .iter()
+                    .enumerate()
+                    .filter(|&(i, _)| i != bg)
+                    .max_by_key(|(_, &v)| v)
+                    .map(|(i, _)| i as u8)
+                    .unwrap_or(0)
+            },
+            "majority_nobg",
+        ),
+        (
+            |f, bg| {
+                f.count
+                    .iter()
+                    .enumerate()
+                    .filter(|&(i, &v)| i != bg && v > 0)
+                    .min_by_key(|(_, &v)| v)
+                    .map(|(i, _)| i as u8)
+                    .unwrap_or(0)
+            },
+            "minority_nobg",
+        ),
         // Field strength (spatial coherence weighted)
-        (|f, _| f.strength.iter().enumerate().max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap()).map(|(i, _)| i as u8).unwrap_or(0),
-         "max_field"),
-        (|f, bg| f.strength.iter().enumerate().filter(|&(i, _)| i != bg).max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap()).map(|(i, _)| i as u8).unwrap_or(0),
-         "max_field_nobg"),
-        (|f, bg| f.strength.iter().enumerate().filter(|&(i, v)| i != bg && *v > 0.0).min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap()).map(|(i, _)| i as u8).unwrap_or(0),
-         "min_field_nobg"),
+        (
+            |f, _| {
+                f.strength
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                    .map(|(i, _)| i as u8)
+                    .unwrap_or(0)
+            },
+            "max_field",
+        ),
+        (
+            |f, bg| {
+                f.strength
+                    .iter()
+                    .enumerate()
+                    .filter(|&(i, _)| i != bg)
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                    .map(|(i, _)| i as u8)
+                    .unwrap_or(0)
+            },
+            "max_field_nobg",
+        ),
+        (
+            |f, bg| {
+                f.strength
+                    .iter()
+                    .enumerate()
+                    .filter(|&(i, v)| i != bg && *v > 0.0)
+                    .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                    .map(|(i, _)| i as u8)
+                    .unwrap_or(0)
+            },
+            "min_field_nobg",
+        ),
         // Charged field (boundary-dominated particles)
-        (|f, bg| f.charged_strength.iter().enumerate().filter(|&(i, _)| i != bg).max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap()).map(|(i, _)| i as u8).unwrap_or(0),
-         "max_charged_nobg"),
+        (
+            |f, bg| {
+                f.charged_strength
+                    .iter()
+                    .enumerate()
+                    .filter(|&(i, _)| i != bg)
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                    .map(|(i, _)| i as u8)
+                    .unwrap_or(0)
+            },
+            "max_charged_nobg",
+        ),
         // Boundary particles only
-        (|f, bg| f.boundary_count.iter().enumerate().filter(|&(i, _)| i != bg).max_by_key(|(_, &v)| v).map(|(i, _)| i as u8).unwrap_or(0),
-         "max_boundary_nobg"),
+        (
+            |f, bg| {
+                f.boundary_count
+                    .iter()
+                    .enumerate()
+                    .filter(|&(i, _)| i != bg)
+                    .max_by_key(|(_, &v)| v)
+                    .map(|(i, _)| i as u8)
+                    .unwrap_or(0)
+            },
+            "max_boundary_nobg",
+        ),
         // Interior particles only (total - boundary)
-        (|f, bg| {
-            let mut best = 0u8;
-            let mut best_v = 0u32;
-            for i in 0..NUM_COLORS {
-                if i == bg { continue; }
-                let interior = f.count[i].saturating_sub(f.boundary_count[i]);
-                if interior > best_v { best_v = interior; best = i as u8; }
-            }
-            best
-        }, "max_interior_nobg"),
+        (
+            |f, bg| {
+                let mut best = 0u8;
+                let mut best_v = 0u32;
+                for i in 0..NUM_COLORS {
+                    if i == bg {
+                        continue;
+                    }
+                    let interior = f.count[i].saturating_sub(f.boundary_count[i]);
+                    if interior > best_v {
+                        best_v = interior;
+                        best = i as u8;
+                    }
+                }
+                best
+            },
+            "max_interior_nobg",
+        ),
         // Most connected color (highest mean connectivity)
-        (|f, bg| {
-            let mut best = 0u8;
-            let mut best_v = 0.0f32;
-            for i in 0..NUM_COLORS {
-                if i == bg || f.count[i] == 0 { continue; }
-                let mean_conn = f.connectivity_sum[i] / f.count[i] as f32;
-                if mean_conn > best_v { best_v = mean_conn; best = i as u8; }
-            }
-            best
-        }, "most_connected_nobg"),
+        (
+            |f, bg| {
+                let mut best = 0u8;
+                let mut best_v = 0.0f32;
+                for i in 0..NUM_COLORS {
+                    if i == bg || f.count[i] == 0 {
+                        continue;
+                    }
+                    let mean_conn = f.connectivity_sum[i] / f.count[i] as f32;
+                    if mean_conn > best_v {
+                        best_v = mean_conn;
+                        best = i as u8;
+                    }
+                }
+                best
+            },
+            "most_connected_nobg",
+        ),
         // Unique color: appears exactly once in block
-        (|f, bg| {
-            for i in 0..NUM_COLORS {
-                if i != bg && f.count[i] == 1 { return i as u8; }
-            }
-            f.count.iter().enumerate().filter(|&(i, _)| i != bg).max_by_key(|(_, &v)| v).map(|(i, _)| i as u8).unwrap_or(0)
-        }, "unique_nobg"),
+        (
+            |f, bg| {
+                for i in 0..NUM_COLORS {
+                    if i != bg && f.count[i] == 1 {
+                        return i as u8;
+                    }
+                }
+                f.count
+                    .iter()
+                    .enumerate()
+                    .filter(|&(i, _)| i != bg)
+                    .max_by_key(|(_, &v)| v)
+                    .map(|(i, _)| i as u8)
+                    .unwrap_or(0)
+            },
+            "unique_nobg",
+        ),
         // Second most common (after bg)
-        (|f, bg| {
-            let mut sorted: Vec<(usize, u32)> = f.count.iter().enumerate()
-                .filter(|&(i, &v)| i != bg && v > 0).map(|(i, &v)| (i, v)).collect();
-            sorted.sort_by(|a, b| b.1.cmp(&a.1));
-            if sorted.len() >= 2 { sorted[1].0 as u8 }
-            else if !sorted.is_empty() { sorted[0].0 as u8 }
-            else { bg as u8 }
-        }, "second_most_nobg"),
+        (
+            |f, bg| {
+                let mut sorted: Vec<(usize, u32)> = f
+                    .count
+                    .iter()
+                    .enumerate()
+                    .filter(|&(i, &v)| i != bg && v > 0)
+                    .map(|(i, &v)| (i, v))
+                    .collect();
+                sorted.sort_by(|a, b| b.1.cmp(&a.1));
+                if sorted.len() >= 2 {
+                    sorted[1].0 as u8
+                } else if !sorted.is_empty() {
+                    sorted[0].0 as u8
+                } else {
+                    bg as u8
+                }
+            },
+            "second_most_nobg",
+        ),
     ];
 
     for &(rule_fn, _rule_name) in &rules {
@@ -1453,26 +1887,47 @@ pub fn solve_task_dirac_direct(task: &ArcTask) -> Option<Vec<Grid>> {
                 for c in 0..ex.output.width {
                     let field = color_layer_block_charged(&ex.input, r * ebh, c * ebw, ebh, ebw);
                     let pred = rule_fn(&field, bg);
-                    if pred != ex.output.cells[r][c] { valid = false; break; }
+                    if pred != ex.output.cells[r][c] {
+                        valid = false;
+                        break;
+                    }
                 }
-                if !valid { break; }
+                if !valid {
+                    break;
+                }
             }
-            if !valid { break; }
+            if !valid {
+                break;
+            }
         }
 
         if valid {
-            let results: Vec<Grid> = task.test.iter().map(|test_ex| {
-                let t_bh = test_ex.input.height / oh;
-                let t_bw = test_ex.input.width / ow;
-                let mut cells = vec![vec![0u8; ow]; oh];
-                for r in 0..oh {
-                    for c in 0..ow {
-                        let field = color_layer_block_charged(&test_ex.input, r * t_bh, c * t_bw, t_bh, t_bw);
-                        cells[r][c] = rule_fn(&field, bg);
+            let results: Vec<Grid> = task
+                .test
+                .iter()
+                .map(|test_ex| {
+                    let t_bh = test_ex.input.height / oh;
+                    let t_bw = test_ex.input.width / ow;
+                    let mut cells = vec![vec![0u8; ow]; oh];
+                    for r in 0..oh {
+                        for c in 0..ow {
+                            let field = color_layer_block_charged(
+                                &test_ex.input,
+                                r * t_bh,
+                                c * t_bw,
+                                t_bh,
+                                t_bw,
+                            );
+                            cells[r][c] = rule_fn(&field, bg);
+                        }
                     }
-                }
-                Grid { cells, height: oh, width: ow }
-            }).collect();
+                    Grid {
+                        cells,
+                        height: oh,
+                        width: ow,
+                    }
+                })
+                .collect();
             return Some(results);
         }
     }
@@ -1486,24 +1941,36 @@ fn load_language_runtime(brain_path: &str) -> Option<LanguageRuntime> {
     let bytes = match std::fs::read(brain_path) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("  [lang] Cannot read {}: {} — falling back to Clifford-only", brain_path, e);
+            eprintln!(
+                "  [lang] Cannot read {}: {} — falling back to Clifford-only",
+                brain_path, e
+            );
             return None;
         }
     };
-    let dm: DimensionManager = match crate::systems::checkpoint::deserialize_checkpoint_from_bytes(&bytes) {
-        Ok(dm) => dm,
-        Err(e) => {
-            eprintln!("  [lang] Cannot deserialize {}: {} — falling back to Clifford-only", brain_path, e);
-            return None;
-        }
-    };
+    let dm: DimensionManager =
+        match crate::systems::checkpoint::deserialize_checkpoint_from_bytes(&bytes) {
+            Ok(dm) => dm,
+            Err(e) => {
+                eprintln!(
+                    "  [lang] Cannot deserialize {}: {} — falling back to Clifford-only",
+                    brain_path, e
+                );
+                return None;
+            }
+        };
     let rt = dm.language_runtime;
     if !rt.bridge.calibrated {
-        eprintln!("  [lang] Bridge in {} not calibrated — falling back to Clifford-only", brain_path);
+        eprintln!(
+            "  [lang] Bridge in {} not calibrated — falling back to Clifford-only",
+            brain_path
+        );
         return None;
     }
-    println!("  [lang] Loaded calibrated LanguageRuntime from {} (bridge {}→{}d)",
-        brain_path, rt.bridge.input_dim, rt.bridge.output_dim);
+    println!(
+        "  [lang] Loaded calibrated LanguageRuntime from {} (bridge {}→{}d)",
+        brain_path, rt.bridge.input_dim, rt.bridge.output_dim
+    );
     Some(rt)
 }
 
@@ -1522,7 +1989,10 @@ impl ArcBrain {
         println!("=== Training ArcBrain ===");
 
         // Load language runtime from brain.bin (read-only, never overwritten)
-        println!("\n--- Loading GrowformerLanguageEncoder from {} ---", lang_brain_path);
+        println!(
+            "\n--- Loading GrowformerLanguageEncoder from {} ---",
+            lang_brain_path
+        );
         let lang_rt = load_language_runtime(lang_brain_path);
         let has_bridge = lang_rt.is_some();
         if has_bridge {
@@ -1575,17 +2045,29 @@ impl ArcBrain {
             router_targets.push(strat_idx);
         }
 
-        let n_useful = strategy_counts.iter().filter(|(k, _)| *k != "none").map(|(_, v)| v).sum::<usize>();
-        println!("  Tasks labeled: {} (non-none best solver: {})", tasks.len(), n_useful);
+        let n_useful = strategy_counts
+            .iter()
+            .filter(|(k, _)| *k != "none")
+            .map(|(_, v)| v)
+            .sum::<usize>();
+        println!(
+            "  Tasks labeled: {} (non-none best solver: {})",
+            tasks.len(),
+            n_useful
+        );
         println!("  Strategy classes: {}", strategy_set.len());
-        println!("  Embedding dim: {}", router_embeddings.first().map_or(0, |e| e.len()));
+        println!(
+            "  Embedding dim: {}",
+            router_embeddings.first().map_or(0, |e| e.len())
+        );
         for (strat, count) in &strategy_counts {
             println!("    {}: {} tasks", strat, count);
         }
 
         // Phase 2: Build strategy router via one-pass Paramecium lattice
         println!("\n--- Phase 2: Strategy router (one-pass) ---");
-        let sample_refs: Vec<(&[f32], usize)> = router_embeddings.iter()
+        let sample_refs: Vec<(&[f32], usize)> = router_embeddings
+            .iter()
             .zip(router_targets.iter())
             .map(|(e, &t)| (e.as_slice(), t))
             .collect();
@@ -1598,7 +2080,10 @@ impl ArcBrain {
             &sample_refs,
         );
 
-        println!("  Router lattice programs: {}", router.lattice.program_count());
+        println!(
+            "  Router lattice programs: {}",
+            router.lattice.program_count()
+        );
 
         // Phase 3: Validate router on training set
         println!("\n--- Phase 3: Router self-validation ---");
@@ -1606,11 +2091,16 @@ impl ArcBrain {
         let mut router_correct = 0;
         for (emb, &target) in router_embeddings.iter().zip(router_targets.iter()) {
             let (cls, _conf, _logits) = router_clone.predict(emb);
-            if cls == target { router_correct += 1; }
+            if cls == target {
+                router_correct += 1;
+            }
         }
-        println!("  Router accuracy on labeled tasks: {}/{} ({:.1}%)",
-            router_correct, router_embeddings.len(),
-            router_correct as f32 / router_embeddings.len().max(1) as f32 * 100.0);
+        println!(
+            "  Router accuracy on labeled tasks: {}/{} ({:.1}%)",
+            router_correct,
+            router_embeddings.len(),
+            router_correct as f32 / router_embeddings.len().max(1) as f32 * 100.0
+        );
 
         println!("\n  Training complete.");
 
@@ -1622,15 +2112,27 @@ impl ArcBrain {
         }
     }
 
-    pub fn route(&mut self, task: &ArcTask, lang_rt: Option<&LanguageRuntime>) -> (usize, f32, String) {
+    pub fn route(
+        &mut self,
+        task: &ArcTask,
+        lang_rt: Option<&LanguageRuntime>,
+    ) -> (usize, f32, String) {
         let emb = encode_task(task, lang_rt);
         let (cls, conf, _logits) = self.strategy_router.predict(&emb);
-        let name = self.strategy_names.get(cls).cloned().unwrap_or_else(|| "unknown".into());
+        let name = self
+            .strategy_names
+            .get(cls)
+            .cloned()
+            .unwrap_or_else(|| "unknown".into());
         (cls, conf, name)
     }
 
     /// Predict best learned solver from task embedding, then run it on `task.test`.
-    pub fn solve_routed(&mut self, task: &ArcTask, lang_rt: Option<&LanguageRuntime>) -> Option<Vec<Grid>> {
+    pub fn solve_routed(
+        &mut self,
+        task: &ArcTask,
+        lang_rt: Option<&LanguageRuntime>,
+    ) -> Option<Vec<Grid>> {
         let (_cls, _conf, name) = self.route(task, lang_rt);
         apply_learned_solver(task, name.as_str())
     }
@@ -1649,10 +2151,14 @@ impl ArcBrain {
 // ─── Benchmark ─────────────────────────────────────────────────────────────
 
 fn grids_match(a: &Grid, b: &Grid) -> bool {
-    if a.height != b.height || a.width != b.width { return false; }
+    if a.height != b.height || a.width != b.width {
+        return false;
+    }
     for r in 0..a.height {
         for c in 0..a.width {
-            if a.cells[r][c] != b.cells[r][c] { return false; }
+            if a.cells[r][c] != b.cells[r][c] {
+                return false;
+            }
         }
     }
     true
@@ -1688,15 +2194,25 @@ pub fn benchmark(brain: &mut ArcBrain, tasks: &[ArcTask], lang_rt: Option<&Langu
     let mut decomp_compositional = 0u32;
     let mut decomp_unknown = 0u32;
 
-    let same_dim_count = tasks.iter().filter(|t|
-        t.train.iter().all(|ex|
-            ex.input.height == ex.output.height && ex.input.width == ex.output.width
-        )
-    ).count();
+    let same_dim_count = tasks
+        .iter()
+        .filter(|t| {
+            t.train
+                .iter()
+                .all(|ex| ex.input.height == ex.output.height && ex.input.width == ex.output.width)
+        })
+        .count();
 
     println!("\n=== ArcBrain Benchmark ===");
     println!("Total tasks: {}, same-dim: {}", tasks.len(), same_dim_count);
-    println!("Language bridge: {}", if lang_rt.is_some() { "ACTIVE" } else { "INACTIVE" });
+    println!(
+        "Language bridge: {}",
+        if lang_rt.is_some() {
+            "ACTIVE"
+        } else {
+            "INACTIVE"
+        }
+    );
     println!("Strategies known: {:?}", brain.strategy_names);
 
     for task in tasks {
@@ -1704,17 +2220,25 @@ pub fn benchmark(brain: &mut ArcBrain, tasks: &[ArcTask], lang_rt: Option<&Langu
 
         let diag = solve_task(task);
         let hc_solved = diag.solved;
-        if hc_solved { solved_handcoded += 1; }
+        if hc_solved {
+            solved_handcoded += 1;
+        }
 
         if let Some(ref f) = diag.flow {
             if f.converging {
                 flow_converging_total += 1;
-                if hc_solved { flow_converging_solved += 1; }
+                if hc_solved {
+                    flow_converging_solved += 1;
+                }
             } else {
                 flow_diverging_total += 1;
-                if hc_solved { flow_diverging_solved += 1; }
+                if hc_solved {
+                    flow_diverging_solved += 1;
+                }
             }
-            if f.is_degenerate() { flow_degenerate_count += 1; }
+            if f.is_degenerate() {
+                flow_degenerate_count += 1;
+            }
             if hc_solved {
                 spatial_bias_sum_solved += f.spatial_bias();
                 n_solved_flow += 1;
@@ -1727,8 +2251,11 @@ pub fn benchmark(brain: &mut ArcBrain, tasks: &[ArcTask], lang_rt: Option<&Langu
         if let Some(ref v) = diag.verification {
             verified_count += 1;
             verified_sum += v.confidence;
-            if v.confidence > 0.6 { verified_high += 1; }
-            else { verified_low += 1; }
+            if v.confidence > 0.6 {
+                verified_high += 1;
+            } else {
+                verified_low += 1;
+            }
         }
         match diag.decomposition {
             Some(crate::arc_agi::TransformationType::Geometric) => decomp_geometric += 1,
@@ -1747,64 +2274,109 @@ pub fn benchmark(brain: &mut ArcBrain, tasks: &[ArcTask], lang_rt: Option<&Langu
         }
 
         let lattice_solved = if let Some(preds) = solve_task_onepass(task) {
-            task.test.iter().enumerate().all(|(i, test_ex)| {
-                i < preds.len() && grids_match(&preds[i], &test_ex.output)
-            })
-        } else { false };
+            task.test
+                .iter()
+                .enumerate()
+                .all(|(i, test_ex)| i < preds.len() && grids_match(&preds[i], &test_ex.output))
+        } else {
+            false
+        };
 
-        if lattice_solved { solved_pertask += 1; }
+        if lattice_solved {
+            solved_pertask += 1;
+        }
 
         let either = hc_solved || lattice_solved;
-        if either { solved_combined += 1; }
+        if either {
+            solved_combined += 1;
+        }
 
         if lattice_solved && !hc_solved {
-            println!("  NEW (lattice only): {} [router predicted: {} conf={:.2}]",
-                task.id, predicted_strategy, conf);
+            println!(
+                "  NEW (lattice only): {} [router predicted: {} conf={:.2}]",
+                task.id, predicted_strategy, conf
+            );
         }
     }
 
     let router_acc = if router_total > 0 {
         router_correct as f32 / router_total as f32 * 100.0
-    } else { 0.0 };
+    } else {
+        0.0
+    };
 
     println!("\n--- Results ---");
     println!("Tasks evaluated: {}", total);
-    println!("Hand-coded pipeline: {}/{} solved ({:.1}%)",
-        solved_handcoded, total, solved_handcoded as f32 / total.max(1) as f32 * 100.0);
-    println!("Per-task lattice:    {}/{} solved ({:.1}%)",
-        solved_pertask, total, solved_pertask as f32 / total.max(1) as f32 * 100.0);
-    println!("Combined (either):   {}/{} solved ({:.1}%)",
-        solved_combined, total, solved_combined as f32 / total.max(1) as f32 * 100.0);
-    println!("Strategy router:     {}/{} match oracle learned label ({:.1}%)",
-        router_correct, router_total, router_acc);
+    println!(
+        "Hand-coded pipeline: {}/{} solved ({:.1}%)",
+        solved_handcoded,
+        total,
+        solved_handcoded as f32 / total.max(1) as f32 * 100.0
+    );
+    println!(
+        "Per-task lattice:    {}/{} solved ({:.1}%)",
+        solved_pertask,
+        total,
+        solved_pertask as f32 / total.max(1) as f32 * 100.0
+    );
+    println!(
+        "Combined (either):   {}/{} solved ({:.1}%)",
+        solved_combined,
+        total,
+        solved_combined as f32 / total.max(1) as f32 * 100.0
+    );
+    println!(
+        "Strategy router:     {}/{} match oracle learned label ({:.1}%)",
+        router_correct, router_total, router_acc
+    );
 
     // Probability flow analysis
     println!("\n--- Flow Diagnostic (Schrödinger continuity) ---");
-    println!("Converging flow:  {}/{} solved ({:.1}%)",
-        flow_converging_solved, flow_converging_total,
-        flow_converging_solved as f32 / flow_converging_total.max(1) as f32 * 100.0);
-    println!("Diverging flow:   {}/{} solved ({:.1}%)",
-        flow_diverging_solved, flow_diverging_total,
-        flow_diverging_solved as f32 / flow_diverging_total.max(1) as f32 * 100.0);
-    println!("Degenerate (|B|≈0): {}/{} tasks", flow_degenerate_count, total);
+    println!(
+        "Converging flow:  {}/{} solved ({:.1}%)",
+        flow_converging_solved,
+        flow_converging_total,
+        flow_converging_solved as f32 / flow_converging_total.max(1) as f32 * 100.0
+    );
+    println!(
+        "Diverging flow:   {}/{} solved ({:.1}%)",
+        flow_diverging_solved,
+        flow_diverging_total,
+        flow_diverging_solved as f32 / flow_diverging_total.max(1) as f32 * 100.0
+    );
+    println!(
+        "Degenerate (|B|≈0): {}/{} tasks",
+        flow_degenerate_count, total
+    );
     if n_solved_flow > 0 {
-        println!("Mean spatial bias (solved):   {:.3}",
-            spatial_bias_sum_solved / n_solved_flow as f32);
+        println!(
+            "Mean spatial bias (solved):   {:.3}",
+            spatial_bias_sum_solved / n_solved_flow as f32
+        );
     }
     if n_unsolved_flow > 0 {
-        println!("Mean spatial bias (unsolved): {:.3}",
-            spatial_bias_sum_unsolved / n_unsolved_flow as f32);
+        println!(
+            "Mean spatial bias (unsolved): {:.3}",
+            spatial_bias_sum_unsolved / n_unsolved_flow as f32
+        );
     }
 
     // Expert solver analysis
     println!("\n--- Expert Solver ---");
-    println!("Verified solutions: {}/{} (high conf: {}, low conf: {})",
-        verified_count, total, verified_high, verified_low);
+    println!(
+        "Verified solutions: {}/{} (high conf: {}, low conf: {})",
+        verified_count, total, verified_high, verified_low
+    );
     if verified_count > 0 {
-        println!("Mean verification confidence: {:.3}", verified_sum / verified_count as f32);
+        println!(
+            "Mean verification confidence: {:.3}",
+            verified_sum / verified_count as f32
+        );
     }
-    println!("Decomposition: geometric={}, causal={}, compositional={}, unknown={}",
-        decomp_geometric, decomp_causal, decomp_compositional, decomp_unknown);
+    println!(
+        "Decomposition: geometric={}, causal={}, compositional={}, unknown={}",
+        decomp_geometric, decomp_causal, decomp_compositional, decomp_unknown
+    );
 }
 
 #[cfg(test)]
@@ -1905,8 +2477,18 @@ pub fn main() {
         match args[i].as_str() {
             "--train" => do_train = true,
             "--test" => do_test = true,
-            "--brain" => { i += 1; if i < args.len() { brain_path = args[i].clone(); } }
-            "--lang-brain" => { i += 1; if i < args.len() { lang_brain_path = args[i].clone(); } }
+            "--brain" => {
+                i += 1;
+                if i < args.len() {
+                    brain_path = args[i].clone();
+                }
+            }
+            "--lang-brain" => {
+                i += 1;
+                if i < args.len() {
+                    lang_brain_path = args[i].clone();
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -1918,8 +2500,7 @@ pub fn main() {
     }
 
     let data_dir = std::path::PathBuf::from(
-        std::env::var("ARC_AGI_ROOT")
-            .unwrap_or_else(|_| "data/arc-agi/data/training".to_string())
+        std::env::var("ARC_AGI_ROOT").unwrap_or_else(|_| "data/arc-agi/data/training".to_string()),
     );
     if !data_dir.exists() {
         eprintln!("ARC-AGI data not found at {:?}", data_dir);
@@ -1931,8 +2512,13 @@ pub fn main() {
 
     if do_train {
         let brain = ArcBrain::train(&tasks, &lang_brain_path);
-        brain.save(Path::new(&brain_path)).expect("Failed to save brain");
-        println!("\nARC brain saved to {} (lang brain read from {})", brain_path, lang_brain_path);
+        brain
+            .save(Path::new(&brain_path))
+            .expect("Failed to save brain");
+        println!(
+            "\nARC brain saved to {} (lang brain read from {})",
+            brain_path, lang_brain_path
+        );
 
         if do_test {
             let mut brain = brain;

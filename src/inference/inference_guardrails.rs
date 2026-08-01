@@ -169,11 +169,7 @@ fn load_guardrails_merged() -> (
                     dm
                 ));
             }
-            Err(e) => eprintln!(
-                "[inference-guardrails] skip {}: {}",
-                p.display(),
-                e
-            ),
+            Err(e) => eprintln!("[inference-guardrails] skip {}: {}", p.display(), e),
         }
     }
 
@@ -181,7 +177,13 @@ fn load_guardrails_merged() -> (
         // Default discovery: show which relative paths were checked (cwd / exe roots).
         let tried: Vec<String> = guardrails_candidate_files()
             .into_iter()
-            .map(|p| format!("{} ({})", p.display(), if p.is_file() { "ok" } else { "missing" }))
+            .map(|p| {
+                format!(
+                    "{} ({})",
+                    p.display(),
+                    if p.is_file() { "ok" } else { "missing" }
+                )
+            })
             .collect();
         if !tried.is_empty() {
             log_lines.push(format!(
@@ -200,8 +202,7 @@ fn parse_guardrails_file(
     headlines: &mut Vec<HeadlineLexicalTopicRule>,
     misfires: &mut Vec<LatticeMisfireRule>,
 ) -> Result<(), String> {
-    let s = std::fs::read_to_string(path)
-        .map_err(|e| format!("read: {}", e))?;
+    let s = std::fs::read_to_string(path).map_err(|e| format!("read: {}", e))?;
     for (line_no, line) in s.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
@@ -220,14 +221,8 @@ fn parse_guardrail_line(
     headlines: &mut Vec<HeadlineLexicalTopicRule>,
     misfires: &mut Vec<LatticeMisfireRule>,
 ) -> Result<(), String> {
-    let v: Value = serde_json::from_str(line).map_err(|e| {
-        format!(
-            "{}:{}: invalid JSON: {}",
-            path.display(),
-            line_no,
-            e
-        )
-    })?;
+    let v: Value = serde_json::from_str(line)
+        .map_err(|e| format!("{}:{}: invalid JSON: {}", path.display(), line_no, e))?;
     let kind = v
         .get("kind")
         .and_then(|x| x.as_str())
@@ -279,7 +274,10 @@ fn parse_guardrail_line(
                 .get("inclusion_redirect")
                 .and_then(|x| x.as_bool())
                 .unwrap_or(false);
-            let min_trim_len = v.get("min_trim_len").and_then(|x| x.as_u64()).map(|n| n as usize);
+            let min_trim_len = v
+                .get("min_trim_len")
+                .and_then(|x| x.as_u64())
+                .map(|n| n as usize);
             let exclude_first_person = v
                 .get("exclude_first_person")
                 .and_then(|x| x.as_bool())

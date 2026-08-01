@@ -67,12 +67,22 @@ fn bench_single_pair(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("embedding_cosine", dim), &dim, |ben, _| {
             ben.iter(|| black_box(cosine_similarity(black_box(&a), black_box(&b))));
         });
-        group.bench_with_input(BenchmarkId::new("reasoning_style_cosine", dim), &dim, |ben, _| {
-            ben.iter(|| black_box(cosine_sim_reasoning_style(black_box(&a), black_box(&b))));
-        });
-        group.bench_with_input(BenchmarkId::new("metacog_style_cosine", dim), &dim, |ben, _| {
-            ben.iter(|| black_box(cosine_sim_metacognition_style(black_box(&a), black_box(&b))));
-        });
+        group.bench_with_input(
+            BenchmarkId::new("reasoning_style_cosine", dim),
+            &dim,
+            |ben, _| {
+                ben.iter(|| black_box(cosine_sim_reasoning_style(black_box(&a), black_box(&b))));
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("metacog_style_cosine", dim),
+            &dim,
+            |ben, _| {
+                ben.iter(|| {
+                    black_box(cosine_sim_metacognition_style(black_box(&a), black_box(&b)))
+                });
+            },
+        );
     }
     group.finish();
 }
@@ -163,9 +173,7 @@ fn bench_reasoning_should_reason(c: &mut Criterion) {
         HashMap::new(),
     );
 
-    let query: Vec<f32> = (0..DIM)
-        .map(|j| ((j * 11) as f32 * 0.041).cos())
-        .collect();
+    let query: Vec<f32> = (0..DIM).map(|j| ((j * 11) as f32 * 0.041).cos()).collect();
 
     c.bench_function("reasoning_should_reason_two_groups", |b| {
         b.iter(|| {

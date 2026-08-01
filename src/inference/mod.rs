@@ -11,32 +11,31 @@ pub mod causal_relation;
 pub mod chat_policy;
 pub mod chat_structure_metacog;
 pub mod context_frame;
+pub mod frame_lexicon;
 pub mod grounding_expand;
-pub mod lookup_graph;
 pub mod grounding_loop;
-pub mod world_grounding;
 pub mod harness;
 pub mod inference_guardrails;
 pub mod inference_toml;
+pub mod lookup_graph;
 pub mod manifest;
 pub mod plugins;
-pub mod retrieval_rescore;
 pub mod retrieval_lexicon;
+pub mod retrieval_rescore;
 pub mod sentiment_generation_lexicon;
-pub mod frame_lexicon;
+pub mod world_grounding;
 
+pub use chat_policy::{BleedHit, ChatPolicyLocale, ChatPolicySection};
+pub use chat_structure_metacog::{evaluate as evaluate_chat_structure, ChatStructureOutcome};
+pub use context_frame::{ContextFrame, ContextFrameConfig, MoodGradient, SpeechAct};
 pub use harness::{
     BrainInferencePlugin, GenerationPreemptOutcome, InferenceHarness, TemplatePostprocessFlags,
 };
 pub use inference_guardrails::{set_inference_guardrails_jsonl_path, GuardrailsDiskSummary};
-pub use chat_policy::{BleedHit, ChatPolicyLocale, ChatPolicySection};
-pub use chat_structure_metacog::{evaluate as evaluate_chat_structure, ChatStructureOutcome};
-pub use context_frame::{ContextFrame, ContextFrameConfig, MoodGradient, SpeechAct};
 pub use inference_toml::{
     inference_rules_runtime, inference_toml_directory, inference_toml_loaded,
     print_train_inference_disk_summary, set_inference_toml_cli_paths, FragmentComposeConfig,
-    FragmentDecomposeConfig, FragmentIntentHint, FragmentReasoningPassConfig,
-    LoadedInferenceToml,
+    FragmentDecomposeConfig, FragmentIntentHint, FragmentReasoningPassConfig, LoadedInferenceToml,
 };
 pub use manifest::{
     inference_thresholds_disk, parse_plugins_manifest_bytes, serialize_plugins_manifest,

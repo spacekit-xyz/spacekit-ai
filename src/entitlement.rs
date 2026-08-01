@@ -26,11 +26,7 @@ pub struct EntitlementContext {
 
 impl EntitlementContext {
     pub fn has_active_entitlement_for(&self, capability: &str) -> bool {
-        if !self
-            .active_capabilities
-            .iter()
-            .any(|c| c == capability)
-        {
+        if !self.active_capabilities.iter().any(|c| c == capability) {
             return false;
         }
         if self.expires_at > 0 {
@@ -83,9 +79,7 @@ pub fn require_capability(capability: &str) -> Result<(), String> {
     CURRENT.with(|cell| {
         let ctx = cell.borrow();
         let Some(ctx) = ctx.as_ref() else {
-            return Err(
-                "growformer entitlement context missing (internal error)".to_string(),
-            );
+            return Err("growformer entitlement context missing (internal error)".to_string());
         };
         if !ctx.has_active_entitlement_for(capability) {
             return Err(format!(

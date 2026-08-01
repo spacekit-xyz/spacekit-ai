@@ -188,7 +188,10 @@ impl AdjustableConeRouter {
     ) -> Self {
         assert_eq!(features.len(), routes.len());
         assert_eq!(features.len(), near.len());
-        let feat_dim = features.first().map(|f| f.len()).unwrap_or(CONE_FEATURE_DIM);
+        let feat_dim = features
+            .first()
+            .map(|f| f.len())
+            .unwrap_or(CONE_FEATURE_DIM);
         let mut rng = StdRng::seed_from_u64(cfg.seed.wrapping_mul(2_654_435_761).wrapping_add(1));
 
         let n_near = near.iter().filter(|&&b| b).count().max(1);
@@ -257,7 +260,11 @@ impl AdjustableConeRouter {
                 let (a1, logit) = piecewise.forward(x);
                 let p = sigmoid(logit);
                 let y = if route_spiral { 1.0 } else { 0.0 };
-                let w = if is_near { 1.0 + cfg.curriculum_boost } else { 1.0 };
+                let w = if is_near {
+                    1.0 + cfg.curriculum_boost
+                } else {
+                    1.0
+                };
                 let mut dlogit = w * (p - y);
                 if is_near {
                     dlogit += cfg.balance_lambda * (mean_p_annulus - 0.5);
@@ -442,9 +449,7 @@ impl Mlp {
         let w1 = (0..hidden)
             .map(|_| (0..in_dim).map(|_| rng.gen_range(-scale..scale)).collect())
             .collect();
-        let w2 = (0..hidden)
-            .map(|_| rng.gen_range(-scale..scale))
-            .collect();
+        let w2 = (0..hidden).map(|_| rng.gen_range(-scale..scale)).collect();
         Self {
             w1,
             b1: vec![0.0; hidden],
@@ -560,7 +565,10 @@ mod tests {
             .filter(|s| (router.route_index(&s.features) == 0) == (s.r < 0.4))
             .count();
         let acc = agree as f32 / test.len() as f32;
-        assert!(acc > 0.85, "region agreement too low on separable task: {acc}");
+        assert!(
+            acc > 0.85,
+            "region agreement too low on separable task: {acc}"
+        );
     }
 
     #[test]

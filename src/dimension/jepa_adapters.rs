@@ -44,7 +44,9 @@ impl FrozenJepaEncoder {
                     .collect()
             })
             .collect();
-        let b: Vec<f32> = (0..WM_LATENT_DIM).map(|_| rng.gen_range(-0.05..0.05)).collect();
+        let b: Vec<f32> = (0..WM_LATENT_DIM)
+            .map(|_| rng.gen_range(-0.05..0.05))
+            .collect();
         let fingerprint = fingerprint_encoder(&w, &b);
         Self { w, b, fingerprint }
     }
@@ -120,7 +122,9 @@ impl PredictorAdapter {
         let dyn_b2 = vec![0.0; WM_LATENT_DIM];
         let aff_w1 = rand_mat(hidden, WM_LATENT_DIM, scale_in, &mut rng);
         let aff_b1 = vec![0.0; hidden];
-        let aff_w2 = (0..hidden).map(|_| rng.gen_range(-scale_h..scale_h)).collect();
+        let aff_w2 = (0..hidden)
+            .map(|_| rng.gen_range(-scale_h..scale_h))
+            .collect();
         Self {
             name: name.to_string(),
             regime_is_inner,
@@ -466,11 +470,9 @@ pub fn run_wm_task_e_seed(seed: u64, train_n: usize) -> WmSeedResult {
     pred_inner.train(&inner_pairs, &outer_z, 400, 0.15);
     pred_outer.train(&outer_pairs, &inner_z, 400, 0.15);
 
-    let bundle = JepaPromotionBundle::promote(
-        &encoder,
-        vec![pred_inner.clone(), pred_outer.clone()],
-    )
-    .expect("promote");
+    let bundle =
+        JepaPromotionBundle::promote(&encoder, vec![pred_inner.clone(), pred_outer.clone()])
+            .expect("promote");
     bundle.verify_encoder(&encoder).expect("pin");
     encoder.assert_pinned(pin);
 

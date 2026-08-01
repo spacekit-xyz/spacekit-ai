@@ -88,7 +88,8 @@ async fn main() {
         .expect("invalid GROWFORMER_NODE_ADDR");
     let auth_token = std::env::var("GROWFORMER_NODE_TOKEN").ok();
     let log_path = std::env::var("GROWFORMER_NODE_LOG_PATH").ok();
-    let mut service = LanguageService::new_default().expect("failed to initialize language service");
+    let mut service =
+        LanguageService::new_default().expect("failed to initialize language service");
 
     // Initialize topic knowledge graph (shared static, same as training binary)
     let kg_path = std::env::var("GROWFORMER_KG_PATH")
@@ -136,8 +137,8 @@ async fn main() {
             );
         }
     } else {
-        let brain_path = std::env::var("GROWFORMER_BRAIN_PATH")
-            .unwrap_or_else(|_| "brain.bin".to_string());
+        let brain_path =
+            std::env::var("GROWFORMER_BRAIN_PATH").unwrap_or_else(|_| "brain.bin".to_string());
         if let Ok(data) = std::fs::read(&brain_path) {
             match service.load_brain(&data) {
                 Ok(()) => {
@@ -229,7 +230,9 @@ async fn brain_save(
     Json(req): Json<BrainSaveRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     authorize(&headers, &state)?;
-    let path = req.path.or_else(|| std::env::var("GROWFORMER_BRAIN_PATH").ok())
+    let path = req
+        .path
+        .or_else(|| std::env::var("GROWFORMER_BRAIN_PATH").ok())
         .unwrap_or_else(|| "brain.bin".to_string());
     let mut svc = state.service.lock().await;
     let prev_active = svc.active_brain.clone();
@@ -239,10 +242,15 @@ async fn brain_save(
         }
         svc.set_active_brain(name);
     }
-    let bytes = svc.export_brain().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let bytes = svc
+        .export_brain()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     svc.set_active_brain(&prev_active);
-    std::fs::write(&path, &bytes).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(json!({ "ok": true, "path": path, "bytes": bytes.len() })))
+    std::fs::write(&path, &bytes)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(
+        json!({ "ok": true, "path": path, "bytes": bytes.len() }),
+    ))
 }
 
 async fn feedback(
@@ -252,13 +260,12 @@ async fn feedback(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     authorize(&headers, &state)?;
     let mut svc = state.service.lock().await;
-    svc.submit_feedback(&req).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    svc.submit_feedback(&req)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn acceptance(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
+async fn acceptance(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let svc = state.service.lock().await;
     let report = svc.acceptance_report();
     Json(serde_json::to_value(&report).unwrap_or_default())
@@ -309,7 +316,8 @@ async fn chat_stream(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<ChatRequest>,
-) -> Result<Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
+) -> Result<Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)>
+{
     authorize(&headers, &state)?;
     let stream = async_stream::stream! {
         match run_chat(state, req).await {
@@ -366,20 +374,34 @@ async fn run_chat(
 
     let (action, text, raw_stdout) = match req.mode.as_str() {
         "action" => {
-            let action = svc
-                .action(&req.message)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("inference failed: {}", e)))?;
-            let pretty = serde_json::to_string_pretty(&action)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize failed: {}", e)))?;
+            let action = svc.action(&req.message).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("inference failed: {}", e),
+                )
+            })?;
+            let pretty = serde_json::to_string_pretty(&action).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("serialize failed: {}", e),
+                )
+            })?;
             let text = format!("Action JSON:\n{}", pretty);
             (action, text.clone(), pretty)
         }
         "generation" => {
-            let (action, generated) = svc
-                .generation(&req.message)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("inference failed: {}", e)))?;
-            let action_json = serde_json::to_string_pretty(&action)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize failed: {}", e)))?;
+            let (action, generated) = svc.generation(&req.message).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("inference failed: {}", e),
+                )
+            })?;
+            let action_json = serde_json::to_string_pretty(&action).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("serialize failed: {}", e),
+                )
+            })?;
             let text = format!(
                 "Action JSON:\n{}\n\nTemplate response:\n{}",
                 action_json, generated.text
@@ -387,11 +409,18 @@ async fn run_chat(
             (action, text.clone(), generated.text)
         }
         "codegen" => {
-            let (action, code) = svc
-                .codegen(&req.message)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("inference failed: {}", e)))?;
-            let action_json = serde_json::to_string_pretty(&action)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize failed: {}", e)))?;
+            let (action, code) = svc.codegen(&req.message).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("inference failed: {}", e),
+                )
+            })?;
+            let action_json = serde_json::to_string_pretty(&action).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("serialize failed: {}", e),
+                )
+            })?;
             let text = match &code {
                 Some(code) => format!(
                     "Action JSON:\n{}\n\nGenerated code ({}, {}):\n{}",
@@ -402,21 +431,30 @@ async fn run_chat(
             (action, text.clone(), text)
         }
         "converse" => {
-            let (action, resp) = svc
-                .converse(&req.message)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("converse failed: {}", e)))?;
+            let (action, resp) = svc.converse(&req.message).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("converse failed: {}", e),
+                )
+            })?;
             (action, resp.text.clone(), resp.text)
         }
         "paramecium" => {
-            let (action, resp) = svc
-                .paramecium_respond(&req.message)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("paramecium failed: {}", e)))?;
+            let (action, resp) = svc.paramecium_respond(&req.message).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("paramecium failed: {}", e),
+                )
+            })?;
             (action, resp.text.clone(), resp.text)
         }
         other => {
             return Err((
                 StatusCode::BAD_REQUEST,
-                format!("unsupported mode '{}'; use action|generation|codegen|converse|paramecium", other),
+                format!(
+                    "unsupported mode '{}'; use action|generation|codegen|converse|paramecium",
+                    other
+                ),
             ))
         }
     };
@@ -474,7 +512,9 @@ async fn reset_conversation(
     authorize(&headers, &state)?;
     let mut svc = state.service.lock().await;
     svc.reset_conversation();
-    Ok(Json(json!({ "ok": true, "message": "conversation reset, session consolidated" })))
+    Ok(Json(
+        json!({ "ok": true, "message": "conversation reset, session consolidated" }),
+    ))
 }
 
 async fn get_personality(
@@ -503,7 +543,10 @@ fn authorize(headers: &HeaderMap, state: &AppState) -> Result<(), (StatusCode, S
     if auth == expected {
         Ok(())
     } else {
-        Err((StatusCode::UNAUTHORIZED, "missing/invalid bearer token".to_string()))
+        Err((
+            StatusCode::UNAUTHORIZED,
+            "missing/invalid bearer token".to_string(),
+        ))
     }
 }
 

@@ -9,21 +9,21 @@ use crate::active_inference::{
     belief_update_from_reflection, Action, BeliefState, EpisodePolicy, Observation, PolicyTurn,
     QueuedEnvironment,
 };
-use crate::infer_trace;
-use crate::dimension::{
-    action_type_one_hot, generate_code_from_action, group_id_one_hot, render_action_template, ActionJson,
-    CalibrationDataset, CalibrationReport, CalibrationRequirements, CheckpointSizeSummary, CodeGeneration,
-    DimensionManager, DimensionManagerConfig, EpisodicSummary, GeneratedResponse, GenerationHead,
-    LanguageConfig, LanguageRoutingDecision, LanguageSample,
-};
+use crate::dimension::action::{ActionPayload, ActionType};
+use crate::dimension::group_gen::{IndexedGenEnv, RawLatticeDiagnosticReport, GEN_COND_DIM};
 use crate::dimension::language::DEFAULT_BRIDGE_DIM;
-use crate::dimension::group_gen::{GEN_COND_DIM, IndexedGenEnv, RawLatticeDiagnosticReport};
-use crate::dimension::action::{ActionType, ActionPayload};
+use crate::dimension::paramecium::InfraciliaryLattice;
+use crate::dimension::tool::{ToolCallInfo, ToolRegistry, ToolResult, ToolSchema};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::dimension::EncoderPreset;
-use crate::spectral::{ProjectModel, EntityKind, HybridEmbedder};
-use crate::dimension::tool::{ToolRegistry, ToolSchema, ToolCallInfo, ToolResult};
-use crate::dimension::paramecium::InfraciliaryLattice;
+use crate::dimension::{
+    action_type_one_hot, generate_code_from_action, group_id_one_hot, render_action_template,
+    ActionJson, CalibrationDataset, CalibrationReport, CalibrationRequirements,
+    CheckpointSizeSummary, CodeGeneration, DimensionManager, DimensionManagerConfig,
+    EpisodicSummary, GeneratedResponse, GenerationHead, LanguageConfig, LanguageRoutingDecision,
+    LanguageSample,
+};
+use crate::infer_trace;
 use crate::inference::{
     default_inference_harness, inference_rules_runtime, plugins::lattice_shortcuts,
     sentiment_generation_lexicon, BrainPluginsManifest, InferenceHarness,
@@ -31,6 +31,7 @@ use crate::inference::{
 };
 use crate::metacognition::{MetaCognition, ReflectionOutcome};
 use crate::reasoning::{ReasoningEngine, System2Config};
+use crate::spectral::{EntityKind, HybridEmbedder, ProjectModel};
 use crate::types::{EnvironmentConfig, GroupId, Sample};
 
 // ---------------------------------------------------------------------------
@@ -185,27 +186,57 @@ impl Default for OceanProfile {
 impl OceanProfile {
     /// Balanced professional assistant: precise, friendly, moderately creative.
     pub fn assistant() -> Self {
-        Self { openness: 0.5, conscientiousness: 0.8, extraversion: 0.5, agreeableness: 0.7, neuroticism: 0.2 }
+        Self {
+            openness: 0.5,
+            conscientiousness: 0.8,
+            extraversion: 0.5,
+            agreeableness: 0.7,
+            neuroticism: 0.2,
+        }
     }
 
     /// Creative brainstormer: highly open, enthusiastic, less rigid.
     pub fn creative() -> Self {
-        Self { openness: 0.9, conscientiousness: 0.4, extraversion: 0.8, agreeableness: 0.6, neuroticism: 0.3 }
+        Self {
+            openness: 0.9,
+            conscientiousness: 0.4,
+            extraversion: 0.8,
+            agreeableness: 0.6,
+            neuroticism: 0.3,
+        }
     }
 
     /// Precise engineer: structured, careful, low on fluff.
     pub fn engineer() -> Self {
-        Self { openness: 0.4, conscientiousness: 0.9, extraversion: 0.3, agreeableness: 0.5, neuroticism: 0.2 }
+        Self {
+            openness: 0.4,
+            conscientiousness: 0.9,
+            extraversion: 0.3,
+            agreeableness: 0.5,
+            neuroticism: 0.2,
+        }
     }
 
     /// Cautious analyst: high conscientiousness and neuroticism (hedging).
     pub fn analyst() -> Self {
-        Self { openness: 0.5, conscientiousness: 0.9, extraversion: 0.3, agreeableness: 0.5, neuroticism: 0.7 }
+        Self {
+            openness: 0.5,
+            conscientiousness: 0.9,
+            extraversion: 0.3,
+            agreeableness: 0.5,
+            neuroticism: 0.7,
+        }
     }
 
     /// Returns the 5-float vector [O, C, E, A, N].
     pub fn as_vec(&self) -> [f32; 5] {
-        [self.openness, self.conscientiousness, self.extraversion, self.agreeableness, self.neuroticism]
+        [
+            self.openness,
+            self.conscientiousness,
+            self.extraversion,
+            self.agreeableness,
+            self.neuroticism,
+        ]
     }
 
     /// Modulate a conditioning vector with personality.
@@ -213,7 +244,9 @@ impl OceanProfile {
     /// scaled so personality is a secondary signal (not overriding content).
     pub fn condition_vector(&self, cond: &mut [f32]) {
         let dim = cond.len();
-        if dim < 10 { return; }
+        if dim < 10 {
+            return;
+        }
         let ocean = self.as_vec();
         let scale = 0.15;
         for (i, &o) in ocean.iter().enumerate() {
@@ -280,16 +313,25 @@ impl OceanProfile {
         // First turn openers
         if turn_count <= 1 {
             if warmth > 0.65 {
-                if lower.starts_with("how") || lower.starts_with("what") || lower.starts_with("why")
-                    || lower.starts_with("explain") || lower.starts_with("describe")
+                if lower.starts_with("how")
+                    || lower.starts_with("what")
+                    || lower.starts_with("why")
+                    || lower.starts_with("explain")
+                    || lower.starts_with("describe")
                 {
                     return Some(Self::pick_opener_warm(&lower));
                 }
-                if lower.starts_with("help") || lower.contains("can you") || lower.contains("could you") {
+                if lower.starts_with("help")
+                    || lower.contains("can you")
+                    || lower.contains("could you")
+                {
                     return Some("Of course. ".to_string());
                 }
-                if lower.starts_with("implement") || lower.starts_with("write") || lower.starts_with("create")
-                    || lower.starts_with("build") || lower.starts_with("design")
+                if lower.starts_with("implement")
+                    || lower.starts_with("write")
+                    || lower.starts_with("create")
+                    || lower.starts_with("build")
+                    || lower.starts_with("design")
                 {
                     return Some(Self::pick_opener_warm(&lower));
                 }
@@ -299,13 +341,22 @@ impl OceanProfile {
 
         // Continuation turns
         if warmth > 0.6 {
-            if lower.starts_with("and ") || lower.starts_with("also") || lower.starts_with("what about") {
+            if lower.starts_with("and ")
+                || lower.starts_with("also")
+                || lower.starts_with("what about")
+            {
                 return Some("Building on that — ".to_string());
             }
-            if lower.starts_with("but ") || lower.starts_with("however") || lower.starts_with("what if") {
+            if lower.starts_with("but ")
+                || lower.starts_with("however")
+                || lower.starts_with("what if")
+            {
                 return Some("Good point. ".to_string());
             }
-            if lower.starts_with("can you") || lower.starts_with("could you") || lower.starts_with("please") {
+            if lower.starts_with("can you")
+                || lower.starts_with("could you")
+                || lower.starts_with("please")
+            {
                 return Some("Sure. ".to_string());
             }
             if lower.starts_with("why") {
@@ -319,13 +370,17 @@ impl OceanProfile {
     fn pick_opener_warm(lower: &str) -> String {
         if lower.contains("explain") || lower.contains("what is") || lower.contains("what are") {
             "Let me break that down. ".to_string()
-        } else if lower.contains("how to") || lower.contains("how do") || lower.contains("how can") {
+        } else if lower.contains("how to") || lower.contains("how do") || lower.contains("how can")
+        {
             "Here's how. ".to_string()
-        } else if lower.contains("design") || lower.contains("architect") || lower.contains("build") {
+        } else if lower.contains("design") || lower.contains("architect") || lower.contains("build")
+        {
             "Here's an approach. ".to_string()
-        } else if lower.contains("implement") || lower.contains("write") || lower.contains("create") {
+        } else if lower.contains("implement") || lower.contains("write") || lower.contains("create")
+        {
             "Here's the implementation. ".to_string()
-        } else if lower.contains("compare") || lower.contains("difference") || lower.contains("vs") {
+        } else if lower.contains("compare") || lower.contains("difference") || lower.contains("vs")
+        {
             "Let me compare them. ".to_string()
         } else {
             String::new()
@@ -427,7 +482,10 @@ impl Default for ConversationContext {
 
 impl ConversationContext {
     pub fn push_user(&mut self, text: &str) {
-        self.history.push(ConversationTurn { role: TurnRole::User, text: text.to_string() });
+        self.history.push(ConversationTurn {
+            role: TurnRole::User,
+            text: text.to_string(),
+        });
         // Keep `open_asks` through this turn so compose can acknowledge replies.
         // Cleared at end of `converse` via `consume_open_asks`.
         self.trim();
@@ -439,7 +497,10 @@ impl ConversationContext {
     }
 
     pub fn push_agent(&mut self, text: &str) {
-        self.history.push(ConversationTurn { role: TurnRole::Agent, text: text.to_string() });
+        self.history.push(ConversationTurn {
+            role: TurnRole::Agent,
+            text: text.to_string(),
+        });
         self.trim();
     }
 
@@ -471,7 +532,10 @@ impl ConversationContext {
     }
 
     pub fn turn_count(&self) -> usize {
-        self.history.iter().filter(|t| t.role == TurnRole::User).count()
+        self.history
+            .iter()
+            .filter(|t| t.role == TurnRole::User)
+            .count()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -515,13 +579,11 @@ impl ConversationContext {
     /// Blend a new turn's query and response embeddings into the running
     /// geometric context. Uses exponential decay so recent turns dominate
     /// but earlier context never fully disappears.
-    pub fn update_geometric_context(
-        &mut self,
-        query_emb: &[f32],
-        response_emb: &[f32],
-    ) {
+    pub fn update_geometric_context(&mut self, query_emb: &[f32], response_emb: &[f32]) {
         let dim = query_emb.len().max(response_emb.len());
-        if dim == 0 { return; }
+        if dim == 0 {
+            return;
+        }
 
         // Midpoint of query + response captures the turn's semantic center
         let mut turn_center = vec![0.0f32; dim];
@@ -538,18 +600,25 @@ impl ConversationContext {
             let d = self.context_decay;
             self.context_embedding.resize(dim, 0.0);
             for i in 0..dim {
-                self.context_embedding[i] = d * self.context_embedding[i]
-                    + (1.0 - d) * turn_center[i];
+                self.context_embedding[i] =
+                    d * self.context_embedding[i] + (1.0 - d) * turn_center[i];
             }
             // L2-normalize to keep on the unit sphere
-            let norm: f32 = self.context_embedding.iter()
-                .map(|x| x * x).sum::<f32>().sqrt();
+            let norm: f32 = self
+                .context_embedding
+                .iter()
+                .map(|x| x * x)
+                .sum::<f32>()
+                .sqrt();
             if norm > 1e-8 {
-                for v in &mut self.context_embedding { *v /= norm; }
+                for v in &mut self.context_embedding {
+                    *v /= norm;
+                }
             }
         }
 
-        self.turn_embeddings.push((query_emb.to_vec(), response_emb.to_vec()));
+        self.turn_embeddings
+            .push((query_emb.to_vec(), response_emb.to_vec()));
     }
 
     /// Modulate a raw query embedding with accumulated conversation context.
@@ -570,7 +639,9 @@ impl ConversationContext {
         }
         let norm: f32 = blended.iter().map(|x| x * x).sum::<f32>().sqrt();
         if norm > 1e-8 {
-            for v in &mut blended { *v /= norm; }
+            for v in &mut blended {
+                *v /= norm;
+            }
         }
         blended
     }
@@ -578,12 +649,23 @@ impl ConversationContext {
     /// Detect if the current query is shifting topic based on cosine similarity
     /// with the accumulated context. Low similarity = topic shift.
     pub fn is_topic_shift(&self, query_emb: &[f32], threshold: f32) -> bool {
-        if self.context_embedding.is_empty() { return false; }
+        if self.context_embedding.is_empty() {
+            return false;
+        }
         let dim = query_emb.len().min(self.context_embedding.len());
-        let dot: f32 = (0..dim).map(|i| query_emb[i] * self.context_embedding[i]).sum();
+        let dot: f32 = (0..dim)
+            .map(|i| query_emb[i] * self.context_embedding[i])
+            .sum();
         let nq: f32 = query_emb.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let nc: f32 = self.context_embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if nq < 1e-8 || nc < 1e-8 { return true; }
+        let nc: f32 = self
+            .context_embedding
+            .iter()
+            .map(|x| x * x)
+            .sum::<f32>()
+            .sqrt();
+        if nq < 1e-8 || nc < 1e-8 {
+            return true;
+        }
         let sim = dot / (nq * nc);
         sim < threshold
     }
@@ -591,9 +673,17 @@ impl ConversationContext {
     /// Format conversation history as context string for the encoder.
     /// Uses a sliding window of the last N turns to keep embedding focused.
     pub fn context_window(&self, window: usize) -> String {
-        let recent: Vec<&ConversationTurn> = self.history.iter()
-            .rev().take(window * 2).collect::<Vec<_>>().into_iter().rev().collect();
-        recent.iter()
+        let recent: Vec<&ConversationTurn> = self
+            .history
+            .iter()
+            .rev()
+            .take(window * 2)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        recent
+            .iter()
             .map(|t| match t.role {
                 TurnRole::User => format!("user: {}", t.text),
                 TurnRole::Agent => format!("agent: {}", t.text),
@@ -743,9 +833,8 @@ fn skip_system2_for_sentiment_scoped_run(
     let on_sentiment_lattice = sentiment_gidx
         .zip(retry_effective_gidx.or(group_idx))
         .is_some_and(|(s, g)| s == g);
-    let sentiment_topic_hint = topic_hint.is_some_and(|t| {
-        sentiment_generation_lexicon::global().is_sentiment_lattice_topic_hint(t)
-    });
+    let sentiment_topic_hint = topic_hint
+        .is_some_and(|t| sentiment_generation_lexicon::global().is_sentiment_lattice_topic_hint(t));
     sentiment_topic_hint || (lex_active && on_sentiment_lattice)
 }
 
@@ -757,7 +846,8 @@ impl LanguageService {
     }
 
     pub fn new_with_config(config: LanguageConfig) -> Result<Self, String> {
-        let (dm, support_gid, coding_gid, report) = build_language_demo_manager_with_config(0.2, config)?;
+        let (dm, support_gid, coding_gid, report) =
+            build_language_demo_manager_with_config(0.2, config)?;
         Self::from_parts(dm, support_gid, coding_gid, report)
     }
 
@@ -781,7 +871,12 @@ impl LanguageService {
         Self::from_parts(dm, support_gid, coding_gid, report)
     }
 
-    fn from_parts(dm: DimensionManager, support_gid: GroupId, coding_gid: GroupId, report: CalibrationReport) -> Result<Self, String> {
+    fn from_parts(
+        dm: DimensionManager,
+        support_gid: GroupId,
+        coding_gid: GroupId,
+        report: CalibrationReport,
+    ) -> Result<Self, String> {
         Ok(Self {
             brains: HashMap::new(),
             active_brain: "default".to_string(),
@@ -877,7 +972,9 @@ impl LanguageService {
         turn_count: usize,
     ) -> Option<GeneratedResponse> {
         use crate::fragment_composer::ComposeContext;
-        use crate::inference::chat_structure_metacog::{evaluate as eval_structure, ChatStructureOutcome};
+        use crate::inference::chat_structure_metacog::{
+            evaluate as eval_structure, ChatStructureOutcome,
+        };
         use crate::reflective_field::ReflectiveWeights;
 
         let fc = self.fragment_composer.as_ref()?;
@@ -973,9 +1070,7 @@ impl LanguageService {
             seed = (seed ^ b as u64).wrapping_mul(0x100000001b3);
         }
         seed = seed.wrapping_add((turn as u64).wrapping_mul(0x9e3779b97f4a7c15));
-        seed = seed.wrapping_add(
-            (turn_count as u64).wrapping_mul(0x517cc1b727220a95),
-        );
+        seed = seed.wrapping_add((turn_count as u64).wrapping_mul(0x517cc1b727220a95));
 
         let force_second_body = fc_policy
             .force_second_body_intents
@@ -1185,7 +1280,10 @@ impl LanguageService {
                     0.998
                 },
             };
-            let persist = fc_policy.context_frame.enabled.then(|| frame.to_persisted());
+            let persist = fc_policy
+                .context_frame
+                .enabled
+                .then(|| frame.to_persisted());
             let intent_note = hints.intent.clone();
             // Drop composer borrow before mutating conversation.
             drop(fc);
@@ -1349,9 +1447,7 @@ impl LanguageService {
 
     /// Reference to the currently active checkpoint (for inspection / API).
     pub fn active_dm(&self) -> &DimensionManager {
-        self.brains
-            .get(&self.active_brain)
-            .unwrap_or(&self.dm)
+        self.brains.get(&self.active_brain).unwrap_or(&self.dm)
     }
 
     // -----------------------------------------------------------------------
@@ -1404,7 +1500,10 @@ impl LanguageService {
         if gen.drive_field {
             if self.drive_field.is_none() {
                 let state = self.drive_state_from_agent_state();
-                let base_novelty = self.active_dm().group_gen_envs.values()
+                let base_novelty = self
+                    .active_dm()
+                    .group_gen_envs
+                    .values()
                     .map(|e| e.lattice.novelty_factor)
                     .fold(0.0f32, f32::max)
                     .max(1.0);
@@ -1424,9 +1523,10 @@ impl LanguageService {
 
         if gen.reflective_field {
             if self.reflective_field.is_none() {
-                infer_trace!("  [reflective-field] enabled; unified Identity⊕Activity⊕Drive composition");
-                self.reflective_field =
-                    Some(crate::reflective_field::ReflectiveField::new(true));
+                infer_trace!(
+                    "  [reflective-field] enabled; unified Identity⊕Activity⊕Drive composition"
+                );
+                self.reflective_field = Some(crate::reflective_field::ReflectiveField::new(true));
             } else if let Some(f) = self.reflective_field.as_mut() {
                 f.enabled = true;
             }
@@ -1513,8 +1613,16 @@ impl LanguageService {
                         self.available_topics().join(", ")
                     )
                 })?;
-                infer_trace!("  [goal-attractor] set goal topic '{}' (pull={:.2})", t, pull);
-                Some(crate::reflective_field::GoalAttractor::new(target, pull, t.to_string()))
+                infer_trace!(
+                    "  [goal-attractor] set goal topic '{}' (pull={:.2})",
+                    t,
+                    pull
+                );
+                Some(crate::reflective_field::GoalAttractor::new(
+                    target,
+                    pull,
+                    t.to_string(),
+                ))
             }
             _ => None,
         };
@@ -1528,7 +1636,11 @@ impl LanguageService {
     /// neuromodulator gains onto the live generation knobs. No-op when the drive
     /// field is disabled, leaving behavior identical to the base system.
     fn apply_drive_field_turn(&mut self, user_text: &str) {
-        let minutes_idle = self.agent_state.as_ref().map(|s| s.minutes_idle).unwrap_or(0.0);
+        let minutes_idle = self
+            .agent_state
+            .as_ref()
+            .map(|s| s.minutes_idle)
+            .unwrap_or(0.0);
         let (modulation, temperature, novelty) = match self.drive_field.as_mut() {
             Some(f) if f.enabled => {
                 // The incoming message can relax a drive (food, petting, rest) before
@@ -1615,14 +1727,7 @@ impl LanguageService {
         nm: Option<crate::drive_field::Neuromodulators>,
         turn_count: usize,
     ) -> Option<GeneratedResponse> {
-        self.try_fragment_compose(
-            intent_text,
-            ocean,
-            state,
-            reflective,
-            nm,
-            turn_count,
-        )
+        self.try_fragment_compose(intent_text, ocean, state, reflective, nm, turn_count)
     }
 
     /// Substitute line when chat passthrough detects a lattice/compose misfire.
@@ -1809,8 +1914,7 @@ impl LanguageService {
                             j += 1;
                         }
                         j += 1;
-                        let variants: Vec<String> =
-                            inner.chars().map(|c| c.to_string()).collect();
+                        let variants: Vec<String> = inner.chars().map(|c| c.to_string()).collect();
                         let mut next = Vec::new();
                         for prefix in &out {
                             for v in &variants {
@@ -1856,7 +1960,9 @@ impl LanguageService {
         mut resp: GeneratedResponse,
     ) -> GeneratedResponse {
         let misfire = Self::chat_response_misfire_hit(intent_text, &resp.text, prior_agent_text);
-        let rule_count = crate::inference::inference_rules_runtime().lattice_misfire.len();
+        let rule_count = crate::inference::inference_rules_runtime()
+            .lattice_misfire
+            .len();
         infer_trace!(
             "  [chat-guardrail] misfire={} rules={}",
             misfire,
@@ -1927,11 +2033,7 @@ impl LanguageService {
         }
         env.topic_subindex
             .iter()
-            .find(|t| {
-                t.topic_name
-                    .to_ascii_lowercase()
-                    .starts_with("neutral_")
-            })
+            .find(|t| t.topic_name.to_ascii_lowercase().starts_with("neutral_"))
             .map(|t| t.topic_name.clone())
     }
 
@@ -2061,7 +2163,9 @@ impl LanguageService {
         // sentiment lattice — do not prefix those lines with "Identity —" (see routing_coarse.identity).
         let th_for_header: &str = if th.eq_ignore_ascii_case("identity") {
             IndexedGenEnv::sentiment_coarse_topic_key_for_routing_fallback("identity")
-        } else if body.contains(crate::inference::sentiment_generation_lexicon::prompt_anchor_marker()) {
+        } else if body
+            .contains(crate::inference::sentiment_generation_lexicon::prompt_anchor_marker())
+        {
             IndexedGenEnv::sentiment_coarse_topic_key_for_routing_fallback(th)
         } else {
             th
@@ -2108,7 +2212,9 @@ impl LanguageService {
     }
 
     #[cfg(feature = "categorical")]
-    fn categorical_composer_arc(&self) -> Option<std::sync::Arc<crate::category::compose::CategoricalComposer>> {
+    fn categorical_composer_arc(
+        &self,
+    ) -> Option<std::sync::Arc<crate::category::compose::CategoricalComposer>> {
         self.categorical_composer.clone()
     }
 
@@ -2119,7 +2225,10 @@ impl LanguageService {
 
     /// Set a trained `CategoricalComposer` for generation fallback.
     #[cfg(feature = "categorical")]
-    pub fn set_categorical_composer(&mut self, composer: crate::category::compose::CategoricalComposer) {
+    pub fn set_categorical_composer(
+        &mut self,
+        composer: crate::category::compose::CategoricalComposer,
+    ) {
         self.categorical_composer = Some(std::sync::Arc::new(composer));
     }
 
@@ -2128,8 +2237,8 @@ impl LanguageService {
     #[cfg(feature = "categorical")]
     pub fn bootstrap_categorical_composer(&mut self, data_dir: &std::path::Path, num_steps: usize) {
         use crate::category::{
-            CurriculumScheduler, GrowformerNode, GrowformerTrainer, NodeId, TrainingBatch,
-            TrainerConfig,
+            CurriculumScheduler, GrowformerNode, GrowformerTrainer, NodeId, TrainerConfig,
+            TrainingBatch,
         };
         let mut batch = TrainingBatch::default();
         if let Ok(mut entries) = std::fs::read_dir(data_dir) {
@@ -2148,19 +2257,22 @@ impl LanguageService {
             return;
         }
         let config = TrainerConfig::default();
-        let curriculum = CurriculumScheduler::new(
-            num_steps / 4,
-            num_steps * 3 / 4,
-        );
+        let curriculum = CurriculumScheduler::new(num_steps / 4, num_steps * 3 / 4);
         let mut trainer = GrowformerTrainer::with_config(curriculum, config.clone());
         trainer.add_node(GrowformerNode::new(
-            NodeId::new(0), "parse", config.embed_dim, vec![0.01; config.embed_dim],
+            NodeId::new(0),
+            "parse",
+            config.embed_dim,
+            vec![0.01; config.embed_dim],
         ));
         match trainer.train_and_export_composer(&batch, num_steps) {
             Ok(composer) => {
                 self.categorical_composer = Some(std::sync::Arc::new(composer));
-                infer_trace!("  [categorical] bootstrapped composer from {} records, {} steps",
-                    batch.records.len(), num_steps);
+                infer_trace!(
+                    "  [categorical] bootstrapped composer from {} records, {} steps",
+                    batch.records.len(),
+                    num_steps
+                );
             }
             Err(e) => {
                 eprintln!("[categorical] failed to bootstrap composer: {e}");
@@ -2215,11 +2327,7 @@ impl LanguageService {
                 let cond = dm.adapt_for_group_clifford(gidx, conditioned, h_raw, GEN_COND_DIM);
                 if let Some(env) = dm.group_gen_envs.get(&gidx) {
                     let cands = env.raw_forced_topic_top_k(&cond, th, top_k);
-                    (
-                        cands,
-                        "forced_topic".to_string(),
-                        Some(th.to_string()),
-                    )
+                    (cands, "forced_topic".to_string(), Some(th.to_string()))
                 } else {
                     (
                         Vec::new(),
@@ -2258,7 +2366,8 @@ impl LanguageService {
 
         // Preserve monetary magnitude for routing/retrieval; hashing encoder skips pure-number tokens.
         // Note: shells expand `$` in double-quoted argv — prefer single quotes or `--prompt-file`.
-        let intent_text_owned = crate::growformer_lang::normalize_inference_money_spans(intent_text);
+        let intent_text_owned =
+            crate::growformer_lang::normalize_inference_money_spans(intent_text);
         let text_owned = if text == intent_text {
             intent_text_owned.clone()
         } else {
@@ -2300,28 +2409,28 @@ impl LanguageService {
 
         // Tool call interception: code/general brains only — not sentiment or chat passthrough.
         if !sentiment_shortcuts && !chat_passthrough {
-        if let Some(tool_call) = self.tool_registry.match_tool(intent_text) {
-            let action = ActionJson {
-                action_type: ActionType::ToolCall,
-                target_group_id: None,
-                group_task_name: None,
-                confidence: 1.0,
-                margin: 1.0,
-                reason: "tool_match".to_string(),
-                payload: Some(ActionPayload::ToolCall {
-                    tool_name: tool_call.tool_name.clone(),
-                    arguments: tool_call.arguments.clone(),
-                }),
-            };
-            let resp = GeneratedResponse {
-                text: format!("[tool_call: {}] Awaiting execution.", tool_call.tool_name),
-                template_id: "tool_call_pending".to_string(),
-                traceable: true,
-                confidence: 1.0,
-            };
-            self.record_latency(start);
-            return Ok((action, resp));
-        }
+            if let Some(tool_call) = self.tool_registry.match_tool(intent_text) {
+                let action = ActionJson {
+                    action_type: ActionType::ToolCall,
+                    target_group_id: None,
+                    group_task_name: None,
+                    confidence: 1.0,
+                    margin: 1.0,
+                    reason: "tool_match".to_string(),
+                    payload: Some(ActionPayload::ToolCall {
+                        tool_name: tool_call.tool_name.clone(),
+                        arguments: tool_call.arguments.clone(),
+                    }),
+                };
+                let resp = GeneratedResponse {
+                    text: format!("[tool_call: {}] Awaiting execution.", tool_call.tool_name),
+                    template_id: "tool_call_pending".to_string(),
+                    traceable: true,
+                    confidence: 1.0,
+                };
+                self.record_latency(start);
+                return Ok((action, resp));
+            }
         } // !sentiment_shortcuts && !chat_passthrough
 
         let personality = self.personality.clone();
@@ -2335,9 +2444,16 @@ impl LanguageService {
         // Pre-compute meta-routing using intent_text (raw message, no context pollution).
         let meta_pre = self.meta_codebook.as_ref().and_then(|mcb| {
             let dm_ref = &self.dm;
-            let bridged = dm_ref.language_runtime.bridge_text_stateless(intent_text).ok()?;
+            let bridged = dm_ref
+                .language_runtime
+                .bridge_text_stateless(intent_text)
+                .ok()?;
             let mr = mcb.route_and_project(&bridged.routed_vector, intent_text);
-            if mr.confidence > 0.3 { Some(mr) } else { None }
+            if mr.confidence > 0.3 {
+                Some(mr)
+            } else {
+                None
+            }
         });
 
         // Snapshot conversation context before mutable borrow of DimensionManager
@@ -2362,20 +2478,16 @@ impl LanguageService {
         // Basal ganglia: snapshot the policy and build this turn's action context
         // (neuromodulators + identity + inferred user affect) so the selector can
         // be pushed onto the gen envs before the mutable DimensionManager borrow.
-        let basal_ganglia_snapshot = self
-            .basal_ganglia
-            .as_ref()
-            .filter(|b| b.enabled)
-            .map(|b| {
-                let mut bg = b.clone();
-                bg.ctx = crate::basal_ganglia::ActionContext {
-                    neuromods: drive_nm_snapshot,
-                    user_affect: crate::basal_ganglia::UserAffect::from_prompt(intent_text),
-                    ocean: ocean_snapshot,
-                    target_chars: 160,
-                };
-                bg
-            });
+        let basal_ganglia_snapshot = self.basal_ganglia.as_ref().filter(|b| b.enabled).map(|b| {
+            let mut bg = b.clone();
+            bg.ctx = crate::basal_ganglia::ActionContext {
+                neuromods: drive_nm_snapshot,
+                user_affect: crate::basal_ganglia::UserAffect::from_prompt(intent_text),
+                ocean: ocean_snapshot,
+                target_chars: 160,
+            };
+            bg
+        });
 
         let inference_profile_cached = self
             .brain_package_header
@@ -2389,7 +2501,9 @@ impl LanguageService {
         let inference_thresholds_ref = inference_thresholds_bundle.as_ref();
         let inference_harness = self.inference_harness.clone();
 
-        let action = self.active_dm_mut().route_text_to_action_stateless(intent_text)?;
+        let action = self
+            .active_dm_mut()
+            .route_text_to_action_stateless(intent_text)?;
 
         // Assisted-maintenance capture (lightweight; certifier runs offline via --grounding-loop-audit).
         {
@@ -2458,15 +2572,16 @@ impl LanguageService {
                         {
                             resp = fb;
                         }
-                    } else if let Some(fb) =
-                        self.chat_policy_bleed_fallback(intent_text, &bleed)
-                    {
+                    } else if let Some(fb) = self.chat_policy_bleed_fallback(intent_text, &bleed) {
                         resp = fb;
                     }
                 }
                 let prior_agent = self.conversation.last_agent_text();
                 resp = Self::apply_chat_output_guardrails(intent_text, prior_agent, resp);
-                infer_trace!("  [fragment-compose] composed response ({} chars)", resp.text.len());
+                infer_trace!(
+                    "  [fragment-compose] composed response ({} chars)",
+                    resp.text.len()
+                );
                 self.record_latency(start);
                 return Ok((action, resp));
             }
@@ -2486,7 +2601,8 @@ impl LanguageService {
         } else {
             None
         };
-        let mut group_idx = action.target_group_id
+        let mut group_idx = action
+            .target_group_id
             .and_then(|gid| dm.main.group_order.iter().position(|&g| g == gid));
 
         // GrowformerLang meta-routing: override traditional routing with concept-level routing.
@@ -2543,7 +2659,8 @@ impl LanguageService {
                 let lower_for_sarcasm = intent_text.to_ascii_lowercase();
                 inference_rules_runtime().has_sarcasm_template(&lower_for_sarcasm)
             };
-            let causal_redirect = if mr.concept == crate::growformer_lang::MetaConcept::CausalReasoning
+            let causal_redirect = if mr.concept
+                == crate::growformer_lang::MetaConcept::CausalReasoning
                 && !sarcasm_blocks_causal
             {
                 causal_group_idx
@@ -2567,17 +2684,25 @@ impl LanguageService {
                 });
             } else if let Some(best_g) = mr.best_group() {
                 if best_g < dm.main.group_order.len() {
-                    infer_trace!("  [meta-route] concept={}, lang={}, conf={:.3}, margin={:.3} → group {}",
-                        mr.concept.name(), mr.language.name(), mr.confidence, mr.margin, best_g);
-                    let apply_meta = mr.margin >= 0.05 || mr.confidence >= 0.90 || group_idx.is_none();
-                    let lattice_skip_weak_gk = inference_harness.skip_weak_gk_for_meta_conditioning(
-                        dm,
-                        inference_profile_opt,
-                        inference_thresholds_ref,
-                        mr.concept,
-                        mr.margin,
+                    infer_trace!(
+                        "  [meta-route] concept={}, lang={}, conf={:.3}, margin={:.3} → group {}",
+                        mr.concept.name(),
+                        mr.language.name(),
                         mr.confidence,
+                        mr.margin,
+                        best_g
                     );
+                    let apply_meta =
+                        mr.margin >= 0.05 || mr.confidence >= 0.90 || group_idx.is_none();
+                    let lattice_skip_weak_gk = inference_harness
+                        .skip_weak_gk_for_meta_conditioning(
+                            dm,
+                            inference_profile_opt,
+                            inference_thresholds_ref,
+                            mr.concept,
+                            mr.margin,
+                            mr.confidence,
+                        );
                     if lattice_skip_weak_gk {
                         infer_trace!(
                             "  [meta-route] lattice profile: ignore weak GeneralKnowledge (margin={:.3}) for conditioning",
@@ -2611,7 +2736,12 @@ impl LanguageService {
         let query_intent = crate::growformer_lang::parse_query_intent(intent_text);
         let is_broad = query_intent.is_broad_overview();
         let mut broad_summary: Option<(String, f32)> = None;
-        infer_trace!("  [intent] action={}, subject=\"{}\", broad={}", query_intent.action.name(), query_intent.subject, is_broad);
+        infer_trace!(
+            "  [intent] action={}, subject=\"{}\", broad={}",
+            query_intent.action.name(),
+            query_intent.subject,
+            is_broad
+        );
 
         if let Some(json) =
             crate::inference::lookup_graph::try_lookup(intent_text, &query_intent.subject)
@@ -2678,9 +2808,16 @@ impl LanguageService {
             let meta_result = if let Some(ref mut mb) = dm.meta_brain {
                 if mb.is_ready() {
                     let r = mb.process(h_raw, &conditioned);
-                    infer_trace!("  [meta-brain] topic={}, verb={}, action={:?}, conf={:.3}",
-                        r.topic, r.verb, r.action, r.confidence);
-                    if group_idx.is_none() && r.group_idx.is_some() { group_idx = r.group_idx; }
+                    infer_trace!(
+                        "  [meta-brain] topic={}, verb={}, action={:?}, conf={:.3}",
+                        r.topic,
+                        r.verb,
+                        r.action,
+                        r.confidence
+                    );
+                    if group_idx.is_none() && r.group_idx.is_some() {
+                        group_idx = r.group_idx;
+                    }
                     // For sentiment brains, trust MetaBrain's topic classification.
                     // For chat brains, MetaBrain's topic classifier is non-functional
                     // (always returns the same default topic with conf=0.0), so skip
@@ -2690,7 +2827,9 @@ impl LanguageService {
                         topic_hint = Some(r.topic.clone());
                     }
                     Some(r)
-                } else { None }
+                } else {
+                    None
+                }
             } else {
                 if let Some(ref mut ul) = dm.understanding {
                     if !ul.is_empty() {
@@ -2722,12 +2861,9 @@ impl LanguageService {
                 }
             }
 
-            let apply_toml_lexical = lattice_shortcuts::sentiment_toml_lexical_guards_active(
-                dm,
-                inference_profile_opt,
-            );
-            let sentiment_lattice_gidx =
-                lattice_shortcuts::pick_sentiment_lattice_group_idx(dm);
+            let apply_toml_lexical =
+                lattice_shortcuts::sentiment_toml_lexical_guards_active(dm, inference_profile_opt);
+            let sentiment_lattice_gidx = lattice_shortcuts::pick_sentiment_lattice_group_idx(dm);
             let infer_rules_rt = crate::inference::inference_rules_runtime();
             let pr_press = if apply_toml_lexical {
                 infer_rules_rt
@@ -2736,7 +2872,8 @@ impl LanguageService {
             } else {
                 false
             };
-            let _pr_wire_world_ground = crate::inference::world_grounding::PrWireHeadlineGuard::bind(pr_press);
+            let _pr_wire_world_ground =
+                crate::inference::world_grounding::PrWireHeadlineGuard::bind(pr_press);
             // PR / wire headlines: force sentiment lattice + neutral bucket (MetaBrain "Identity",
             // TopicGraph operation topics, and cross-group redirects routinely hijack these lines).
             if pr_press {
@@ -2755,7 +2892,8 @@ impl LanguageService {
                 }
             }
 
-            let fp_finance_complaint = infer_rules_rt.looks_like_first_person_finance_intent(intent_text)
+            let fp_finance_complaint = infer_rules_rt
+                .looks_like_first_person_finance_intent(intent_text)
                 && !inference_harness.match_identity_query(chat_locale, intent_text);
             let op_topic_opt = crate::growformer_lang::infer_operation_topic(intent_text);
             // Override topic_hint with operation-specific intent from GrowformerLang.
@@ -2784,18 +2922,27 @@ impl LanguageService {
                     // This prevents false matches where a group has the topic label but
                     // few/irrelevant programs.
                     if let Some(current_g) = group_idx {
-                        let current_count = dm.group_gen_envs.get(&current_g)
-                            .map(|env| env.topic_subindex.iter()
-                                .filter(|t| t.topic_name.eq_ignore_ascii_case(op_topic))
-                                .map(|t| t.lattice.programs.len())
-                                .sum::<usize>())
+                        let current_count = dm
+                            .group_gen_envs
+                            .get(&current_g)
+                            .map(|env| {
+                                env.topic_subindex
+                                    .iter()
+                                    .filter(|t| t.topic_name.eq_ignore_ascii_case(op_topic))
+                                    .map(|t| t.lattice.programs.len())
+                                    .sum::<usize>()
+                            })
                             .unwrap_or(0);
 
                         let mut best_redirect: Option<(usize, usize)> = None;
                         for (&gidx, env) in &dm.group_gen_envs {
-                            if gidx == current_g { continue; }
+                            if gidx == current_g {
+                                continue;
+                            }
                             for t in &env.topic_subindex {
-                                if t.topic_name.eq_ignore_ascii_case(op_topic) && !t.lattice.programs.is_empty() {
+                                if t.topic_name.eq_ignore_ascii_case(op_topic)
+                                    && !t.lattice.programs.is_empty()
+                                {
                                     let count = t.lattice.programs.len();
                                     if best_redirect.map(|(_, c)| count > c).unwrap_or(true) {
                                         best_redirect = Some((gidx, count));
@@ -2871,7 +3018,8 @@ impl LanguageService {
             // Wire headlines about open finance / inclusion to the sentiment lattice even when
             // the classifier lands on identity or another group (fixes hard decline + weak retrieval).
             if apply_toml_lexical
-                && infer_rules_rt.sentiment_inclusion_open_finance_headline_positive_raw(intent_text)
+                && infer_rules_rt
+                    .sentiment_inclusion_open_finance_headline_positive_raw(intent_text)
             {
                 if let Some(sgx) = sentiment_lattice_gidx {
                     if group_idx != Some(sgx) {
@@ -2883,9 +3031,9 @@ impl LanguageService {
                     }
                 }
             }
-            let allow_sentiment_lexical = !Self::operation_topic_blocks_sentiment_lexical(
-                op_topic_opt.as_deref(),
-            ) || pr_press;
+            let allow_sentiment_lexical =
+                !Self::operation_topic_blocks_sentiment_lexical(op_topic_opt.as_deref())
+                    || pr_press;
             let sentiment_lexical_k = if apply_toml_lexical && allow_sentiment_lexical {
                 infer_rules_rt.sentiment_lexical_topic_key(intent_text)
             } else {
@@ -2894,7 +3042,8 @@ impl LanguageService {
             // Multi-group: classifier often picks identity for crypto wire; headline TOML still maps
             // crime/laundering to negative_mild — force the sentiment lattice so lexical guards run.
             if dm.group_gen_envs.len() > 1 {
-                if let (Some(sgx), Some(ref k)) = (sentiment_lattice_gidx, sentiment_lexical_k.as_ref())
+                if let (Some(sgx), Some(ref k)) =
+                    (sentiment_lattice_gidx, sentiment_lexical_k.as_ref())
                 {
                     if group_idx != Some(sgx)
                         && !infer_rules_rt.looks_like_first_person_finance_intent(intent_text)
@@ -2978,12 +3127,16 @@ impl LanguageService {
                         intent_text,
                     );
                     if let Some(k) = infer_rules_rt.lexical_polarity_signal(&n) {
-                        let k_ok = lattice_shortcuts::TOPIC_KEYS.iter().any(|t| *t == k.as_str());
+                        let k_ok = lattice_shortcuts::TOPIC_KEYS
+                            .iter()
+                            .any(|t| *t == k.as_str());
                         if k_ok {
                             let th = topic_hint.as_deref();
                             let lex = crate::inference::sentiment_generation_lexicon::global();
                             let th_ok = th.is_some_and(|t| {
-                                lattice_shortcuts::TOPIC_KEYS.iter().any(|x| t.eq_ignore_ascii_case(x))
+                                lattice_shortcuts::TOPIC_KEYS
+                                    .iter()
+                                    .any(|x| t.eq_ignore_ascii_case(x))
                                     || lex.is_sentiment_lattice_topic_hint(t)
                             });
                             if !th_ok {
@@ -3039,8 +3192,8 @@ impl LanguageService {
                     };
                     let dim = gen_conditioning.len().min(conv_ctx_snapshot.len());
                     for i in 0..dim {
-                        gen_conditioning[i] = (1.0 - blend) * gen_conditioning[i]
-                            + blend * conv_ctx_snapshot[i];
+                        gen_conditioning[i] =
+                            (1.0 - blend) * gen_conditioning[i] + blend * conv_ctx_snapshot[i];
                     }
                 }
 
@@ -3079,7 +3232,8 @@ impl LanguageService {
 
             // Apply OCEAN Hopf diversity bonus and subject keywords to all gen envs
             let div_bonus = personality.hopf_diversity_bonus();
-            let mut subject_kw: Vec<String> = query_intent.subject
+            let mut subject_kw: Vec<String> = query_intent
+                .subject
                 .split_whitespace()
                 .filter(|w| w.len() > 2)
                 .map(|w| w.to_ascii_lowercase())
@@ -3102,11 +3256,9 @@ impl LanguageService {
             }
 
             if let Some(ref op_topic) = op_topic_opt {
-                if let Some(shard_gidx) = Self::route_vocabulary_sharded_group(
-                    dm,
-                    op_topic,
-                    &subject_kw,
-                ) {
+                if let Some(shard_gidx) =
+                    Self::route_vocabulary_sharded_group(dm, op_topic, &subject_kw)
+                {
                     group_idx = Some(shard_gidx);
                 }
             }
@@ -3123,7 +3275,9 @@ impl LanguageService {
                 // Score each group by how many of its topic names overlap with the query subject.
                 let mut best_broad_group: Option<(usize, usize)> = None; // (gidx, relevance_score)
                 for (&gidx, env) in &dm.group_gen_envs {
-                    if env.topic_subindex.len() < 2 { continue; }
+                    if env.topic_subindex.len() < 2 {
+                        continue;
+                    }
                     let mut relevance = 0usize;
                     for t in &env.topic_subindex {
                         let tname = t.topic_name.to_ascii_lowercase().replace('_', " ");
@@ -3146,7 +3300,11 @@ impl LanguageService {
                     .or_else(|| meta_result.as_ref().and_then(|mr| mr.group_idx));
 
                 if let Some(bbg) = best_broad_group {
-                    infer_trace!("  [broad-query] best group by topic match: group {} (relevance={})", bbg.0, bbg.1);
+                    infer_trace!(
+                        "  [broad-query] best group by topic match: group {} (relevance={})",
+                        bbg.0,
+                        bbg.1
+                    );
                 }
 
                 effective_gidx.and_then(|gidx| {
@@ -3180,18 +3338,17 @@ impl LanguageService {
 
             // --- Level 1: Competitive multi-head inference with E8 composition ---
             use crate::dimension::group_gen::{
-                E8Contribution, e8_blend_quantum, e8_compose_sentences_quantum,
-                e8_select_best, compute_q,
+                compute_q, e8_blend_quantum, e8_compose_sentences_quantum, e8_select_best,
+                E8Contribution,
             };
 
             // Primary generation: prefer classifier's group_idx over MetaBrain's.
             // Only use MetaBrain's archetype when the classifier didn't provide a group.
-            let effective_gidx = group_idx.or_else(|| meta_result.as_ref().and_then(|mr| mr.group_idx));
+            let effective_gidx =
+                group_idx.or_else(|| meta_result.as_ref().and_then(|mr| mr.group_idx));
 
             if let Some(k) = raw_diag_k {
-                let diag_topic = raw_diag_force_topic
-                    .as_deref()
-                    .or(topic_hint.as_deref());
+                let diag_topic = raw_diag_force_topic.as_deref().or(topic_hint.as_deref());
                 let report = Self::build_raw_lattice_diagnostic(
                     dm,
                     intent_text,
@@ -3225,14 +3382,15 @@ impl LanguageService {
             );
             let preempt_template_id = gen_preempt.as_ref().map(|o| o.template_id);
             // True when we emit classification grounded in the user's line without lattice retrieval.
-            let lattice_user_anchored_used = gen_preempt.is_some()
-                && effective_gidx.is_some()
-                && broad_summary.is_none();
+            let lattice_user_anchored_used =
+                gen_preempt.is_some() && effective_gidx.is_some() && broad_summary.is_none();
 
             let primary = if let Some((ref summary_text, summary_conf)) = &broad_summary {
                 effective_gidx.map(|gidx| {
                     let mut e8 = [0.0f32; 8];
-                    for i in 0..8.min(gen_conditioning.len()) { e8[i] = gen_conditioning[i]; }
+                    for i in 0..8.min(gen_conditioning.len()) {
+                        e8[i] = gen_conditioning[i];
+                    }
                     E8Contribution {
                         group_idx: gidx,
                         lattice_point: e8,
@@ -3242,8 +3400,12 @@ impl LanguageService {
                 })
             } else if let (Some(out), Some(gidx)) = (gen_preempt, effective_gidx) {
                 let mut e8 = [0.0f32; 8];
-                for i in 0..8.min(gen_conditioning.len()) { e8[i] = gen_conditioning[i]; }
-                infer_trace!("  [lattice-direct] user-anchored classification (lattice paraphrase skipped)");
+                for i in 0..8.min(gen_conditioning.len()) {
+                    e8[i] = gen_conditioning[i];
+                }
+                infer_trace!(
+                    "  [lattice-direct] user-anchored classification (lattice paraphrase skipped)"
+                );
                 Some(E8Contribution {
                     group_idx: gidx,
                     lattice_point: e8,
@@ -3254,8 +3416,14 @@ impl LanguageService {
                 effective_gidx.and_then(|gidx| {
                     let cond = dm.adapt_for_group_clifford(gidx, &conditioned, h_raw, GEN_COND_DIM);
                     dm.group_gen_envs.get_mut(&gidx).map(|env| {
-                        let (text, conf, e8) = env.generate_with_e8_for_topic(&cond, topic_hint.as_deref(), 300, 0.8);
-                        E8Contribution { group_idx: gidx, lattice_point: e8, text, confidence: conf }
+                        let (text, conf, e8) =
+                            env.generate_with_e8_for_topic(&cond, topic_hint.as_deref(), 300, 0.8);
+                        E8Contribution {
+                            group_idx: gidx,
+                            lattice_point: e8,
+                            text,
+                            confidence: conf,
+                        }
                     })
                 })
             };
@@ -3269,7 +3437,9 @@ impl LanguageService {
             // replicate, so let them through even with auxiliary groups.
             has_auxiliary = !auxiliary_groups.is_empty();
             let lexicon_grounded_preempt = preempt_template_id == Some(TEMPLATE_ID_USER_ANCHORED)
-                && primary.as_ref().map_or(false, |c| c.text.contains("Grounded in the user's own words"));
+                && primary.as_ref().map_or(false, |c| {
+                    c.text.contains("Grounded in the user's own words")
+                });
             let (mut best_text, mut best_conf, best_gidx) = match primary {
                 Some(ref c)
                     if c.text.len() > 5
@@ -3401,7 +3571,8 @@ impl LanguageService {
             if best_text.len() > 5 && sentiment_sanitize_primary {
                 let head: String = best_text.chars().take(1200).collect();
                 let hard = IndexedGenEnv::lattice_surface_hard_reject(&head);
-                let lattice_misfire = infer_rules_rt.lattice_response_misfire_hit(intent_text, &head);
+                let lattice_misfire =
+                    infer_rules_rt.lattice_response_misfire_hit(intent_text, &head);
                 if hard || lattice_misfire {
                     infer_trace!(
                         "  [sentiment-sanitize] replacing primary line (hard_reject={} lattice_misfire={})",
@@ -3416,12 +3587,17 @@ impl LanguageService {
                     } else if let Some(sg) = sentiment_lattice_gidx {
                         if let Some(env) = dm.group_gen_envs.get(&sg) {
                             if let Some((ct, cc)) = Self::categorical_compose_fallback(
-                                &cat_composer, env, topic_hint.as_deref(), intent_text, &gen_conditioning,
+                                &cat_composer,
+                                env,
+                                topic_hint.as_deref(),
+                                intent_text,
+                                &gen_conditioning,
                             ) {
                                 best_text = ct;
                                 best_conf = cc;
                             } else {
-                                let (fb, fc) = env.sentiment_routing_only_fallback_line(topic_hint.as_deref());
+                                let (fb, fc) =
+                                    env.sentiment_routing_only_fallback_line(topic_hint.as_deref());
                                 best_text = fb;
                                 best_conf = fc;
                             }
@@ -3439,7 +3615,11 @@ impl LanguageService {
             {
                 if let Some(env) = dm.group_gen_envs.get(&best_gidx) {
                     if let Some((ct, cc)) = Self::categorical_compose_fallback(
-                        &cat_composer, env, topic_hint.as_deref(), intent_text, &gen_conditioning,
+                        &cat_composer,
+                        env,
+                        topic_hint.as_deref(),
+                        intent_text,
+                        &gen_conditioning,
                     ) {
                         infer_trace!(
                             "  [retrieval-floor-fill] categorical compose for confidence-floor bypass headline"
@@ -3447,7 +3627,8 @@ impl LanguageService {
                         best_text = ct;
                         best_conf = best_conf.max(cc);
                     } else {
-                        let (fb, fc) = env.sentiment_routing_only_fallback_line(topic_hint.as_deref());
+                        let (fb, fc) =
+                            env.sentiment_routing_only_fallback_line(topic_hint.as_deref());
                         if fb.len() > 5 {
                             infer_trace!(
                                 "  [retrieval-floor-fill] routing-only fallback for confidence-floor bypass headline"
@@ -3469,23 +3650,28 @@ impl LanguageService {
             // decline instead of a low-confidence wrong answer.
             const RETRIEVAL_CONFIDENCE_FLOOR: f32 = 0.25;
             let inclusion_floor_bypass = apply_toml_lexical
-                && infer_rules_rt
-                    .sentiment_retrieval_confidence_floor_bypass(intent_text)
+                && infer_rules_rt.sentiment_retrieval_confidence_floor_bypass(intent_text)
                 && best_text.len() > 5
                 && sentiment_lattice_gidx.is_some();
-            let knowledge_floor_ok =
-                best_conf >= RETRIEVAL_CONFIDENCE_FLOOR || inclusion_floor_bypass
+            let knowledge_floor_ok = best_conf >= RETRIEVAL_CONFIDENCE_FLOOR
+                || inclusion_floor_bypass
                 || chat_passthrough;
             if !knowledge_floor_ok || best_text.len() <= 5 {
-                infer_trace!("  [knowledge-boundary] conf={:.3} < floor={:.3}, declining",
-                    best_conf, RETRIEVAL_CONFIDENCE_FLOOR);
+                infer_trace!(
+                    "  [knowledge-boundary] conf={:.3} < floor={:.3}, declining",
+                    best_conf,
+                    RETRIEVAL_CONFIDENCE_FLOOR
+                );
 
                 let is_sentiment = sentiment_lattice_gidx.is_some()
                     && lattice_shortcuts::generation_env_looks_like_sentiment(&*dm, best_gidx);
                 let has_sentiment_lattice = sentiment_lattice_gidx.is_some();
                 let decline_msg = if (is_sentiment || has_sentiment_lattice) && apply_toml_lexical {
-                    let label = topic_hint.as_deref()
-                        .map(|th| IndexedGenEnv::sentiment_coarse_topic_key_for_routing_fallback(th))
+                    let label = topic_hint
+                        .as_deref()
+                        .map(|th| {
+                            IndexedGenEnv::sentiment_coarse_topic_key_for_routing_fallback(th)
+                        })
                         .unwrap_or("mixed");
                     let header = lattice_shortcuts::label_header(label);
                     let trimmed = lattice_shortcuts::detokenize_money_pub(intent_text);
@@ -3502,7 +3688,8 @@ impl LanguageService {
                         header, excerpt
                     )
                 } else {
-                    let topic_label = topic_hint.as_deref()
+                    let topic_label = topic_hint
+                        .as_deref()
                         .map(|t| t.replace('_', " "))
                         .unwrap_or_default();
                     if topic_label.is_empty() {
@@ -3543,7 +3730,11 @@ impl LanguageService {
                             best_text = clean;
                             best_conf = cc.max(best_conf * 0.85);
                         } else if let Some((ct, cc)) = Self::categorical_compose_fallback(
-                            &cat_composer, env, topic_hint.as_deref(), intent_text, &gen_conditioning,
+                            &cat_composer,
+                            env,
+                            topic_hint.as_deref(),
+                            intent_text,
+                            &gen_conditioning,
                         ) {
                             best_text = ct;
                             best_conf = cc;
@@ -3567,18 +3758,23 @@ impl LanguageService {
                 let text_is_grounded = lattice_user_anchored_used
                     || broad_summary.is_some()
                     || best_text.contains("Grounded in the user");
-                let must_gate = apply_toml_lexical
-                    && !text_is_grounded;
+                let must_gate = apply_toml_lexical && !text_is_grounded;
 
                 let (display_text, final_template_id) = if must_gate {
                     infer_trace!(
                         "  [grounding-gate] sentiment body not grounded in user text, replacing with honest decline"
                     );
-                    let label = topic_hint.as_deref()
-                        .map(|th| IndexedGenEnv::sentiment_coarse_topic_key_for_routing_fallback(th))
+                    let label = topic_hint
+                        .as_deref()
+                        .map(|th| {
+                            IndexedGenEnv::sentiment_coarse_topic_key_for_routing_fallback(th)
+                        })
                         .unwrap_or("mixed");
                     let header = crate::inference::plugins::lattice_shortcuts::label_header(label);
-                    let trimmed = crate::inference::plugins::lattice_shortcuts::detokenize_money_pub(intent_text);
+                    let trimmed =
+                        crate::inference::plugins::lattice_shortcuts::detokenize_money_pub(
+                            intent_text,
+                        );
                     let trimmed = trimmed.trim();
                     let excerpt = if trimmed.chars().count() > 200 {
                         let head: String = trimmed.chars().take(200).collect();
@@ -3655,8 +3851,8 @@ impl LanguageService {
 
         // If the response is already a knowledge boundary decline, skip all
         // downstream reasoning and metacog — there's nothing to improve.
-        let is_decline = resp.template_id == "knowledge_boundary"
-            || resp.template_id == "metacog_degradation";
+        let is_decline =
+            resp.template_id == "knowledge_boundary" || resp.template_id == "metacog_degradation";
 
         // Reasoning fallback: invoke System 1.5 (wave settling) when primary
         // confidence is genuinely low AND text is short/unhelpful, OR invoke
@@ -3664,12 +3860,14 @@ impl LanguageService {
         // middle and cross-domain ambiguity is detected.
         let resp = if is_decline {
             resp
-        } else if let (Some(ref reasoning), Some((ref _h_raw, ref bridged))) = (&self.reasoning, &encoded) {
+        } else if let (Some(ref reasoning), Some((ref _h_raw, ref bridged))) =
+            (&self.reasoning, &encoded)
+        {
             let mut cond = bridged.routed_vector.clone();
             cond.resize(GEN_COND_DIM, 0.0);
             let dm_ref = self.active_dm();
-            let skip_sentiment_display_header = broad_summary.is_some()
-                || resp.template_id == TEMPLATE_ID_USER_ANCHORED;
+            let skip_sentiment_display_header =
+                broad_summary.is_some() || resp.template_id == TEMPLATE_ID_USER_ANCHORED;
             let eff_g_for_sentiment = retry_effective_gidx.or(group_idx).unwrap_or(0);
 
             // P0-02 / cross-group reasoning: skip System 2 **and** System 1.5 wave `reason()`
@@ -3718,8 +3916,10 @@ impl LanguageService {
                 if s2_result.confidence > resp.confidence && s2_result.text.len() > 10 {
                     infer_trace!(
                         "  [system2] accepted: steps={}, wm={}, coherence={:.3}, groups={:?}",
-                        s2_result.steps_taken, s2_result.working_memory_size,
-                        s2_result.final_coherence, s2_result.source_groups
+                        s2_result.steps_taken,
+                        s2_result.working_memory_size,
+                        s2_result.final_coherence,
+                        s2_result.source_groups
                     );
                     let s2_display = Self::maybe_prefix_sentiment_retrieval_line(
                         dm_ref,
@@ -3758,7 +3958,8 @@ impl LanguageService {
                 && !skip_cross_group_reasoning_for_sentiment
             {
                 if reasoning.should_reason(&cond, resp.confidence, &dm_ref.group_gen_envs) {
-                    let result = reasoning.reason(&cond, &dm_ref.group_gen_envs, &dm_ref.group_rotors);
+                    let result =
+                        reasoning.reason(&cond, &dm_ref.group_gen_envs, &dm_ref.group_rotors);
                     if result.confidence > resp.confidence && result.text.len() > 10 {
                         let r_display = Self::maybe_prefix_sentiment_retrieval_line(
                             dm_ref,
@@ -3787,12 +3988,18 @@ impl LanguageService {
                             traceable: false,
                             confidence: r_conf,
                         }
-                    } else { resp }
-                } else { resp }
+                    } else {
+                        resp
+                    }
+                } else {
+                    resp
+                }
             } else {
                 resp
             }
-        } else { resp };
+        } else {
+            resp
+        };
 
         // MetaCognition: reflective quality gate with retry-reconditioning loop.
         // Skip for: broad query summaries, knowledge boundary declines, degradation,
@@ -3881,18 +4088,27 @@ impl LanguageService {
                             }
                             break;
                         }
-                        ReflectionOutcome::Retry { scores, adjustment: _, attempt: att } => {
+                        ReflectionOutcome::Retry {
+                            scores,
+                            adjustment: _,
+                            attempt: att,
+                        } => {
                             infer_trace!(
                                 "  [metacog] RETRY: quality={:.3}, attempt {}, predictive coding refinement",
                                 scores.quality, att + 1
                             );
                             let dm = self.active_dm_mut();
-                            if let (Some(gidx), Some(ref base_cond)) = (retry_effective_gidx, &retry_conditioning) {
+                            if let (Some(gidx), Some(ref base_cond)) =
+                                (retry_effective_gidx, &retry_conditioning)
+                            {
                                 // Predictive Coding: STA grade-decomposed error correction
                                 // replaces crude "push toward topic centroid" adjustment.
-                                let response_emb = Self::approximate_response_embedding(prompt_emb, &current_resp.text);
+                                let response_emb = Self::approximate_response_embedding(
+                                    prompt_emb,
+                                    &current_resp.text,
+                                );
                                 let pc = crate::predictive_coder::PredictiveCoder::new(
-                                    crate::predictive_coder::PredictiveCodingConfig::default()
+                                    crate::predictive_coder::PredictiveCodingConfig::default(),
                                 );
                                 let refinement = pc.refine(prompt_emb, base_cond, &response_emb);
                                 let adjusted_cond = if refinement.improved {
@@ -3905,19 +4121,30 @@ impl LanguageService {
                                     base_cond.clone()
                                 };
 
-                                let recond = dm.adapt_for_group_clifford(gidx, &adjusted_cond, h_raw_clone, GEN_COND_DIM);
+                                let recond = dm.adapt_for_group_clifford(
+                                    gidx,
+                                    &adjusted_cond,
+                                    h_raw_clone,
+                                    GEN_COND_DIM,
+                                );
                                 if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
-                                    let (retry_text, retry_conf, _) = env.generate_with_e8_for_topic(
-                                        &recond, topic_hint.as_deref(), 300, 0.8,
-                                    );
-                                    if retry_text.len() > 5 && retry_conf > current_resp.confidence {
-                                        let retry_display = Self::maybe_prefix_sentiment_retrieval_line(
-                                            &*dm,
-                                            gidx,
+                                    let (retry_text, retry_conf, _) = env
+                                        .generate_with_e8_for_topic(
+                                            &recond,
                                             topic_hint.as_deref(),
-                                            false,
-                                            &retry_text,
+                                            300,
+                                            0.8,
                                         );
+                                    if retry_text.len() > 5 && retry_conf > current_resp.confidence
+                                    {
+                                        let retry_display =
+                                            Self::maybe_prefix_sentiment_retrieval_line(
+                                                &*dm,
+                                                gidx,
+                                                topic_hint.as_deref(),
+                                                false,
+                                                &retry_text,
+                                            );
                                         current_resp = GeneratedResponse {
                                             text: retry_display,
                                             template_id: format!("metacog_retry_{}", att + 1),
@@ -3928,7 +4155,11 @@ impl LanguageService {
                                 }
                             }
                         }
-                        ReflectionOutcome::Degrade { scores, message: _, attempts_exhausted } => {
+                        ReflectionOutcome::Degrade {
+                            scores,
+                            message: _,
+                            attempts_exhausted,
+                        } => {
                             infer_trace!(
                                 "  [metacog] DEGRADE: quality={:.3} after {} attempts → honest decline",
                                 scores.quality, attempts_exhausted
@@ -3942,17 +4173,23 @@ impl LanguageService {
                                 }
                             }
                             let mc_dm = self.active_dm();
-                            let mc_sentiment_gidx = lattice_shortcuts::pick_sentiment_lattice_group_idx(mc_dm);
+                            let mc_sentiment_gidx =
+                                lattice_shortcuts::pick_sentiment_lattice_group_idx(mc_dm);
                             let is_sentiment = mc_sentiment_gidx.is_some()
-                                && retry_effective_gidx.map_or(false, |gidx|
-                                    lattice_shortcuts::generation_env_looks_like_sentiment(mc_dm, gidx)
-                                );
+                                && retry_effective_gidx.map_or(false, |gidx| {
+                                    lattice_shortcuts::generation_env_looks_like_sentiment(
+                                        mc_dm, gidx,
+                                    )
+                                });
                             let has_sentiment_lattice = mc_sentiment_gidx.is_some();
-                            let mc_toml_active = lattice_shortcuts::sentiment_toml_lexical_guards_active(
-                                mc_dm,
-                                inference_profile_opt,
-                            );
-                            let decline_text = if (is_sentiment || has_sentiment_lattice) && mc_toml_active {
+                            let mc_toml_active =
+                                lattice_shortcuts::sentiment_toml_lexical_guards_active(
+                                    mc_dm,
+                                    inference_profile_opt,
+                                );
+                            let decline_text = if (is_sentiment || has_sentiment_lattice)
+                                && mc_toml_active
+                            {
                                 let label = topic_hint.as_deref()
                                     .map(|th| IndexedGenEnv::sentiment_coarse_topic_key_for_routing_fallback(th))
                                     .unwrap_or("mixed");
@@ -3971,12 +4208,14 @@ impl LanguageService {
                                     header, excerpt
                                 )
                             } else {
-                                let topic_label = topic_hint.as_deref()
+                                let topic_label = topic_hint
+                                    .as_deref()
                                     .map(|t| t.replace('_', " "))
                                     .unwrap_or_default();
                                 if topic_label.is_empty() {
                                     "I don't have enough information to answer this confidently. \
-                                     Could you rephrase or ask about something more specific?".to_string()
+                                     Could you rephrase or ask about something more specific?"
+                                        .to_string()
                                 } else {
                                     format!(
                                         "I don't have enough information about '{}' to give you a confident answer. \
@@ -4018,7 +4257,8 @@ impl LanguageService {
             infer_trace!(
                 "  [final-garble-gate] output still contains hard-reject pattern, replacing with honest decline"
             );
-            let label = topic_hint.as_deref()
+            let label = topic_hint
+                .as_deref()
                 .map(|th| IndexedGenEnv::sentiment_coarse_topic_key_for_routing_fallback(th))
                 .unwrap_or("mixed");
             let header = lattice_shortcuts::label_header(label);
@@ -4080,10 +4320,7 @@ impl LanguageService {
         // Chat passthrough safety net: high-confidence lines that match TOML lattice_misfire
         // → retry fragment compose, then optional TOML fallback line.
         // Owned so compose can mutably borrow conversation afterward.
-        let prior_agent = self
-            .conversation
-            .last_agent_text()
-            .map(|s| s.to_string());
+        let prior_agent = self.conversation.last_agent_text().map(|s| s.to_string());
         let prior_agent = prior_agent.as_deref();
         let resp = if chat_passthrough
             && resp.confidence > 0.95
@@ -4122,7 +4359,10 @@ impl LanguageService {
     pub fn converse(&mut self, user_text: &str) -> Result<(ActionJson, GeneratedResponse), String> {
         // Build context BEFORE pushing user turn to avoid duplicating it in the window.
         let context_prefix = if self.conversation.turn_count() > 0 {
-            Some(self.conversation.context_window(self.conversation.context_window_size))
+            Some(
+                self.conversation
+                    .context_window(self.conversation.context_window_size),
+            )
         } else {
             None
         };
@@ -4159,8 +4399,11 @@ impl LanguageService {
         let intent_for_routing = resolved_intent.as_deref().unwrap_or(user_text);
 
         // Embed the raw query for geometric context operations
-        let query_bridge = self.active_dm()
-            .language_runtime.bridge_text_stateless(user_text).ok();
+        let query_bridge = self
+            .active_dm()
+            .language_runtime
+            .bridge_text_stateless(user_text)
+            .ok();
         let query_emb = query_bridge.as_ref().map(|b| b.routed_vector.clone());
 
         // Topic shift detection: if the new query is geometrically distant
@@ -4181,12 +4424,15 @@ impl LanguageService {
             None => user_text.to_string(),
         };
 
-        let (action, mut resp) = self.generation_with_intent_override(&context_prompt, intent_for_routing)?;
+        let (action, mut resp) =
+            self.generation_with_intent_override(&context_prompt, intent_for_routing)?;
 
         // Update geometric context with this turn's embeddings
         if let Some(ref qe) = query_emb {
-            let resp_emb = self.active_dm()
-                .language_runtime.bridge_text_stateless(&resp.text)
+            let resp_emb = self
+                .active_dm()
+                .language_runtime
+                .bridge_text_stateless(&resp.text)
                 .map(|b| b.routed_vector)
                 .unwrap_or_else(|_| qe.clone());
             self.conversation.update_geometric_context(qe, &resp_emb);
@@ -4194,7 +4440,11 @@ impl LanguageService {
 
         // Track topic and group continuity
         if let Some(ref gidx) = action.target_group_id.and_then(|gid| {
-            self.active_dm().main.group_order.iter().position(|&g| g == gid)
+            self.active_dm()
+                .main
+                .group_order
+                .iter()
+                .position(|&g| g == gid)
         }) {
             self.conversation.current_group = Some(*gidx);
         }
@@ -4207,10 +4457,10 @@ impl LanguageService {
             && !resp.template_id.starts_with("tool_")
             && resp.confidence > 0.3;
         if is_framed {
-            if let Some(prefix) = self.personality.conversational_prefix(
-                self.conversation.turn_count(),
-                user_text,
-            ) {
+            if let Some(prefix) = self
+                .personality
+                .conversational_prefix(self.conversation.turn_count(), user_text)
+            {
                 if !prefix.is_empty() {
                     resp.text = format!("{}{}", prefix, resp.text);
                 }
@@ -4220,10 +4470,7 @@ impl LanguageService {
         self.conversation.push_agent(&resp.text);
         // Drop asks that belonged to the prior agent turn; keep any newly noted.
         if self.conversation.open_asks.len() > prior_open_ask_count {
-            let kept = self
-                .conversation
-                .open_asks
-                .split_off(prior_open_ask_count);
+            let kept = self.conversation.open_asks.split_off(prior_open_ask_count);
             self.conversation.open_asks = kept;
         } else {
             self.conversation.consume_open_asks();
@@ -4231,10 +4478,17 @@ impl LanguageService {
 
         // Store turn context for Continuum feedback (including lattice routing info)
         let effective_gidx = action.target_group_id.and_then(|gid| {
-            self.active_dm().main.group_order.iter().position(|&g| g == gid)
+            self.active_dm()
+                .main
+                .group_order
+                .iter()
+                .position(|&g| g == gid)
         });
         let program_idx = effective_gidx.and_then(|gidx| {
-            self.active_dm().group_gen_envs.get(&gidx).and_then(|e| e.last_selected_archetype)
+            self.active_dm()
+                .group_gen_envs
+                .get(&gidx)
+                .and_then(|e| e.last_selected_archetype)
         });
         self.last_turn = Some(TurnContext {
             message: user_text.to_string(),
@@ -4260,26 +4514,39 @@ impl LanguageService {
         // Look for patterns like "implement that", "do that", "explain this",
         // "use it", "how does it work", etc.
         let pronoun_patterns = [
-            " that ", " that?", " that.", " that,",
-            " this ", " this?", " this.", " this,",
-            " it ", " it?", " it.", " it,",
+            " that ", " that?", " that.", " that,", " this ", " this?", " this.", " this,", " it ",
+            " it?", " it.", " it,",
         ];
-        let starts_with_pronoun = lower.starts_with("that ") || lower.starts_with("this ") || lower.starts_with("it ");
-        let ends_with_pronoun = lower.ends_with(" that") || lower.ends_with(" this") || lower.ends_with(" it");
+        let starts_with_pronoun =
+            lower.starts_with("that ") || lower.starts_with("this ") || lower.starts_with("it ");
+        let ends_with_pronoun =
+            lower.ends_with(" that") || lower.ends_with(" this") || lower.ends_with(" it");
 
         let has_pronoun = starts_with_pronoun
             || ends_with_pronoun
             || pronoun_patterns.iter().any(|p| lower.contains(p));
 
-        if !has_pronoun { return None; }
+        if !has_pronoun {
+            return None;
+        }
 
         // Avoid false positives: if the sentence already has a clear noun subject
         // (more than 5 content words besides the pronoun), it's likely self-contained.
-        let content_words: Vec<&str> = words.iter()
-            .filter(|w| w.len() > 2 && !["the", "that", "this", "how", "would", "you", "can", "could", "what", "does", "with", "for", "from", "into"].contains(w))
+        let content_words: Vec<&str> = words
+            .iter()
+            .filter(|w| {
+                w.len() > 2
+                    && ![
+                        "the", "that", "this", "how", "would", "you", "can", "could", "what",
+                        "does", "with", "for", "from", "into",
+                    ]
+                    .contains(w)
+            })
             .copied()
             .collect();
-        if content_words.len() >= 4 { return None; }
+        if content_words.len() >= 4 {
+            return None;
+        }
 
         // Extract the referent from the previous turn's message via intent parsing
         let prev_intent = crate::growformer_lang::parse_query_intent(&prev.message);
@@ -4287,10 +4554,16 @@ impl LanguageService {
             prev_intent.subject.clone()
         } else {
             // Fallback: use first 6 words of the previous message
-            prev.message.split_whitespace().take(6).collect::<Vec<_>>().join(" ")
+            prev.message
+                .split_whitespace()
+                .take(6)
+                .collect::<Vec<_>>()
+                .join(" ")
         };
 
-        if referent.is_empty() { return None; }
+        if referent.is_empty() {
+            return None;
+        }
 
         // Replace the pronoun with the referent
         let mut resolved = text.to_string();
@@ -4310,8 +4583,18 @@ impl LanguageService {
                     } else {
                         format!(" {}{}", referent, suffix_char)
                     };
-                    resolved = format!("{}{}{}", &resolved[..pos], replacement, &resolved[pos + pat.len()..]);
-                    infer_trace!("  [anaphora] '{}' → '{}' (referent: {})", text, resolved, referent);
+                    resolved = format!(
+                        "{}{}{}",
+                        &resolved[..pos],
+                        replacement,
+                        &resolved[pos + pat.len()..]
+                    );
+                    infer_trace!(
+                        "  [anaphora] '{}' → '{}' (referent: {})",
+                        text,
+                        resolved,
+                        referent
+                    );
                     return Some(resolved);
                 }
             }
@@ -4320,14 +4603,24 @@ impl LanguageService {
             if resolved.to_ascii_lowercase().ends_with(&trailing) {
                 let cut = resolved.len() - trailing.len();
                 resolved = format!("{} {}", &resolved[..cut], referent);
-                infer_trace!("  [anaphora] '{}' → '{}' (referent: {})", text, resolved, referent);
+                infer_trace!(
+                    "  [anaphora] '{}' → '{}' (referent: {})",
+                    text,
+                    resolved,
+                    referent
+                );
                 return Some(resolved);
             }
             // Handle leading pronoun
             let leading = format!("{} ", pronoun);
             if resolved.to_ascii_lowercase().starts_with(&leading) {
                 resolved = format!("{} {}", referent, &resolved[leading.len()..]);
-                infer_trace!("  [anaphora] '{}' → '{}' (referent: {})", text, resolved, referent);
+                infer_trace!(
+                    "  [anaphora] '{}' → '{}' (referent: {})",
+                    text,
+                    resolved,
+                    referent
+                );
                 return Some(resolved);
             }
         }
@@ -4385,7 +4678,9 @@ impl LanguageService {
         for (_gidx, env) in &dm.group_gen_envs {
             if let Some(ref cb) = env.codebook {
                 for (arch_idx, arch) in cb.archetypes.iter().enumerate() {
-                    let centroid = cb.archetype_prototypes.get(arch_idx)
+                    let centroid = cb
+                        .archetype_prototypes
+                        .get(arch_idx)
                         .cloned()
                         .unwrap_or_else(|| vec![0.0; DEFAULT_BRIDGE_DIM]);
                     let mut tokens: Vec<u16> = arch.fixed.iter().map(|&(_, t)| t).collect();
@@ -4395,7 +4690,10 @@ impl LanguageService {
             }
         }
 
-        let dict = dm.group_gen_envs.values().next()
+        let dict = dm
+            .group_gen_envs
+            .values()
+            .next()
             .map(|e| e.dictionary.clone())
             .unwrap_or_else(|| crate::spectral::TokenDictionary::build(&[""], 256));
 
@@ -4417,7 +4715,8 @@ impl LanguageService {
                 env.topic_subindex[0].topic_name.clone()
             };
             for prog in &env.lattice.programs {
-                let topic = env.topic_label_for_program_centroid(&prog.ema_centroid, &default_topic);
+                let topic =
+                    env.topic_label_for_program_centroid(&prog.ema_centroid, &default_topic);
                 mc.absorb_pair(&prog.ema_centroid, &prog.ema_centroid, &topic);
                 pair_count += 1;
             }
@@ -4429,7 +4728,8 @@ impl LanguageService {
                 env.topic_subindex[0].topic_name.clone()
             };
             for prog in &env.lattice.programs {
-                let topic = env.topic_label_for_program_centroid(&prog.ema_centroid, &default_topic);
+                let topic =
+                    env.topic_label_for_program_centroid(&prog.ema_centroid, &default_topic);
                 mc.absorb_pair(&prog.ema_centroid, &prog.ema_centroid, &topic);
                 pair_count += 1;
             }
@@ -4437,7 +4737,9 @@ impl LanguageService {
 
         infer_trace!(
             "  MetaCognition rebuilt: {} pairs, {} topics, ready={}",
-            pair_count, mc.topic_count(), mc.is_ready()
+            pair_count,
+            mc.topic_count(),
+            mc.is_ready()
         );
         self.metacognition = Some(mc);
     }
@@ -4447,7 +4749,8 @@ impl LanguageService {
         use crate::reasoning::{CognitiveMap, ReasoningEngine};
         let dm = self.active_dm();
         let cog_map = CognitiveMap::build(&dm.group_gen_envs, &dm.group_rotors);
-        let group_dicts: HashMap<usize, crate::spectral::TokenDictionary> = dm.group_gen_envs
+        let group_dicts: HashMap<usize, crate::spectral::TokenDictionary> = dm
+            .group_gen_envs
             .iter()
             .map(|(&gidx, env)| (gidx, env.dictionary.clone()))
             .collect();
@@ -4462,9 +4765,14 @@ impl LanguageService {
     /// Rebuild GrowformerLang MetaCodebook from loaded brain's lattice programs.
     /// Infers concepts and languages from decoded program text.
     pub fn rebuild_meta_codebook(&mut self) {
-        use crate::growformer_lang::{infer_concept, detect_language, MetaCodebook};
+        use crate::growformer_lang::{detect_language, infer_concept, MetaCodebook};
         let dm = self.active_dm();
-        let mut meta_samples: Vec<(Vec<f32>, crate::growformer_lang::MetaConcept, crate::growformer_lang::TargetLanguage, usize)> = Vec::new();
+        let mut meta_samples: Vec<(
+            Vec<f32>,
+            crate::growformer_lang::MetaConcept,
+            crate::growformer_lang::TargetLanguage,
+            usize,
+        )> = Vec::new();
 
         for (&gidx, env) in &dm.group_gen_envs {
             for prog in &env.lattice.programs {
@@ -4494,17 +4802,36 @@ impl LanguageService {
 
     fn fast_cosine(a: &[f32], b: &[f32]) -> f32 {
         let len = a.len().min(b.len());
-        if len == 0 { return 0.0; }
-        let dot: f64 = a[..len].iter().zip(b[..len].iter()).map(|(&x, &y)| (x as f64) * (y as f64)).sum();
-        let na = a[..len].iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
-        let nb = b[..len].iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
-        if na < 1e-20 || nb < 1e-20 { return 0.0; }
+        if len == 0 {
+            return 0.0;
+        }
+        let dot: f64 = a[..len]
+            .iter()
+            .zip(b[..len].iter())
+            .map(|(&x, &y)| (x as f64) * (y as f64))
+            .sum();
+        let na = a[..len]
+            .iter()
+            .map(|&x| (x as f64) * (x as f64))
+            .sum::<f64>()
+            .sqrt();
+        let nb = b[..len]
+            .iter()
+            .map(|&x| (x as f64) * (x as f64))
+            .sum::<f64>()
+            .sqrt();
+        if na < 1e-20 || nb < 1e-20 {
+            return 0.0;
+        }
         (dot / (na * nb)) as f32
     }
 
     /// Paramecium inference: lattice-only, no neural substrate.
     /// Falls back to standard generation if no paramecium is built.
-    pub fn paramecium_respond(&mut self, text: &str) -> Result<(ActionJson, GeneratedResponse), String> {
+    pub fn paramecium_respond(
+        &mut self,
+        text: &str,
+    ) -> Result<(ActionJson, GeneratedResponse), String> {
         let start = portable_instant();
 
         if self.paramecium.is_none() {
@@ -4516,7 +4843,9 @@ impl LanguageService {
         let encoded = dm.language_runtime.encode_and_bridge(&normalized)?;
         let embedding = &encoded.1.routed_vector;
 
-        let lattice = self.paramecium.as_mut()
+        let lattice = self
+            .paramecium
+            .as_mut()
             .ok_or_else(|| "paramecium not initialized".to_string())?;
         let pr = lattice.respond(embedding);
 
@@ -4554,7 +4883,8 @@ impl LanguageService {
     /// Index a function/symbol into the project model.
     pub fn index_symbol(&mut self, path: &str, name: &str, body: &str) {
         let emb = ProjectModel::embed_symbol(path, name, body);
-        self.project_model.add_entity(EntityKind::Function, name, path, emb);
+        self.project_model
+            .add_entity(EntityKind::Function, name, path, emb);
     }
 
     /// Load git history for edit correlation (dims 12-15).
@@ -4582,7 +4912,8 @@ impl LanguageService {
                 let ctx = self.project_context_for_file(path);
                 let related = self.project_model.context_for_file(path, 3);
                 if !related.is_empty() {
-                    let context_hint = related.iter()
+                    let context_hint = related
+                        .iter()
                         .map(|e| format!("{:?} {} ({})", e.kind, e.name, e.path))
                         .collect::<Vec<_>>()
                         .join(", ");
@@ -4600,9 +4931,15 @@ impl LanguageService {
         if summary.total_entities == 0 {
             "No project indexed".to_string()
         } else {
-            let git = if summary.has_git_history { ", git history loaded" } else { "" };
-            format!("{} entities ({} files, {} functions, {} types{})",
-                summary.total_entities, summary.files, summary.functions, summary.types, git)
+            let git = if summary.has_git_history {
+                ", git history loaded"
+            } else {
+                ""
+            };
+            format!(
+                "{} entities ({} files, {} functions, {} types{})",
+                summary.total_entities, summary.files, summary.functions, summary.types, git
+            )
         }
     }
 
@@ -4631,9 +4968,15 @@ impl LanguageService {
         tool_result: &ToolResult,
     ) -> Result<(ActionJson, GeneratedResponse), String> {
         let augmented = if tool_result.success {
-            format!("[tool_result: {} = {}] {}", tool_result.tool_name, tool_result.output, original_text)
+            format!(
+                "[tool_result: {} = {}] {}",
+                tool_result.tool_name, tool_result.output, original_text
+            )
         } else {
-            format!("[tool_error: {} = {}] {}", tool_result.tool_name, tool_result.output, original_text)
+            format!(
+                "[tool_error: {} = {}] {}",
+                tool_result.tool_name, tool_result.output, original_text
+            )
         };
         self.generation(&augmented)
     }
@@ -4645,8 +4988,9 @@ impl LanguageService {
         #[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
         {
             if crate::semantic_router::is_loaded() {
-                let serve_snippets = crate::semantic_router::with_router(|r| !r.code_generation_enabled())
-                    .unwrap_or(false);
+                let serve_snippets =
+                    crate::semantic_router::with_router(|r| !r.code_generation_enabled())
+                        .unwrap_or(false);
                 if serve_snippets {
                     let decision = crate::semantic_router::infer(text)
                         .transpose()?
@@ -4667,9 +5011,10 @@ impl LanguageService {
                         }),
                     };
                     if let Some(topic) = decision.topic.as_deref() {
-                        if let Some(snippet) =
-                            crate::semantic_router::with_router(|r| r.lookup_snippet(topic).cloned())
-                                .flatten()
+                        if let Some(snippet) = crate::semantic_router::with_router(|r| {
+                            r.lookup_snippet(topic).cloned()
+                        })
+                        .flatten()
                         {
                             let code = CodeGeneration {
                                 language: snippet.code_language,
@@ -4692,7 +5037,11 @@ impl LanguageService {
         let meta_pre = self.meta_codebook.as_ref().and_then(|mcb| {
             let bridged = self.dm.language_runtime.bridge_text_stateless(text).ok()?;
             let mr = mcb.route_and_project(&bridged.routed_vector, text);
-            if mr.confidence > 0.3 { Some(mr) } else { None }
+            if mr.confidence > 0.3 {
+                Some(mr)
+            } else {
+                None
+            }
         });
 
         let allow_deterministic_stub = {
@@ -4704,15 +5053,21 @@ impl LanguageService {
         let action = dm.route_text_to_action_stateless(text)?;
 
         let encoded = dm.language_runtime.encode_and_bridge(text).ok();
-        let mut group_idx = action.target_group_id
+        let mut group_idx = action
+            .target_group_id
             .and_then(|gid| dm.main.group_order.iter().position(|&g| g == gid));
 
         // Apply meta-routing override for codegen
         if let Some(ref mr) = meta_pre {
             if let Some(mg) = mr.best_group() {
                 if mg < dm.main.group_order.len() {
-                    infer_trace!("  [meta-route codegen] concept={}, lang={}, conf={:.3} → group {}",
-                        mr.concept.name(), mr.language.name(), mr.confidence, mg);
+                    infer_trace!(
+                        "  [meta-route codegen] concept={}, lang={}, conf={:.3} → group {}",
+                        mr.concept.name(),
+                        mr.language.name(),
+                        mr.confidence,
+                        mg
+                    );
                     group_idx = Some(mg);
                 }
             }
@@ -4744,34 +5099,45 @@ impl LanguageService {
             };
             // Operation-specific topic hint from GrowformerLang for sub-lattice discrimination,
             // falling back to understanding layer's generic topic.
-            let topic_hint = crate::growformer_lang::infer_operation_topic(text)
-                .or_else(|| {
-                    dm.understanding.as_ref()
-                        .filter(|ul| !ul.is_empty())
-                        .map(|ul| {
-                            let (_, _, topic, _) = ul.classify(h_raw);
-                            topic
-                        })
-                });
+            let topic_hint = crate::growformer_lang::infer_operation_topic(text).or_else(|| {
+                dm.understanding
+                    .as_ref()
+                    .filter(|ul| !ul.is_empty())
+                    .map(|ul| {
+                        let (_, _, topic, _) = ul.classify(h_raw);
+                        topic
+                    })
+            });
 
             // Topic-graph authority: if the resolved (sub)topic lives in exactly one
             // code group, pin routing to it. Otherwise cross-group competition can let
             // an unrelated group's collapsed sink (e.g. a seed `binary_search` in
             // coding_implementation) non-deterministically outscore the correct group.
             if let Some(ref th) = topic_hint {
-                let owning: Vec<usize> = dm.group_code_envs.iter()
-                    .filter(|(_, env)| env.topic_subindex.iter()
-                        .any(|t| t.topic_name.eq_ignore_ascii_case(th)))
+                let owning: Vec<usize> = dm
+                    .group_code_envs
+                    .iter()
+                    .filter(|(_, env)| {
+                        env.topic_subindex
+                            .iter()
+                            .any(|t| t.topic_name.eq_ignore_ascii_case(th))
+                    })
                     .map(|(&g, _)| g)
                     .collect();
                 if owning.len() == 1 && group_idx != Some(owning[0]) {
-                    infer_trace!("  [topic-pin] subtopic '{}' owned solely by group {} → pin", th, owning[0]);
+                    infer_trace!(
+                        "  [topic-pin] subtopic '{}' owned solely by group {} → pin",
+                        th,
+                        owning[0]
+                    );
                     group_idx = Some(owning[0]);
                 }
             }
             let lang = match action.payload {
-                Some(crate::dimension::action::ActionPayload::CodingAssist { ref language_hint, .. }) =>
-                    language_hint.clone(),
+                Some(crate::dimension::action::ActionPayload::CodingAssist {
+                    ref language_hint,
+                    ..
+                }) => language_hint.clone(),
                 _ => {
                     if let Some(ref mr) = meta_pre {
                         mr.language.name().to_lowercase()
@@ -4783,7 +5149,8 @@ impl LanguageService {
 
             // Propagate subject keywords to code envs so BM25 re-ranking
             // works in the codegen retrieval pass (not just text gen).
-            let code_subject_kw: Vec<String> = text.split_whitespace()
+            let code_subject_kw: Vec<String> = text
+                .split_whitespace()
                 .filter(|w| w.len() > 2)
                 .map(|w| w.to_ascii_lowercase())
                 .collect();
@@ -4808,7 +5175,11 @@ impl LanguageService {
                 }
                 dm.group_code_envs.get_mut(&gidx).map(|env| {
                     let (code, conf) = env.generate_for_topic_lang(
-                        &adapted, topic_hint.as_deref(), Some(lang.as_str()), 500, 0.7,
+                        &adapted,
+                        topic_hint.as_deref(),
+                        Some(lang.as_str()),
+                        500,
+                        0.7,
                     );
                     (code, conf, gidx)
                 })
@@ -4826,13 +5197,18 @@ impl LanguageService {
                         .map(|(c, cf, g)| (c, cf, g))
                         .unwrap_or_else(|| (String::new(), -1.0, 0));
 
-                    let other_keys: Vec<usize> = dm.group_code_envs.keys()
+                    let other_keys: Vec<usize> = dm
+                        .group_code_envs
+                        .keys()
                         .filter(|&&k| Some(k) != group_idx)
-                        .copied().collect();
+                        .copied()
+                        .collect();
                     for gidx in other_keys {
-                        let adapted = dm.adapt_for_group_clifford(gidx, base_cond, h_raw, GEN_COND_DIM);
+                        let adapted =
+                            dm.adapt_for_group_clifford(gidx, base_cond, h_raw, GEN_COND_DIM);
                         if let Some(env) = dm.group_code_envs.get_mut(&gidx) {
-                            let (c, cf) = env.generate_for_topic(&adapted, topic_hint.as_deref(), 500, 0.7);
+                            let (c, cf) =
+                                env.generate_for_topic(&adapted, topic_hint.as_deref(), 500, 0.7);
                             if cf > best_cf && c.len() > 5 {
                                 best_c = c;
                                 best_cf = cf;
@@ -4885,10 +5261,17 @@ impl LanguageService {
                 let prompt_emb = &bridged.routed_vector;
                 let response_emb = Self::approximate_response_embedding(prompt_emb, &cg.code);
                 let topic_hint_cg = crate::growformer_lang::infer_operation_topic(text);
-                let scores = mc.evaluate(prompt_emb, &response_emb, &cg.code, topic_hint_cg.as_deref());
+                let scores = mc.evaluate(
+                    prompt_emb,
+                    &response_emb,
+                    &cg.code,
+                    topic_hint_cg.as_deref(),
+                );
                 infer_trace!(
                     "  [metacog codegen] quality={:.3}, coherence={:.3}, relevance={:.3}",
-                    scores.quality, scores.coherence, scores.relevance
+                    scores.quality,
+                    scores.coherence,
+                    scores.relevance
                 );
                 // The reflection brain is trained on (prompt, response) TEXT pairs;
                 // on raw code bodies it has no signal (coherence and relevance
@@ -4901,7 +5284,8 @@ impl LanguageService {
                     infer_trace!("  [metacog codegen] SKIP: blind on code, trusting retrieval");
                     Some(cg)
                 } else if scores.quality >= mc.config.accept_threshold * 0.8
-                    || (scores.coherence >= 0.95 && scores.quality >= 0.15) {
+                    || (scores.coherence >= 0.95 && scores.quality >= 0.15)
+                {
                     Some(cg)
                 } else {
                     infer_trace!("  [metacog codegen] REJECTED: quality below threshold");
@@ -4917,7 +5301,12 @@ impl LanguageService {
 
     /// Level 3: Store a successful generation composition in episodic memory
     /// for zero-shot retrieval on similar future prompts.
-    fn cache_composition(dm: &mut DimensionManager, embedding: &[f32], group_ids: &[usize], confidence: f32) {
+    fn cache_composition(
+        dm: &mut DimensionManager,
+        embedding: &[f32],
+        group_ids: &[usize],
+        confidence: f32,
+    ) {
         use crate::dimension::composition::Episode;
         let gids: Vec<u32> = group_ids.iter().map(|&g| g as u32).collect();
         let n = gids.len().max(1);
@@ -4934,9 +5323,9 @@ impl LanguageService {
     /// Level 3: Try to retrieve a cached composition from episodic memory.
     /// Returns the group indices and blend weights if a similar prompt was seen before.
     fn retrieve_cached_composition(dm: &DimensionManager, embedding: &[f32]) -> Option<Vec<usize>> {
-        dm.episodic_memory.retrieve(embedding, 0.90).map(|ep| {
-            ep.group_ids.iter().map(|&g| g as usize).collect()
-        })
+        dm.episodic_memory
+            .retrieve(embedding, 0.90)
+            .map(|ep| ep.group_ids.iter().map(|&g| g as usize).collect())
     }
 
     /// Level 2: Cross-group text composition.
@@ -4949,10 +5338,12 @@ impl LanguageService {
         }
 
         // Split each candidate into sentences
-        let segmented: Vec<(Vec<&str>, f32, usize)> = candidates.iter()
+        let segmented: Vec<(Vec<&str>, f32, usize)> = candidates
+            .iter()
             .filter(|(t, _, _)| t.len() > 5)
             .map(|(text, conf, gidx)| {
-                let sentences: Vec<&str> = text.split(". ")
+                let sentences: Vec<&str> = text
+                    .split(". ")
                     .map(|s| s.trim())
                     .filter(|s| s.len() > 3)
                     .collect();
@@ -4961,11 +5352,15 @@ impl LanguageService {
             .filter(|(sents, _, _)| !sents.is_empty())
             .collect();
 
-        if segmented.is_empty() { return None; }
+        if segmented.is_empty() {
+            return None;
+        }
 
         // Find the maximum number of sentence positions
         let max_sents = segmented.iter().map(|(s, _, _)| s.len()).max().unwrap_or(0);
-        if max_sents == 0 { return None; }
+        if max_sents == 0 {
+            return None;
+        }
 
         // For each sentence position, pick the best sentence (longest meaningful
         // content weighted by confidence). This selects the most informative
@@ -4994,20 +5389,31 @@ impl LanguageService {
 
             if !best_sent.is_empty() {
                 composed.push(best_sent.to_string());
-                if best_source.is_none() { best_source = Some(best_gidx); }
+                if best_source.is_none() {
+                    best_source = Some(best_gidx);
+                }
                 total_conf += best_score;
                 count += 1;
             }
         }
 
-        if composed.is_empty() { return None; }
+        if composed.is_empty() {
+            return None;
+        }
 
         let text = composed.join(". ");
-        let avg_conf = if count > 0 { total_conf / count as f32 } else { 0.0 };
+        let avg_conf = if count > 0 {
+            total_conf / count as f32
+        } else {
+            0.0
+        };
         let source_gidx = best_source.unwrap_or(0);
 
         // Quality gate: reject if the composed text is mostly punctuation/symbols
-        let alpha_count = text.chars().filter(|c| c.is_alphabetic() || c.is_whitespace()).count();
+        let alpha_count = text
+            .chars()
+            .filter(|c| c.is_alphabetic() || c.is_whitespace())
+            .count();
         let total_chars = text.len().max(1);
         let alpha_ratio = alpha_count as f32 / total_chars as f32;
         if alpha_ratio < 0.7 {
@@ -5015,7 +5421,8 @@ impl LanguageService {
         }
 
         // Only use composition if it's meaningfully different from the best single candidate
-        let best_single = candidates.iter()
+        let best_single = candidates
+            .iter()
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         if let Some((best_text, best_conf, _)) = best_single {
             if text == *best_text || avg_conf <= *best_conf {
@@ -5037,7 +5444,11 @@ impl LanguageService {
             cond.extend(action_type_one_hot(&action.action_type));
             let group_dims = head.cond_dim.saturating_sub(cond.len());
             if group_dims > 0 {
-                cond.extend(group_id_one_hot(action.target_group_id, group_order, group_dims));
+                cond.extend(group_id_one_hot(
+                    action.target_group_id,
+                    group_order,
+                    group_dims,
+                ));
             }
             let generated = head.generate(&cond, 300, 0.8);
             if generated.len() > 5 {
@@ -5083,13 +5494,19 @@ impl LanguageService {
             cond.extend(action_type_one_hot(&action.action_type));
             let group_dims = head.cond_dim.saturating_sub(cond.len());
             if group_dims > 0 {
-                cond.extend(group_id_one_hot(action.target_group_id, group_order, group_dims));
+                cond.extend(group_id_one_hot(
+                    action.target_group_id,
+                    group_order,
+                    group_dims,
+                ));
             }
             let generated = head.generate(&cond, 500, 0.7);
             if generated.len() > 5 {
                 let lang = match action.payload {
-                    Some(crate::dimension::action::ActionPayload::CodingAssist { ref language_hint, .. }) =>
-                        language_hint.clone(),
+                    Some(crate::dimension::action::ActionPayload::CodingAssist {
+                        ref language_hint,
+                        ..
+                    }) => language_hint.clone(),
                     _ => "python".to_string(),
                 };
                 return Some(CodeGeneration {
@@ -5107,7 +5524,9 @@ impl LanguageService {
     }
 
     pub fn load_gle_students_from_bytes(&mut self, data: &[&[u8]]) -> Result<usize, String> {
-        self.active_dm_mut().language_runtime.load_students_from_bytes(data)
+        self.active_dm_mut()
+            .language_runtime
+            .load_students_from_bytes(data)
     }
 
     // -----------------------------------------------------------------------
@@ -5117,11 +5536,15 @@ impl LanguageService {
     /// Serializes the active `DimensionManager` into a [`crate::brain::BrainPackage`] and encodes it.
     /// Includes optional UTF-8 TOML plugins (see [`BrainPluginsManifest`]); sentiment lattice brains
     /// get a default `[sentiment]` section so the runtime is self-describing.
-    /// [`load_brain`](Self::load_brain) accepts this envelope, format v1/v2, or legacy raw checkpoint JSON.
+    /// [`load_brain`](Self::load_brain) accepts this envelope, its optional compressed wrapper,
+    /// or legacy raw checkpoint JSON.
     pub fn export_brain(&mut self) -> Result<Vec<u8>, String> {
         #[cfg(not(target_arch = "wasm32"))]
-        self.active_dm_mut().language_runtime.ensure_students_preloaded();
-        let checkpoint = crate::systems::checkpoint::serialize_checkpoint_to_bytes(self.active_dm())?;
+        self.active_dm_mut()
+            .language_runtime
+            .ensure_students_preloaded();
+        let checkpoint =
+            crate::systems::checkpoint::serialize_checkpoint_to_bytes(self.active_dm())?;
         let personality = self.export_personality()?;
         let mut header = crate::brain::BrainPackageHeader::default();
         let mut id_raw = [0u8; 16];
@@ -5133,28 +5556,39 @@ impl LanguageService {
         });
         header.name.clone_from(&self.agent_name);
         header.author.name.clone_from(&self.agent_creator);
-        header.description.clone_from(&self.brain_package_description);
+        header
+            .description
+            .clone_from(&self.brain_package_description);
         let dm = self.active_dm();
         let prev_profile = self
             .brain_package_header
             .as_ref()
             .and_then(|h| h.inference_profile.as_deref());
         let mut manifest = self.brain_plugins_manifest.clone().unwrap_or_default();
-        self.inference_harness
-            .apply_export_brain_plugins(dm, prev_profile, &mut header, &mut manifest);
+        self.inference_harness.apply_export_brain_plugins(
+            dm,
+            prev_profile,
+            &mut header,
+            &mut manifest,
+        );
         let loaded_toml = crate::inference::inference_toml::inference_toml_loaded();
         manifest.rules = Some(loaded_toml.rules_section.clone());
         let plugins_blob = crate::inference::serialize_plugins_manifest(&manifest)
             .ok()
             .filter(|v| !v.is_empty());
 
-        let pkg = crate::brain::BrainPackage::new(
-            header,
-            checkpoint,
-            Some(personality),
-            plugins_blob,
-        );
+        let pkg =
+            crate::brain::BrainPackage::new(header, checkpoint, Some(personality), plugins_blob);
         pkg.encode_to_bytes()
+    }
+
+    /// Export the current brain inside the versioned, lossless compression envelope.
+    ///
+    /// Loading remains automatic through [`load_brain`](Self::load_brain). This API is
+    /// feature-gated so inference-only builds can omit compression dependencies.
+    #[cfg(feature = "brain-compression")]
+    pub fn export_brain_compressed(&mut self) -> Result<Vec<u8>, String> {
+        crate::brain::wrap_compressed_brain_bytes(&self.export_brain()?)
     }
 
     /// Export current personality as JSON bytes (for persistence alongside brain).
@@ -5174,10 +5608,17 @@ impl LanguageService {
     /// Record this turn for feedback association. Call after each inference; next request may send feedback for this turn.
     pub fn record_turn(&mut self, message: &str, group_id: Option<GroupId>, output: &str) {
         let effective_gidx = group_id.and_then(|gid| {
-            self.active_dm().main.group_order.iter().position(|&g| g == gid)
+            self.active_dm()
+                .main
+                .group_order
+                .iter()
+                .position(|&g| g == gid)
         });
         let program_idx = effective_gidx.and_then(|gidx| {
-            self.active_dm().group_gen_envs.get(&gidx).and_then(|e| e.last_selected_archetype)
+            self.active_dm()
+                .group_gen_envs
+                .get(&gidx)
+                .and_then(|e| e.last_selected_archetype)
         });
         self.last_turn = Some(TurnContext {
             message: message.to_string(),
@@ -5247,11 +5688,7 @@ impl LanguageService {
                     if let Some(gidx) = turn.effective_gidx {
                         if let Some(ref correction) = feedback.correction {
                             if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
-                                env.inject_correction(
-                                    turn.program_idx,
-                                    embedding,
-                                    correction,
-                                );
+                                env.inject_correction(turn.program_idx, embedding, correction);
                             }
                         } else {
                             // Correct without correction text: just degrade
@@ -5276,10 +5713,14 @@ impl LanguageService {
                     // 3. Neural gen head correction with correction text
                     if let Some(ref correction) = feedback.correction {
                         if let Some(group_id) = turn.group_id {
-                            let group_idx = dm.main.group_order.iter()
-                                .position(|&g| g == group_id);
+                            let group_idx = dm.main.group_order.iter().position(|&g| g == group_id);
                             if let Some(gidx) = group_idx {
-                                let adapted = dm.adapt_for_group_clifford(gidx, embedding, h_raw, GEN_COND_DIM);
+                                let adapted = dm.adapt_for_group_clifford(
+                                    gidx,
+                                    embedding,
+                                    h_raw,
+                                    GEN_COND_DIM,
+                                );
                                 if let Some(env) = dm.group_gen_envs.get_mut(&gidx) {
                                     let was_frozen = env.frozen;
                                     env.frozen = false;
@@ -5297,9 +5738,10 @@ impl LanguageService {
         }
 
         // Emergent personality: drift OCEAN based on feedback patterns
-        let correction_ratio = feedback.correction.as_ref().map(|c| {
-            c.len() as f32 / turn.output.len().max(1) as f32
-        });
+        let correction_ratio = feedback
+            .correction
+            .as_ref()
+            .map(|c| c.len() as f32 / turn.output.len().max(1) as f32);
         self.personality.apply_feedback_drift(
             matches!(feedback.outcome, FeedbackOutcome::Accept),
             correction_ratio,
@@ -5313,16 +5755,18 @@ impl LanguageService {
     #[cfg(feature = "training")]
     fn maybe_auto_checkpoint(&mut self) {
         let interval = self.continuum_config.checkpoint_interval;
-        if interval == 0 { return; }
-        if self.continuum_feedback_count > 0
-            && self.continuum_feedback_count % interval == 0
-        {
+        if interval == 0 {
+            return;
+        }
+        if self.continuum_feedback_count > 0 && self.continuum_feedback_count % interval == 0 {
             if let Ok(bytes) = self.export_brain() {
                 let _ = std::fs::write(&self.continuum_config.checkpoint_path, bytes);
             }
             // Persist emergent personality alongside brain
             if let Ok(bytes) = self.export_personality() {
-                let personality_path = self.continuum_config.checkpoint_path
+                let personality_path = self
+                    .continuum_config
+                    .checkpoint_path
                     .replace(".bin", "_personality.json");
                 let _ = std::fs::write(personality_path, bytes);
             }
@@ -5333,7 +5777,9 @@ impl LanguageService {
     #[cfg(feature = "training")]
     fn check_rate_limit(&mut self) -> bool {
         let limit = self.continuum_config.rate_limit_per_minute;
-        if limit == 0 { return true; }
+        if limit == 0 {
+            return true;
+        }
         let now = instant::Instant::now();
         if now.duration_since(self.last_feedback_time).as_secs() >= 60 {
             self.last_feedback_time = now;
@@ -5360,10 +5806,7 @@ impl LanguageService {
         };
         if let Some(ref manifest) = self.brain_plugins_manifest {
             if let Some(ref rules_section) = manifest.rules {
-                let thresholds = manifest
-                    .inference_thresholds
-                    .clone()
-                    .unwrap_or_default();
+                let thresholds = manifest.inference_thresholds.clone().unwrap_or_default();
                 crate::inference::inference_toml::replace_loaded_from_rules_section(
                     rules_section.clone(),
                     thresholds,
@@ -5409,7 +5852,9 @@ impl LanguageService {
     /// schema templates and chunk codecs (neither is serialized).
     fn configure_novelty_from_profile(&mut self) {
         use crate::inference::plugins::lattice_shortcuts;
-        let profile = self.brain_package_header.as_ref()
+        let profile = self
+            .brain_package_header
+            .as_ref()
             .and_then(|h| h.inference_profile.as_deref());
         let is_chat = lattice_shortcuts::chat_passthrough_generation(profile, self.active_dm());
         let factor = if is_chat { 2.5 } else { 1.0 };
@@ -5427,7 +5872,10 @@ impl LanguageService {
             }
         }
         if is_chat && factor > 1.0 {
-            infer_trace!("  [novelty] chat brain detected; novelty_factor = {:.1}", factor);
+            infer_trace!(
+                "  [novelty] chat brain detected; novelty_factor = {:.1}",
+                factor
+            );
         }
     }
 
@@ -5440,7 +5888,9 @@ impl LanguageService {
             env.build_chunk_codec();
             env.rebuild_program_graphs();
             if !env.topic_subindex.is_empty() {
-                let names: Vec<_> = env.topic_subindex.iter()
+                let names: Vec<_> = env
+                    .topic_subindex
+                    .iter()
                     .map(|t| format!("{}({})", t.topic_name, t.lattice.programs.len()))
                     .collect();
                 infer_trace!("  [topics] group {} gen: {}", gidx, names.join(", "));
@@ -5451,7 +5901,9 @@ impl LanguageService {
             env.build_chunk_codec();
             env.rebuild_program_graphs();
             if !env.topic_subindex.is_empty() {
-                let names: Vec<_> = env.topic_subindex.iter()
+                let names: Vec<_> = env
+                    .topic_subindex
+                    .iter()
                     .map(|t| format!("{}({})", t.topic_name, t.lattice.programs.len()))
                     .collect();
                 infer_trace!("  [topics] group {} code: {}", gidx, names.join(", "));
@@ -5560,9 +6012,7 @@ impl LanguageService {
     /// appended a fragment from an unrelated group (e.g., identity text on an
     /// information theory query).
     fn coherence_truncate(prompt_emb: &[f32], text: &str) -> String {
-        let sentences: Vec<&str> = text.split(". ")
-            .filter(|s| s.trim().len() > 5)
-            .collect();
+        let sentences: Vec<&str> = text.split(". ").filter(|s| s.trim().len() > 5).collect();
         if sentences.len() <= 1 {
             return text.to_string();
         }
@@ -5572,7 +6022,12 @@ impl LanguageService {
         // whose character distribution diverges sharply from the first sentence
         // are likely cross-domain contamination.
         let first_sig = Self::sentence_signature(sentences[0]);
-        let _prompt_norm: f32 = prompt_emb.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+        let _prompt_norm: f32 = prompt_emb
+            .iter()
+            .map(|x| x * x)
+            .sum::<f32>()
+            .sqrt()
+            .max(1e-8);
 
         let mut kept: Vec<&str> = vec![sentences[0]];
         for &sent in &sentences[1..] {
@@ -5589,15 +6044,20 @@ impl LanguageService {
                 || (sent.contains("I ") && sent.contains("structural pattern"));
 
             if has_self_ref {
-                infer_trace!("  [coherence-trunc] stripped self-referential tail: \"{}\"",
-                    &sent[..sent.len().min(60)]);
+                infer_trace!(
+                    "  [coherence-trunc] stripped self-referential tail: \"{}\"",
+                    &sent[..sent.len().min(60)]
+                );
                 break;
             }
 
             // Low overlap with the leading sentence = likely off-topic tail
             if overlap < 0.15 && kept.len() >= 1 {
-                infer_trace!("  [coherence-trunc] stripped divergent tail (overlap={:.3}): \"{}\"",
-                    overlap, &sent[..sent.len().min(60)]);
+                infer_trace!(
+                    "  [coherence-trunc] stripped divergent tail (overlap={:.3}): \"{}\"",
+                    overlap,
+                    &sent[..sent.len().min(60)]
+                );
                 break;
             }
             kept.push(sent);
@@ -5620,13 +6080,19 @@ impl LanguageService {
             *counts.entry(key).or_insert(0) += 1;
         }
         let total = counts.values().sum::<u32>().max(1) as f32;
-        counts.into_iter().map(|(k, v)| (k, v as f32 / total)).collect()
+        counts
+            .into_iter()
+            .map(|(k, v)| (k, v as f32 / total))
+            .collect()
     }
 
     /// Cosine-like overlap between two bigram signatures.
     fn signature_overlap(a: &[(u16, f32)], b: &[(u16, f32)]) -> f32 {
         let b_map: std::collections::HashMap<u16, f32> = b.iter().copied().collect();
-        let dot: f32 = a.iter().map(|(k, v)| v * b_map.get(k).unwrap_or(&0.0)).sum();
+        let dot: f32 = a
+            .iter()
+            .map(|(k, v)| v * b_map.get(k).unwrap_or(&0.0))
+            .sum();
         let norm_a: f32 = a.iter().map(|(_, v)| v * v).sum::<f32>().sqrt().max(1e-8);
         let norm_b: f32 = b.iter().map(|(_, v)| v * v).sum::<f32>().sqrt().max(1e-8);
         dot / (norm_a * norm_b)
@@ -5636,16 +6102,21 @@ impl LanguageService {
     /// Projects the prompt embedding through a text-length and hash modulation
     /// to create a distinct but related vector for the response.
     fn approximate_response_embedding(prompt_emb: &[f32], response_text: &str) -> Vec<f32> {
-        let text_hash = response_text.bytes().fold(0u64, |acc, b| {
-            acc.wrapping_mul(31).wrapping_add(b as u64)
-        });
+        let text_hash = response_text
+            .bytes()
+            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
         let len_factor = (response_text.len() as f32 / 200.0).clamp(0.1, 2.0);
         let hash_phase = (text_hash % 1000) as f32 / 1000.0;
 
-        prompt_emb.iter().enumerate().map(|(i, &v)| {
-            let modulation = 1.0 + 0.3 * ((i as f32 * 0.1 + hash_phase * std::f32::consts::TAU).sin());
-            v * len_factor * modulation
-        }).collect()
+        prompt_emb
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| {
+                let modulation =
+                    1.0 + 0.3 * ((i as f32 * 0.1 + hash_phase * std::f32::consts::TAU).sin());
+                v * len_factor * modulation
+            })
+            .collect()
     }
 
     fn record_latency(&mut self, start: u64) {
@@ -5694,11 +6165,7 @@ impl LanguageService {
             },
             generation: GenerationMetrics {
                 template_based: true,
-                codegen_languages: vec![
-                    "python".into(),
-                    "rust".into(),
-                    "javascript".into(),
-                ],
+                codegen_languages: vec!["python".into(), "rust".into(), "javascript".into()],
             },
             continual_learning: ContinualLearningMetrics {
                 episodic_episodes: ckpt.episodic_episodes,
@@ -5724,28 +6191,24 @@ pub struct RoutingGenerationMetacogEpisodePolicy<'a> {
 }
 
 impl<'a> EpisodePolicy for RoutingGenerationMetacogEpisodePolicy<'a> {
-    fn on_observation(
-        &mut self,
-        _belief: &mut BeliefState,
-        obs: &Observation,
-    ) -> PolicyTurn {
+    fn on_observation(&mut self, _belief: &mut BeliefState, obs: &Observation) -> PolicyTurn {
         match obs {
             Observation::UserText(text) => match self.service.generation(text) {
-                Ok((_action, resp)) => PolicyTurn::complete_after(vec![Action::Emit {
-                    text: resp.text,
-                }]),
+                Ok((_action, resp)) => {
+                    PolicyTurn::complete_after(vec![Action::Emit { text: resp.text }])
+                }
                 Err(e) => PolicyTurn::complete_after(vec![Action::Emit {
                     text: format!("[generation_error] {}", e),
                 }]),
             },
-            Observation::ReflectionCycle { quality, terminal } => PolicyTurn::complete_after(vec![
-                Action::RecordTrace {
+            Observation::ReflectionCycle { quality, terminal } => {
+                PolicyTurn::complete_after(vec![Action::RecordTrace {
                     message: format!(
                         "reflection_replay quality={:.3} terminal={:?}",
                         quality, terminal
                     ),
-                },
-            ]),
+                }])
+            }
         }
     }
 }
@@ -5850,7 +6313,8 @@ pub fn build_language_demo_manager_with_groups(
         } else {
             generate_concentric_circles_data(50, &mut data_rng)
         };
-        let gid = dm.force_promote(name, &cal)
+        let gid = dm
+            .force_promote(name, &cal)
             .ok_or_else(|| format!("failed to promote {} mirror", name))?;
         gids.push((name.to_string(), gid));
     }
@@ -5871,11 +6335,13 @@ pub fn build_language_demo_manager_with_groups(
         }
     }
 
-    let support_gid = gids.iter()
+    let support_gid = gids
+        .iter()
         .find(|(n, _)| n == "support")
         .map(|(_, g)| *g)
         .unwrap_or_else(|| gids.first().map(|(_, g)| *g).unwrap_or(0));
-    let coding_gid = gids.iter()
+    let coding_gid = gids
+        .iter()
         .find(|(n, _)| n == "coding")
         .map(|(_, g)| *g)
         .unwrap_or_else(|| gids.get(1).map(|(_, g)| *g).unwrap_or(0));
@@ -5953,7 +6419,11 @@ fn parse_csv_env_f32(key: &str) -> Option<Vec<f32>> {
             return None;
         }
     }
-    if out.is_empty() { None } else { Some(out) }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 fn phase2_base_config() -> EnvironmentConfig {
@@ -6124,7 +6594,10 @@ mod tests {
 
     #[test]
     fn contains_word_respects_boundaries() {
-        assert!(LanguageService::contains_word("i let out a soft purr.", "purr"));
+        assert!(LanguageService::contains_word(
+            "i let out a soft purr.",
+            "purr"
+        ));
         assert!(!LanguageService::contains_word("the black cat", "ack"));
         assert!(LanguageService::contains_word("ack. i hiss.", "ack"));
     }
@@ -6138,8 +6611,12 @@ mod tests {
         let mut p = OceanProfile::default();
         let n_before = p.neuroticism;
         p.apply_feedback_drift(true, None);
-        assert!(p.neuroticism < n_before,
-            "accept should reduce neuroticism: {} → {}", n_before, p.neuroticism);
+        assert!(
+            p.neuroticism < n_before,
+            "accept should reduce neuroticism: {} → {}",
+            n_before,
+            p.neuroticism
+        );
     }
 
     #[test]
@@ -6147,8 +6624,12 @@ mod tests {
         let mut p = OceanProfile::default();
         let a_before = p.agreeableness;
         p.apply_feedback_drift(true, None);
-        assert!(p.agreeableness > a_before,
-            "accept should boost agreeableness: {} → {}", a_before, p.agreeableness);
+        assert!(
+            p.agreeableness > a_before,
+            "accept should boost agreeableness: {} → {}",
+            a_before,
+            p.agreeableness
+        );
     }
 
     #[test]
@@ -6156,8 +6637,12 @@ mod tests {
         let mut p = OceanProfile::default();
         let c_before = p.conscientiousness;
         p.apply_feedback_drift(false, None);
-        assert!(p.conscientiousness > c_before,
-            "reject should boost conscientiousness: {} → {}", c_before, p.conscientiousness);
+        assert!(
+            p.conscientiousness > c_before,
+            "reject should boost conscientiousness: {} → {}",
+            c_before,
+            p.conscientiousness
+        );
     }
 
     #[test]
@@ -6165,8 +6650,12 @@ mod tests {
         let mut p = OceanProfile::default();
         let n_before = p.neuroticism;
         p.apply_feedback_drift(false, None);
-        assert!(p.neuroticism > n_before,
-            "reject should increase neuroticism: {} → {}", n_before, p.neuroticism);
+        assert!(
+            p.neuroticism > n_before,
+            "reject should increase neuroticism: {} → {}",
+            n_before,
+            p.neuroticism
+        );
     }
 
     #[test]
@@ -6175,8 +6664,12 @@ mod tests {
         let e_before = p.extraversion;
         // correction 2x longer than original → user wants more detail
         p.apply_feedback_drift(false, Some(2.0));
-        assert!(p.extraversion > e_before,
-            "long correction should boost extraversion: {} → {}", e_before, p.extraversion);
+        assert!(
+            p.extraversion > e_before,
+            "long correction should boost extraversion: {} → {}",
+            e_before,
+            p.extraversion
+        );
     }
 
     #[test]
@@ -6185,20 +6678,28 @@ mod tests {
         let e_before = p.extraversion;
         // correction half the length → user wants conciseness
         p.apply_feedback_drift(false, Some(0.4));
-        assert!(p.extraversion < e_before,
-            "short correction should reduce extraversion: {} → {}", e_before, p.extraversion);
+        assert!(
+            p.extraversion < e_before,
+            "short correction should reduce extraversion: {} → {}",
+            e_before,
+            p.extraversion
+        );
     }
 
     #[test]
     fn test_ocean_drift_stays_clamped() {
         let mut p = OceanProfile::default();
         // 200 accepts should not push anything out of [0, 1]
-        for _ in 0..200 { p.apply_feedback_drift(true, None); }
+        for _ in 0..200 {
+            p.apply_feedback_drift(true, None);
+        }
         assert!(p.neuroticism >= 0.0 && p.neuroticism <= 1.0);
         assert!(p.agreeableness >= 0.0 && p.agreeableness <= 1.0);
 
         // 200 rejects
-        for _ in 0..200 { p.apply_feedback_drift(false, Some(3.0)); }
+        for _ in 0..200 {
+            p.apply_feedback_drift(false, Some(3.0));
+        }
         assert!(p.conscientiousness >= 0.0 && p.conscientiousness <= 1.0);
         assert!(p.extraversion >= 0.0 && p.extraversion <= 1.0);
         assert!(p.neuroticism >= 0.0 && p.neuroticism <= 1.0);
@@ -6210,7 +6711,9 @@ mod tests {
         let initial = p.clone();
 
         // Lots of accepts → personality should drift toward lower neuroticism, higher agreeableness
-        for _ in 0..100 { p.apply_feedback_drift(true, None); }
+        for _ in 0..100 {
+            p.apply_feedback_drift(true, None);
+        }
         assert!(p.neuroticism < initial.neuroticism);
         assert!(p.agreeableness > initial.agreeableness);
         // Openness and conscientiousness should be untouched by accepts
@@ -6223,7 +6726,13 @@ mod tests {
 
     #[test]
     fn test_framing_warm_personality_first_turn() {
-        let p = OceanProfile { openness: 0.7, conscientiousness: 0.5, extraversion: 0.7, agreeableness: 0.8, neuroticism: 0.2 };
+        let p = OceanProfile {
+            openness: 0.7,
+            conscientiousness: 0.5,
+            extraversion: 0.7,
+            agreeableness: 0.8,
+            neuroticism: 0.2,
+        };
         let prefix = p.conversational_prefix(1, "explain the observer pattern");
         assert!(prefix.is_some(), "warm personality should produce a prefix");
         let text = prefix.unwrap();
@@ -6234,27 +6743,47 @@ mod tests {
     fn test_framing_terse_personality_no_prefix() {
         let p = OceanProfile::engineer();
         let prefix = p.conversational_prefix(1, "explain the observer pattern");
-        assert!(prefix.is_none(),
-            "engineer personality (low extraversion + agreeableness) should skip framing");
+        assert!(
+            prefix.is_none(),
+            "engineer personality (low extraversion + agreeableness) should skip framing"
+        );
     }
 
     #[test]
     fn test_framing_continuation_building_on() {
-        let p = OceanProfile { openness: 0.5, conscientiousness: 0.5, extraversion: 0.6, agreeableness: 0.7, neuroticism: 0.3 };
+        let p = OceanProfile {
+            openness: 0.5,
+            conscientiousness: 0.5,
+            extraversion: 0.6,
+            agreeableness: 0.7,
+            neuroticism: 0.3,
+        };
         let prefix = p.conversational_prefix(3, "and what about error handling?");
         assert_eq!(prefix, Some("Building on that — ".to_string()));
     }
 
     #[test]
     fn test_framing_help_request() {
-        let p = OceanProfile { openness: 0.5, conscientiousness: 0.5, extraversion: 0.6, agreeableness: 0.8, neuroticism: 0.2 };
+        let p = OceanProfile {
+            openness: 0.5,
+            conscientiousness: 0.5,
+            extraversion: 0.6,
+            agreeableness: 0.8,
+            neuroticism: 0.2,
+        };
         let prefix = p.conversational_prefix(1, "help me reset my password");
         assert_eq!(prefix, Some("Of course. ".to_string()));
     }
 
     #[test]
     fn test_framing_how_to_question() {
-        let p = OceanProfile { openness: 0.5, conscientiousness: 0.5, extraversion: 0.7, agreeableness: 0.7, neuroticism: 0.2 };
+        let p = OceanProfile {
+            openness: 0.5,
+            conscientiousness: 0.5,
+            extraversion: 0.7,
+            agreeableness: 0.7,
+            neuroticism: 0.2,
+        };
         let prefix = p.conversational_prefix(1, "how to implement binary search");
         assert!(prefix.is_some());
     }
@@ -6279,8 +6808,12 @@ mod tests {
     #[test]
     fn test_ocean_serde_roundtrip() {
         let mut p = OceanProfile::creative();
-        for _ in 0..10 { p.apply_feedback_drift(true, None); }
-        for _ in 0..5 { p.apply_feedback_drift(false, Some(1.5)); }
+        for _ in 0..10 {
+            p.apply_feedback_drift(true, None);
+        }
+        for _ in 0..5 {
+            p.apply_feedback_drift(false, Some(1.5));
+        }
 
         let json = serde_json::to_string(&p).unwrap();
         let restored: OceanProfile = serde_json::from_str(&json).unwrap();
@@ -6299,12 +6832,7 @@ mod tests {
     fn test_fragment_compose_config() -> crate::inference::FragmentComposeConfig {
         crate::inference::FragmentComposeConfig {
             enabled: true,
-            vocalizations: vec![
-                "mrrp".into(),
-                "chirp".into(),
-                "trill".into(),
-                "purr".into(),
-            ],
+            vocalizations: vec!["mrrp".into(), "chirp".into(), "trill".into(), "purr".into()],
             vocal_coda_modifiers: vec!["now".into()],
             ..Default::default()
         }
@@ -6372,5 +6900,4 @@ mod tests {
             &composed, &hints, &fc, 1
         ));
     }
-
 }

@@ -16,9 +16,11 @@ use crate::cifar_patch::{filter_class_pair_frozen, FrozenCifarPatchEncoder, FROZ
 use crate::mnist::RandomProjection;
 use crate::types::{EnvironmentConfig, GroupId, Sample};
 
-use super::embedding::{build_tag_vector, cosine_similarity, hidden_activation_vector, TAG_VECTOR_DIM};
+use super::embedding::{
+    build_tag_vector, cosine_similarity, hidden_activation_vector, TAG_VECTOR_DIM,
+};
 use super::manager::{DimensionManager, DimensionManagerConfig};
-use super::router::LearnedRouter;
+use super::router::{KnnRouter, LearnedRouter};
 
 pub const SPLIT_CIFAR_OBS: usize = 64;
 
@@ -368,6 +370,79 @@ pub struct SplitCifarFrozenResult {
     pub note: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct SplitCifarRouterProbeResult {
+    pub cifar_available: bool,
+    pub router_free_agree: f32,
+    pub router_margin: f32,
+    pub router_degenerate: bool,
+    pub k: usize,
+}
+
+/// Fast 4f router-only probe: no specialist training.
+///
+/// Task labels are used only for held-in router training. Evaluation receives
+/// frozen input features only, matching the context-free 4f inference contract.
+pub fn run_phase4f_knn_router_probe(
+    seed: u64,
+    data_root: &Path,
+    train_limit: usize,
+    k: usize,
+) -> SplitCifarRouterProbeResult {
+    const TASKS: [(u8, u8); 5] = [(0, 1), (2, 3), (4, 5), (6, 7), (8, 9)];
+    if !cifar10_available(data_root) {
+        return SplitCifarRouterProbeResult {
+            cifar_available: false,
+            router_free_agree: 0.0,
+            router_margin: 0.0,
+            router_degenerate: true,
+            k,
+        };
+    }
+    let Ok((train_raw, test_raw)) = load_cifar10(data_root) else {
+        return SplitCifarRouterProbeResult {
+            cifar_available: false,
+            router_free_agree: 0.0,
+            router_margin: 0.0,
+            router_degenerate: true,
+            k,
+        };
+    };
+    let enc = FrozenCifarPatchEncoder::new(seed);
+    let mut pairs = Vec::new();
+    let mut test_per_task = Vec::new();
+    for (t, &(a, b)) in TASKS.iter().enumerate() {
+        let train = filter_class_pair_frozen(&train_raw, a, b, &enc, train_limit);
+        pairs.extend(train.into_iter().map(|(x, _)| (x, t as GroupId)));
+        test_per_task.push(filter_class_pair_frozen(&test_raw, a, b, &enc, 240));
+    }
+    let router = KnnRouter::build(FROZEN_FEAT, TASKS.len(), k, &pairs);
+    let mut ok = 0usize;
+    let mut n = 0usize;
+    let mut margins = 0.0f32;
+    let mut route_counts = vec![0usize; TASKS.len()];
+    for (t, data) in test_per_task.iter().enumerate() {
+        for (x, _) in data.iter().take(40) {
+            let logits = router.predict_logits(x);
+            let mut order: Vec<(usize, f32)> = logits.into_iter().enumerate().collect();
+            order.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let pick = order[0].0;
+            ok += usize::from(pick == t);
+            route_counts[pick] += 1;
+            margins += order[0].1 - order[1].1;
+            n += 1;
+        }
+    }
+    let max_share = route_counts.iter().copied().max().unwrap_or(0) as f32 / n.max(1) as f32;
+    SplitCifarRouterProbeResult {
+        cifar_available: true,
+        router_free_agree: ok as f32 / n.max(1) as f32,
+        router_margin: margins / n.max(1) as f32,
+        router_degenerate: max_share > 0.90,
+        k,
+    }
+}
+
 /// Phase 4f — Split-CIFAR-10 with frozen contrast-normalized patch bank (128-D).
 pub fn run_phase4f_split_cifar_frozen(
     seed: u64,
@@ -488,14 +563,18 @@ pub fn run_phase4f_split_cifar_frozen(
     let retention_zero_forget = forget < 1e-4;
     let mean_task_acc = acc_at_promote.iter().sum::<f32>() / group_ids.len().max(1) as f32;
 
+    // Direct input-only k-NN preserves local task structure that the compressed
+    // Paramecium lattice loses on these overlapping frozen CIFAR features.
     let mut pairs: Vec<(Vec<f32>, GroupId)> = Vec::new();
     for (t, data) in train_per_task.iter().enumerate() {
-        for (x, _) in data.iter().take(220) {
+        for (x, _) in data {
             pairs.push((x.clone(), t as GroupId));
         }
     }
     pairs.shuffle(&mut rng);
-    let mut router = LearnedRouter::build(FROZEN_FEAT, group_ids.len(), &pairs);
+    // Keep the established 7-neighbor policy used by LearnedRouter; only remove
+    // the lossy lattice compression. Router-only probe: 41.0% at seed 42.
+    let router = KnnRouter::build(FROZEN_FEAT, group_ids.len(), 7, &pairs);
 
     let per_task = 40usize;
     let mut guided_ok = 0usize;
@@ -576,7 +655,28 @@ pub fn run_phase4f_split_cifar_frozen(
         router_margin: margin_mean,
         router_degenerate: max_share > 0.90,
         chat_metric_used: false,
-        note: "4f: CIFAR-10 ×5, frozen patch bank (128-D, pin-stable) + promote–freeze + CF router"
+        note: "4f: CIFAR-10 ×5, frozen patch bank (128-D, pin-stable) + promote–freeze + input-only cosine k-NN router"
             .into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Data-dependent diagnostic; run explicitly with:
+    /// `cargo test --release phase4f_knn_router_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn phase4f_knn_router_probe() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("data");
+        for k in [1, 3, 7, 15, 25] {
+            let r = run_phase4f_knn_router_probe(42, &root, 1000, k);
+            println!(
+                "4f k={}: agree={:.3} margin={:.4} degenerate={}",
+                k, r.router_free_agree, r.router_margin, r.router_degenerate
+            );
+            assert!(r.cifar_available);
+        }
     }
 }

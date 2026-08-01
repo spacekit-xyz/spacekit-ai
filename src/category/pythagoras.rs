@@ -91,12 +91,7 @@ impl<W: Clone> PythagorasNode<W> {
     }
 
     /// Create a split using the nearest valid Pythagorean pair automatically.
-    pub fn auto_split(
-        weights: W,
-        dimension: usize,
-        left_weights: W,
-        right_weights: W,
-    ) -> Self {
+    pub fn auto_split(weights: W, dimension: usize, left_weights: W, right_weights: W) -> Self {
         let (a, b) = nearest_pythagorean_split(dimension);
         Self {
             weights,
@@ -183,12 +178,7 @@ impl<W: Clone> PythagorasNode<W> {
 
     /// Grow: expand a leaf into an internal node.
     /// Core Growformer operation — local to this node, no DAG rewiring needed.
-    pub fn grow(
-        self,
-        left_weights: W,
-        right_weights: W,
-        tolerance: f64,
-    ) -> Result<Self, String> {
+    pub fn grow(self, left_weights: W, right_weights: W, tolerance: f64) -> Result<Self, String> {
         if !self.is_leaf() {
             return Err("Cannot grow a non-leaf node".to_string());
         }

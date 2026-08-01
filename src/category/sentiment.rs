@@ -5,8 +5,8 @@
 // Natural transformations between entity categories enable
 // generalization to unseen days/objects.
 
-use crate::category::{Layer, NaturalTransform};
 use crate::category::training::SentimentLabel;
+use crate::category::{Layer, NaturalTransform};
 
 // ── ParsedInput ───────────────────────────────────────────────────────────────
 
@@ -40,10 +40,7 @@ impl ParsedInput {
 /// Penalizes shared information between the sentiment and entity branches.
 /// During training, minimizing this alongside the main loss encourages
 /// the Pythagoras left/right children to learn independent representations.
-pub fn disentanglement_loss(
-    sentiment_embedding: &[f32],
-    entity_embedding: &[f32],
-) -> f32 {
+pub fn disentanglement_loss(sentiment_embedding: &[f32], entity_embedding: &[f32]) -> f32 {
     debug_assert_eq!(
         sentiment_embedding.len(),
         entity_embedding.len(),
@@ -56,7 +53,11 @@ pub fn disentanglement_loss(
         .map(|(a, b)| a * b)
         .sum();
 
-    let norm_s: f32 = sentiment_embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_s: f32 = sentiment_embedding
+        .iter()
+        .map(|x| x * x)
+        .sum::<f32>()
+        .sqrt();
     let norm_e: f32 = entity_embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
 
     if norm_s == 0.0 || norm_e == 0.0 {
@@ -92,11 +93,7 @@ pub struct SentimentFunctor {
 }
 
 impl SentimentFunctor {
-    pub fn new(
-        sentiment_weights: Vec<f32>,
-        entity_weights: Vec<f32>,
-        threshold: f32,
-    ) -> Self {
+    pub fn new(sentiment_weights: Vec<f32>, entity_weights: Vec<f32>, threshold: f32) -> Self {
         Self {
             sentiment_weights,
             entity_weights,
@@ -126,8 +123,7 @@ impl SentimentFunctor {
 
     /// Score: positive = positive sentiment, negative = negative.
     pub fn sentiment_score(&self, input: &ParsedInput) -> f32 {
-        self.sentiment_embedding(input).iter().sum::<f32>()
-            / self.sentiment_weights.len() as f32
+        self.sentiment_embedding(input).iter().sum::<f32>() / self.sentiment_weights.len() as f32
     }
 }
 
@@ -172,13 +168,13 @@ pub enum DayOfWeek {
 impl DayOfWeek {
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().trim_end_matches('s') {
-            "monday"    => Some(Self::Monday),
-            "tuesday"   => Some(Self::Tuesday),
+            "monday" => Some(Self::Monday),
+            "tuesday" => Some(Self::Tuesday),
             "wednesday" => Some(Self::Wednesday),
-            "thursday"  => Some(Self::Thursday),
-            "friday"    => Some(Self::Friday),
-            "saturday"  => Some(Self::Saturday),
-            "sunday"    => Some(Self::Sunday),
+            "thursday" => Some(Self::Thursday),
+            "friday" => Some(Self::Friday),
+            "saturday" => Some(Self::Saturday),
+            "sunday" => Some(Self::Sunday),
             _ => None,
         }
     }
@@ -199,7 +195,6 @@ impl NaturalTransform<DayOfWeek, DayOfWeek> for DaySubstitution {
         day
     }
 }
-
 
 /// Alias used by GrowformerTrainer for inference — delegates to AuxCategory::infer.
 pub fn entity_to_aux_category(entity: &str) -> crate::category::training::AuxCategory {

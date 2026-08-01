@@ -44,12 +44,7 @@ impl Policy {
 
     /// One training step: one-hot target for action index. Returns MSE loss.
     #[cfg(feature = "training")]
-    pub fn train_step(
-        &mut self,
-        state: &[f32],
-        target_action: usize,
-        _rng: &mut impl Rng,
-    ) -> f32 {
+    pub fn train_step(&mut self, state: &[f32], target_action: usize, _rng: &mut impl Rng) -> f32 {
         if state.len() != self.state_dim || target_action >= self.num_actions {
             return 0.0;
         }
@@ -110,15 +105,8 @@ impl ContinuousPolicy {
 
     /// One training step: MSE to target action. Returns MSE loss.
     #[cfg(feature = "training")]
-    pub fn train_step(
-        &mut self,
-        state: &[f32],
-        target: &[f32],
-        _rng: &mut impl Rng,
-    ) -> f32 {
-        if state.len() != self.state_dim
-            || target.len() != self.action_dim
-        {
+    pub fn train_step(&mut self, state: &[f32], target: &[f32], _rng: &mut impl Rng) -> f32 {
+        if state.len() != self.state_dim || target.len() != self.action_dim {
             return 0.0;
         }
         let output = self.env.forward(state);
@@ -129,8 +117,8 @@ impl ContinuousPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand::SeedableRng;
 
     #[test]
     fn test_policy_new_and_predict_logits_shape() {
@@ -239,6 +227,11 @@ mod tests {
         }
         let out = policy.predict(&state);
         assert_eq!(out.len(), 1);
-        assert!((out[0] - target[0]).abs() < 0.3, "output {:?} should be near target {:?}", out, target);
+        assert!(
+            (out[0] - target[0]).abs() < 0.3,
+            "output {:?} should be near target {:?}",
+            out,
+            target
+        );
     }
 }

@@ -20,8 +20,7 @@
 //! error decomposed by cortical layer → targeted feedback corrections.
 
 use crate::clifford::{
-    embed_bridge_vector, extract_conditioning, Multivector,
-    GRADE_DIMS, GRADE_OFFSETS,
+    embed_bridge_vector, extract_conditioning, Multivector, GRADE_DIMS, GRADE_OFFSETS,
 };
 use crate::coherence::{band_coherence_mv, BandCoherence};
 
@@ -29,15 +28,15 @@ use crate::coherence::{band_coherence_mv, BandCoherence};
 /// Higher grades get stronger correction (they carry more
 /// compositional information and are more volatile).
 const GRADE_LR: [f32; 9] = [
-    0.02,  // grade 0: scalar — gentle (overall activation)
-    0.08,  // grade 1: vector — moderate (semantic direction)
-    0.12,  // grade 2: bivector — strong (relational structure)
-    0.15,  // grade 3: trivector — strong (compositional)
-    0.10,  // grade 4
-    0.08,  // grade 5
-    0.06,  // grade 6
-    0.04,  // grade 7
-    0.02,  // grade 8: pseudoscalar
+    0.02, // grade 0: scalar — gentle (overall activation)
+    0.08, // grade 1: vector — moderate (semantic direction)
+    0.12, // grade 2: bivector — strong (relational structure)
+    0.15, // grade 3: trivector — strong (compositional)
+    0.10, // grade 4
+    0.08, // grade 5
+    0.06, // grade 6
+    0.04, // grade 7
+    0.02, // grade 8: pseudoscalar
 ];
 
 /// Configuration for the predictive coding loop.
@@ -217,8 +216,8 @@ impl PredictiveCoder {
             // Forward model error: what the conditioning predicted vs actual response
             let mut forward_err = 0.0f32;
             for i in 0..dim {
-                let diff = conditioning_mv.components[offset + i]
-                    - response_mv.components[offset + i];
+                let diff =
+                    conditioning_mv.components[offset + i] - response_mv.components[offset + i];
                 forward_err += diff * diff;
             }
             forward_err = forward_err.sqrt();
@@ -226,15 +225,14 @@ impl PredictiveCoder {
             // Goal alignment error: response vs goal
             let mut goal_err = 0.0f32;
             for i in 0..dim {
-                let diff = goal_mv.components[offset + i]
-                    - response_mv.components[offset + i];
+                let diff = goal_mv.components[offset + i] - response_mv.components[offset + i];
                 goal_err += diff * diff;
             }
             goal_err = goal_err.sqrt();
 
             // Combined error for this grade
-            let grade_error = self.config.w_forward_error * forward_err
-                + self.config.w_goal_alignment * goal_err;
+            let grade_error =
+                self.config.w_forward_error * forward_err + self.config.w_goal_alignment * goal_err;
             magnitudes[grade] = grade_error;
             total += grade_error;
 
@@ -246,8 +244,8 @@ impl PredictiveCoder {
             // Correction direction: push conditioning toward goal, weighted by error
             let lr = GRADE_LR[grade] * self.config.lr_scale;
             for i in 0..dim {
-                let goal_dir = goal_mv.components[offset + i]
-                    - conditioning_mv.components[offset + i];
+                let goal_dir =
+                    goal_mv.components[offset + i] - conditioning_mv.components[offset + i];
                 correction.components[offset + i] = goal_dir * lr * grade_error;
             }
         }
@@ -277,12 +275,10 @@ impl PredictiveCoder {
 /// Instead of picking the single nearest-neighbor in `soft_decode_index`,
 /// this returns a full probability distribution that can be used for
 /// gradient-based optimization of slot bits.
-pub fn soft_decode_distribution(
-    bits: &[f32],
-    num_options: usize,
-    temperature: f32,
-) -> Vec<f32> {
-    if num_options <= 1 { return vec![1.0]; }
+pub fn soft_decode_distribution(bits: &[f32], num_options: usize, temperature: f32) -> Vec<f32> {
+    if num_options <= 1 {
+        return vec![1.0];
+    }
 
     let n_bits = bits_for_count(num_options);
     let mut distances = Vec::with_capacity(num_options);
@@ -299,13 +295,19 @@ pub fn soft_decode_distribution(
 
     // Temperature-scaled softmax: P(val) = exp(-dist/T) / sum(exp(-dist/T))
     let t = temperature.max(0.01);
-    let max_neg_dist = distances.iter().map(|d| -d / t).fold(f32::NEG_INFINITY, f32::max);
-    let mut probs: Vec<f32> = distances.iter()
+    let max_neg_dist = distances
+        .iter()
+        .map(|d| -d / t)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let mut probs: Vec<f32> = distances
+        .iter()
         .map(|d| ((-d / t) - max_neg_dist).exp())
         .collect();
     let sum: f32 = probs.iter().sum();
     if sum > 0.0 {
-        for p in &mut probs { *p /= sum; }
+        for p in &mut probs {
+            *p /= sum;
+        }
     } else {
         let uniform = 1.0 / num_options as f32;
         probs.fill(uniform);
@@ -316,14 +318,14 @@ pub fn soft_decode_distribution(
 
 /// Expected token from soft distribution over slot vocabulary.
 /// Returns the token with highest probability and the confidence.
-pub fn soft_slot_token(
-    bits: &[f32],
-    slot_vocab: &[u16],
-    temperature: f32,
-) -> (u16, f32) {
-    if slot_vocab.is_empty() { return (0, 0.0); }
+pub fn soft_slot_token(bits: &[f32], slot_vocab: &[u16], temperature: f32) -> (u16, f32) {
+    if slot_vocab.is_empty() {
+        return (0, 0.0);
+    }
     let probs = soft_decode_distribution(bits, slot_vocab.len(), temperature);
-    let (best_idx, &best_prob) = probs.iter().enumerate()
+    let (best_idx, &best_prob) = probs
+        .iter()
+        .enumerate()
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
         .unwrap();
     (slot_vocab[best_idx.min(slot_vocab.len() - 1)], best_prob)
@@ -345,16 +347,23 @@ pub fn optimize_slot_bits(
     let mut best_bits = bits.clone();
     let mut best_score = score_fn(&bits);
 
-    let mut rng_state: u64 = initial_bits.iter()
+    let mut rng_state: u64 = initial_bits
+        .iter()
         .fold(0u64, |acc, v| acc.wrapping_add(v.to_bits() as u64))
         .wrapping_add(7919);
 
     for _ in 0..num_steps {
         // Rademacher perturbation
-        let perturbation: Vec<f32> = (0..n).map(|_| {
-            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
-            if (rng_state >> 33) & 1 == 0 { 1.0 } else { -1.0 }
-        }).collect();
+        let perturbation: Vec<f32> = (0..n)
+            .map(|_| {
+                rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                if (rng_state >> 33) & 1 == 0 {
+                    1.0
+                } else {
+                    -1.0
+                }
+            })
+            .collect();
 
         // Forward and backward
         let mut plus = bits.clone();
@@ -384,7 +393,9 @@ pub fn optimize_slot_bits(
 }
 
 fn bits_for_count(n: usize) -> usize {
-    if n <= 1 { return 1; }
+    if n <= 1 {
+        return 1;
+    }
     (usize::BITS - (n - 1).leading_zeros()) as usize
 }
 
@@ -422,7 +433,8 @@ pub struct SchemaSlot {
 impl SchemaSlot {
     /// Most common token at this slot.
     pub fn mode_token(&self) -> u16 {
-        self.candidates.iter()
+        self.candidates
+            .iter()
             .max_by_key(|(_, count)| *count)
             .map(|(tok, _)| *tok)
             .unwrap_or(0)
@@ -443,19 +455,25 @@ pub fn extract_schemas(
     min_support: usize,
     similarity_threshold: f32,
 ) -> Vec<Schema> {
-    if programs.is_empty() { return Vec::new(); }
+    if programs.is_empty() {
+        return Vec::new();
+    }
 
     // Group programs by token-level Jaccard similarity
     let mut used = vec![false; programs.len()];
     let mut groups: Vec<Vec<usize>> = Vec::new();
 
     for i in 0..programs.len() {
-        if used[i] { continue; }
+        if used[i] {
+            continue;
+        }
         let mut group = vec![i];
         used[i] = true;
 
         for j in (i + 1)..programs.len() {
-            if used[j] { continue; }
+            if used[j] {
+                continue;
+            }
             let sim = token_jaccard(&programs[i].0, &programs[j].0);
             if sim >= similarity_threshold {
                 group.push(j);
@@ -468,56 +486,69 @@ pub fn extract_schemas(
     }
 
     // For each group, extract fixed/variable positions
-    groups.iter().map(|group| {
-        let sequences: Vec<&Vec<u16>> = group.iter().map(|&i| &programs[i].0).collect();
-        let min_len = sequences.iter().map(|s| s.len()).min().unwrap_or(0);
-        let max_len = sequences.iter().map(|s| s.len()).max().unwrap_or(0);
-        let use_len = min_len; // conservative: only schema up to shortest
+    groups
+        .iter()
+        .map(|group| {
+            let sequences: Vec<&Vec<u16>> = group.iter().map(|&i| &programs[i].0).collect();
+            let min_len = sequences.iter().map(|s| s.len()).min().unwrap_or(0);
+            let max_len = sequences.iter().map(|s| s.len()).max().unwrap_or(0);
+            let use_len = min_len; // conservative: only schema up to shortest
 
-        let mut fixed = Vec::new();
-        let mut slots = Vec::new();
-        let threshold = (group.len() as f32 * 0.8).ceil() as usize; // 80% agreement = fixed
+            let mut fixed = Vec::new();
+            let mut slots = Vec::new();
+            let threshold = (group.len() as f32 * 0.8).ceil() as usize; // 80% agreement = fixed
 
-        for pos in 0..use_len {
-            let mut token_counts: std::collections::HashMap<u16, u32> = std::collections::HashMap::new();
-            for seq in &sequences {
-                if pos < seq.len() {
-                    *token_counts.entry(seq[pos]).or_insert(0) += 1;
+            for pos in 0..use_len {
+                let mut token_counts: std::collections::HashMap<u16, u32> =
+                    std::collections::HashMap::new();
+                for seq in &sequences {
+                    if pos < seq.len() {
+                        *token_counts.entry(seq[pos]).or_insert(0) += 1;
+                    }
+                }
+
+                let (most_common, max_count) = token_counts
+                    .iter()
+                    .max_by_key(|(_, &c)| c)
+                    .map(|(&t, &c)| (t, c as usize))
+                    .unwrap_or((0, 0));
+
+                if max_count >= threshold {
+                    fixed.push((pos, most_common));
+                } else {
+                    let candidates: Vec<(u16, u32)> = token_counts.into_iter().collect();
+                    slots.push(SchemaSlot {
+                        position: pos,
+                        candidates,
+                    });
                 }
             }
 
-            let (most_common, max_count) = token_counts.iter()
-                .max_by_key(|(_, &c)| c)
-                .map(|(&t, &c)| (t, c as usize))
-                .unwrap_or((0, 0));
+            let avg_quality =
+                group.iter().map(|&i| programs[i].1).sum::<f32>() / group.len() as f32;
 
-            if max_count >= threshold {
-                fixed.push((pos, most_common));
-            } else {
-                let candidates: Vec<(u16, u32)> = token_counts.into_iter().collect();
-                slots.push(SchemaSlot { position: pos, candidates });
+            // Label from first few fixed tokens
+            let label = fixed
+                .iter()
+                .take(4)
+                .map(|(_, t)| format!("{}", t))
+                .collect::<Vec<_>>()
+                .join("-");
+
+            Schema {
+                label: if label.is_empty() {
+                    "abstract".to_string()
+                } else {
+                    label
+                },
+                length: max_len,
+                fixed,
+                slots,
+                support: group.len(),
+                avg_quality,
             }
-        }
-
-        let avg_quality = group.iter()
-            .map(|&i| programs[i].1)
-            .sum::<f32>() / group.len() as f32;
-
-        // Label from first few fixed tokens
-        let label = fixed.iter().take(4)
-            .map(|(_, t)| format!("{}", t))
-            .collect::<Vec<_>>()
-            .join("-");
-
-        Schema {
-            label: if label.is_empty() { "abstract".to_string() } else { label },
-            length: max_len,
-            fixed,
-            slots,
-            support: group.len(),
-            avg_quality,
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 /// Fill a schema's slots using a conditioning vector.
@@ -525,10 +556,7 @@ pub fn extract_schemas(
 /// For each slot, scores candidate tokens by how well they align
 /// with the conditioning signal (via cosine similarity of a simple
 /// token-position hash embedding — this is a heuristic).
-pub fn fill_schema(
-    schema: &Schema,
-    conditioning: &[f32],
-) -> Vec<u16> {
+pub fn fill_schema(schema: &Schema, conditioning: &[f32]) -> Vec<u16> {
     let mut tokens = vec![0u16; schema.length];
 
     // Place fixed tokens
@@ -546,16 +574,20 @@ pub fn fill_schema(
 
         // Score each candidate by hash-based alignment with conditioning
         let pos_hash = slot.position as f32 * 0.1;
-        let cond_signal: f32 = conditioning.iter().enumerate()
+        let cond_signal: f32 = conditioning
+            .iter()
+            .enumerate()
             .map(|(i, &v)| v * ((i as f32 * 0.07 + pos_hash).sin()))
             .sum::<f32>();
 
-        let best = slot.candidates.iter()
+        let best = slot
+            .candidates
+            .iter()
             .max_by(|(tok_a, count_a), (tok_b, count_b)| {
-                let score_a = *count_a as f32
-                    + 0.3 * (cond_signal * *tok_a as f32 * 0.001).sin().abs();
-                let score_b = *count_b as f32
-                    + 0.3 * (cond_signal * *tok_b as f32 * 0.001).sin().abs();
+                let score_a =
+                    *count_a as f32 + 0.3 * (cond_signal * *tok_a as f32 * 0.001).sin().abs();
+                let score_b =
+                    *count_b as f32 + 0.3 * (cond_signal * *tok_b as f32 * 0.001).sin().abs();
                 score_a.partial_cmp(&score_b).unwrap()
             })
             .map(|(tok, _)| *tok)
@@ -579,7 +611,11 @@ fn token_jaccard(a: &[u16], b: &[u16]) -> f32 {
     let set_b: HashSet<u16> = b.iter().copied().collect();
     let intersection = set_a.intersection(&set_b).count();
     let union = set_a.union(&set_b).count();
-    if union == 0 { 0.0 } else { intersection as f32 / union as f32 }
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f32 / union as f32
+    }
 }
 
 // ===========================================================================
@@ -621,7 +657,10 @@ mod tests {
             assert!(ge.total_error > 0.0, "should have nonzero error");
             assert!(ge.dominant_grade < 9, "dominant grade in range");
             let sum: f32 = ge.magnitudes.iter().sum();
-            assert!((sum - ge.total_error).abs() < 0.01, "magnitudes should sum to total");
+            assert!(
+                (sum - ge.total_error).abs() < 0.01,
+                "magnitudes should sum to total"
+            );
         }
     }
 
@@ -634,7 +673,11 @@ mod tests {
         });
         let result = pc.refine(&goal, &goal, &goal);
 
-        assert!(result.cycles <= 2, "should stop early when goal matches: {} cycles", result.cycles);
+        assert!(
+            result.cycles <= 2,
+            "should stop early when goal matches: {} cycles",
+            result.cycles
+        );
     }
 
     #[test]
@@ -650,7 +693,11 @@ mod tests {
         });
         let result = pc.refine(&goal, &cond, &response);
 
-        assert!(result.cycles < 10, "should detect stall early: {} cycles", result.cycles);
+        assert!(
+            result.cycles < 10,
+            "should detect stall early: {} cycles",
+            result.cycles
+        );
     }
 
     // --- Differentiable Slot Decode tests ---
@@ -674,15 +721,21 @@ mod tests {
         let cold_max = cold.iter().cloned().fold(0.0f32, f32::max);
         let warm_max = warm.iter().cloned().fold(0.0f32, f32::max);
 
-        assert!(cold_max > warm_max + 0.1,
-            "low temperature should concentrate: cold_max={}, warm_max={}", cold_max, warm_max);
+        assert!(
+            cold_max > warm_max + 0.1,
+            "low temperature should concentrate: cold_max={}, warm_max={}",
+            cold_max,
+            warm_max
+        );
     }
 
     #[test]
     fn test_soft_decode_picks_correct_value() {
         let bits = vec![1.0, 0.0, 1.0]; // should decode to 5 (= 1 + 4)
         let probs = soft_decode_distribution(&bits, 8, 0.1);
-        let best = probs.iter().enumerate()
+        let best = probs
+            .iter()
+            .enumerate()
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
             .map(|(idx, _)| idx)
             .unwrap();
@@ -716,8 +769,12 @@ mod tests {
         let optimized = optimize_slot_bits(&initial, 20, 0.1, 0.05, &score_fn);
         let final_score = score_fn(&optimized);
 
-        assert!(final_score > initial_score,
-            "optimization should improve: {} → {}", initial_score, final_score);
+        assert!(
+            final_score > initial_score,
+            "optimization should improve: {} → {}",
+            initial_score,
+            final_score
+        );
     }
 
     // --- Schema Abstraction tests ---
@@ -741,13 +798,13 @@ mod tests {
 
     #[test]
     fn test_extract_schemas_min_support() {
-        let programs: Vec<(Vec<u16>, f32)> = vec![
-            (vec![10, 20], 0.5),
-            (vec![99, 88], 0.5),
-        ];
+        let programs: Vec<(Vec<u16>, f32)> = vec![(vec![10, 20], 0.5), (vec![99, 88], 0.5)];
 
         let schemas = extract_schemas(&programs, 3, 0.5);
-        assert!(schemas.is_empty(), "should not extract with support < min_support");
+        assert!(
+            schemas.is_empty(),
+            "should not extract with support < min_support"
+        );
     }
 
     #[test]
@@ -756,12 +813,10 @@ mod tests {
             label: "test".to_string(),
             length: 5,
             fixed: vec![(0, 10), (1, 20), (3, 40), (4, 50)],
-            slots: vec![
-                SchemaSlot {
-                    position: 2,
-                    candidates: vec![(30, 5), (31, 3), (32, 2)],
-                },
-            ],
+            slots: vec![SchemaSlot {
+                position: 2,
+                candidates: vec![(30, 5), (31, 3), (32, 2)],
+            }],
             support: 3,
             avg_quality: 0.8,
         };
@@ -773,8 +828,11 @@ mod tests {
         assert_eq!(tokens[1], 20);
         assert_eq!(tokens[3], 40);
         assert_eq!(tokens[4], 50);
-        assert!(tokens[2] == 30 || tokens[2] == 31 || tokens[2] == 32,
-            "slot should be filled with a candidate: {}", tokens[2]);
+        assert!(
+            tokens[2] == 30 || tokens[2] == 31 || tokens[2] == 32,
+            "slot should be filled with a candidate: {}",
+            tokens[2]
+        );
     }
 
     #[test]
@@ -792,6 +850,6 @@ mod tests {
         let b = vec![3, 4, 5, 6, 7];
         let sim = token_jaccard(&a, &b);
         // intersection = {3,4,5} = 3, union = {1,2,3,4,5,6,7} = 7
-        assert!((sim - 3.0/7.0).abs() < 0.01);
+        assert!((sim - 3.0 / 7.0).abs() < 0.01);
     }
 }

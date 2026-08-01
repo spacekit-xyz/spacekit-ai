@@ -2,38 +2,40 @@
 
 use std::collections::HashMap;
 
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
+use rand::Rng;
+use rand::SeedableRng;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use rand::Rng;
-use rand::seq::SliceRandom;
-use rand::SeedableRng;
-use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
 
 use crate::environment::NeuralEnvironment;
 use crate::types::EnvironmentConfig;
 use crate::types::GroupId;
 
-use super::composition::{EpisodicMemory, Episode, VirtualGroup};
-use super::action::{ActionJson, ActionType, action_from_routing};
+use super::action::{action_from_routing, ActionJson, ActionType};
 use super::action_classifier::ActionClassifier;
+use super::composition::{Episode, EpisodicMemory, VirtualGroup};
+use super::embedding::{build_tag_vector, compute_group_embedding, GroupEmbedding, TAG_VECTOR_DIM};
 use super::generation_head::GenerationHead;
 use super::group_gen::{GroupGenEnv, IndexedGenEnv};
-use crate::spectral::TokenDictionary;
-use super::embedding::{compute_group_embedding, build_tag_vector, GroupEmbedding, TAG_VECTOR_DIM};
 use super::language::{
-    CalibrationDataset, CalibrationReport, CalibrationRequirements, GroupAdapter, LanguageConfig,
-    LanguageRoutingDecision, LanguageRuntime, route_language_embedding,
+    route_language_embedding, CalibrationDataset, CalibrationReport, CalibrationRequirements,
+    GroupAdapter, LanguageConfig, LanguageRoutingDecision, LanguageRuntime,
 };
-use super::polarity_probe;
-use crate::clifford::{GroupRotor, embed_bridge_vector, structural_fingerprint, structural_similarity};
-use crate::micro_brain::MetaBrain;
-use crate::understanding::UnderstandingLayer;
 use super::main_dim::MainDimension;
-use super::mirror_dim::{MirrorDimension, EpochResult};
+use super::mirror_dim::{EpochResult, MirrorDimension};
 use super::observer::GlobalObserver;
+use super::polarity_probe;
 use super::promotion::PromotionGateConfig;
 use super::router::LearnedRouter;
+use crate::clifford::{
+    embed_bridge_vector, structural_fingerprint, structural_similarity, GroupRotor,
+};
+use crate::micro_brain::MetaBrain;
+use crate::spectral::TokenDictionary;
+use crate::understanding::UnderstandingLayer;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DimensionManagerConfig {
@@ -100,8 +102,13 @@ pub struct DimensionManager {
 /// Canonical causal topic names emitted by Brain B's lattice. Used to detect
 /// which group in a merged brain is the causal overlay.
 const CAUSAL_TOPIC_NAMES: &[&str] = &[
-    "direct", "compensatory", "contrastive", "explanatory",
-    "concessive", "inferential", "retrospective_framing",
+    "direct",
+    "compensatory",
+    "contrastive",
+    "explanatory",
+    "concessive",
+    "inferential",
+    "retrospective_framing",
     "interventional_counterfactual",
 ];
 
@@ -112,7 +119,9 @@ impl DimensionManager {
     pub fn find_causal_group(&self) -> Option<usize> {
         let mut best: Option<(usize, usize)> = None;
         for (&gid, env) in &self.group_gen_envs {
-            let hits = env.topic_subindex.iter()
+            let hits = env
+                .topic_subindex
+                .iter()
                 .filter(|s| CAUSAL_TOPIC_NAMES.contains(&s.topic_name.as_str()))
                 .count();
             if hits >= 3 {
@@ -203,7 +212,9 @@ impl DimensionManager {
     /// Register a structural fingerprint for a group, computed from the mean
     /// of its training embeddings' grade-2 bivector components in Cl(8).
     pub fn register_group_fingerprint(&mut self, group_idx: usize, raw_embeddings: &[&[f32]]) {
-        if raw_embeddings.is_empty() { return; }
+        if raw_embeddings.is_empty() {
+            return;
+        }
         let mean_fp = Self::mean_structural_fingerprint(raw_embeddings);
         self.group_fingerprints.insert(group_idx, mean_fp);
     }
@@ -232,12 +243,7 @@ impl DimensionManager {
     /// `alpha` in (0,1]: weight of the new observation (`fp_new = (1-α)·old + α·new`).
     /// If no prior fingerprint exists, registers `new_fp` directly.
     /// Does not touch lattices, routers, or topic programs — augment-only CL.
-    pub fn augment_group_fingerprint(
-        &mut self,
-        group_idx: usize,
-        new_fp: &[f32],
-        alpha: f32,
-    ) {
+    pub fn augment_group_fingerprint(&mut self, group_idx: usize, new_fp: &[f32], alpha: f32) {
         let alpha = alpha.clamp(0.0, 1.0);
         if new_fp.is_empty() {
             return;
@@ -253,8 +259,7 @@ impl DimensionManager {
                 }
             }
             None => {
-                self.group_fingerprints
-                    .insert(group_idx, new_fp.to_vec());
+                self.group_fingerprints.insert(group_idx, new_fp.to_vec());
             }
         }
     }
@@ -278,7 +283,9 @@ impl DimensionManager {
     /// Returns (best_group_idx, similarity, second_similarity) or None if
     /// no fingerprints are registered.
     pub fn route_by_structure(&self, h_raw: &[f32]) -> Option<(usize, f32, f32)> {
-        if self.group_fingerprints.is_empty() { return None; }
+        if self.group_fingerprints.is_empty() {
+            return None;
+        }
         let mv = embed_bridge_vector(h_raw);
         let input_mv_for_sim = {
             let mut m = crate::clifford::Multivector::zero();
@@ -287,7 +294,9 @@ impl DimensionManager {
             m.components[start..start + 28].copy_from_slice(&fp);
             m
         };
-        let mut scored: Vec<(usize, f32)> = self.group_fingerprints.iter()
+        let mut scored: Vec<(usize, f32)> = self
+            .group_fingerprints
+            .iter()
             .map(|(&gidx, fp_vec)| {
                 let mut gm = crate::clifford::Multivector::zero();
                 let start = crate::clifford::GRADE_OFFSETS[2];
@@ -308,7 +317,11 @@ impl DimensionManager {
     }
 
     /// Infer with optional context tags for tag-vector re-rank (e.g. ["spiral"] or ["circles"]).
-    pub fn infer_with_context(&mut self, input: &[f32], context_tags: Option<&[String]>) -> Vec<f32> {
+    pub fn infer_with_context(
+        &mut self,
+        input: &[f32],
+        context_tags: Option<&[String]>,
+    ) -> Vec<f32> {
         self.observer.infer(input, &mut self.main, context_tags)
     }
 
@@ -352,14 +365,12 @@ impl DimensionManager {
         rng: &mut impl Rng,
         batch_size: Option<usize>,
     ) -> Option<EpochResult> {
-        self.mirrors.get_mut(task_name).map(|m| {
-            match batch_size {
-                Some(b) if b > 1 => {
-                    let epoch = m.epochs_trained;
-                    m.train_epoch_minibatch(data, b, epoch, rng)
-                }
-                _ => m.train_epoch(data, rng),
+        self.mirrors.get_mut(task_name).map(|m| match batch_size {
+            Some(b) if b > 1 => {
+                let epoch = m.epochs_trained;
+                m.train_epoch_minibatch(data, b, epoch, rng)
             }
+            _ => m.train_epoch(data, rng),
         })
     }
 
@@ -386,9 +397,9 @@ impl DimensionManager {
         current_loss: f32,
         rng: &mut impl Rng,
     ) -> bool {
-        self.mirrors
-            .get_mut(task_name)
-            .map_or(false, |m| m.try_neurogenesis_trigger(epoch_trigger, loss_threshold, current_loss, rng))
+        self.mirrors.get_mut(task_name).map_or(false, |m| {
+            m.try_neurogenesis_trigger(epoch_trigger, loss_threshold, current_loss, rng)
+        })
     }
 
     /// Residual-based neurogenesis: add one neuron if loss has been above threshold for at least
@@ -402,7 +413,12 @@ impl DimensionManager {
         rng: &mut impl Rng,
     ) -> bool {
         self.mirrors.get_mut(task_name).map_or(false, |m| {
-            m.try_neurogenesis_trigger_residual(residual_threshold, min_epochs_high, current_loss, rng)
+            m.try_neurogenesis_trigger_residual(
+                residual_threshold,
+                min_epochs_high,
+                current_loss,
+                rng,
+            )
         })
     }
 
@@ -417,7 +433,11 @@ impl DimensionManager {
     }
 
     /// Force promote a mirror (for demos / testing). Consumes the mirror and registers in Main.
-    pub fn force_promote(&mut self, task_name: &str, calibration_data: &[crate::types::Sample]) -> Option<GroupId> {
+    pub fn force_promote(
+        &mut self,
+        task_name: &str,
+        calibration_data: &[crate::types::Sample],
+    ) -> Option<GroupId> {
         let mirror = self.mirrors.remove(task_name)?;
         let mut env = mirror.env;
         env.freeze_all();
@@ -449,11 +469,7 @@ impl DimensionManager {
     }
 
     /// Evaluate accuracy of a specific main-dimension group on data.
-    pub fn evaluate_main_group(
-        &mut self,
-        group_id: GroupId,
-        data: &[crate::types::Sample],
-    ) -> f32 {
+    pub fn evaluate_main_group(&mut self, group_id: GroupId, data: &[crate::types::Sample]) -> f32 {
         let fg = match self.main.groups.get_mut(&group_id) {
             Some(f) => f,
             None => return 0.0,
@@ -473,22 +489,29 @@ impl DimensionManager {
     }
 
     pub fn list_groups(&self) -> Vec<GroupSummary> {
-        self.main.group_order.iter().filter_map(|&gid| {
-            self.main.groups.get(&gid).map(|fg| GroupSummary {
-                group_id: gid,
-                task_name: fg.task_name.clone(),
-                accuracy: fg.accuracy,
-                promoted_at_epoch: fg.promoted_at_epoch,
+        self.main
+            .group_order
+            .iter()
+            .filter_map(|&gid| {
+                self.main.groups.get(&gid).map(|fg| GroupSummary {
+                    group_id: gid,
+                    task_name: fg.task_name.clone(),
+                    accuracy: fg.accuracy,
+                    promoted_at_epoch: fg.promoted_at_epoch,
+                })
             })
-        }).collect()
+            .collect()
     }
 
     pub fn list_mirrors(&self) -> Vec<MirrorSummary> {
-        self.mirrors.iter().map(|(name, m)| MirrorSummary {
-            task_name: name.clone(),
-            epochs_trained: m.epochs_trained,
-            best_accuracy: m.best_accuracy,
-        }).collect()
+        self.mirrors
+            .iter()
+            .map(|(name, m)| MirrorSummary {
+                task_name: name.clone(),
+                epochs_trained: m.epochs_trained,
+                best_accuracy: m.best_accuracy,
+            })
+            .collect()
     }
 
     pub fn coherence(&self) -> f32 {
@@ -563,7 +586,8 @@ impl DimensionManager {
             return (0.0, 0.0);
         }
         let input_dim = samples[0].0.len();
-        let typed_samples: Vec<(Vec<f32>, GroupId)> = samples.iter()
+        let typed_samples: Vec<(Vec<f32>, GroupId)> = samples
+            .iter()
             .map(|(emb, gid)| (emb.clone(), *gid as GroupId))
             .collect();
         let mut router = LearnedRouter::build(input_dim, num_groups, &typed_samples);
@@ -694,7 +718,11 @@ impl DimensionManager {
     }
 
     /// Infer using a VirtualGroup (blend of frozen groups). For Phase 3c demo.
-    pub fn predict_with_composition(&mut self, input: &[f32], virtual_group: &VirtualGroup) -> Vec<f32> {
+    pub fn predict_with_composition(
+        &mut self,
+        input: &[f32],
+        virtual_group: &VirtualGroup,
+    ) -> Vec<f32> {
         virtual_group.predict(&mut self.main, input)
     }
 
@@ -744,11 +772,19 @@ impl DimensionManager {
         } else {
             return Err(format!("group {} not found", group_id));
         }
-        if let Some(lib) = self.main.embedding_library.iter_mut().find(|e| e.group_id == group_id) {
+        if let Some(lib) = self
+            .main
+            .embedding_library
+            .iter_mut()
+            .find(|e| e.group_id == group_id)
+        {
             lib.language_vector = language_vector;
             Ok(())
         } else {
-            Err(format!("embedding library entry missing for group {}", group_id))
+            Err(format!(
+                "embedding library entry missing for group {}",
+                group_id
+            ))
         }
     }
 
@@ -836,7 +872,11 @@ impl DimensionManager {
         let chosen_group_id = self.main.group_order.get(best_idx).copied();
         let rejected_as_ood = chosen_group_id.is_none();
         Some(LanguageRoutingDecision {
-            chosen_group_id: if rejected_as_ood { None } else { chosen_group_id },
+            chosen_group_id: if rejected_as_ood {
+                None
+            } else {
+                chosen_group_id
+            },
             best_similarity: best_logit,
             second_similarity: second_logit,
             margin,
@@ -969,8 +1009,7 @@ impl DimensionManager {
         &mut self,
         routing: &LanguageRoutingDecision,
     ) -> Option<String> {
-        let below = routing.rejected_as_ood
-            || routing.best_similarity < self.auto_spawn_threshold;
+        let below = routing.rejected_as_ood || routing.best_similarity < self.auto_spawn_threshold;
         if below {
             self.low_confidence_streak += 1;
         } else {
@@ -1033,8 +1072,14 @@ impl DimensionManager {
     ///
     /// Returns a summary of what was merged.
     pub fn merge_overlay_brain(&mut self, overlay: Self) -> BrainMergeSummary {
-        let max_existing = self.group_gen_envs.keys().chain(self.group_code_envs.keys())
-            .copied().max().map(|m| m + 1).unwrap_or(0);
+        let max_existing = self
+            .group_gen_envs
+            .keys()
+            .chain(self.group_code_envs.keys())
+            .copied()
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
         let base_offset = (self.next_group_id as usize).max(max_existing);
         let mut overlay_group_map: HashMap<usize, usize> = HashMap::new();
         let mut gen_envs_added = 0usize;

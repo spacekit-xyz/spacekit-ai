@@ -11,12 +11,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::dimension::embedding::cosine_similarity;
 use crate::dimension::language::LanguageRuntime;
-use crate::spectral::TokenDictionary;
-use crate::text_autoencoder::ChunkCodec;
 use crate::inference::world_grounding::{
     activated_root_ids, activated_root_ids_in_domain_graph, fleet_node_inventory,
     GroundingFleetDomain, GroundingNodeInfo,
 };
+use crate::spectral::TokenDictionary;
+use crate::text_autoencoder::ChunkCodec;
 
 /// Tunable thresholds for propose / certify / collision (§3–§6).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -285,7 +285,10 @@ pub enum RepresentationMode {
 ///   coverage-vs-additions curve (§6) without a live model dependency.
 enum PhraseEmbedder {
     Cata(TokenDictionary, ChunkCodec),
-    Vectors { dim: usize, map: HashMap<String, Vec<f32>> },
+    Vectors {
+        dim: usize,
+        map: HashMap<String, Vec<f32>>,
+    },
     Supervised(SupervisedEncoder),
 }
 
@@ -353,7 +356,11 @@ fn text_features(text: &str, n_buckets: usize) -> Vec<(usize, f32)> {
         *counts.entry(b).or_insert(0.0) += 1.0;
     });
     let mut v: Vec<(usize, f32)> = counts.into_iter().collect();
-    let norm: f64 = v.iter().map(|(_, x)| (*x as f64) * (*x as f64)).sum::<f64>().sqrt();
+    let norm: f64 = v
+        .iter()
+        .map(|(_, x)| (*x as f64) * (*x as f64))
+        .sum::<f64>()
+        .sqrt();
     if norm > 1e-12 {
         for (_, x) in v.iter_mut() {
             *x = (*x as f64 / norm) as f32;
@@ -438,8 +445,11 @@ impl SupervisedEncoder {
         if labels.len() < 2 {
             return None;
         }
-        let label_ix: HashMap<&str, usize> =
-            labels.iter().enumerate().map(|(i, l)| (l.as_str(), i)).collect();
+        let label_ix: HashMap<&str, usize> = labels
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (l.as_str(), i))
+            .collect();
         let n_labels = labels.len();
         let feats: Vec<(Vec<(usize, f32)>, usize)> = samples
             .iter()
@@ -489,7 +499,11 @@ impl SupervisedEncoder {
                 }
             }
         }
-        Some(Self { n_buckets, labels, w })
+        Some(Self {
+            n_buckets,
+            labels,
+            w,
+        })
     }
 
     pub fn n_labels(&self) -> usize {
@@ -558,7 +572,10 @@ pub fn install_vector_embedder(map: HashMap<String, Vec<f32>>) -> usize {
         .collect();
     let n = normalized.len();
     if let Ok(mut g) = phrase_embedder().write() {
-        *g = Some(PhraseEmbedder::Vectors { dim, map: normalized });
+        *g = Some(PhraseEmbedder::Vectors {
+            dim,
+            map: normalized,
+        });
     }
     n
 }
@@ -570,7 +587,10 @@ pub fn clear_phrase_embedder() {
 }
 
 pub fn phrase_embedder_active() -> bool {
-    phrase_embedder().read().map(|g| g.is_some()).unwrap_or(false)
+    phrase_embedder()
+        .read()
+        .map(|g| g.is_some())
+        .unwrap_or(false)
 }
 
 /// Deterministic per-string unit vector (splitmix64) — a stable distractor for
@@ -677,7 +697,11 @@ fn mean_embedding(vectors: &[Vec<f32>]) -> Vec<f32> {
 }
 
 fn l2_normalize_in_place(v: &mut [f32]) {
-    let norm: f64 = v.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+    let norm: f64 = v
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        .sqrt();
     if norm > 1e-12 {
         for x in v.iter_mut() {
             *x = (*x as f64 / norm) as f32;
@@ -833,7 +857,13 @@ pub fn calibrate_alias_threshold(
             }
         }
     }
-    let mean = |v: &[f32]| if v.is_empty() { 0.0 } else { v.iter().sum::<f32>() / v.len() as f32 };
+    let mean = |v: &[f32]| {
+        if v.is_empty() {
+            0.0
+        } else {
+            v.iter().sum::<f32>() / v.len() as f32
+        }
+    };
     let same_mean = mean(&same);
     let cross_mean = mean(&cross);
     Ok(ThresholdSuggestion {
@@ -943,9 +973,19 @@ pub fn append_traffic_capture(cap: &TrafficCapture, dir: &std::path::Path) -> st
     let safe_agent: String = cap
         .agent
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    let safe_agent = if safe_agent.is_empty() { "unknown".to_string() } else { safe_agent };
+    let safe_agent = if safe_agent.is_empty() {
+        "unknown".to_string()
+    } else {
+        safe_agent
+    };
     let path = dir.join(format!("traffic_{safe_agent}.jsonl"));
     let mut f = std::fs::OpenOptions::new()
         .create(true)
@@ -1053,7 +1093,12 @@ impl GroundingNodeIndex {
     pub fn activated_node_scores(&self, embedding: &[f32]) -> Vec<(String, f32)> {
         let mut out: Vec<(String, f32)> = self
             .all_nodes()
-            .map(|n| (format!("{}:{}", n.domain.as_str(), n.node_id), cosine_similarity(embedding, &n.centroid)))
+            .map(|n| {
+                (
+                    format!("{}:{}", n.domain.as_str(), n.node_id),
+                    cosine_similarity(embedding, &n.centroid),
+                )
+            })
             .filter(|(_, s)| *s >= self.activation_threshold)
             .collect();
         out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -1245,7 +1290,12 @@ pub fn propose_new_nodes_from_buffer(
     let mut out = Vec::new();
     for cluster in clusters {
         let phrases: Vec<String> = cluster.iter().map(|&i| buffered[i].0.clone()).collect();
-        let centroid = mean_embedding(&cluster.iter().map(|&i| buffered[i].1.clone()).collect::<Vec<_>>());
+        let centroid = mean_embedding(
+            &cluster
+                .iter()
+                .map(|&i| buffered[i].1.clone())
+                .collect::<Vec<_>>(),
+        );
         let parent = index
             .nearest_fleet_wide(&centroid)
             .filter(|m| m.similarity >= params.tau_alias * 0.85)
@@ -1282,8 +1332,15 @@ pub fn collision_check(
     }
     // Also flag if phrase routes to a different node in another domain above target.
     if let Some(m) = index.nearest_fleet_wide(embedding) {
-        if m.domain != target_domain && m.node_id != target_node && m.similarity >= params.collision_threshold {
-            conflicts.push((m.domain.as_str().to_string(), m.node_id.clone(), m.similarity));
+        if m.domain != target_domain
+            && m.node_id != target_node
+            && m.similarity >= params.collision_threshold
+        {
+            conflicts.push((
+                m.domain.as_str().to_string(),
+                m.node_id.clone(),
+                m.similarity,
+            ));
             max_foreign = max_foreign.max(m.similarity);
         }
     }
@@ -1515,7 +1572,9 @@ pub fn decide_batch_verdict(
         return BatchVerdict::NetNegativeCollision;
     }
 
-    if held_lift < params.min_held_out_lift && after.captured_accuracy <= before.captured_accuracy + 0.01 {
+    if held_lift < params.min_held_out_lift
+        && after.captured_accuracy <= before.captured_accuracy + 0.01
+    {
         return BatchVerdict::Saturation;
     }
 
@@ -1848,7 +1907,8 @@ pub fn scan_corpus_disjointness(
         }
     }
 
-    let mut per_class: std::collections::BTreeMap<String, (usize, usize)> = std::collections::BTreeMap::new();
+    let mut per_class: std::collections::BTreeMap<String, (usize, usize)> =
+        std::collections::BTreeMap::new();
     let (mut n_disjoint, mut n_seen, mut n_novel) = (0usize, 0usize, 0usize);
     let mut n_eligible_phrases = 0usize;
     for (c, fp) in &feats {
@@ -1867,9 +1927,12 @@ pub fn scan_corpus_disjointness(
         let disjoint = fp.iter().all(|f| cf.get(f).copied().unwrap_or(0) <= 1);
         if disjoint {
             n_disjoint += 1;
-            let seen_elsewhere = fp
-                .iter()
-                .any(|f| feat_classes.get(f).map(|s| s.iter().any(|x| x != c)).unwrap_or(false));
+            let seen_elsewhere = fp.iter().any(|f| {
+                feat_classes
+                    .get(f)
+                    .map(|s| s.iter().any(|x| x != c))
+                    .unwrap_or(false)
+            });
             if seen_elsewhere {
                 n_seen += 1;
                 entry.0 += 1;
@@ -1878,7 +1941,10 @@ pub fn scan_corpus_disjointness(
             }
         }
     }
-    let n_eligible_classes = class_phrase_count.values().filter(|&&n| n >= min_class_size).count();
+    let n_eligible_classes = class_phrase_count
+        .values()
+        .filter(|&&n| n >= min_class_size)
+        .count();
     CorpusDisjointnessScan {
         level: level.to_string(),
         n_classes: class_phrase_count.len(),
@@ -1910,7 +1976,8 @@ pub fn audit_disjoint_eval(
     let global = restrict_features(&global_train, level);
     let empty = HashSet::new();
 
-    let mut per_class: std::collections::BTreeMap<String, (usize, usize)> = std::collections::BTreeMap::new();
+    let mut per_class: std::collections::BTreeMap<String, (usize, usize)> =
+        std::collections::BTreeMap::new();
     let (mut n_overlap0, mut n_seen, mut n_novel) = (0usize, 0usize, 0usize);
     for (text, class) in eval_pairs {
         let entry = per_class.entry(class.clone()).or_insert((0, 0));
@@ -1934,10 +2001,7 @@ pub fn audit_disjoint_eval(
         n_overlap0,
         n_seen_elsewhere: n_seen,
         n_novel,
-        per_class_seen_elsewhere: per_class
-            .into_iter()
-            .map(|(c, (s, t))| (c, s, t))
-            .collect(),
+        per_class_seen_elsewhere: per_class.into_iter().map(|(c, (s, t))| (c, s, t)).collect(),
         resolvable: n_seen >= DISJOINT_MIN_N,
     }
 }
@@ -1995,15 +2059,20 @@ pub fn malformed_capture_reason(phrase: &str) -> Option<&'static str> {
     }
     // Training MASK token leaked into the surface (the "bad cat" garble family).
     if t.contains("[MASK]")
-        || t.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| w == "MASK")
+        || t.split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|w| w == "MASK")
     {
         return Some("mask_leak");
     }
     // Known decode-collapse multi-word n-grams — improbable in genuine user input (single words are
     // intentionally excluded to avoid quarantining legitimate phrases).
     let l = t.to_lowercase();
-    const COLLAPSE: [&str; 4] =
-        ["schedule both", "puddle brush", "vibrates sleeping", "sleeping minutes"];
+    const COLLAPSE: [&str; 4] = [
+        "schedule both",
+        "puddle brush",
+        "vibrates sleeping",
+        "sleeping minutes",
+    ];
     if COLLAPSE.iter().any(|sig| l.contains(sig)) {
         return Some("decode_collapse");
     }
@@ -2139,7 +2208,12 @@ pub struct FirewallReport {
     pub certify_augmented: usize,
 }
 
-fn tally_provenance(kind: ProvenanceKind, real: &mut usize, authored: &mut usize, augmented: &mut usize) {
+fn tally_provenance(
+    kind: ProvenanceKind,
+    real: &mut usize,
+    authored: &mut usize,
+    augmented: &mut usize,
+) {
     match kind {
         ProvenanceKind::RealTraffic => *real += 1,
         ProvenanceKind::Authored => *authored += 1,
@@ -2161,8 +2235,14 @@ pub fn run_augmentation_firewall(captures: &[FailureCapture]) -> FirewallReport 
 /// in the certify set is treated as clean (§2.2 of the real-encoder experiment spec:
 /// authored phrases are genuinely held-out when no encoder trained on them). `Augmented`
 /// provenance in certify is always rejected regardless of this flag.
-pub fn run_augmentation_firewall_ex(captures: &[FailureCapture], allow_authored_certify: bool) -> FirewallReport {
-    let mut r = FirewallReport { clean: true, ..Default::default() };
+pub fn run_augmentation_firewall_ex(
+    captures: &[FailureCapture],
+    allow_authored_certify: bool,
+) -> FirewallReport {
+    let mut r = FirewallReport {
+        clean: true,
+        ..Default::default()
+    };
     let mut train_lineage: HashSet<String> = HashSet::new();
     let mut certify_ids: Vec<(String, String)> = Vec::new(); // (phrase_id, phrase)
 
@@ -2199,7 +2279,11 @@ pub fn run_augmentation_firewall_ex(captures: &[FailureCapture], allow_authored_
                         "certify phrase '{}' has provenance {} (must be {})",
                         c.phrase,
                         c.provenance.kind.as_str(),
-                        if allow_authored_certify { "real_traffic or authored" } else { "real_traffic" }
+                        if allow_authored_certify {
+                            "real_traffic or authored"
+                        } else {
+                            "real_traffic"
+                        }
                     ));
                 }
                 let id = if c.provenance.phrase_id.is_empty() {
@@ -2399,7 +2483,10 @@ pub struct EncoderVerdict {
 impl EncoderVerdict {
     /// Deterministic artifact filename `verdict_<encoder>_<datahash>_<seed>.json`.
     pub fn filename(&self) -> String {
-        format!("verdict_{}_{}_{}.json", self.encoder_id, self.data_hash, self.seed)
+        format!(
+            "verdict_{}_{}_{}.json",
+            self.encoder_id, self.data_hash, self.seed
+        )
     }
 
     pub fn to_json(&self) -> String {
@@ -2446,7 +2533,11 @@ pub fn data_hash(captures: &[FailureCapture], node_ids: &[String]) -> String {
     rows.sort();
     nodes.sort();
     let mut h: u64 = 0xcbf29ce484222325;
-    for s in rows.iter().chain(std::iter::once(&"::".to_string())).chain(nodes.iter()) {
+    for s in rows
+        .iter()
+        .chain(std::iter::once(&"::".to_string()))
+        .chain(nodes.iter())
+    {
         for b in s.as_bytes() {
             h ^= *b as u64;
             h = h.wrapping_mul(0x100000001b3);
@@ -2663,7 +2754,11 @@ pub fn coverage_elasticity(
 /// `foreign_activations` = count of turns with a foreign-domain hit;
 /// `total_turns` = all turns in the window.
 pub fn cross_domain_collision_rate(foreign_activations: usize, total_turns: usize) -> f32 {
-    if total_turns == 0 { 0.0 } else { foreign_activations as f32 / total_turns as f32 }
+    if total_turns == 0 {
+        0.0
+    } else {
+        foreign_activations as f32 / total_turns as f32
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2719,7 +2814,9 @@ pub fn evaluate_signal_drift(
 
     // Cause: if any system change coincides with the first deviating window, it's system-drift.
     let cause = if let Some(desc) = system_changes.get(&first_deviating_idx) {
-        DriftCause::System { description: desc.clone() }
+        DriftCause::System {
+            description: desc.clone(),
+        }
     } else {
         DriftCause::World
     };
@@ -2745,7 +2842,11 @@ pub fn evaluate_signal_drift(
             severity,
             message: format!(
                 "{} {} for {} consecutive windows (z={:.2}, cause={})",
-                signal_name, direction, persisted, latest_z, cause.as_str()
+                signal_name,
+                direction,
+                persisted,
+                latest_z,
+                cause.as_str()
             ),
         })
     } else {
@@ -2797,7 +2898,10 @@ pub fn build_drift_report(
     let ft_history: Vec<f32> = windows.iter().map(|w| w.fallthrough_rate).collect();
     let ent_history: Vec<f32> = windows.iter().map(|w| w.routing_entropy_p50).collect();
     let dis_history: Vec<f32> = windows.iter().map(|w| w.dissatisfaction_rate).collect();
-    let col_history: Vec<f32> = windows.iter().map(|w| w.cross_domain_collision_rate).collect();
+    let col_history: Vec<f32> = windows
+        .iter()
+        .map(|w| w.cross_domain_collision_rate)
+        .collect();
 
     let trend_of = |history: &[f32]| -> TrendSummary {
         let (mean, std) = rolling_baseline(history, 12);
@@ -2818,9 +2922,7 @@ pub fn build_drift_report(
         }
     };
 
-    let active_alerts: Vec<DriftAlert> = latest
-        .map(|w| w.alerts.clone())
-        .unwrap_or_default();
+    let active_alerts: Vec<DriftAlert> = latest.map(|w| w.alerts.clone()).unwrap_or_default();
 
     let recert = recommend_recert(&active_alerts);
 
@@ -2868,12 +2970,18 @@ mod tests {
             "good morning sunshine",
             "are you having a nice day?",
         ] {
-            assert_eq!(malformed_capture_reason(ok), None, "false positive on {ok:?}");
+            assert_eq!(
+                malformed_capture_reason(ok),
+                None,
+                "false positive on {ok:?}"
+            );
         }
         // Empty / MASK-leak / decode-collapse soup are quarantined before they can reach the queue.
         assert_eq!(malformed_capture_reason("   "), Some("empty"));
         assert_eq!(
-            malformed_capture_reason("I shoes brave the brush bestow MASK Some, vibrates sleeping just"),
+            malformed_capture_reason(
+                "I shoes brave the brush bestow MASK Some, vibrates sleeping just"
+            ),
             Some("mask_leak"),
         );
         assert_eq!(
@@ -2914,7 +3022,10 @@ mod tests {
         let (a, _) = embed_phrase(&rt, "bitcoin btc sats").unwrap();
         let (b, _) = embed_phrase(&rt, "bitcoin btc sats").unwrap();
         assert!(!a.is_empty(), "empty embedding");
-        assert!(a.iter().any(|x| x.abs() > 1e-9), "degenerate (all-zero) embedding");
+        assert!(
+            a.iter().any(|x| x.abs() > 1e-9),
+            "degenerate (all-zero) embedding"
+        );
         let sim = crate::dimension::embedding::cosine_similarity(&a, &b);
         assert!(sim > 0.99, "self sim={sim}");
         // shared-token overlap > disjoint-token pair (lexical structure present).
@@ -2922,7 +3033,10 @@ mod tests {
         let (disjoint, _) = embed_phrase(&rt, "ethereum gas").unwrap();
         let sim_shared = crate::dimension::embedding::cosine_similarity(&a, &shared);
         let sim_disjoint = crate::dimension::embedding::cosine_similarity(&a, &disjoint);
-        assert!(sim_shared > sim_disjoint, "shared {sim_shared} !> disjoint {sim_disjoint}");
+        assert!(
+            sim_shared > sim_disjoint,
+            "shared {sim_shared} !> disjoint {sim_disjoint}"
+        );
         clear_phrase_embedder();
     }
 
@@ -3007,11 +3121,27 @@ mod tests {
         ];
 
         let (before_m, after_m) = certify_batch(&captures, &rt, &before, &after, d).unwrap();
-        assert!(before_m.held_out_accuracy < 0.34, "baseline held-out {}", before_m.held_out_accuracy);
-        assert!(after_m.held_out_accuracy > 0.99, "after held-out {}", after_m.held_out_accuracy);
-        assert!(after_m.captured_accuracy > 0.99, "after captured {}", after_m.captured_accuracy);
+        assert!(
+            before_m.held_out_accuracy < 0.34,
+            "baseline held-out {}",
+            before_m.held_out_accuracy
+        );
+        assert!(
+            after_m.held_out_accuracy > 0.99,
+            "after held-out {}",
+            after_m.held_out_accuracy
+        );
+        assert!(
+            after_m.captured_accuracy > 0.99,
+            "after captured {}",
+            after_m.captured_accuracy
+        );
         let verdict = decide_batch_verdict(&before_m, &after_m, &params, false);
-        assert_eq!(verdict, BatchVerdict::GenuineCoverageImprovement, "verdict {verdict:?}");
+        assert_eq!(
+            verdict,
+            BatchVerdict::GenuineCoverageImprovement,
+            "verdict {verdict:?}"
+        );
         clear_phrase_embedder();
     }
 
@@ -3024,7 +3154,11 @@ mod tests {
         let word_a = restrict_features(&a, "w");
         let word_b = restrict_features(&b, "w");
         // Whole-word level: "vacuum" != "vacuuming" → disjoint.
-        assert_eq!(word_a.intersection(&word_b).count(), 0, "words should be disjoint");
+        assert_eq!(
+            word_a.intersection(&word_b).count(),
+            0,
+            "words should be disjoint"
+        );
         // Encoder (union) level: shared "vac","acu","cuu","uum" trigrams → NOT disjoint.
         assert!(
             feature_overlap_fraction(&b, &a) > 0.0,
@@ -3036,7 +3170,10 @@ mod tests {
     fn wilson_widens_for_small_n() {
         let (lo_big, hi_big) = wilson_interval(50, 100, 1.96);
         let (lo_small, hi_small) = wilson_interval(1, 2, 1.96);
-        assert!((hi_small - lo_small) > (hi_big - lo_big), "small-n CI must be wider");
+        assert!(
+            (hi_small - lo_small) > (hi_big - lo_big),
+            "small-n CI must be wider"
+        );
         assert!(lo_big > 0.3 && hi_big < 0.7);
     }
 
@@ -3108,8 +3245,18 @@ mod tests {
     #[test]
     fn firewall_clean_when_certify_is_real_traffic_only() {
         let caps = vec![
-            cap_with("p1", "c", CaptureSplit::Propose, PhraseProvenance::real("p1")),
-            cap_with("c1", "c", CaptureSplit::Certify, PhraseProvenance::real("c1")),
+            cap_with(
+                "p1",
+                "c",
+                CaptureSplit::Propose,
+                PhraseProvenance::real("p1"),
+            ),
+            cap_with(
+                "c1",
+                "c",
+                CaptureSplit::Certify,
+                PhraseProvenance::real("c1"),
+            ),
         ];
         let r = run_augmentation_firewall(&caps);
         assert!(r.clean, "should be clean: {:?}", r.violations);
@@ -3119,7 +3266,12 @@ mod tests {
     #[test]
     fn firewall_rejects_augmented_in_certify() {
         let caps = vec![
-            cap_with("p1", "c", CaptureSplit::Propose, PhraseProvenance::real("p1")),
+            cap_with(
+                "p1",
+                "c",
+                CaptureSplit::Propose,
+                PhraseProvenance::real("p1"),
+            ),
             cap_with(
                 "c1",
                 "c",
@@ -3151,7 +3303,12 @@ mod tests {
                     derived_from: vec!["c1".into()],
                 },
             ),
-            cap_with("certify one", "c", CaptureSplit::Certify, PhraseProvenance::real("c1")),
+            cap_with(
+                "certify one",
+                "c",
+                CaptureSplit::Certify,
+                PhraseProvenance::real("c1"),
+            ),
         ];
         let r = run_augmentation_firewall(&caps);
         assert!(!r.clean, "lineage crossing must be flagged");
@@ -3256,7 +3413,10 @@ mod tests {
         // Every phrase's words are unique within its class here, so all 4 are disjoint-from-class;
         // "alpha"-bearing phrases are seen-elsewhere (alpha spans c1 and c2).
         assert_eq!(s.n_phrases, 4);
-        assert!(s.n_seen_elsewhere >= 1, "the shared-token phrases must count as seen-elsewhere");
+        assert!(
+            s.n_seen_elsewhere >= 1,
+            "the shared-token phrases must count as seen-elsewhere"
+        );
         assert!(s.n_disjoint >= s.n_seen_elsewhere);
     }
 
@@ -3264,10 +3424,16 @@ mod tests {
     fn audit_disjoint_eval_distinguishes_surface_disjoint_from_overlapping() {
         // Training: each class has distinctive surface tokens.
         let train = vec![
-            ("reset my password please".to_string(), "support".to_string()),
+            (
+                "reset my password please".to_string(),
+                "support".to_string(),
+            ),
             ("cannot login to account".to_string(), "support".to_string()),
             ("write a rust function".to_string(), "coding".to_string()),
-            ("implement a parser module".to_string(), "coding".to_string()),
+            (
+                "implement a parser module".to_string(),
+                "coding".to_string(),
+            ),
         ];
         // Surface-overlapping eval (shares tokens with own class) → not disjoint.
         let overlapping = vec![
@@ -3275,19 +3441,37 @@ mod tests {
             ("write rust parser".to_string(), "coding".to_string()),
         ];
         let a = audit_disjoint_eval(&train, &overlapping, "wbc");
-        assert_eq!(a.n_seen_elsewhere, 0, "overlapping eval has no disjoint phrases");
+        assert_eq!(
+            a.n_seen_elsewhere, 0,
+            "overlapping eval has no disjoint phrases"
+        );
         assert!(!a.resolvable);
     }
 
     #[test]
     fn data_hash_is_order_independent_and_sensitive() {
-        let a = cap_with("alpha", "c1", CaptureSplit::Propose, PhraseProvenance::real("a"));
-        let b = cap_with("beta", "c2", CaptureSplit::Certify, PhraseProvenance::real("b"));
+        let a = cap_with(
+            "alpha",
+            "c1",
+            CaptureSplit::Propose,
+            PhraseProvenance::real("a"),
+        );
+        let b = cap_with(
+            "beta",
+            "c2",
+            CaptureSplit::Certify,
+            PhraseProvenance::real("b"),
+        );
         let nodes = vec!["c1".to_string(), "c2".to_string()];
         let h1 = data_hash(&[a.clone(), b.clone()], &nodes);
         let h2 = data_hash(&[b.clone(), a.clone()], &nodes); // reordered
         assert_eq!(h1, h2, "hash must be order-independent");
-        let c = cap_with("beta", "c3", CaptureSplit::Certify, PhraseProvenance::real("b"));
+        let c = cap_with(
+            "beta",
+            "c3",
+            CaptureSplit::Certify,
+            PhraseProvenance::real("b"),
+        );
         let h3 = data_hash(&[a, c], &nodes);
         assert_ne!(h1, h3, "different content must change the hash");
     }
@@ -3315,7 +3499,10 @@ mod tests {
             hi = h;
             lo = l;
         }
-        assert!(cusum_alarm(hi, lo, threshold), "alarm after sustained high shift");
+        assert!(
+            cusum_alarm(hi, lo, threshold),
+            "alarm after sustained high shift"
+        );
     }
 
     #[test]
@@ -3353,7 +3540,10 @@ mod tests {
         let ft = vec![0.10, 0.06];
         let al = vec![100, 120];
         let (elas, sat) = coverage_elasticity(&ft, &al);
-        assert!(elas < 0.0, "negative elasticity = aliases reducing fallthrough");
+        assert!(
+            elas < 0.0,
+            "negative elasticity = aliases reducing fallthrough"
+        );
         assert!(!sat);
     }
 
@@ -3411,7 +3601,10 @@ mod tests {
         // Deviating, then normal, then deviating — not consecutive.
         let z = vec![3.0, 0.5, 3.0];
         let (_, alert) = evaluate_signal_drift("entropy", &z, &HashMap::new());
-        assert!(alert.is_none(), "non-consecutive deviation should not alert");
+        assert!(
+            alert.is_none(),
+            "non-consecutive deviation should not alert"
+        );
     }
 
     #[test]
@@ -3430,12 +3623,17 @@ mod tests {
     fn no_recert_on_system_drift() {
         let alerts = vec![DriftAlert {
             signal: "fallthrough".to_string(),
-            cause: DriftCause::System { description: "graph edit".into() },
+            cause: DriftCause::System {
+                description: "graph edit".into(),
+            },
             persisted_windows: ALERT_PERSISTENCE_MIN * 2,
             severity: AlertSeverity::Warning,
             message: "test".to_string(),
         }];
-        assert!(!recommend_recert(&alerts), "system drift → rollback, not recert");
+        assert!(
+            !recommend_recert(&alerts),
+            "system drift → rollback, not recert"
+        );
     }
 
     #[test]
@@ -3492,14 +3690,23 @@ mod tests {
 
         let report = build_drift_report("test", &[window], Some(&pairs));
         assert!(report.recert_recommended, "recert should be recommended");
-        assert_eq!(report.recert_constructible, Some(false),
-            "traffic with overlapping features must be unconstructible");
+        assert_eq!(
+            report.recert_constructible,
+            Some(false),
+            "traffic with overlapping features must be unconstructible"
+        );
     }
 
     #[test]
     fn verdict_from_str_roundtrips() {
-        for v in [Verdict::Invalid, Verdict::BelowResolution, Verdict::FailMemorization,
-                   Verdict::FailCollision, Verdict::PassProvisional, Verdict::Pass] {
+        for v in [
+            Verdict::Invalid,
+            Verdict::BelowResolution,
+            Verdict::FailMemorization,
+            Verdict::FailCollision,
+            Verdict::PassProvisional,
+            Verdict::Pass,
+        ] {
             assert_eq!(Verdict::from_str(v.as_str()), v);
         }
     }

@@ -1,12 +1,10 @@
 //! Re-measure I(R; A_spiral): output bottleneck vs below resolution (see CMI spec §spiral-resolve).
 
-use crate::cmi::{
-    cross_entropy_bits, empirical_h_r, mean_std, mi_from_ce, CmiPointRecord,
-};
+use crate::cmi::{cross_entropy_bits, empirical_h_r, mean_std, mi_from_ce, CmiPointRecord};
+use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::Rng;
 use rand::SeedableRng;
-use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
 
 const LN2: f32 = std::f32::consts::LN_2;
@@ -126,7 +124,10 @@ fn angle_degrees(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let na = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    (dot / (na * nb + 1e-8)).clamp(-1.0, 1.0).acos().to_degrees()
+    (dot / (na * nb + 1e-8))
+        .clamp(-1.0, 1.0)
+        .acos()
+        .to_degrees()
 }
 
 fn mean_center(data: &[Vec<f32>]) -> (Vec<Vec<f32>>, Vec<f32>) {
@@ -249,7 +250,11 @@ fn knn_mi(features: &[Vec<f32>], labels: &[u8], k: usize, rng: &mut StdRng) -> f
         return 0.0;
     }
     let dist = |a: &[f32], b: &[f32]| -> f32 {
-        a.iter().zip(b).map(|(x, y)| (x - y).powi(2)).sum::<f32>().sqrt()
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).powi(2))
+            .sum::<f32>()
+            .sqrt()
     };
     let mut probs = Vec::new();
     let mut test_y = Vec::new();
@@ -259,11 +264,7 @@ fn knn_mi(features: &[Vec<f32>], labels: &[u8], k: usize, rng: &mut StdRng) -> f
             .map(|&j| (dist(&features[ti], &features[j]), labels[j]))
             .collect();
         dists.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        let pos = dists
-            .iter()
-            .take(k)
-            .filter(|(_, y)| *y == 1)
-            .count() as f32;
+        let pos = dists.iter().take(k).filter(|(_, y)| *y == 1).count() as f32;
         probs.push((pos + 1.0) / (k as f32 + 2.0));
         test_y.push(labels[ti]);
     }
@@ -311,7 +312,10 @@ fn linear_mi_single_split(
     let mut model = LogisticRidge::new(dim, lambda);
     model.fit(&train_x, &train_y, 0.1, 80);
     let probs: Vec<f32> = test_x.iter().map(|x| model.predict_proba(x)).collect();
-    (mi_from_ce(h_r, cross_entropy_bits(&test_y, &probs)), model.w.clone())
+    (
+        mi_from_ce(h_r, cross_entropy_bits(&test_y, &probs)),
+        model.w.clone(),
+    )
 }
 
 fn repeated_cv_mlp(
@@ -371,7 +375,10 @@ fn permutation_null_linear(
     nulls.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let mean = nulls.iter().sum::<f32>() / nulls.len().max(1) as f32;
     let p95_idx = ((nulls.len() as f32) * 0.95).floor() as usize;
-    let p95 = nulls.get(p95_idx.min(nulls.len().saturating_sub(1))).copied().unwrap_or(0.0);
+    let p95 = nulls
+        .get(p95_idx.min(nulls.len().saturating_sub(1)))
+        .copied()
+        .unwrap_or(0.0);
     let below = nulls.iter().filter(|&&v| v < obs).count() as f32;
     let percentile = below / nulls.len().max(1) as f32 * 100.0;
     (obs, mean, p95, percentile)
@@ -492,7 +499,9 @@ pub fn format_spiral_resolve_report(res: &SpiralResolveResult) -> String {
     let lin = res.pooled_linear_mi;
     let ksg_pos = res.pooled_pca_knn_mi.iter().any(|&v| v > 0.05);
     if obs > 0.10 && lin > base + 0.10 && ksg_pos {
-        out.push_str("VERDICT: Output bottleneck CONFIRMED — region linearly present beyond scalar.\n");
+        out.push_str(
+            "VERDICT: Output bottleneck CONFIRMED — region linearly present beyond scalar.\n",
+        );
     } else if res.perm_observed_percentile < 95.0 || lin <= base + 0.05 {
         out.push_str("VERDICT: Below resolution / near wall — I(R;A_spiral) not credibly above I(R;Y_spiral).\n");
     } else {

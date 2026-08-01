@@ -13,7 +13,7 @@
 //!   Phase 2 — Semantic cloze: blank out clauses and phrases
 //!   Phase 3 — Compositional cloze: novel templates combining two skills
 
-use crate::clifford::{embed_bridge_vector, causal_fingerprint, BOOST_BIVECTOR_COUNT};
+use crate::clifford::{causal_fingerprint, embed_bridge_vector, BOOST_BIVECTOR_COUNT};
 use crate::dimension::group_gen::{AlgebraicCodebook, IndexedGenEnv};
 use crate::dimension::paramecium::BehavioralProgram;
 use crate::spectral::TokenDictionary;
@@ -55,10 +55,19 @@ impl std::fmt::Display for ClozeStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let acc = if self.total_slots > 0 {
             self.correct_slots as f32 / self.total_slots as f32
-        } else { 0.0 };
-        write!(f, "games={}, slots={}/{} ({:.1}%), rewards={}, punishments={}",
-            self.games_played, self.correct_slots, self.total_slots,
-            acc * 100.0, self.reward_applied, self.punishment_applied)
+        } else {
+            0.0
+        };
+        write!(
+            f,
+            "games={}, slots={}/{} ({:.1}%), rewards={}, punishments={}",
+            self.games_played,
+            self.correct_slots,
+            self.total_slots,
+            acc * 100.0,
+            self.reward_applied,
+            self.punishment_applied
+        )
     }
 }
 
@@ -156,7 +165,9 @@ pub fn infer_slots(
 
         // Blend vote totals with causal alignment (precomputed fingerprints only).
         for (vocab_idx, vote) in votes.iter_mut().enumerate() {
-            if *vote < 1e-8 { continue; }
+            if *vote < 1e-8 {
+                continue;
+            }
             let tok = slot.vocab[vocab_idx];
             let best_causal_alignment = voters
                 .iter()
@@ -171,7 +182,9 @@ pub fn infer_slots(
             *vote = 0.70 * *vote + 0.30 * best_causal_alignment * *vote;
         }
 
-        let winner = votes.iter().enumerate()
+        let winner = votes
+            .iter()
+            .enumerate()
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(idx, _)| idx)
             .unwrap_or(0);
@@ -209,11 +222,7 @@ where
 {
     let mut stats = ClozeStats::default();
 
-    let Some(codebook) = env
-        .codebook
-        .as_ref()
-        .filter(|cb| !cb.archetypes.is_empty())
-    else {
+    let Some(codebook) = env.codebook.as_ref().filter(|cb| !cb.archetypes.is_empty()) else {
         return stats;
     };
 
@@ -238,7 +247,9 @@ where
             Some(a) => a,
             None => continue,
         };
-        if arch.slots.is_empty() { continue; }
+        if arch.slots.is_empty() {
+            continue;
+        }
 
         // Infer slots from input conditioning vector.
         let proposed = infer_slots(
@@ -258,15 +269,21 @@ where
             let correct = proposed_val == truth_val;
             slot_correct.push(correct);
             stats.total_slots += 1;
-            if correct { stats.correct_slots += 1; }
+            if correct {
+                stats.correct_slots += 1;
+            }
         }
 
         let nearest = top_k_programs_by_cosine(&env.lattice.programs, &task.cond, k_voters);
 
         for &(prog_idx, sim) in &nearest {
-            if sim < 0.05 { continue; }
+            if sim < 0.05 {
+                continue;
+            }
             let prog = &env.lattice.programs[prog_idx];
-            let prog_token_at_slots: Vec<Option<u16>> = arch.slots.iter()
+            let prog_token_at_slots: Vec<Option<u16>> = arch
+                .slots
+                .iter()
                 .map(|s| prog.token_sequence.get(s.position).copied())
                 .collect();
 
@@ -292,7 +309,8 @@ where
                 // Reward: drift toward the input (strengthen ownership)
                 let alpha = reward_rate * sim;
                 for i in 0..dim {
-                    prog.ema_centroid[i] = prog.ema_centroid[i] * (1.0 - alpha) + task.cond[i] * alpha;
+                    prog.ema_centroid[i] =
+                        prog.ema_centroid[i] * (1.0 - alpha) + task.cond[i] * alpha;
                 }
                 stats.reward_applied += 1;
             } else if did_punish && !did_reward {
@@ -307,18 +325,32 @@ where
 
                 for i in 0..dim {
                     // Repel from incorrect input
-                    prog.ema_centroid[i] = prog.ema_centroid[i] * (1.0 + repel_alpha) - task.cond[i] * repel_alpha;
+                    prog.ema_centroid[i] =
+                        prog.ema_centroid[i] * (1.0 + repel_alpha) - task.cond[i] * repel_alpha;
                 }
 
                 // Attract toward original centroid (home base)
                 let home_dim = prog.centroid.len().min(dim);
                 for i in 0..home_dim {
-                    prog.ema_centroid[i] = prog.ema_centroid[i] * (1.0 - attract_alpha) + prog.centroid[i] * attract_alpha;
+                    prog.ema_centroid[i] = prog.ema_centroid[i] * (1.0 - attract_alpha)
+                        + prog.centroid[i] * attract_alpha;
                 }
 
                 // Re-normalize to prevent centroid explosion
-                let norm = prog.ema_centroid.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
-                let original_norm = prog.centroid.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+                let norm = prog
+                    .ema_centroid
+                    .iter()
+                    .map(|x| x * x)
+                    .sum::<f32>()
+                    .sqrt()
+                    .max(1e-8);
+                let original_norm = prog
+                    .centroid
+                    .iter()
+                    .map(|x| x * x)
+                    .sum::<f32>()
+                    .sqrt()
+                    .max(1e-8);
                 let target_norm = original_norm;
                 for v in &mut prog.ema_centroid {
                     *v *= target_norm / norm;
@@ -370,10 +402,7 @@ pub fn encode_inferred_slot_bits(
 /// program, ∇F points AWAY from addition TOWARD subtraction.
 ///
 /// Returns: (gradient_vector, gradient_magnitude)
-pub fn compute_field_gradient(
-    cond: &[f32],
-    programs: &[BehavioralProgram],
-) -> (Vec<f32>, f32) {
+pub fn compute_field_gradient(cond: &[f32], programs: &[BehavioralProgram]) -> (Vec<f32>, f32) {
     let dim = cond.len();
     let mut gradient = vec![0.0f32; dim];
 
@@ -401,7 +430,9 @@ pub fn compute_field_gradient(
 
         // Source strength: how relevant is this program to the query
         let sim = cosine_sim(cond, centroid).max(0.0);
-        if sim < 0.01 { continue; }
+        if sim < 0.01 {
+            continue;
+        }
 
         // Green's function weight: 1/r² * source_strength
         let green_weight = sim / disp_norm_sq;
@@ -452,7 +483,9 @@ pub fn infer_slots_with_gradient(
     }
 
     // Score programs by BOTH proximity AND gradient alignment.
-    let mut scored: Vec<(usize, f32)> = programs.iter().enumerate()
+    let mut scored: Vec<(usize, f32)> = programs
+        .iter()
+        .enumerate()
         .map(|(i, prog)| {
             let sim = cosine_sim(cond, &prog.ema_centroid).max(0.0);
 
@@ -498,7 +531,9 @@ pub fn infer_slots_with_gradient(
             }
         }
 
-        let winner = votes.iter().enumerate()
+        let winner = votes
+            .iter()
+            .enumerate()
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(idx, _)| idx)
             .unwrap_or(0);
@@ -510,10 +545,26 @@ pub fn infer_slots_with_gradient(
 }
 
 fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f64 = a.iter().zip(b.iter()).map(|(&x, &y)| (x as f64) * (y as f64)).sum();
-    let na: f64 = a.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
-    let nb: f64 = b.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
-    if na < 1e-20 || nb < 1e-20 { 0.0 } else { (dot / (na * nb)) as f32 }
+    let dot: f64 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| (x as f64) * (y as f64))
+        .sum();
+    let na: f64 = a
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        .sqrt();
+    let nb: f64 = b
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        .sqrt();
+    if na < 1e-20 || nb < 1e-20 {
+        0.0
+    } else {
+        (dot / (na * nb)) as f32
+    }
 }
 
 /// Top-`k` programs by cosine similarity to `cond` in **O(programs.len() × k)** time.
@@ -542,9 +593,7 @@ fn top_k_programs_by_cosine(
         let (min_j, _) = buf
             .iter()
             .enumerate()
-            .min_by(|(_, a), (_, b)| {
-                a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal)
-            })
+            .min_by(|(_, a), (_, b)| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal))
             .unwrap();
         buf.swap_remove(min_j);
     }
@@ -556,19 +605,27 @@ fn causal_cosine(a: &[f32; BOOST_BIVECTOR_COUNT], b: &[f32; BOOST_BIVECTOR_COUNT
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na < 1e-10 || nb < 1e-10 { 0.0 } else { (dot / (na * nb)).max(0.0) }
+    if na < 1e-10 || nb < 1e-10 {
+        0.0
+    } else {
+        (dot / (na * nb)).max(0.0)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spectral::TokenDictionary;
     use crate::dimension::group_gen::AlgebraicCodebook;
     use crate::dimension::paramecium::BehavioralProgram;
+    use crate::spectral::TokenDictionary;
 
     fn make_test_dict() -> TokenDictionary {
         TokenDictionary::build(
-            &["add two numbers", "subtract two numbers", "multiply two numbers"],
+            &[
+                "add two numbers",
+                "subtract two numbers",
+                "multiply two numbers",
+            ],
             50,
         )
     }

@@ -42,9 +42,9 @@ const DISTRESS_PROMPTS: &[&str] = &[
 ];
 
 const WARM_WORDS: &[&str] = &[
-    "safe", "calm", "gentle", "soft", "warm", "here", "stay", "close", "slow",
-    "okay", "rest", "breathe", "love", "comfort", "lean", "curl", "blink",
-    "nuzzle", "purr", "soothe", "easy", "quiet", "hold",
+    "safe", "calm", "gentle", "soft", "warm", "here", "stay", "close", "slow", "okay", "rest",
+    "breathe", "love", "comfort", "lean", "curl", "blink", "nuzzle", "purr", "soothe", "easy",
+    "quiet", "hold",
 ];
 
 fn ensure_flags(toml: &str, bg: bool) -> String {
@@ -52,7 +52,13 @@ fn ensure_flags(toml: &str, bg: bool) -> String {
         let want = format!("{} = {}", key, val);
         if toml.lines().any(|l| l.trim_start().starts_with(key)) {
             toml.lines()
-                .map(|l| if l.trim_start().starts_with(key) { want.clone() } else { l.to_string() })
+                .map(|l| {
+                    if l.trim_start().starts_with(key) {
+                        want.clone()
+                    } else {
+                        l.to_string()
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         } else {
@@ -146,7 +152,12 @@ fn run_arm(rt: &mut Runtime, label: &str) -> Arm {
         distress.push(r);
     }
 
-    Arm { ood, ood_collapses, distress, distress_warm }
+    Arm {
+        ood,
+        ood_collapses,
+        distress,
+        distress_warm,
+    }
 }
 
 fn main() {
@@ -166,8 +177,8 @@ fn main() {
         growformer::topic_graph::TopicGraph::from_toml(&base).expect("parse topic graph base");
     let final_graph = match overlay {
         Some(ov) => {
-            let og = growformer::topic_graph::TopicGraph::from_toml_quiet(&ov)
-                .expect("parse overlay");
+            let og =
+                growformer::topic_graph::TopicGraph::from_toml_quiet(&ov).expect("parse overlay");
             base_graph.merge_overlay(og)
         }
         None => base_graph,

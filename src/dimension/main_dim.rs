@@ -76,11 +76,7 @@ impl MainDimension {
     }
 
     /// Query selected groups with input; returns (group_id, output activations).
-    pub fn query(
-        &mut self,
-        input: &[f32],
-        group_ids: &[GroupId],
-    ) -> Vec<(GroupId, Vec<f32>)> {
+    pub fn query(&mut self, input: &[f32], group_ids: &[GroupId]) -> Vec<(GroupId, Vec<f32>)> {
         group_ids
             .iter()
             .filter_map(|&gid| {
@@ -98,9 +94,9 @@ impl MainDimension {
         input: &[f32],
         group_id: GroupId,
     ) -> Option<(Vec<f32>, Vec<f32>)> {
-        self.groups.get_mut(&group_id).map(|fg| {
-            fg.env.predict_with_penultimate_hidden(input)
-        })
+        self.groups
+            .get_mut(&group_id)
+            .map(|fg| fg.env.predict_with_penultimate_hidden(input))
     }
 
     /// Output-head effective weights from penultimate layer (for linear-bottleneck diagnostics).
@@ -121,8 +117,8 @@ mod tests {
     use super::*;
     use crate::environment::NeuralEnvironment;
     use crate::types::EnvironmentConfig;
-    use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand::SeedableRng;
 
     #[test]
     fn test_main_register_and_query() {
@@ -131,7 +127,8 @@ mod tests {
         let mut env = NeuralEnvironment::new(config);
         env.build_layers(&[2, 16, 16, 1], &mut rng);
         env.freeze_all();
-        let calibration: Vec<crate::types::Sample> = (0..10).map(|_| (vec![0.0_f32, 0.0], [0.0])).collect();
+        let calibration: Vec<crate::types::Sample> =
+            (0..10).map(|_| (vec![0.0_f32, 0.0], [0.0])).collect();
         let vector = crate::dimension::embedding::compute_group_embedding(&mut env, &calibration);
         let embedding = GroupEmbedding {
             group_id: 0,

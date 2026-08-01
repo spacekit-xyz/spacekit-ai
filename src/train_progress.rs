@@ -3,7 +3,7 @@
 
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::borrow::Cow;
-use std::io::{IsTerminal, stderr};
+use std::io::{stderr, IsTerminal};
 use std::time::Duration;
 
 /// Major train phases: positions `0 .. MAJOR_PHASE_COUNT-1`, then `finish_ok` sets full width.
@@ -42,7 +42,11 @@ impl TrainUi {
         );
         detail.set_draw_target(ProgressDrawTarget::hidden());
 
-        Some(Self { multi, overall, detail })
+        Some(Self {
+            multi,
+            overall,
+            detail,
+        })
     }
 
     pub fn set_major_phase(&self, index: u64, label: impl Into<Cow<'static, str>>) {
@@ -68,7 +72,9 @@ impl TrainUi {
         self.detail.set_draw_target(ProgressDrawTarget::stderr());
         self.detail.set_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.yellow} [{bar:28.yellow/black}] {human_pos}/{human_len} {wide_msg}")
+                .template(
+                    "{spinner:.yellow} [{bar:28.yellow/black}] {human_pos}/{human_len} {wide_msg}",
+                )
                 .unwrap()
                 .progress_chars("=> "),
         );

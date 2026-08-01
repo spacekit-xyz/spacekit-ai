@@ -15,14 +15,12 @@ use std::path::Path;
 use super::cone_router::{cone_features, AdjustableConeRouter, ConeConfig, ConeSample};
 use super::energy_jepa::EnergyAdapter;
 use super::jepa_adapters::{WM_INNER_RADIUS, WM_LATENT_DIM};
-use super::wm_frontier::{
-    geometric_energy, FrozenGeometricEncoder, WorldRule,
-};
+use super::wm_frontier::{geometric_energy, FrozenGeometricEncoder, WorldRule};
 
 pub const ACTION_DIM: usize = 4;
 pub const HARD_OBS_DIM: usize = 8;
 const ACT_ENERGY_IN: usize = WM_LATENT_DIM * 2 + ACTION_DIM + WM_LATENT_DIM; // z + a + z' + Δz... wait
-// feats = [z; a_onehot; z_next; z_next-z] = 8+4+8+8 = 28
+                                                                             // feats = [z; a_onehot; z_next; z_next-z] = 8+4+8+8 = 28
 const ACT_FEAT: usize = WM_LATENT_DIM + ACTION_DIM + WM_LATENT_DIM + WM_LATENT_DIM;
 
 // =============================================================================
@@ -84,7 +82,11 @@ pub fn step_dynamics_action(obs: &[f32], action: WmAction, dt: f32) -> Vec<f32> 
         }
     }
     // Passive regime dynamics on the updated state.
-    let ang = if r < WM_INNER_RADIUS { 0.30 * dt } else { 0.05 * dt };
+    let ang = if r < WM_INNER_RADIUS {
+        0.30 * dt
+    } else {
+        0.05 * dt
+    };
     let (c, s) = (ang.cos(), ang.sin());
     let nx = c * x - s * y + vx * dt * 0.15;
     let ny = s * x + c * y + vy * dt * 0.15;
@@ -316,7 +318,11 @@ impl ActionEnergyAdapter {
                 let mut es = [0.0f32; ACTION_DIM];
                 for a in 0..ACTION_DIM {
                     let e = self.planning_energy(z, WmAction::from_u8(a as u8));
-                    es[a] = if e.is_finite() { e.clamp(-20.0, 20.0) } else { 0.0 };
+                    es[a] = if e.is_finite() {
+                        e.clamp(-20.0, 20.0)
+                    } else {
+                        0.0
+                    };
                 }
                 // softmin via stable log-sum-exp on −E
                 let mut m = es[0];
@@ -353,10 +359,18 @@ impl ActionEnergyAdapter {
                 }
             }
             for w in self.r_b1.iter_mut() {
-                *w = if w.is_finite() { w.clamp(-3.0, 3.0) } else { 0.0 };
+                *w = if w.is_finite() {
+                    w.clamp(-3.0, 3.0)
+                } else {
+                    0.0
+                };
             }
             for w in self.r_w2.iter_mut() {
-                *w = if w.is_finite() { w.clamp(-3.0, 3.0) } else { 0.0 };
+                *w = if w.is_finite() {
+                    w.clamp(-3.0, 3.0)
+                } else {
+                    0.0
+                };
             }
             self.r_b2 = if self.r_b2.is_finite() {
                 self.r_b2.clamp(-3.0, 3.0)
@@ -445,11 +459,7 @@ impl ActionEnergyAdapter {
 }
 
 /// Greedy one-step (or horizon-2) planner: pick action minimizing planning energy.
-pub fn plan_action(
-    adapter: &ActionEnergyAdapter,
-    z: &[f32],
-    horizon: usize,
-) -> (WmAction, f32) {
+pub fn plan_action(adapter: &ActionEnergyAdapter, z: &[f32], horizon: usize) -> (WmAction, f32) {
     let mut best = WmAction::Brake;
     let mut best_e = f32::INFINITY;
     for a in 0..ACTION_DIM {
@@ -548,7 +558,8 @@ pub fn run_phase3n_action_seed(seed: u64) -> ActionWmSeedResult {
                 // Latent-visible goal so planning rank head can fit from z.
                 let n0: f32 = z.iter().map(|x| x * x).sum::<f32>().sqrt();
                 let n1: f32 = zn.iter().map(|x| x * x).sum::<f32>().sqrt();
-                let s = (n1 - n0) + 0.35 * (zn[0] - z[0])
+                let s = (n1 - n0)
+                    + 0.35 * (zn[0] - z[0])
                     + 0.15 * dynamics_goal_score(obs, &next, inner);
                 if s > best {
                     best = s;
@@ -611,8 +622,8 @@ pub fn run_phase3n_action_seed(seed: u64) -> ActionWmSeedResult {
             let zn = enc.encode(&next);
             let n0: f32 = z.iter().map(|x| x * x).sum::<f32>().sqrt();
             let n1: f32 = zn.iter().map(|x| x * x).sum::<f32>().sqrt();
-            let s = (n1 - n0) + 0.35 * (zn[0] - z[0])
-                + 0.15 * dynamics_goal_score(&obs, &next, inner);
+            let s =
+                (n1 - n0) + 0.35 * (zn[0] - z[0]) + 0.15 * dynamics_goal_score(&obs, &next, inner);
             if s > oracle_score {
                 oracle_score = s;
                 oracle = act;
@@ -732,7 +743,11 @@ impl ComposedWmBundle {
         obs_next: &[f32],
         inner: bool,
     ) -> f32 {
-        let ens = if inner { &self.ens_inner } else { &self.ens_outer };
+        let ens = if inner {
+            &self.ens_inner
+        } else {
+            &self.ens_outer
+        };
         let mut e = ens
             .iter()
             .map(|a| geometric_energy(a, z, z_next))
@@ -1258,8 +1273,8 @@ pub fn run_phase3q_deploy_seed(seed: u64, path: &Path) -> DeploySeedResult {
     let bundle = train_composed_bundle(seed);
     save_composed_bundle(path, &bundle).expect("save");
     let loaded = load_composed_bundle(path).expect("load");
-    let pin_stable = loaded.encoder_fingerprint == bundle.encoder_fingerprint
-        && loaded.verify().is_ok();
+    let pin_stable =
+        loaded.encoder_fingerprint == bundle.encoder_fingerprint && loaded.verify().is_ok();
 
     let mut rng = StdRng::seed_from_u64(seed.wrapping_add(999));
     let mut ok = 0usize;
@@ -1396,11 +1411,7 @@ fn nudge_energy(
     ad.e_b2 -= dlogit;
     for i in 0..ad.hidden {
         ad.e_w2[i] -= dlogit * h[i] + 1e-4 * ad.e_w2[i] * scale.signum().max(0.0);
-        let dh = if h[i] > 0.0 {
-            dlogit * ad.e_w2[i]
-        } else {
-            0.0
-        };
+        let dh = if h[i] > 0.0 { dlogit * ad.e_w2[i] } else { 0.0 };
         ad.e_b1[i] -= dh;
         for j in 0..x.len() {
             ad.e_w1[i][j] -= dh * x[j];
@@ -1420,11 +1431,7 @@ fn nudge_rank(ad: &mut ActionEnergyAdapter, z: &[f32], act: WmAction, _e: f32, s
     ad.r_b2 -= dlogit;
     for i in 0..ad.hidden {
         ad.r_w2[i] -= dlogit * h[i];
-        let dh = if h[i] > 0.0 {
-            dlogit * ad.r_w2[i]
-        } else {
-            0.0
-        };
+        let dh = if h[i] > 0.0 { dlogit * ad.r_w2[i] } else { 0.0 };
         ad.r_b1[i] -= dh;
         for j in 0..xa.len() {
             ad.r_w1[i][j] -= dh * xa[j];

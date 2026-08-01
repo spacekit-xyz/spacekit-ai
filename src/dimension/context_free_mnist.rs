@@ -16,7 +16,9 @@ use crate::mnist::{
 };
 use crate::types::{EnvironmentConfig, GroupId, Sample};
 
-use super::embedding::{build_tag_vector, cosine_similarity, hidden_activation_vector, TAG_VECTOR_DIM};
+use super::embedding::{
+    build_tag_vector, cosine_similarity, hidden_activation_vector, TAG_VECTOR_DIM,
+};
 use super::manager::{DimensionManager, DimensionManagerConfig};
 use super::router::LearnedRouter;
 
@@ -69,7 +71,12 @@ fn train_split_mnist_dm(
     train_limit: usize,
     max_epochs: u32,
     tasks: &[(u8, u8)],
-) -> Option<(DimensionManager, Vec<GroupId>, Vec<Vec<Sample>>, Vec<Vec<Sample>>)> {
+) -> Option<(
+    DimensionManager,
+    Vec<GroupId>,
+    Vec<Vec<Sample>>,
+    Vec<Vec<Sample>>,
+)> {
     if mnist_missing(data_root) {
         return None;
     }
@@ -251,7 +258,14 @@ pub fn run_phase4b_cf_mnist_router(
     max_epochs: u32,
 ) -> CfMnistRouterResult {
     const TASKS: [(u8, u8); 3] = [(0, 1), (2, 3), (4, 5)];
-    run_cf_mnist_router(seed, data_root, train_limit, max_epochs, &TASKS, "4b: 3-task CF LearnedRouter")
+    run_cf_mnist_router(
+        seed,
+        data_root,
+        train_limit,
+        max_epochs,
+        &TASKS,
+        "4b: 3-task CF LearnedRouter",
+    )
 }
 
 /// Phase 4d — full 5-task Split-MNIST context-free LearnedRouter (Whitepaper §4.4).
@@ -370,12 +384,7 @@ fn run_cf_mnist_router(
         }
     }
 
-    let max_share = route_counts
-        .iter()
-        .copied()
-        .max()
-        .unwrap_or(0) as f32
-        / n.max(1) as f32;
+    let max_share = route_counts.iter().copied().max().unwrap_or(0) as f32 / n.max(1) as f32;
     let mean_acc: f32 = group_ids
         .iter()
         .enumerate()

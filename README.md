@@ -6,7 +6,8 @@
 |-----|---------------|
 | **This file** (`README.md`) | Overview, architecture, training/inference CLI, WASM, GLE milestones, latest results |
 | [`docs/APPLICATIONS.md`](docs/APPLICATIONS.md) | **What you can build/use today** — applications catalog for devs and users, across Growformer (language/agents/code) and Growformer JEPA (world models), with maturity tags |
-| [`docs/GROWFORMER_WHITEPAPER.md`](docs/GROWFORMER_WHITEPAPER.md) | Preprint: parameter-isolated specialists, VirtualGroup negative, cone anti-collapse (qualified), retention invariant; appendices for deployment stack |
+| [`docs/GROWFORMER_PUBLIC_WHITEPAPER.md`](docs/GROWFORMER_PUBLIC_WHITEPAPER.md) | **Canonical public whitepaper** — self-contained approach, evidence, limitations, world-model status, and roadmap |
+| [`docs/GROWFORMER_WHITEPAPER.md`](docs/GROWFORMER_WHITEPAPER.md) | Technical and reproducibility companion — detailed protocols, internal experiment labels, artifacts, and deployment appendices |
 | [`USE_CASES.md`](USE_CASES.md) | Where the substrate wins, emergent architectures, continual learning, edge deployment, explainability (uses “Neuro” naming for the same system) |
 | [`DOCKER.md`](DOCKER.md) | Linux amd64 builds (`build-linux.sh`), Docker image, cloud VM deployment |
 | [`src/category/README.md`](src/category/README.md) | Categorical DAG + Pythagoras trainer (`--features categorical`) |
@@ -265,7 +266,15 @@ A/B harnesses: `examples/reflective_field_ab.rs`, `examples/drive_field_ab.rs`, 
 Brains ship as versioned binary packages (`brain.rs`):
 
 - Magic `GWFBRPKG`, format v1 (header + checkpoint + personality) or v2 (+ UTF-8 TOML plugins blob)
+- Optional outer magic `GWFCMPKG`, format v1: versioned gzip envelope around an unchanged v1/v2 package
 - Parsed on `LanguageService::load_brain`; plugins manifest → `InferenceHarness`
+- `LanguageService::export_brain_compressed` and `Runtime::export_brain_compressed` emit compressed packages when the `brain-compression` feature is enabled
+- Existing uncompressed packages and legacy raw JSON checkpoints remain readable
+
+The outer envelope is owned and versioned by Growformer; compression is
+provided by the shared `spacekit-compressor` library. Brain packages use only
+its Binary/gzip mode—text-pattern substitution never touches checkpoints,
+router prototypes, or model representations.
 
 Lean inference without the full training CLI:
 
@@ -273,6 +282,10 @@ Lean inference without the full training CLI:
 |-------|---------------|
 | `runtime.rs` | `Runtime::from_brain_bytes` — prompt, converse, codegen; native + wasm32 |
 | `growformer-runtime` | `cargo build --release --bin growformer-runtime --no-default-features` then `growformer-runtime brain.bin "prompt"` |
+
+The default feature set includes `brain-compression`. A lean runtime built with
+`--no-default-features` reads uncompressed packages; add
+`--features brain-compression` when it must read `GWFCMPKG` files.
 
 ### Categorical Training (optional)
 
@@ -336,7 +349,7 @@ growformer/
     ├── server.rs            — HTTP server (`growformer-node`)
     ├── service.rs           — LanguageService: routing, generation, OCEAN, fragment compose
     ├── runtime.rs           — Portable inference API (`Runtime::from_brain_bytes`)
-    ├── brain.rs             — Brain package envelope (GWFBRPKG v1/v2 + plugins blob)
+    ├── brain.rs             — Brain package (GWFBRPKG v1/v2) + optional gzip envelope (GWFCMPKG v1)
     ├── project_gf.rs        — `*.gf.toml` project manifest parser
     ├── entitlement.rs       — SpaceKit capability gate (train / infer / merge)
     ├── tools_builtin.rs     — calculator, file_reader, code_runner, web_search executors

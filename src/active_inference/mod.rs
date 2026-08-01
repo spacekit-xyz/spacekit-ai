@@ -23,9 +23,7 @@ mod integration;
 mod spine;
 mod state;
 
-pub use blanket::{
-    Action, EnvironmentError, EnvironmentPort, Observation, ReflectionTerminal,
-};
+pub use blanket::{Action, EnvironmentError, EnvironmentPort, Observation, ReflectionTerminal};
 pub use harness::QueuedEnvironment;
 pub use integration::{belief_update_from_reflection, observation_from_reflection_outcome};
 pub use spine::{
@@ -40,9 +38,7 @@ mod tests {
 
     #[test]
     fn episode_echo_user_then_stops() {
-        let mut env = QueuedEnvironment::from_observations([Observation::UserText(
-            "hello".into(),
-        )]);
+        let mut env = QueuedEnvironment::from_observations([Observation::UserText("hello".into())]);
         let mut belief = BeliefState::new();
         let mut policy = EchoPolicy::new("> ");
         let spine = ActiveInferenceSpine::new(SpineConfig {

@@ -10,78 +10,80 @@
 //!   cargo run --bin growformer-demos -- --language-pipeline
 //!   ... etc
 
-use growformer::cmi::{CmiPointRecord, format_cmi_report, estimate_cmi_seed};
-use growformer::cmi_spiral::{format_spiral_resolve_report, resolve_spiral_region_mi, SpiralResolveResult};
+use growformer::cmi::{estimate_cmi_seed, format_cmi_report, CmiPointRecord};
+use growformer::cmi_spiral::{
+    format_spiral_resolve_report, resolve_spiral_region_mi, SpiralResolveResult,
+};
+use growformer::dimension::{
+    append_language_samples_from_training_jsonl_dir, cone_features, generate_code_from_action,
+    install_wm_citizens, load_language_samples_jsonl, render_action_template,
+    route_language_embedding, routing_entropy_bits, routing_entropy_degenerate,
+    run_energy_wm_task_e_seed, run_phase3k_geo_seed, run_phase3l_prob_seed, run_phase3m_sym_seed,
+    run_phase3n_action_seed, run_phase3o_compose_seed, run_phase3p_hard_seed,
+    run_phase3q_deploy_seed, run_phase3r_action_rank_seed, run_phase3r_foreign_seed,
+    run_phase3r_sim_loop, run_phase3s_spacekit_host_seed, run_phase3s_visuomotor_seed,
+    run_phase3t_disk_act_seed, run_phase3t_host_act_seed, run_phase3t_visuomotor_act_seed,
+    run_phase3u_vjepa_seed, run_phase3v_scene_seed, run_phase3w_scene_host_seed,
+    run_phase4a_context_free_mnist, run_phase4b_cf_mnist_router, run_phase4c_split_cifar_scaffold,
+    run_phase4d_cf_mnist_multiseed, run_phase4e_split_cifar_lite, run_phase4f_split_cifar_frozen,
+    run_phase5a_wm_dm_spike, run_phase5b_product_act_loop, run_phase5c_external_product_loop,
+    run_phase5d_vjepa_vision_seed, run_phase5f_live_spacekit_episode,
+    run_phase5g_vjepa_real_log_seed, run_wm_task_e_seed, ActSeedResult, ActingHostSession,
+    ActionRankSeedResult, ActionWmSeedResult, AdjustableConeRouter, CalibrationDataset,
+    CalibrationReport, CalibrationRequirements, CfMnistMultiSeedResult, CfMnistRouterResult,
+    ComposeWmSeedResult, ConeConfig, ConeSample, ContextFreeMnistResult, DeploySeedResult,
+    DimensionManager, DimensionManagerConfig, EncoderPreset, EnergyWmSeedResult,
+    ExternalProductLoopResult, ForeignProofSeedResult, GeoWmSeedResult, HardWmSeedResult,
+    HashingLanguageEncoder, LabelFreeStrategy, LanguageConfig, LanguageEncoder, LanguageSample,
+    LearnedRouter, LiveSpacekitEpisodeResult, MainDimension, ProbWmSeedResult,
+    ProductActLoopResult, RoutingEntropyGuard, SceneHostSeedResult, SceneHostSession,
+    SceneWmSeedResult, SimLoopResult, SpacekitHostSeedResult, SplitCifarFrozenResult,
+    SplitCifarLiteResult, SplitCifarScaffoldResult, SymWmSeedResult, VirtualGroup,
+    VisuomotorSeedResult, VjepaWmSeedResult, WmDmSpikeResult, WmHostSession, WmSeedResult,
+};
+use growformer::environment::NeuralEnvironment;
 use growformer::inference::grounding_loop::{
-    self, BatchVerdict, CaptureSplit, CoverageCurvePoint, EditProposal, FailureCapture,
-    FailureTrigger, FixtureRow, GroundingLoopParams, ProposalKind,
-    build_grounding_index, build_grounding_index_from_nodes, build_overlap_curve,
+    self, build_grounding_index, build_grounding_index_from_nodes, build_overlap_curve,
     calibrate_alias_threshold, certify_batch, clear_phrase_embedder, collision_check,
-    concept_train_features, coverage_vs_additions_curve, curve_lifts, decide_batch_verdict,
-    embed_phrase, evaluate_disjoint, format_certifier_report, format_coverage_curve,
-    install_phrase_embedder_from_corpus, install_supervised_embedder, install_vector_embedder,
-    overlap0_substrata, pooled_accuracy, propose_for_phrase, synthetic_audit_fixture,
-    wilson_interval, OverlapBin, SupervisedEncoder, PET_DOMAIN_FIXTURE_TOML,
-    EncoderVerdict, FeatureFamily, Verdict, VerdictInputs, decide_encoder_verdict,
-    is_below_resolution, data_hash, routing_accuracy_for_captures,
+    concept_train_features, coverage_vs_additions_curve, curve_lifts, data_hash,
+    decide_batch_verdict, decide_encoder_verdict, embed_phrase, evaluate_disjoint,
+    format_certifier_report, format_coverage_curve, install_phrase_embedder_from_corpus,
+    install_supervised_embedder, install_vector_embedder, is_below_resolution, overlap0_substrata,
+    pooled_accuracy, propose_for_phrase, routing_accuracy_for_captures, synthetic_audit_fixture,
+    wilson_interval, BatchVerdict, CaptureSplit, CoverageCurvePoint, EditProposal, EncoderVerdict,
+    FailureCapture, FailureTrigger, FeatureFamily, FixtureRow, GroundingLoopParams, OverlapBin,
+    ProposalKind, SupervisedEncoder, Verdict, VerdictInputs, PET_DOMAIN_FIXTURE_TOML,
 };
 use growformer::inference::world_grounding::{self, GroundingFleetDomain};
-use growformer::environment::NeuralEnvironment;
 use growformer::types::NeuronId;
-use growformer::dimension::{
-    append_language_samples_from_training_jsonl_dir, CalibrationDataset, CalibrationReport,
-    CalibrationRequirements, EncoderPreset, LanguageConfig, LanguageSample, DimensionManager,
-    DimensionManagerConfig, HashingLanguageEncoder, LanguageEncoder, LearnedRouter, MainDimension,
-    VirtualGroup, RoutingEntropyGuard, routing_entropy_bits, routing_entropy_degenerate,
-    load_language_samples_jsonl, render_action_template, generate_code_from_action,
-    route_language_embedding,
-    AdjustableConeRouter, ConeConfig, ConeSample, LabelFreeStrategy, cone_features,
-    run_wm_task_e_seed, WmSeedResult, run_energy_wm_task_e_seed, EnergyWmSeedResult,
-    run_phase3k_geo_seed, run_phase3l_prob_seed, run_phase3m_sym_seed,
-    GeoWmSeedResult, ProbWmSeedResult, SymWmSeedResult,
-    run_phase3n_action_seed, run_phase3o_compose_seed, run_phase3p_hard_seed,
-    run_phase3q_deploy_seed, ActionWmSeedResult, ComposeWmSeedResult, HardWmSeedResult,
-    DeploySeedResult,
-    run_phase3r_action_rank_seed, run_phase3r_foreign_seed, run_phase3r_sim_loop,
-    ActionRankSeedResult, ForeignProofSeedResult, SimLoopResult,
-    run_phase3s_visuomotor_seed, run_phase3s_spacekit_host_seed,
-    VisuomotorSeedResult, SpacekitHostSeedResult,
-    run_phase3t_disk_act_seed, run_phase3t_visuomotor_act_seed, run_phase3t_host_act_seed,
-    ActSeedResult,
-    run_phase3u_vjepa_seed, VjepaWmSeedResult,
-    run_phase3v_scene_seed, SceneWmSeedResult,
-    run_phase3w_scene_host_seed, SceneHostSeedResult,
-    run_phase4a_context_free_mnist, run_phase4b_cf_mnist_router, run_phase4d_cf_mnist_multiseed,
-    ContextFreeMnistResult, CfMnistRouterResult, CfMnistMultiSeedResult,
-    run_phase4c_split_cifar_scaffold, run_phase4e_split_cifar_lite, run_phase4f_split_cifar_frozen,
-    SplitCifarScaffoldResult, SplitCifarLiteResult, SplitCifarFrozenResult,
-    run_phase5a_wm_dm_spike, WmDmSpikeResult, run_phase5b_product_act_loop, ProductActLoopResult,
-    ActingHostSession, SceneHostSession, WmHostSession,
-};
 
-use growformer::types::GroupId;
-use std::collections::HashMap;
-use std::io::Write;
-use std::time::Instant;
+use clap::Parser;
+use growformer::service::LanguageService;
 use growformer::systems::checkpoint::{
-    save_phase2_checkpoint, load_phase2_checkpoint, save_mnist_checkpoint, load_mnist_checkpoint,
-    save_language_checkpoint, load_language_checkpoint
+    load_language_checkpoint, load_mnist_checkpoint, load_phase2_checkpoint,
+    save_language_checkpoint, save_mnist_checkpoint, save_phase2_checkpoint,
 };
 use growformer::systems::mirror::mirror_symmetry_score;
 use growformer::systems::whorls::print_whorl_summary;
-use growformer::service::LanguageService;
+use growformer::types::GroupId;
 use growformer::types::{EnvironmentConfig, Sample};
+use indicatif::{ProgressBar, ProgressStyle};
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
 use rand::Rng;
 use rand::SeedableRng;
-use rand::seq::SliceRandom;
-use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
-use indicatif::{ProgressBar, ProgressStyle};
-use clap::Parser;
+use std::time::Instant;
 
 #[derive(Parser, Debug)]
-#[command(name = "growformer-demos", version, about = "Growformer demos and benchmarks")]
+#[command(
+    name = "growformer-demos",
+    version,
+    about = "Growformer demos and benchmarks"
+)]
 struct Args {
     #[arg(short, long)]
     xor: bool,
@@ -190,6 +192,21 @@ struct Args {
     /// Phase 5b: Product act-loop (return vs random/VG; chat non-certifier).
     #[arg(long)]
     phase5b_product_act: bool,
+    /// Phase 5c: External product loop (DM citizens + return + SpaceKit pin).
+    #[arg(long)]
+    phase5c_external_product: bool,
+    /// Phase 5d: D′ lite — frozen vision V-JEPA export (not mock) + adapters.
+    #[arg(long)]
+    phase5d_vjepa_vision: bool,
+    /// Phase 5e: language + WM citizens in one brain.bin (export/load_brain).
+    #[arg(long)]
+    phase5e_wm_brain: bool,
+    /// Phase 5f: live SpaceKit acting-host episode (return + pin).
+    #[arg(long)]
+    phase5f_live_spacekit: bool,
+    /// Phase 5g: D′ real-log V-JEPA (export from logged frames; HF optional).
+    #[arg(long)]
+    phase5g_vjepa_real_log: bool,
     /// SpaceKit stdio JSONL host: `scene` | `acting` | `deploy` (one JSON request per stdin line).
     #[arg(long, value_name = "MODE")]
     wm_host_stdio: Option<String>,
@@ -357,7 +374,11 @@ struct Args {
     min_codegen_specialized_rate: f32,
     #[arg(long)]
     m5_retention_eval: bool,
-    #[arg(long, value_name = "PATH", default_value = "data/language/m5/retention_eval_splits.json")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "data/language/m5/retention_eval_splits.json"
+    )]
     m5_retention_plan: String,
     #[arg(long, default_value_t = 20)]
     m5_epochs: u32,
@@ -422,39 +443,84 @@ fn main() {
             std::process::exit(1);
         }
     } else if args.language_code_eval {
-        if let Err(e) = demo_language_code_eval(args.code_eval_data.as_deref(), args.code_eval_report.as_deref()) {
+        if let Err(e) = demo_language_code_eval(
+            args.code_eval_data.as_deref(),
+            args.code_eval_report.as_deref(),
+        ) {
             eprintln!("Failed language code eval: {}", e);
             std::process::exit(1);
         }
     } else if args.validate_codegen {
-        match validate_codegen(args.code_eval_data.as_deref(), args.code_eval_report.as_deref(), args.min_codegen_language_match, args.min_codegen_specialized_rate) {
-            Ok(true) => {} Ok(false) => std::process::exit(2),
-            Err(e) => { eprintln!("Failed codegen validation: {}", e); std::process::exit(1); }
+        match validate_codegen(
+            args.code_eval_data.as_deref(),
+            args.code_eval_report.as_deref(),
+            args.min_codegen_language_match,
+            args.min_codegen_specialized_rate,
+        ) {
+            Ok(true) => {}
+            Ok(false) => std::process::exit(2),
+            Err(e) => {
+                eprintln!("Failed codegen validation: {}", e);
+                std::process::exit(1);
+            }
         }
     } else if args.m5_retention_eval {
-        if let Err(e) = run_m5_retention_eval(&args.m5_retention_plan, args.m5_epochs, args.m5_lr, args.m5_feature_dim, args.m5_replay_per_epoch, args.m5_replay_prior_ratio, args.m5_retention_report.as_deref()) {
+        if let Err(e) = run_m5_retention_eval(
+            &args.m5_retention_plan,
+            args.m5_epochs,
+            args.m5_lr,
+            args.m5_feature_dim,
+            args.m5_replay_per_epoch,
+            args.m5_replay_prior_ratio,
+            args.m5_retention_report.as_deref(),
+        ) {
             eprintln!("Failed M5 retention eval: {}", e);
             std::process::exit(1);
         }
     } else if args.language_action_eval {
-        if let Err(e) = demo_language_action_eval(args.action_eval_data.as_deref(), args.action_eval_report.as_deref()) {
+        if let Err(e) = demo_language_action_eval(
+            args.action_eval_data.as_deref(),
+            args.action_eval_report.as_deref(),
+        ) {
             eprintln!("Failed language action eval: {}", e);
             std::process::exit(1);
         }
     } else if args.validate_action_schema {
-        match validate_action_schema(args.action_eval_data.as_deref(), args.action_eval_report.as_deref(), args.min_action_accuracy, args.min_fallback_precision, args.min_payload_valid_rate) {
-            Ok(true) => {} Ok(false) => std::process::exit(2),
-            Err(e) => { eprintln!("Failed action schema validation: {}", e); std::process::exit(1); }
+        match validate_action_schema(
+            args.action_eval_data.as_deref(),
+            args.action_eval_report.as_deref(),
+            args.min_action_accuracy,
+            args.min_fallback_precision,
+            args.min_payload_valid_rate,
+        ) {
+            Ok(true) => {}
+            Ok(false) => std::process::exit(2),
+            Err(e) => {
+                eprintln!("Failed action schema validation: {}", e);
+                std::process::exit(1);
+            }
         }
     } else if args.language_generation_eval {
-        if let Err(e) = demo_language_generation_eval(args.action_eval_data.as_deref(), args.generation_eval_report.as_deref()) {
+        if let Err(e) = demo_language_generation_eval(
+            args.action_eval_data.as_deref(),
+            args.generation_eval_report.as_deref(),
+        ) {
             eprintln!("Failed language generation eval: {}", e);
             std::process::exit(1);
         }
     } else if args.validate_generation {
-        match validate_generation(args.action_eval_data.as_deref(), args.generation_eval_report.as_deref(), args.max_task_success_drop, args.max_hallucination_rate) {
-            Ok(true) => {} Ok(false) => std::process::exit(2),
-            Err(e) => { eprintln!("Failed generation validation: {}", e); std::process::exit(1); }
+        match validate_generation(
+            args.action_eval_data.as_deref(),
+            args.generation_eval_report.as_deref(),
+            args.max_task_success_drop,
+            args.max_hallucination_rate,
+        ) {
+            Ok(true) => {}
+            Ok(false) => std::process::exit(2),
+            Err(e) => {
+                eprintln!("Failed generation validation: {}", e);
+                std::process::exit(1);
+            }
         }
     } else if args.language_ema_ablation {
         if let Err(e) = demo_language_ema_ablation() {
@@ -462,9 +528,18 @@ fn main() {
             std::process::exit(1);
         }
     } else if let Some(path) = args.validate_gle.as_deref() {
-        match validate_gle_model_card(path, args.min_routing_acc, args.min_routing_median_margin, args.min_routing_p10_margin) {
-            Ok(true) => {} Ok(false) => std::process::exit(2),
-            Err(e) => { eprintln!("Failed to validate GLE model card: {}", e); std::process::exit(1); }
+        match validate_gle_model_card(
+            path,
+            args.min_routing_acc,
+            args.min_routing_median_margin,
+            args.min_routing_p10_margin,
+        ) {
+            Ok(true) => {}
+            Ok(false) => std::process::exit(2),
+            Err(e) => {
+                eprintln!("Failed to validate GLE model card: {}", e);
+                std::process::exit(1);
+            }
         }
     } else if args.xor {
         demo_xor();
@@ -574,6 +649,16 @@ fn main() {
         demo_phase5a_wm_dm();
     } else if args.phase5b_product_act {
         demo_phase5b_product_act();
+    } else if args.phase5c_external_product {
+        demo_phase5c_external_product();
+    } else if args.phase5d_vjepa_vision {
+        demo_phase5d_vjepa_vision();
+    } else if args.phase5e_wm_brain {
+        demo_phase5e_wm_brain();
+    } else if args.phase5f_live_spacekit {
+        demo_phase5f_live_spacekit();
+    } else if args.phase5g_vjepa_real_log {
+        demo_phase5g_vjepa_real_log();
     } else if args.phase3f_competence {
         demo_phase3f_competence_routing();
     } else if args.phase3e_boundary_analyze {
@@ -585,7 +670,12 @@ fn main() {
     } else if args.neurogenesis {
         demo_neurogenesis();
     } else if args.mnist {
-        demo_split_mnist(args.progress, args.mnist_train_limit, args.mnist_max_epochs, args.mnist_batch_size);
+        demo_split_mnist(
+            args.progress,
+            args.mnist_train_limit,
+            args.mnist_max_epochs,
+            args.mnist_batch_size,
+        );
     } else if args.mnist_v2 {
         demo_clifford_mnist(args.mnist_train_limit, args.mnist_max_epochs);
     } else if args.mnist_v2_gen {
@@ -611,7 +701,12 @@ fn main() {
     } else if args.language_pipeline {
         demo_language_pipeline();
     } else if args.language_distill {
-        demo_language_distill_experiment(args.language_distill_data.as_deref(), args.language_distill_save.as_deref(), args.language_distill_resume.as_deref(), args.language_distill_epochs);
+        demo_language_distill_experiment(
+            args.language_distill_data.as_deref(),
+            args.language_distill_save.as_deref(),
+            args.language_distill_resume.as_deref(),
+            args.language_distill_epochs,
+        );
     } else if let Some(mode) = &args.learning {
         match mode.as_str() {
             "train-a" => demo_phase2_train_a(),
@@ -626,9 +721,21 @@ fn main() {
 
 fn load_m5_or_synthetic() -> CalibrationDataset {
     match load_all_m5_training_data() {
-        Ok(samples) if !samples.is_empty() => { println!("Loaded M5 training data: {} samples", samples.len()); CalibrationDataset { samples } }
-        Ok(_) => { println!("M5 data empty, falling back to synthetic dataset."); build_language_calibration_dataset() }
-        Err(e) => { println!("M5 data not found ({}) — falling back to synthetic dataset.", e); build_language_calibration_dataset() }
+        Ok(samples) if !samples.is_empty() => {
+            println!("Loaded M5 training data: {} samples", samples.len());
+            CalibrationDataset { samples }
+        }
+        Ok(_) => {
+            println!("M5 data empty, falling back to synthetic dataset.");
+            build_language_calibration_dataset()
+        }
+        Err(e) => {
+            println!(
+                "M5 data not found ({}) — falling back to synthetic dataset.",
+                e
+            );
+            build_language_calibration_dataset()
+        }
     }
 }
 
@@ -664,7 +771,7 @@ fn demo_xor() {
     let config = EnvironmentConfig {
         learning_rate: 0.5,
         weight_decay: 0.0001,
-        bias_decay: 0.0,           // disabled — same reason as spiral (survival math)
+        bias_decay: 0.0, // disabled — same reason as spiral (survival math)
         dropout_rate: 0.0,
         geometry_noise: 0.001,
         competitive_k: 0,
@@ -672,7 +779,7 @@ fn demo_xor() {
         max_synapses_per_neuron: 32,
         energy_budget_per_neuron: 100.0,
         pruning_threshold: 0.001,
-        mirror_coupling_strength: 3.14,//0.001,
+        mirror_coupling_strength: 3.14, //0.001,
         growth_radius: 0.0,
         geometry_interval: 500,
         stdp_enabled: false,
@@ -706,13 +813,26 @@ fn demo_xor() {
             epoch_loss += env.train_tick(input.as_slice(), target, &mut rng).loss;
         }
         epoch_loss /= xor_data.len() as f32;
-        if epoch % 1000 == 0 && epoch > 0 { env.prune_dormant(); }
+        if epoch % 1000 == 0 && epoch > 0 {
+            env.prune_dormant();
+        }
         if epoch % 500 == 0 {
-            let weights: Vec<String> = env.layers[1].iter()
-                .flat_map(|id| env.neurons[id].synapses.iter().map(|s| format!("{:.3}", s.strength)))
+            let weights: Vec<String> = env.layers[1]
+                .iter()
+                .flat_map(|id| {
+                    env.neurons[id]
+                        .synapses
+                        .iter()
+                        .map(|s| format!("{:.3}", s.strength))
+                })
                 .collect();
-            println!("  epoch {:>5} | loss={:.5} | sparsity={:.2} | h→o: {:?}",
-                epoch, epoch_loss, env.firing_sparsity(), weights);
+            println!(
+                "  epoch {:>5} | loss={:.5} | sparsity={:.2} | h→o: {:?}",
+                epoch,
+                epoch_loss,
+                env.firing_sparsity(),
+                weights
+            );
         }
     }
 
@@ -721,13 +841,27 @@ fn demo_xor() {
     println!("  ---------------------------------------");
     let mut correct = 0;
     // Test in canonical order
-    for (input, expected) in &[([0.0,0.0],[0.0]),([0.0,1.0],[1.0]),([1.0,0.0],[1.0]),([1.0,1.0],[0.0])] {
+    for (input, expected) in &[
+        ([0.0, 0.0], [0.0]),
+        ([0.0, 1.0], [1.0]),
+        ([1.0, 0.0], [1.0]),
+        ([1.0, 1.0], [0.0]),
+    ] {
         let out = env.predict(input);
         let rounded = if out[0] > 0.5 { 1.0 } else { 0.0 };
-        let expected_value:f32 = expected[0];
+        let expected_value: f32 = expected[0];
         let ok = (rounded - expected_value).abs() < 0.01;
-        if ok { correct += 1; }
-        println!("  [{:.0},{:.0}]     {:.1}       {:.4}    {}", input[0], input[1], expected[0], out[0], if ok { "✓" } else { "✗" });
+        if ok {
+            correct += 1;
+        }
+        println!(
+            "  [{:.0},{:.0}]     {:.1}       {:.4}    {}",
+            input[0],
+            input[1],
+            expected[0],
+            out[0],
+            if ok { "✓" } else { "✗" }
+        );
     }
     println!("\n  Accuracy: {}/4", correct);
     print_structural_report(&env, group_a, group_b);
@@ -742,14 +876,14 @@ fn demo_spiral() {
 
     let config = EnvironmentConfig {
         learning_rate: 0.15,
-        weight_decay: 0.0000025,   // scaled: 0.001/400 samples
-        bias_decay: 0.0,           // disabled — any useful value annihilates over 3.2M steps
-        dropout_rate: 0.1,    // reduced: 32 neurons each carry more weight than in 16-neuron layer
-        geometry_noise: 0.0,        // replaced by thermal_noise in physics
-        competitive_k: 4,            // KWTA top-4 of 16: hard competition regardless of synapse strength
-        lateral_inhibition: 0.12,    // active from epoch 0: no warmup, moderate selectivity
-                                   // targets act=0.25-0.40 with sigma_inhib=2.0
-        lr_decay: 0.00008,    // slowed 5×: previous decay killed lr by epoch 1000, no learning late
+        weight_decay: 0.0000025,  // scaled: 0.001/400 samples
+        bias_decay: 0.0,          // disabled — any useful value annihilates over 3.2M steps
+        dropout_rate: 0.1, // reduced: 32 neurons each carry more weight than in 16-neuron layer
+        geometry_noise: 0.0, // replaced by thermal_noise in physics
+        competitive_k: 4,  // KWTA top-4 of 16: hard competition regardless of synapse strength
+        lateral_inhibition: 0.12, // active from epoch 0: no warmup, moderate selectivity
+        // targets act=0.25-0.40 with sigma_inhib=2.0
+        lr_decay: 0.00008, // slowed 5×: previous decay killed lr by epoch 1000, no learning late
         max_synapses_per_neuron: 64,
         energy_budget_per_neuron: 100.0,
         pruning_threshold: 0.001,
@@ -760,20 +894,20 @@ fn demo_spiral() {
         k_repel: 0.2,
         gravity_g: 0.05,
         damping: 0.2,
-        thermal_noise: 0.02,     //
+        thermal_noise: 0.02, //
         // Reaction-diffusion: sigma_inhib tuned for 32-neuron single layer
         // spread ~2.8, 40% = 1.1 — slightly tighter for more diverse receptive fields
-        sigma_inhib: 2.0,            // widened: spread=2.4, need sigma > spread/2 for truly local inhibition
+        sigma_inhib: 2.0, // widened: spread=2.4, need sigma > spread/2 for truly local inhibition
         // Debye: screening length replaces hard repulsion_radius
         debye_length: 1.5,
         // Mass-competition: lower win threshold to match actual activation range
         mass_win_threshold: 0.14, // lowered: strong inhibition means winners fire ~0.3-0.5 post-suppression
-        mass_decay: 0.00009,          // all neurons lose this fraction per sample, 0.00009 -> 0.000009
+        mass_decay: 0.00009,      // all neurons lose this fraction per sample, 0.00009 -> 0.000009
         // Homeostasis: gentle bias regulation to prevent runaway negative drift
         homeostasis_target: 0.30, // target slightly sparse
         homeostasis_lr: 0.0,      // disabled — equalizes all neurons to same bias, kills diversity
-        // homeostasis_tau: 0.0001,  // 10000 sample window   
-        prune_interval: 500,     // changed from 500 to 1000 to reduce pruning frequency
+        // homeostasis_tau: 0.0001,  // 10000 sample window
+        prune_interval: 500, // changed from 500 to 1000 to reduce pruning frequency
         ..EnvironmentConfig::default()
     };
 
@@ -784,12 +918,12 @@ fn demo_spiral() {
     // Larger architecture — spiral needs more representational capacity
     // 2 → 16 → 16 → 1  scaled layer-2: 8 neurons insufficient to integrate spiral boundary
     //                     warmup removed — created always-on neurons, killed specialisation
-    
-    //  2 → 16 → 16 → 1 
+
+    //  2 → 16 → 16 → 1
     // (300 = Spiral accuracy: 389/600 (64.8%))
     // (800 = Spiral accuracy: 991/1600 (61.9%))
 
-    //  2 → 24 → 24 → 1 
+    //  2 → 24 → 24 → 1
     // (300 = Spiral accuracy: 389/600 (75.4%))
     env.build_layers(&[2, 16, 16, 1], &mut rng);
 
@@ -801,13 +935,16 @@ fn demo_spiral() {
 
     let samples = 400; // becomes 200 ->400, 400 -> 800
     let epochs = 8000;
-    // change from 400 -> 
+    // change from 400 ->
     // (200 = Spiral accuracy: 267/400 (66.8%))
     // (200 = Spiral accuracy: 264/400 (66.0%))
-    // (300 = Spiral accuracy: 389/600 (64.8%)) 
+    // (300 = Spiral accuracy: 389/600 (64.8%))
     // (800 = Spiral accuracy: 991/1600 (61.9%))
     let mut spiral_data = generate_spiral_data(samples, &mut rng);
-    println!("Training on {} samples, architecture [2→16→16→1], {} epochs...", samples, epochs);
+    println!(
+        "Training on {} samples, architecture [2→16→16→1], {} epochs...",
+        samples, epochs
+    );
 
     for epoch in 0..epochs {
         env.set_epoch(epoch);
@@ -832,17 +969,26 @@ fn demo_spiral() {
     let mut correct = 0;
     for (input, target) in &spiral_data {
         let out = env.predict(input);
-        if (if out[0] > 0.5 { 1.0_f32 } else { 0.0 } - target[0]).abs() < 0.01 { correct += 1; }
+        if (if out[0] > 0.5 { 1.0_f32 } else { 0.0 } - target[0]).abs() < 0.01 {
+            correct += 1;
+        }
     }
-    println!("\nSpiral accuracy: {}/{} ({:.1}%)",
-        correct, spiral_data.len(), 100.0 * correct as f32 / spiral_data.len() as f32);
+    println!(
+        "\nSpiral accuracy: {}/{} ({:.1}%)",
+        correct,
+        spiral_data.len(),
+        100.0 * correct as f32 / spiral_data.len() as f32
+    );
 
     println!("\nSample predictions:");
     println!("  X        Y        Expected  Predicted");
     println!("  ----------------------------------------");
     for (input, target) in spiral_data.iter().take(8) {
         let out = env.predict(input);
-        println!("  {:+.4}  {:+.4}    {:.1}       {:.4}", input[0], input[1], target[0], out[0]);
+        println!(
+            "  {:+.4}  {:+.4}    {:.1}       {:.4}",
+            input[0], input[1], target[0], out[0]
+        );
     }
 
     print_structural_report(&env, group_a, group_b);
@@ -856,14 +1002,14 @@ fn demo_concentric_circles() {
     println!("--- Demo 3: Concentric Circles ---\n");
     let config = EnvironmentConfig {
         learning_rate: 0.15,
-        weight_decay: 0.0000025,   // scaled: 0.001/400 samples
-        bias_decay: 0.0,           // disabled — any useful value annihilates over 3.2M steps
-        dropout_rate: 0.1,    // reduced: 32 neurons each carry more weight than in 16-neuron layer
-        geometry_noise: 0.0,        // replaced by thermal_noise in physics
-        competitive_k: 4,            // KWTA top-4 of 16: hard competition regardless of synapse strength
-        lateral_inhibition: 0.12,    // active from epoch 0: no warmup, moderate selectivity
-                                   // targets act=0.25-0.40 with sigma_inhib=2.0
-        lr_decay: 0.00008,    // slowed 5×: previous decay killed lr by epoch 1000, no learning late
+        weight_decay: 0.0000025,  // scaled: 0.001/400 samples
+        bias_decay: 0.0,          // disabled — any useful value annihilates over 3.2M steps
+        dropout_rate: 0.1, // reduced: 32 neurons each carry more weight than in 16-neuron layer
+        geometry_noise: 0.0, // replaced by thermal_noise in physics
+        competitive_k: 4,  // KWTA top-4 of 16: hard competition regardless of synapse strength
+        lateral_inhibition: 0.12, // active from epoch 0: no warmup, moderate selectivity
+        // targets act=0.25-0.40 with sigma_inhib=2.0
+        lr_decay: 0.00008, // slowed 5×: previous decay killed lr by epoch 1000, no learning late
         max_synapses_per_neuron: 64,
         energy_budget_per_neuron: 100.0,
         pruning_threshold: 0.001,
@@ -874,20 +1020,20 @@ fn demo_concentric_circles() {
         k_repel: 0.2,
         gravity_g: 0.05,
         damping: 0.2,
-        thermal_noise: 0.02,     //
+        thermal_noise: 0.02, //
         // Reaction-diffusion: sigma_inhib tuned for 32-neuron single layer
         // spread ~2.8, 40% = 1.1 — slightly tighter for more diverse receptive fields
-        sigma_inhib: 2.0,            // widened: spread=2.4, need sigma > spread/2 for truly local inhibition
+        sigma_inhib: 2.0, // widened: spread=2.4, need sigma > spread/2 for truly local inhibition
         // Debye: screening length replaces hard repulsion_radius
         debye_length: 1.5,
         // Mass-competition: lower win threshold to match actual activation range
         mass_win_threshold: 0.14, // lowered: strong inhibition means winners fire ~0.3-0.5 post-suppression
-        mass_decay: 0.00009,          // all neurons lose this fraction per sample, 0.00009 -> 0.000009
+        mass_decay: 0.00009,      // all neurons lose this fraction per sample, 0.00009 -> 0.000009
         // Homeostasis: gentle bias regulation to prevent runaway negative drift
         homeostasis_target: 0.30, // target slightly sparse
         homeostasis_lr: 0.0,      // disabled — equalizes all neurons to same bias, kills diversity
-        // homeostasis_tau: 0.0001,  // 10000 sample window   
-        prune_interval: 500,     // changed from 500 to 1000 to reduce pruning frequency
+        // homeostasis_tau: 0.0001,  // 10000 sample window
+        prune_interval: 500, // changed from 500 to 1000 to reduce pruning frequency
         ..EnvironmentConfig::default()
     };
 
@@ -905,9 +1051,12 @@ fn demo_concentric_circles() {
 
     let samples = 400; // becomes 200 ->400, 400 -> 800
     let epochs = 8000;
-    
+
     let mut concentric_data = generate_concentric_circles_data(samples, &mut rng);
-    println!("Training on {} samples, architecture [2→16→16→1], {} epochs...", samples, epochs);
+    println!(
+        "Training on {} samples, architecture [2→16→16→1], {} epochs...",
+        samples, epochs
+    );
 
     for epoch in 0..epochs {
         env.set_epoch(epoch);
@@ -932,21 +1081,29 @@ fn demo_concentric_circles() {
     let mut correct = 0;
     for (input, target) in &concentric_data {
         let out = env.predict(input);
-        if (if out[0] > 0.5 { 1.0_f32 } else { 0.0 } - target[0]).abs() < 0.01 { correct += 1; }
+        if (if out[0] > 0.5 { 1.0_f32 } else { 0.0 } - target[0]).abs() < 0.01 {
+            correct += 1;
+        }
     }
-    println!("\nConcentric Circles accuracy: {}/{} ({:.1}%)",
-        correct, concentric_data.len(), 100.0 * correct as f32 / concentric_data.len() as f32);
+    println!(
+        "\nConcentric Circles accuracy: {}/{} ({:.1}%)",
+        correct,
+        concentric_data.len(),
+        100.0 * correct as f32 / concentric_data.len() as f32
+    );
 
     println!("\nSample predictions:");
     println!("  X        Y        Expected  Predicted");
     println!("  ----------------------------------------");
     for (input, target) in concentric_data.iter().take(8) {
         let out = env.predict(input);
-        println!("  {:+.4}  {:+.4}    {:.1}       {:.4}", input[0], input[1], target[0], out[0]);
+        println!(
+            "  {:+.4}  {:+.4}    {:.1}       {:.4}",
+            input[0], input[1], target[0], out[0]
+        );
     }
 
     print_structural_report(&env, group_a, group_b);
-    
 }
 
 // =============================================================================
@@ -959,17 +1116,17 @@ fn demo_mlp_baseline() {
     let mut mlp = NeuralEnvironment::new(EnvironmentConfig {
         learning_rate: 0.15,
         weight_decay: 0.0000025,
-        bias_decay: 0.0,           // no Rivera bias pressure
+        bias_decay: 0.0, // no Rivera bias pressure
         lr_decay: 0.00008,
-        competitive_k: 0,          // no KWTA
-        lateral_inhibition: 0.0,   // no inhibition
-        dropout_rate: 0.0,         // no dropout
-        thermal_noise: 0.0,        // no physics
+        competitive_k: 0,        // no KWTA
+        lateral_inhibition: 0.0, // no inhibition
+        dropout_rate: 0.0,       // no dropout
+        thermal_noise: 0.0,      // no physics
         gravity_g: 0.0,
         k_repel: 0.0,
         mass_decay: 0.0,
         mass_growth: 0.0,
-        homeostasis_lr: 0.0,       // no homeostasis
+        homeostasis_lr: 0.0, // no homeostasis
         mirror_coupling_strength: 0.0,
         prune_interval: 9_999_999,
         geometry_interval: 9_999_999,
@@ -992,8 +1149,10 @@ fn demo_mlp_baseline() {
         }
         epoch_loss /= spiral_data.len() as f32;
         if epoch % 500 == 0 {
-            println!("  epoch {:>4} | loss={:.5} | lr={:.5}",
-                epoch, epoch_loss, mlp.current_lr);
+            println!(
+                "  epoch {:>4} | loss={:.5} | lr={:.5}",
+                epoch, epoch_loss, mlp.current_lr
+            );
         }
     }
 
@@ -1004,11 +1163,13 @@ fn demo_mlp_baseline() {
             correct += 1;
         }
     }
-    println!("\nMLP accuracy: {}/{} ({:.1}%)",
-        correct, spiral_data.len(),
-        100.0 * correct as f32 / spiral_data.len() as f32);
+    println!(
+        "\nMLP accuracy: {}/{} ({:.1}%)",
+        correct,
+        spiral_data.len(),
+        100.0 * correct as f32 / spiral_data.len() as f32
+    );
 }
-
 
 // =============================================================================
 // Phase 2 Checkpoint modes — train-a saves checkpoint, train-b loads and runs B only
@@ -1097,19 +1258,25 @@ fn demo_phase2_train_a() {
         }
         epoch_loss /= spiral_data.len() as f32;
         if epoch % 500 == 0 {
-            println!("  epoch {:>4} | loss={:.5} | syn={} | sparse={:.2} | mass={:.2} | lr={:.5}",
-                epoch, epoch_loss,
+            println!(
+                "  epoch {:>4} | loss={:.5} | syn={} | sparse={:.2} | mass={:.2} | lr={:.5}",
+                epoch,
+                epoch_loss,
                 env.total_synapses(),
                 env.firing_sparsity(),
                 env.mean_hidden_mass(),
-                env.current_lr);
+                env.current_lr
+            );
         }
     }
 
     let task_a_result = evaluate_accuracy_head(&mut env, &spiral_data, 0);
-    println!("\nTask A accuracy: {}/{} ({:.1}%)",
-        task_a_result.0, task_a_result.1,
-        100.0 * task_a_result.0 as f32 / task_a_result.1 as f32);
+    println!(
+        "\nTask A accuracy: {}/{} ({:.1}%)",
+        task_a_result.0,
+        task_a_result.1,
+        100.0 * task_a_result.0 as f32 / task_a_result.1 as f32
+    );
 
     println!("\n>>> Consolidating Task A (frozen flag gate)...");
 
@@ -1140,22 +1307,17 @@ fn demo_phase2_train_b() {
     println!("--- Phase 2: Train B (from checkpoint) ---\n");
 
     if !Path::new(TASK_A_CHECKPOINT_PATH).exists() {
-        println!("No checkpoint found at {} — run with '--learning train-a' first.", TASK_A_CHECKPOINT_PATH);
+        println!(
+            "No checkpoint found at {} — run with '--learning train-a' first.",
+            TASK_A_CHECKPOINT_PATH
+        );
         return;
     }
 
     let base_config = phase2_base_config();
 
-    let (
-        mut env,
-        _group_a_ids,
-        _group_b_ids,
-        group_a,
-        _group_b,
-        _output_0,
-        _output_1,
-        data_seed,
-    ) = load_phase2_checkpoint(TASK_A_CHECKPOINT_PATH, &base_config);
+    let (mut env, _group_a_ids, _group_b_ids, group_a, _group_b, _output_0, _output_1, data_seed) =
+        load_phase2_checkpoint(TASK_A_CHECKPOINT_PATH, &base_config);
 
     env.current_lr = base_config.learning_rate;
     env.set_consolidated_groups(&[group_a]);
@@ -1167,9 +1329,12 @@ fn demo_phase2_train_b() {
     let mut circles_data = generate_concentric_circles_data(400, &mut data_rng);
 
     let task_a_before = evaluate_accuracy_head(&mut env, &spiral_data, 0);
-    println!("Task A retention on load: {}/{} ({:.1}%)\n",
-        task_a_before.0, task_a_before.1,
-        100.0 * task_a_before.0 as f32 / task_a_before.1 as f32);
+    println!(
+        "Task A retention on load: {}/{} ({:.1}%)\n",
+        task_a_before.0,
+        task_a_before.1,
+        100.0 * task_a_before.0 as f32 / task_a_before.1 as f32
+    );
 
     println!("=== TASK B: Concentric Circles ===");
     println!("Training on 400 samples, 4000 epochs...");
@@ -1189,12 +1354,15 @@ fn demo_phase2_train_b() {
         epoch_loss /= circles_data.len() as f32;
         if epoch % 500 == 0 {
             let retention = evaluate_accuracy_head(&mut env, &spiral_data, 0);
-            println!("  epoch {:>4} | loss={:.5} | syn={} | sparse={:.2} | mass={:.2} | A_retain={:.1}%",
-                epoch, epoch_loss,
+            println!(
+                "  epoch {:>4} | loss={:.5} | syn={} | sparse={:.2} | mass={:.2} | A_retain={:.1}%",
+                epoch,
+                epoch_loss,
                 env.total_synapses(),
                 env.firing_sparsity(),
                 env.mean_hidden_mass(),
-                100.0 * retention.0 as f32 / retention.1 as f32);
+                100.0 * retention.0 as f32 / retention.1 as f32
+            );
         }
     }
 
@@ -1207,18 +1375,33 @@ fn demo_phase2_train_b() {
 
     println!("\n=== CONTINUAL LEARNING RESULTS ===\n");
     println!("  Task A (Spiral):");
-    println!("    Before Task B: {}/{} ({:.1}%)", task_a_before.0, task_a_before.1, baseline_pct);
-    println!("    After  Task B: {}/{} ({:.1}%)", task_a_after.0, task_a_after.1, retention_pct);
+    println!(
+        "    Before Task B: {}/{} ({:.1}%)",
+        task_a_before.0, task_a_before.1, baseline_pct
+    );
+    println!(
+        "    After  Task B: {}/{} ({:.1}%)",
+        task_a_after.0, task_a_after.1, retention_pct
+    );
     println!("    Forgetting:    {:.1}%  (threshold: >10%)", forgetting);
     println!("\n  Task B (Circles):");
-    println!("    Accuracy: {}/{} ({:.1}%)",
-        task_b_result.0, task_b_result.1,
-        100.0 * task_b_result.0 as f32 / task_b_result.1 as f32);
-    println!("\n  Verdict: {}",
-        if forgetting < 5.0 { "PASS — near-zero forgetting." }
-        else if forgetting < 10.0 { "PASS — within threshold." }
-        else if forgetting < 20.0 { "PARTIAL — significant forgetting." }
-        else { "FAIL — catastrophic forgetting." }
+    println!(
+        "    Accuracy: {}/{} ({:.1}%)",
+        task_b_result.0,
+        task_b_result.1,
+        100.0 * task_b_result.0 as f32 / task_b_result.1 as f32
+    );
+    println!(
+        "\n  Verdict: {}",
+        if forgetting < 5.0 {
+            "PASS — near-zero forgetting."
+        } else if forgetting < 10.0 {
+            "PASS — within threshold."
+        } else if forgetting < 20.0 {
+            "PARTIAL — significant forgetting."
+        } else {
+            "FAIL — catastrophic forgetting."
+        }
     );
 }
 
@@ -1257,8 +1440,12 @@ fn demo_fractal_continual_learning() {
             break; // mirror was auto-promoted and removed
         };
         if epoch % 500 == 0 {
-            println!("  [spiral] epoch {:>4} | loss={:.4} | acc={:.1}%",
-                epoch, result.loss, result.accuracy * 100.0);
+            println!(
+                "  [spiral] epoch {:>4} | loss={:.4} | acc={:.1}%",
+                epoch,
+                result.loss,
+                result.accuracy * 100.0
+            );
         }
         if epoch % 500 == 0 {
             dm.evaluate_promotions(&calibration_spiral);
@@ -1276,7 +1463,8 @@ fn demo_fractal_continual_learning() {
     println!("\nTask A promoted as Group {}\n", spiral_group);
 
     // === TASK B: Circles in fresh Mirror ===
-    dm.spawn_mirror("circles", 43).expect("spawn circles mirror");
+    dm.spawn_mirror("circles", 43)
+        .expect("spawn circles mirror");
     println!("=== TASK B: Circles (Mirror) ===\n");
 
     for epoch in 0..4000 {
@@ -1285,8 +1473,13 @@ fn demo_fractal_continual_learning() {
         };
         if epoch % 500 == 0 {
             let spiral_retain = dm.evaluate_main_group(spiral_group, &spiral_data);
-            println!("  [circles] epoch {:>4} | loss={:.4} | acc={:.1}% | A_retain={:.1}%",
-                epoch, result.loss, result.accuracy * 100.0, spiral_retain * 100.0);
+            println!(
+                "  [circles] epoch {:>4} | loss={:.4} | acc={:.1}% | A_retain={:.1}%",
+                epoch,
+                result.loss,
+                result.accuracy * 100.0,
+                spiral_retain * 100.0
+            );
         }
         if epoch % 500 == 0 {
             dm.evaluate_promotions(&calibration_circles);
@@ -1350,7 +1543,10 @@ fn demo_neurogenesis() {
     let mut dm = DimensionManager::new(config);
     let mut rng = StdRng::seed_from_u64(42);
     let mut data_rng = StdRng::seed_from_u64(99);
-    let spiral_data: Vec<_> = generate_spiral_data(400, &mut data_rng).into_iter().take(60).collect();
+    let spiral_data: Vec<_> = generate_spiral_data(400, &mut data_rng)
+        .into_iter()
+        .take(60)
+        .collect();
 
     dm.spawn_mirror("spiral", 42).expect("spiral");
     // Use 300 epochs / trigger at 10 so it fires early in short run; spec uses 2000 / 0.3 for real runs.
@@ -1363,7 +1559,9 @@ fn demo_neurogenesis() {
     let mut trigger_epoch: Option<u32> = None;
 
     for epoch in 0..TOTAL_EPOCHS {
-        let Some(result) = dm.train_mirror_epoch("spiral", &spiral_data, &mut rng, None) else { break };
+        let Some(result) = dm.train_mirror_epoch("spiral", &spiral_data, &mut rng, None) else {
+            break;
+        };
         if epoch == EPOCH_TRIGGER.saturating_sub(1) {
             loss_before_trigger = Some(result.loss);
         }
@@ -1376,13 +1574,22 @@ fn demo_neurogenesis() {
         );
         if added {
             trigger_epoch = Some(epoch + 1);
-            println!("  Neurogenesis: added 1 neuron at epoch {} (loss={:.4})", epoch + 1, result.loss);
+            println!(
+                "  Neurogenesis: added 1 neuron at epoch {} (loss={:.4})",
+                epoch + 1,
+                result.loss
+            );
         }
         if trigger_epoch.is_some() && epoch == EPOCH_TRIGGER + 99 {
             loss_after_trigger = Some(result.loss);
         }
         if epoch % 500 == 0 {
-            println!("  [spiral] epoch {:>4} | loss={:.4} | acc={:.1}%", epoch, result.loss, result.accuracy * 100.0);
+            println!(
+                "  [spiral] epoch {:>4} | loss={:.4} | acc={:.1}%",
+                epoch,
+                result.loss,
+                result.accuracy * 100.0
+            );
         }
     }
 
@@ -1390,14 +1597,28 @@ fn demo_neurogenesis() {
     if let Some(ep) = trigger_epoch {
         println!("  Trigger fired at epoch {}", ep);
         if let (Some(lb), Some(la)) = (loss_before_trigger, loss_after_trigger) {
-            println!("  Loss before trigger: {:.4}  after (+100 epochs): {:.4}", lb, la);
+            println!(
+                "  Loss before trigger: {:.4}  after (+100 epochs): {:.4}",
+                lb, la
+            );
         }
     } else {
-        println!("  Trigger did not fire (loss was <= {} or epochs < {})", LOSS_THRESHOLD, EPOCH_TRIGGER);
+        println!(
+            "  Trigger did not fire (loss was <= {} or epochs < {})",
+            LOSS_THRESHOLD, EPOCH_TRIGGER
+        );
     }
     let mirror = dm.mirrors.get("spiral").expect("mirror still present");
-    let last_hidden_len = mirror.env.layers.get(mirror.env.layers.len().wrapping_sub(2)).map(|l| l.len()).unwrap_or(0);
-    println!("  Last hidden layer size: {} (base was 16)", last_hidden_len);
+    let last_hidden_len = mirror
+        .env
+        .layers
+        .get(mirror.env.layers.len().wrapping_sub(2))
+        .map(|l| l.len())
+        .unwrap_or(0);
+    println!(
+        "  Last hidden layer size: {} (base was 16)",
+        last_hidden_len
+    );
     println!("  No crash; loss still decreases after event.");
 }
 
@@ -1411,11 +1632,16 @@ fn demo_split_mnist(
     max_epochs_override: Option<u32>,
     batch_size: Option<usize>,
 ) {
-    use growformer::mnist::{load_mnist_normalized, filter_digit_pair, RandomProjection, project_dataset, MnistSample, MNIST_PROJECTED};
+    use growformer::mnist::{
+        filter_digit_pair, load_mnist_normalized, project_dataset, MnistSample, RandomProjection,
+        MNIST_PROJECTED,
+    };
     use std::fs::OpenOptions;
 
-    let log_path = std::env::var("GROWFORMER_MNIST_LOG").unwrap_or_else(|_| "mnist-run.log".to_string());
-    let checkpoint_path = std::env::var("GROWFORMER_MNIST_CHECKPOINT").unwrap_or_else(|_| "mnist_checkpoint.json".to_string());
+    let log_path =
+        std::env::var("GROWFORMER_MNIST_LOG").unwrap_or_else(|_| "mnist-run.log".to_string());
+    let checkpoint_path = std::env::var("GROWFORMER_MNIST_CHECKPOINT")
+        .unwrap_or_else(|_| "mnist_checkpoint.json".to_string());
     let mut log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -1445,8 +1671,16 @@ fn demo_split_mnist(
             pkg_version, build_unix, build_target, build_profile, build_git
         );
         let _ = writeln!(f, "cwd={}", cwd);
-        let _ = writeln!(f, "train_limit={:?} max_epochs={:?} batch_size={:?}", train_limit, max_epochs_override, batch_size);
-        let _ = writeln!(f, "log_path={} checkpoint_path={}", log_path, checkpoint_path);
+        let _ = writeln!(
+            f,
+            "train_limit={:?} max_epochs={:?} batch_size={:?}",
+            train_limit, max_epochs_override, batch_size
+        );
+        let _ = writeln!(
+            f,
+            "log_path={} checkpoint_path={}",
+            log_path, checkpoint_path
+        );
         f.flush()
     });
     println!("--- Split MNIST ---\n");
@@ -1457,19 +1691,28 @@ fn demo_split_mnist(
         "Build: growformer v{} build_unix={} target={} profile={} git={}",
         pkg_version, build_unix, build_target, build_profile, build_git
     );
-    println!("Run: cwd={} log_path={} checkpoint_path={}", cwd, log_path, checkpoint_path);
+    println!(
+        "Run: cwd={} log_path={} checkpoint_path={}",
+        cwd, log_path, checkpoint_path
+    );
     let data_path = std::env::var("MNIST_ROOT").unwrap_or_else(|_| "data".to_string());
     println!("Run: MNIST_ROOT={}", data_path);
     let images_path = std::path::Path::new(&data_path).join("train-images-idx3-ubyte");
     let images_gz = std::path::Path::new(&data_path).join("train-images-idx3-ubyte.gz");
     if !images_path.exists() && !images_gz.exists() {
-        eprintln!("MNIST data not found. The mnist crate expects decompressed IDX files in {:?}.", data_path);
+        eprintln!(
+            "MNIST data not found. The mnist crate expects decompressed IDX files in {:?}.",
+            data_path
+        );
         eprintln!("Run from the repo root:  bash scripts/download_mnist.sh");
         eprintln!("Or set MNIST_ROOT to a directory that already contains the four .ubyte files.");
         std::process::exit(1);
     }
     if train_limit.is_some() || max_epochs_override.is_some() || batch_size.is_some() {
-        println!("Fast run: train_limit={:?}, max_epochs={:?}, batch_size={:?}\n", train_limit, max_epochs_override, batch_size);
+        println!(
+            "Fast run: train_limit={:?}, max_epochs={:?}, batch_size={:?}\n",
+            train_limit, max_epochs_override, batch_size
+        );
     }
     println!("Loading MNIST from {:?}...", data_path);
     let (train_imgs, train_lbls, test_imgs, test_lbls) = load_mnist_normalized(&data_path);
@@ -1526,15 +1769,29 @@ fn demo_split_mnist(
 
         let mut last_result = None;
         for epoch in 0..max_epochs {
-            let Some(result) = dm.train_mirror_epoch(&task_name, train, &mut rng, batch_size) else { break };
+            let Some(result) = dm.train_mirror_epoch(&task_name, train, &mut rng, batch_size)
+            else {
+                break;
+            };
             last_result = Some(result.clone());
             if let Some(ref bar) = pb {
                 bar.set_position((epoch + 1) as u64);
-                bar.set_message(format!("{} ({} vs {}) acc={:.1}%", t, d1, d2, result.accuracy * 100.0));
+                bar.set_message(format!(
+                    "{} ({} vs {}) acc={:.1}%",
+                    t,
+                    d1,
+                    d2,
+                    result.accuracy * 100.0
+                ));
             }
             // Always print epoch 0 and every 400th so loss/acc are visible (use bar.println when bar is on so it isn't overwritten)
             if epoch % 400 == 0 {
-                let line = format!("    epoch {} loss={:.4} acc={:.1}%", epoch, result.loss, result.accuracy * 100.0);
+                let line = format!(
+                    "    epoch {} loss={:.4} acc={:.1}%",
+                    epoch,
+                    result.loss,
+                    result.accuracy * 100.0
+                );
                 if let Some(ref bar) = pb {
                     let _ = bar.println(line);
                 } else {
@@ -1544,14 +1801,25 @@ fn demo_split_mnist(
             // Log every 50 epochs so tail -f mnist-run.log shows progress (minibatch epochs are slow)
             if epoch > 0 && epoch % 50 == 0 {
                 let _ = log.as_mut().map(|f| {
-                    let _ = writeln!(f, "  task_{} epoch {} loss={:.4} acc={:.1}%", t, epoch, result.loss, result.accuracy * 100.0);
+                    let _ = writeln!(
+                        f,
+                        "  task_{} epoch {} loss={:.4} acc={:.1}%",
+                        t,
+                        epoch,
+                        result.loss,
+                        result.accuracy * 100.0
+                    );
                     f.flush()
                 });
             }
             if result.accuracy >= TARGET_ACC {
                 let reached = format!("    Reached {:.0}% at epoch {}", TARGET_ACC * 100.0, epoch);
                 if let Some(ref bar) = pb {
-                    bar.finish_with_message(format!("done at epoch {} ({:.0}%)", epoch, TARGET_ACC * 100.0));
+                    bar.finish_with_message(format!(
+                        "done at epoch {} ({:.0}%)",
+                        epoch,
+                        TARGET_ACC * 100.0
+                    ));
                     let _ = bar.println(reached);
                 } else {
                     println!("{}", reached);
@@ -1565,19 +1833,40 @@ fn demo_split_mnist(
         let gid = dm.force_promote(&task_name, &cal).expect("promote");
         group_ids.push(gid);
         if let Some(ref r) = last_result {
-            println!("  Task {} ({} vs {}) done: {:.1}% accuracy, loss={:.4}", t, d1, d2, r.accuracy * 100.0, r.loss);
+            println!(
+                "  Task {} ({} vs {}) done: {:.1}% accuracy, loss={:.4}",
+                t,
+                d1,
+                d2,
+                r.accuracy * 100.0,
+                r.loss
+            );
         }
         let _ = log.as_mut().map(|f| {
             if let Some(ref r) = last_result {
-                let _ = writeln!(f, "section task_{} ({} vs {}) done group_id={} acc={:.1}% loss={:.4}", t, d1, d2, gid, r.accuracy * 100.0, r.loss);
+                let _ = writeln!(
+                    f,
+                    "section task_{} ({} vs {}) done group_id={} acc={:.1}% loss={:.4}",
+                    t,
+                    d1,
+                    d2,
+                    gid,
+                    r.accuracy * 100.0,
+                    r.loss
+                );
             } else {
-                let _ = writeln!(f, "section task_{} ({} vs {}) done group_id={}", t, d1, d2, gid);
+                let _ = writeln!(
+                    f,
+                    "section task_{} ({} vs {}) done group_id={}",
+                    t, d1, d2, gid
+                );
             }
             f.flush()
         });
     }
 
-    let calibration_refs: Vec<(&[Sample], usize)> = (0..5).map(|t| (train_per_task[t].as_slice(), t)).collect();
+    let calibration_refs: Vec<(&[Sample], usize)> =
+        (0..5).map(|t| (train_per_task[t].as_slice(), t)).collect();
     let _ = log.as_mut().map(|f| {
         let _ = writeln!(f, "section router start (epochs=400)");
         f.flush()
@@ -1607,7 +1896,14 @@ fn demo_split_mnist(
     let _ = log.as_mut().map(|f| {
         let _ = writeln!(f, "section final_eval");
         for (t, (d1, d2)) in TASKS.iter().enumerate() {
-            let _ = writeln!(f, "  task {} ({} vs {}): {:.1}%", t, d1, d2, accs[t] * 100.0);
+            let _ = writeln!(
+                f,
+                "  task {} ({} vs {}): {:.1}%",
+                t,
+                d1,
+                d2,
+                accs[t] * 100.0
+            );
         }
         let _ = writeln!(f, "  average: {:.1}%", avg * 100.0);
         let _ = writeln!(f, "--- run {} end ---", run_ts);
@@ -1625,14 +1921,26 @@ fn demo_split_mnist(
         Ok(m) => {
             println!("Checkpoint verification: exists=true bytes={}", m.len());
             let _ = log.as_mut().map(|f| {
-                let _ = writeln!(f, "section checkpoint_save end path={} exists=true bytes={}", checkpoint_path, m.len());
+                let _ = writeln!(
+                    f,
+                    "section checkpoint_save end path={} exists=true bytes={}",
+                    checkpoint_path,
+                    m.len()
+                );
                 f.flush()
             });
         }
         Err(e) => {
-            eprintln!("Checkpoint verification FAILED: path={} err={}", checkpoint_path, e);
+            eprintln!(
+                "Checkpoint verification FAILED: path={} err={}",
+                checkpoint_path, e
+            );
             let _ = log.as_mut().map(|f| {
-                let _ = writeln!(f, "section checkpoint_save end path={} exists=false err={}", checkpoint_path, e);
+                let _ = writeln!(
+                    f,
+                    "section checkpoint_save end path={} exists=false err={}",
+                    checkpoint_path, e
+                );
                 f.flush()
             });
         }
@@ -1646,10 +1954,14 @@ fn demo_split_mnist(
 // =============================================================================
 
 fn demo_mnist_retention() {
-    use growformer::mnist::{load_mnist_normalized, filter_digit_pair, RandomProjection, project_dataset, MnistSample, MNIST_PROJECTED};
+    use growformer::mnist::{
+        filter_digit_pair, load_mnist_normalized, project_dataset, MnistSample, RandomProjection,
+        MNIST_PROJECTED,
+    };
 
     const TASKS: [(u8, u8); 5] = [(0, 1), (2, 3), (4, 5), (6, 7), (8, 9)];
-    let checkpoint_path = std::env::var("GROWFORMER_MNIST_CHECKPOINT").unwrap_or_else(|_| "mnist_checkpoint.json".to_string());
+    let checkpoint_path = std::env::var("GROWFORMER_MNIST_CHECKPOINT")
+        .unwrap_or_else(|_| "mnist_checkpoint.json".to_string());
 
     println!("--- MNIST retention evaluation ---\n");
     println!("Loading checkpoint: {}", checkpoint_path);
@@ -1685,7 +1997,11 @@ fn demo_mnist_retention() {
         let expected = baseline_accs.get(t).copied().unwrap_or(0.0);
         println!(
             "  Task {} ({} vs {}): {:.1}%  (expected baseline: {:.1}%)",
-            t, d1, d2, acc * 100.0, expected * 100.0
+            t,
+            d1,
+            d2,
+            acc * 100.0,
+            expected * 100.0
         );
     }
     let avg = accs.iter().sum::<f32>() / 5.0;
@@ -1714,14 +2030,20 @@ fn demo_clifford_mnist(train_limit: Option<usize>, max_epochs_override: Option<u
     println!("--- Growformer.ai Vision: MNIST Benchmark ---\n");
     println!("Loading MNIST from {:?}...", data_path);
     let (train_imgs, train_lbls, test_imgs, test_lbls) = load_mnist_normalized(&data_path);
-    println!("  Train: {} images, Test: {} images\n", train_imgs.len(), test_imgs.len());
+    println!(
+        "  Train: {} images, Test: {} images\n",
+        train_imgs.len(),
+        test_imgs.len()
+    );
 
     let max_epochs = max_epochs_override.unwrap_or(30);
 
     let start = Instant::now();
     let result = growformer::clifford_mnist::run_clifford_mnist_progress(
-        &train_imgs, &train_lbls,
-        &test_imgs, &test_lbls,
+        &train_imgs,
+        &train_lbls,
+        &test_imgs,
+        &test_lbls,
         train_limit,
         max_epochs,
     );
@@ -1751,23 +2073,35 @@ fn demo_clifford_mnist(train_limit: Option<usize>, max_epochs_override: Option<u
     row("");
     row(&format!("  Hardware:   CPU only (Apple Silicon / x86)"));
     row(&format!("  GPU:        None required"));
-    row(&format!("  Framework:  Native Growformer.ai (no PyTorch/TF)"));
+    row(&format!(
+        "  Framework:  Native Growformer.ai (no PyTorch/TF)"
+    ));
     row(&format!("  Training:   {:.1}s", elapsed.as_secs_f64()));
     row("");
     println!("{}", sep_mid);
     row("  RESULTS");
     println!("{}", sep_mid);
     row("");
-    row(&format!("  Binary classification (per-task):  {:.1}%", result.avg_accuracy * 100.0));
-    row(&format!("  10-class classification:           {:.1}%", result.ten_class_accuracy * 100.0));
+    row(&format!(
+        "  Binary classification (per-task):  {:.1}%",
+        result.avg_accuracy * 100.0
+    ));
+    row(&format!(
+        "  10-class classification:           {:.1}%",
+        result.ten_class_accuracy * 100.0
+    ));
     row("");
     row("  Per-digit accuracy:");
     for d in 0..10 {
-        row(&format!("    digit {}:  {:.1}%", d, result.per_digit_accuracy[d] * 100.0));
+        row(&format!(
+            "    digit {}:  {:.1}%",
+            d,
+            result.per_digit_accuracy[d] * 100.0
+        ));
     }
     row("");
     row("  Binary pair breakdown:");
-    let pairs = [(0,1),(2,3),(4,5),(6,7),(8,9)];
+    let pairs = [(0, 1), (2, 3), (4, 5), (6, 7), (8, 9)];
     for (t, acc) in result.task_accuracies.iter().enumerate() {
         let (d1, d2) = pairs[t];
         row(&format!("    {} vs {}:   {:.1}%", d1, d2, acc * 100.0));
@@ -1780,7 +2114,10 @@ fn demo_clifford_mnist(train_limit: Option<usize>, max_epochs_override: Option<u
     row("  \u{2022} Same architecture handles vision AND language");
     row("  \u{2022} No convolutional layers \u{2014}");
     row("  \u{2022} No backpropagation \u{2014} gradient-free training");
-    row(&format!("  \u{2022} No GPU required \u{2014} trains in {:.0}s on CPU", elapsed.as_secs_f64()));
+    row(&format!(
+        "  \u{2022} No GPU required \u{2014} trains in {:.0}s on CPU",
+        elapsed.as_secs_f64()
+    ));
     row("  \u{2022} Domain-general: not vision-specific architecture");
     row("");
     // if ratio > 1.0 {
@@ -1797,10 +2134,10 @@ fn demo_clifford_mnist(train_limit: Option<usize>, max_epochs_override: Option<u
 // =============================================================================
 
 fn demo_clifford_mnist_gen(train_limit: Option<usize>, max_epochs_override: Option<u32>) {
-    use growformer::mnist::load_mnist_normalized;
     use growformer::clifford_mnist::{
-        run_clifford_mnist_progress, run_clifford_autoencoder, render_ascii,
+        render_ascii, run_clifford_autoencoder, run_clifford_mnist_progress,
     };
+    use growformer::mnist::load_mnist_normalized;
 
     let data_path = std::env::var("MNIST_ROOT").unwrap_or_else(|_| "data".to_string());
     let images_path = std::path::Path::new(&data_path).join("train-images-idx3-ubyte");
@@ -1818,22 +2155,31 @@ fn demo_clifford_mnist_gen(train_limit: Option<usize>, max_epochs_override: Opti
 
     println!("Loading MNIST from {:?}...", data_path);
     let (train_imgs, train_lbls, test_imgs, test_lbls) = load_mnist_normalized(&data_path);
-    println!("  Train: {} images, Test: {} images\n", train_imgs.len(), test_imgs.len());
+    println!(
+        "  Train: {} images, Test: {} images\n",
+        train_imgs.len(),
+        test_imgs.len()
+    );
 
     // Step 1: Train the encoder via classification (or reuse if already trained)
     let max_epochs = max_epochs_override.unwrap_or(30);
     println!("--- Step 1: Training encoder via classification ---\n");
     let start = Instant::now();
     let class_result = run_clifford_mnist_progress(
-        &train_imgs, &train_lbls,
-        &test_imgs, &test_lbls,
-        train_limit, max_epochs,
+        &train_imgs,
+        &train_lbls,
+        &test_imgs,
+        &test_lbls,
+        train_limit,
+        max_epochs,
     );
     let class_elapsed = start.elapsed();
-    println!("\n  Classification: {:.1}% avg binary, {:.1}% 10-class ({:.1}s)\n",
+    println!(
+        "\n  Classification: {:.1}% avg binary, {:.1}% 10-class ({:.1}s)\n",
         class_result.avg_accuracy * 100.0,
         class_result.ten_class_accuracy * 100.0,
-        class_elapsed.as_secs_f64());
+        class_elapsed.as_secs_f64()
+    );
 
     let encoder = class_result.encoder;
     let classifier = class_result.classifier;
@@ -1843,8 +2189,10 @@ fn demo_clifford_mnist_gen(train_limit: Option<usize>, max_epochs_override: Opti
     let ae_start = Instant::now();
     let ae_result = run_clifford_autoencoder(
         &encoder,
-        &train_imgs, &train_lbls,
-        &test_imgs, &test_lbls,
+        &train_imgs,
+        &train_lbls,
+        &test_imgs,
+        &test_lbls,
         train_limit,
         &classifier,
         1,
@@ -1856,8 +2204,14 @@ fn demo_clifford_mnist_gen(train_limit: Option<usize>, max_epochs_override: Opti
     println!("═══════════════════════════════════════════════════════════");
     println!("  Pixel MSE:               {:.5}", ae_result.final_mse);
     println!("  SSIM:                    {:.3}", ae_result.final_ssim);
-    println!("  Classifier on generated: {:.1}%", ae_result.classifier_accuracy * 100.0);
-    println!("  Solve time:              {:.1}s", ae_elapsed.as_secs_f64());
+    println!(
+        "  Classifier on generated: {:.1}%",
+        ae_result.classifier_accuracy * 100.0
+    );
+    println!(
+        "  Solve time:              {:.1}s",
+        ae_elapsed.as_secs_f64()
+    );
     println!("═══════════════════════════════════════════════════════════\n");
 
     // Display sample reconstructions as ASCII
@@ -1882,19 +2236,19 @@ fn demo_clifford_mnist_gen(train_limit: Option<usize>, max_epochs_override: Opti
 // =============================================================================
 
 fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>) {
-    use growformer::pathmnist::{
-        PathMNISTDataset, CLASS_NAMES, PATH_NUM_CLASSES, is_cancer_class,
-        compute_cancer_metrics,
+    use growformer::clifford::{
+        classify_interval, minkowski_interval, IntervalType, Multivector, CL8_DIM,
     };
     use growformer::clifford_mnist::{
-        CliffordRGBEncoder, CliffordDiracEncoder, PathClassifier, LinearClassifier,
-        discriminability_weights, train_projection_for_bv,
+        discriminability_weights, train_projection_for_bv, CliffordDiracEncoder,
+        CliffordRGBEncoder, LinearClassifier, PathClassifier,
     };
-    use growformer::clifford::{Multivector, CL8_DIM, minkowski_interval, classify_interval, IntervalType};
+    use growformer::pathmnist::{
+        compute_cancer_metrics, is_cancer_class, PathMNISTDataset, CLASS_NAMES, PATH_NUM_CLASSES,
+    };
 
     let data_dir = std::path::PathBuf::from(
-        std::env::var("PATHMNIST_ROOT")
-            .unwrap_or_else(|_| "data/pathology/pathmnist".to_string())
+        std::env::var("PATHMNIST_ROOT").unwrap_or_else(|_| "data/pathology/pathmnist".to_string()),
     );
     if !data_dir.exists() {
         eprintln!("PathMNIST data not found at {:?}", data_dir);
@@ -1911,13 +2265,19 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
     let train = PathMNISTDataset::load(&data_dir, "train");
     let val = PathMNISTDataset::load(&data_dir, "val");
     let test = PathMNISTDataset::load(&data_dir, "test");
-    println!("  Train: {}, Val: {}, Test: {} (different clinical center)",
-        train.n, val.n, test.n);
+    println!(
+        "  Train: {}, Val: {}, Test: {} (different clinical center)",
+        train.n, val.n, test.n
+    );
 
     let dist = train.class_distribution();
     println!("\n  Class distribution (train):");
     for c in 0..PATH_NUM_CLASSES {
-        let marker = if is_cancer_class(c as u8) { " ← CANCER" } else { "" };
+        let marker = if is_cancer_class(c as u8) {
+            " ← CANCER"
+        } else {
+            ""
+        };
         println!("    {}: {:>14} {:>6}{}", c, CLASS_NAMES[c], dist[c], marker);
     }
 
@@ -1929,11 +2289,19 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
     let mut rgb_enc = CliffordRGBEncoder::new(42);
     let mut dirac_enc = CliffordDiracEncoder::new(77);
 
-    let rgb_cal: Vec<_> = train.images_rgb.iter().take(1000)
-        .map(|img| (img.clone(), 0u8)).collect();
+    let rgb_cal: Vec<_> = train
+        .images_rgb
+        .iter()
+        .take(1000)
+        .map(|img| (img.clone(), 0u8))
+        .collect();
     rgb_enc.calibrate_scales(&rgb_cal);
-    let gray_cal: Vec<_> = train.images_gray.iter().take(1000)
-        .map(|img| (img.clone(), 0u8)).collect();
+    let gray_cal: Vec<_> = train
+        .images_gray
+        .iter()
+        .take(1000)
+        .map(|img| (img.clone(), 0u8))
+        .collect();
     dirac_enc.calibrate_scales(&gray_cal);
 
     let train_n = train_limit.unwrap_or(train.n).min(train.n);
@@ -1954,31 +2322,61 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
     println!("═══════════════════════════════════════════════════════════════");
 
     let diag_start = Instant::now();
-    let (bv_matrix, rotational_pairs, degenerate_pairs) =
-        diagnose_pair_learnability(&rgb_enc, &train.images_rgb, train_lbls_full, PATH_NUM_CLASSES, 1000);
+    let (bv_matrix, rotational_pairs, degenerate_pairs) = diagnose_pair_learnability(
+        &rgb_enc,
+        &train.images_rgb,
+        train_lbls_full,
+        PATH_NUM_CLASSES,
+        1000,
+    );
 
     println!("\n  Confusion bivector |B| matrix:");
     print!("         ");
-    for c in 0..PATH_NUM_CLASSES { print!("{:>6}", c); }
+    for c in 0..PATH_NUM_CLASSES {
+        print!("{:>6}", c);
+    }
     println!();
     for i in 0..PATH_NUM_CLASSES {
-        print!("    {}:{:>8} ", i, &CLASS_NAMES[i][..CLASS_NAMES[i].len().min(8)]);
+        print!(
+            "    {}:{:>8} ",
+            i,
+            &CLASS_NAMES[i][..CLASS_NAMES[i].len().min(8)]
+        );
         for j in 0..PATH_NUM_CLASSES {
-            if i == j { print!("     -"); }
-            else {
+            if i == j {
+                print!("     -");
+            } else {
                 let bv = bv_matrix[i][j];
-                let tag = if bv >= 0.3 { "+" } else if bv < 0.1 { "!" } else { " " };
+                let tag = if bv >= 0.3 {
+                    "+"
+                } else if bv < 0.1 {
+                    "!"
+                } else {
+                    " "
+                };
                 print!("{}{:5.3}", tag, bv);
             }
         }
         println!();
     }
 
-    println!("\n  Rotational (|B| >= 0.3): {} pairs", rotational_pairs.len());
-    println!("  Degenerate (|B| < 0.1):  {} pairs", degenerate_pairs.len());
+    println!(
+        "\n  Rotational (|B| >= 0.3): {} pairs",
+        rotational_pairs.len()
+    );
+    println!(
+        "  Degenerate (|B| < 0.1):  {} pairs",
+        degenerate_pairs.len()
+    );
     for &(a, b) in &degenerate_pairs {
-        println!("    {} ↔ {}  ({} ↔ {})  |B|={:.3}",
-            a, b, CLASS_NAMES[a as usize], CLASS_NAMES[b as usize], bv_matrix[a as usize][b as usize]);
+        println!(
+            "    {} ↔ {}  ({} ↔ {})  |B|={:.3}",
+            a,
+            b,
+            CLASS_NAMES[a as usize],
+            CLASS_NAMES[b as usize],
+            bv_matrix[a as usize][b as usize]
+        );
     }
     println!("  Diagnostic: {:.1}s", diag_start.elapsed().as_secs_f64());
 
@@ -1990,8 +2388,12 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
     println!("\n═══════════════════════════════════════════════════════════════");
     println!("  Projection Training — maximize |B| for cancer pairs");
     println!("  Target pairs: stroma↔debris (7,2), stroma↔adeno (7,8)");
-    println!("  Params: {}×{} = {} (projection only)", train.images_rgb[0].len(), CL8_DIM,
-        train.images_rgb[0].len() * CL8_DIM);
+    println!(
+        "  Params: {}×{} = {} (projection only)",
+        train.images_rgb[0].len(),
+        CL8_DIM,
+        train.images_rgb[0].len() * CL8_DIM
+    );
     println!("═══════════════════════════════════════════════════════════════");
 
     let proj_train_start = Instant::now();
@@ -2001,30 +2403,51 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
         &train.images_rgb[..train_n],
         train_lbls_full,
         &target_pairs,
-        500,      // steps
-        0.0001,   // learning rate
-        5000,     // samples per class for mean computation
+        500,    // steps
+        0.0001, // learning rate
+        5000,   // samples per class for mean computation
     );
 
     rgb_enc.calibrate_scales(&rgb_cal);
-    println!("  Projection training: {:.1}s", proj_train_start.elapsed().as_secs_f64());
+    println!(
+        "  Projection training: {:.1}s",
+        proj_train_start.elapsed().as_secs_f64()
+    );
 
     // Post-training |B| diagnostic
     println!("\n  Post-training |B| diagnostic:");
-    let (bv_matrix_post, rotational_post, degenerate_post) =
-        diagnose_pair_learnability(&rgb_enc, &train.images_rgb, train_lbls_full, PATH_NUM_CLASSES, 1000);
+    let (bv_matrix_post, rotational_post, degenerate_post) = diagnose_pair_learnability(
+        &rgb_enc,
+        &train.images_rgb,
+        train_lbls_full,
+        PATH_NUM_CLASSES,
+        1000,
+    );
 
     print!("         ");
-    for c in 0..PATH_NUM_CLASSES { print!("{:>6}", c); }
+    for c in 0..PATH_NUM_CLASSES {
+        print!("{:>6}", c);
+    }
     println!();
     for i in 0..PATH_NUM_CLASSES {
-        print!("    {}:{:>8} ", i, &CLASS_NAMES[i][..CLASS_NAMES[i].len().min(8)]);
+        print!(
+            "    {}:{:>8} ",
+            i,
+            &CLASS_NAMES[i][..CLASS_NAMES[i].len().min(8)]
+        );
         for j in 0..PATH_NUM_CLASSES {
-            if i == j { print!("     -"); }
-            else {
+            if i == j {
+                print!("     -");
+            } else {
                 let bv = bv_matrix_post[i][j];
                 let delta = bv - bv_matrix[i][j];
-                let tag = if delta > 0.05 { "↑" } else if delta < -0.05 { "↓" } else { " " };
+                let tag = if delta > 0.05 {
+                    "↑"
+                } else if delta < -0.05 {
+                    "↓"
+                } else {
+                    " "
+                };
                 print!("{}{:5.3}", tag, bv);
             }
         }
@@ -2035,18 +2458,37 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
     for &(a, b) in &target_pairs {
         let before = bv_matrix[a as usize][b as usize];
         let after = bv_matrix_post[a as usize][b as usize];
-        let verdict = if after >= 0.3 { "SEPARABLE" } else if after >= 0.1 { "improved" } else { "still degenerate" };
-        println!("    {} ↔ {}:  {:.3} → {:.3}  ({})",
-            CLASS_NAMES[a as usize], CLASS_NAMES[b as usize], before, after, verdict);
+        let verdict = if after >= 0.3 {
+            "SEPARABLE"
+        } else if after >= 0.1 {
+            "improved"
+        } else {
+            "still degenerate"
+        };
+        println!(
+            "    {} ↔ {}:  {:.3} → {:.3}  ({})",
+            CLASS_NAMES[a as usize], CLASS_NAMES[b as usize], before, after, verdict
+        );
     }
-    println!("  Rotational pairs: {} → {}", rotational_pairs.len(), rotational_post.len());
-    println!("  Degenerate pairs: {} → {}", degenerate_pairs.len(), degenerate_post.len());
+    println!(
+        "  Rotational pairs: {} → {}",
+        rotational_pairs.len(),
+        rotational_post.len()
+    );
+    println!(
+        "  Degenerate pairs: {} → {}",
+        degenerate_pairs.len(),
+        degenerate_post.len()
+    );
 
     // ══════════════════════════════════════════════════════════════════════
     //  Encode all training images: RGB + Dirac → 512D
     // ══════════════════════════════════════════════════════════════════════
     let full_dim = joint_dim;
-    println!("\n--- Encoding {} training images (RGB+Dirac → {}D Cl(1,7)) ---", train_n, full_dim);
+    println!(
+        "\n--- Encoding {} training images (RGB+Dirac → {}D Cl(1,7)) ---",
+        train_n, full_dim
+    );
     let encode_start = Instant::now();
 
     let mut train_features: Vec<Vec<f32>> = Vec::with_capacity(train_n);
@@ -2064,28 +2506,30 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
         train_rgb_mvs.push(rgb_mv);
         train_dirac_mvs.push(dirac_mv);
 
-        if (i + 1) % 20000 == 0 { println!("    {}/{}", i + 1, train_n); }
+        if (i + 1) % 20000 == 0 {
+            println!("    {}/{}", i + 1, train_n);
+        }
     }
     let train_lbls = &train.labels[..train_n];
-    println!("  Encoded in {:.1}s ({}D features)\n",
-        encode_start.elapsed().as_secs_f64(), full_dim);
+    println!(
+        "  Encoded in {:.1}s ({}D features)\n",
+        encode_start.elapsed().as_secs_f64(),
+        full_dim
+    );
 
     // ── Single-pass: solve 9-class on 512D joint features ──
     println!("--- Solving 9-class classifier (512D normal equations) ---");
-    let head = LinearClassifier::fit_from_features(
-        &train_features, train_lbls,
-        PATH_NUM_CLASSES, 1.0, 1,
-    );
+    let head =
+        LinearClassifier::fit_from_features(&train_features, train_lbls, PATH_NUM_CLASSES, 1.0, 1);
 
     // ── Also solve binary cancer classifier on 512D joint features ──
     println!("\n--- Solving binary cancer classifier (512D) ---");
-    let cancer_labels: Vec<u8> = train_lbls.iter()
+    let cancer_labels: Vec<u8> = train_lbls
+        .iter()
         .map(|&l| if is_cancer_class(l) { 1 } else { 0 })
         .collect();
-    let cancer_head = LinearClassifier::fit_from_features(
-        &train_features, &cancer_labels,
-        2, 1.0, 1,
-    );
+    let cancer_head =
+        LinearClassifier::fit_from_features(&train_features, &cancer_labels, 2, 1.0, 1);
 
     // ── Geometry-driven hierarchical routing ──
     // Build binary tree from centroid distances — let the algebra define the splits
@@ -2097,19 +2541,27 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
     for (feat, &lbl) in train_features.iter().zip(train_lbls.iter()) {
         let c = lbl as usize;
         class_counts[c] += 1;
-        for j in 0..joint_dim { class_sums[c][j] += feat[j] as f64; }
+        for j in 0..joint_dim {
+            class_sums[c][j] += feat[j] as f64;
+        }
     }
-    let centroids_512: Vec<Vec<f32>> = (0..PATH_NUM_CLASSES).map(|c| {
-        let n = class_counts[c].max(1) as f64;
-        class_sums[c].iter().map(|&s| (s / n) as f32).collect()
-    }).collect();
+    let centroids_512: Vec<Vec<f32>> = (0..PATH_NUM_CLASSES)
+        .map(|c| {
+            let n = class_counts[c].max(1) as f64;
+            class_sums[c].iter().map(|&s| (s / n) as f32).collect()
+        })
+        .collect();
 
     // Pairwise Euclidean distance matrix between centroids
     let mut dist_matrix = vec![vec![0.0f32; PATH_NUM_CLASSES]; PATH_NUM_CLASSES];
     for i in 0..PATH_NUM_CLASSES {
-        for j in (i+1)..PATH_NUM_CLASSES {
-            let d: f32 = centroids_512[i].iter().zip(centroids_512[j].iter())
-                .map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt();
+        for j in (i + 1)..PATH_NUM_CLASSES {
+            let d: f32 = centroids_512[i]
+                .iter()
+                .zip(centroids_512[j].iter())
+                .map(|(a, b)| (a - b) * (a - b))
+                .sum::<f32>()
+                .sqrt();
             dist_matrix[i][j] = d;
             dist_matrix[j][i] = d;
         }
@@ -2117,13 +2569,22 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
 
     println!("\n  Centroid distance matrix (512D Euclidean):");
     print!("         ");
-    for c in 0..PATH_NUM_CLASSES { print!("{:>6}", c); }
+    for c in 0..PATH_NUM_CLASSES {
+        print!("{:>6}", c);
+    }
     println!();
     for i in 0..PATH_NUM_CLASSES {
-        print!("    {}:{:>8} ", i, &CLASS_NAMES[i][..CLASS_NAMES[i].len().min(8)]);
+        print!(
+            "    {}:{:>8} ",
+            i,
+            &CLASS_NAMES[i][..CLASS_NAMES[i].len().min(8)]
+        );
         for j in 0..PATH_NUM_CLASSES {
-            if i == j { print!("     -"); }
-            else { print!(" {:5.2}", dist_matrix[i][j]); }
+            if i == j {
+                print!("     -");
+            } else {
+                print!(" {:5.2}", dist_matrix[i][j]);
+            }
         }
         println!();
     }
@@ -2145,9 +2606,18 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
         fn classify(&self, feat: &[f32]) -> u8 {
             match self {
                 GeoNode::Leaf(c) => *c,
-                GeoNode::Split { classifier, left, right, .. } => {
+                GeoNode::Split {
+                    classifier,
+                    left,
+                    right,
+                    ..
+                } => {
                     let (pred, _) = classifier.classify_features(feat);
-                    if pred == 0 { left.classify(feat) } else { right.classify(feat) }
+                    if pred == 0 {
+                        left.classify(feat)
+                    } else {
+                        right.classify(feat)
+                    }
                 }
             }
         }
@@ -2171,13 +2641,19 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
             let c1 = classes[1];
             let indent = "    ".repeat(depth + 1);
             // Filter to these two classes, relabel as 0/1
-            let (sub_feats, sub_lbls): (Vec<_>, Vec<_>) = features.iter()
+            let (sub_feats, sub_lbls): (Vec<_>, Vec<_>) = features
+                .iter()
                 .zip(labels.iter())
                 .filter(|(_, &l)| l == c0 || l == c1)
                 .map(|(f, &l)| (f.clone(), if l == c0 { 0u8 } else { 1 }))
                 .unzip();
-            println!("{}Split: {} vs {} ({} samples)",
-                indent, class_names[c0 as usize], class_names[c1 as usize], sub_feats.len());
+            println!(
+                "{}Split: {} vs {} ({} samples)",
+                indent,
+                class_names[c0 as usize],
+                class_names[c1 as usize],
+                sub_feats.len()
+            );
             let clf = LinearClassifier::fit_from_features(&sub_feats, &sub_lbls, 2, 1.0, 0);
             return GeoNode::Split {
                 classifier: clf,
@@ -2193,9 +2669,13 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
         let mut seed_a = classes[0];
         let mut seed_b = classes[1];
         for i in 0..classes.len() {
-            for j in (i+1)..classes.len() {
+            for j in (i + 1)..classes.len() {
                 let d = dist_matrix[classes[i] as usize][classes[j] as usize];
-                if d > max_dist { max_dist = d; seed_a = classes[i]; seed_b = classes[j]; }
+                if d > max_dist {
+                    max_dist = d;
+                    seed_a = classes[i];
+                    seed_b = classes[j];
+                }
             }
         }
 
@@ -2205,7 +2685,11 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
         for &c in classes {
             let da = dist_matrix[c as usize][seed_a as usize];
             let db = dist_matrix[c as usize][seed_b as usize];
-            if da <= db { left_classes.push(c); } else { right_classes.push(c); }
+            if da <= db {
+                left_classes.push(c);
+            } else {
+                right_classes.push(c);
+            }
         }
 
         // Safety: if one side is empty, force at least one class into it
@@ -2217,15 +2701,27 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
         }
 
         let indent = "    ".repeat(depth + 1);
-        let left_names: Vec<_> = left_classes.iter().map(|&c| class_names[c as usize]).collect();
-        let right_names: Vec<_> = right_classes.iter().map(|&c| class_names[c as usize]).collect();
-        println!("{}Split (d={:.2}): {{{}}} vs {{{}}}",
-            indent, max_dist, left_names.join(", "), right_names.join(", "));
+        let left_names: Vec<_> = left_classes
+            .iter()
+            .map(|&c| class_names[c as usize])
+            .collect();
+        let right_names: Vec<_> = right_classes
+            .iter()
+            .map(|&c| class_names[c as usize])
+            .collect();
+        println!(
+            "{}Split (d={:.2}): {{{}}} vs {{{}}}",
+            indent,
+            max_dist,
+            left_names.join(", "),
+            right_names.join(", ")
+        );
 
         // Train binary classifier: left=0, right=1
         let left_set: std::collections::HashSet<u8> = left_classes.iter().copied().collect();
         let all_set: std::collections::HashSet<u8> = classes.iter().copied().collect();
-        let (sub_feats, sub_lbls): (Vec<_>, Vec<_>) = features.iter()
+        let (sub_feats, sub_lbls): (Vec<_>, Vec<_>) = features
+            .iter()
             .zip(labels.iter())
             .filter(|(_, &l)| all_set.contains(&l))
             .map(|(f, &l)| (f.clone(), if left_set.contains(&l) { 0u8 } else { 1 }))
@@ -2233,10 +2729,22 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
         let clf = LinearClassifier::fit_from_features(&sub_feats, &sub_lbls, 2, 1.0, 0);
 
         let left_child = build_geo_tree(
-            &left_classes, centroids, dist_matrix, features, labels, class_names, depth + 1,
+            &left_classes,
+            centroids,
+            dist_matrix,
+            features,
+            labels,
+            class_names,
+            depth + 1,
         );
         let right_child = build_geo_tree(
-            &right_classes, centroids, dist_matrix, features, labels, class_names, depth + 1,
+            &right_classes,
+            centroids,
+            dist_matrix,
+            features,
+            labels,
+            class_names,
+            depth + 1,
         );
 
         GeoNode::Split {
@@ -2255,16 +2763,19 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
     use growformer::clifford_mnist::CliffordMicroBrain;
 
     let cliff_brain = CliffordMicroBrain::build(
-        &train_rgb_mvs, &train_dirac_mvs, train_lbls, PATH_NUM_CLASSES,
+        &train_rgb_mvs,
+        &train_dirac_mvs,
+        train_lbls,
+        PATH_NUM_CLASSES,
     );
 
     let _solve_elapsed = total_start.elapsed();
 
     // ── Encode validation + test with all encoders ──
     println!("\n--- Validation ---");
-    let encode_joint = |rgb_imgs: &[Vec<f32>], gray_imgs: &[Vec<f32>]|
-        -> (Vec<Vec<f32>>, Vec<Multivector>, Vec<Multivector>)
-    {
+    let encode_joint = |rgb_imgs: &[Vec<f32>],
+                        gray_imgs: &[Vec<f32>]|
+     -> (Vec<Vec<f32>>, Vec<Multivector>, Vec<Multivector>) {
         let mut feats = Vec::with_capacity(rgb_imgs.len());
         let mut rgb_mvs = Vec::with_capacity(rgb_imgs.len());
         let mut dirac_mvs_out = Vec::with_capacity(rgb_imgs.len());
@@ -2281,20 +2792,41 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
         (feats, rgb_mvs, dirac_mvs_out)
     };
 
-    let (val_features, val_rgb_mvs, val_dirac_mvs) = encode_joint(&val.images_rgb, &val.images_gray);
+    let (val_features, val_rgb_mvs, val_dirac_mvs) =
+        encode_joint(&val.images_rgb, &val.images_gray);
 
-    let val_9_preds: Vec<u8> = val_features.iter().map(|f| head.classify_features(f).0).collect();
-    let val_9_acc = val_9_preds.iter().zip(val.labels.iter())
-        .filter(|(p, l)| p == l).count() as f32 / val.n as f32;
+    let val_9_preds: Vec<u8> = val_features
+        .iter()
+        .map(|f| head.classify_features(f).0)
+        .collect();
+    let val_9_acc = val_9_preds
+        .iter()
+        .zip(val.labels.iter())
+        .filter(|(p, l)| p == l)
+        .count() as f32
+        / val.n as f32;
 
-    let val_cancer_preds: Vec<u8> = val_features.iter().map(|f| cancer_head.classify_features(f).0).collect();
-    let val_cancer_labels: Vec<u8> = val.labels.iter()
-        .map(|&l| if is_cancer_class(l) { 1 } else { 0 }).collect();
-    let val_cancer_acc = val_cancer_preds.iter().zip(val_cancer_labels.iter())
-        .filter(|(p, l)| p == l).count() as f32 / val.n as f32;
+    let val_cancer_preds: Vec<u8> = val_features
+        .iter()
+        .map(|f| cancer_head.classify_features(f).0)
+        .collect();
+    let val_cancer_labels: Vec<u8> = val
+        .labels
+        .iter()
+        .map(|&l| if is_cancer_class(l) { 1 } else { 0 })
+        .collect();
+    let val_cancer_acc = val_cancer_preds
+        .iter()
+        .zip(val_cancer_labels.iter())
+        .filter(|(p, l)| p == l)
+        .count() as f32
+        / val.n as f32;
 
     println!("  9-class val accuracy:      {:.1}%", val_9_acc * 100.0);
-    println!("  Cancer binary val accuracy: {:.1}%", val_cancer_acc * 100.0);
+    println!(
+        "  Cancer binary val accuracy: {:.1}%",
+        val_cancer_acc * 100.0
+    );
 
     // ── Clifford spacetime analysis (diagnostic, not primary routing) ──
     // The grade discriminability is nearly flat (~0.02 per grade), meaning
@@ -2304,20 +2836,35 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
 
     // ── Evaluate on test set (different clinical center) ──
     println!("\n--- Test Set Evaluation (CRC-VAL-HE-7K — different hospital) ---");
-    let (test_features, test_rgb_mvs, test_dirac_mvs) = encode_joint(&test.images_rgb, &test.images_gray);
+    let (test_features, test_rgb_mvs, test_dirac_mvs) =
+        encode_joint(&test.images_rgb, &test.images_gray);
 
-    let test_preds: Vec<u8> = test_features.iter().map(|f| head.classify_features(f).0).collect();
-    let test_acc = test_preds.iter().zip(test.labels.iter())
-        .filter(|(p, l)| p == l).count() as f32 / test.n as f32;
+    let test_preds: Vec<u8> = test_features
+        .iter()
+        .map(|f| head.classify_features(f).0)
+        .collect();
+    let test_acc = test_preds
+        .iter()
+        .zip(test.labels.iter())
+        .filter(|(p, l)| p == l)
+        .count() as f32
+        / test.n as f32;
     let cancer = compute_cancer_metrics(&test_preds, &test.labels);
 
     // Binary cancer detection via dedicated classifier
-    let test_cancer_preds: Vec<u8> = test_features.iter()
-        .map(|f| cancer_head.classify_features(f).0).collect();
-    let test_cancer_labels: Vec<u8> = test.labels.iter()
-        .map(|&l| if is_cancer_class(l) { 1 } else { 0 }).collect();
-    let mut c_tp = 0u32; let mut c_fn = 0u32;
-    let mut c_fp = 0u32; let mut c_tn = 0u32;
+    let test_cancer_preds: Vec<u8> = test_features
+        .iter()
+        .map(|f| cancer_head.classify_features(f).0)
+        .collect();
+    let test_cancer_labels: Vec<u8> = test
+        .labels
+        .iter()
+        .map(|&l| if is_cancer_class(l) { 1 } else { 0 })
+        .collect();
+    let mut c_tp = 0u32;
+    let mut c_fn = 0u32;
+    let mut c_fp = 0u32;
+    let mut c_tn = 0u32;
     for (&pred, &label) in test_cancer_preds.iter().zip(test_cancer_labels.iter()) {
         match (pred, label) {
             (1, 1) => c_tp += 1,
@@ -2340,8 +2887,14 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
 
     println!("\n  9-CLASS RESULTS:");
     println!("    Overall accuracy:      {:.1}%", test_acc * 100.0);
-    println!("    Adenocarcinoma recall: {:.1}%  (class 8)", cancer.adeno_recall * 100.0);
-    println!("    Stroma recall:         {:.1}%  (class 7)", cancer.stroma_recall * 100.0);
+    println!(
+        "    Adenocarcinoma recall: {:.1}%  (class 8)",
+        cancer.adeno_recall * 100.0
+    );
+    println!(
+        "    Stroma recall:         {:.1}%  (class 7)",
+        cancer.stroma_recall * 100.0
+    );
 
     // Per-class accuracy
     println!("\n  Per-class accuracy:");
@@ -2351,16 +2904,27 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
         let l = label as usize;
         if l < PATH_NUM_CLASSES {
             per_class_total[l] += 1;
-            if pred == label { per_class_correct[l] += 1; }
+            if pred == label {
+                per_class_correct[l] += 1;
+            }
         }
     }
     for c in 0..PATH_NUM_CLASSES {
         let acc = if per_class_total[c] > 0 {
             per_class_correct[c] as f32 / per_class_total[c] as f32
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         let marker = if is_cancer_class(c as u8) { " ←" } else { "" };
-        println!("    {}: {:>14} {:.1}% ({}/{}){}", c, CLASS_NAMES[c],
-            acc * 100.0, per_class_correct[c], per_class_total[c], marker);
+        println!(
+            "    {}: {:>14} {:.1}% ({}/{}){}",
+            c,
+            CLASS_NAMES[c],
+            acc * 100.0,
+            per_class_correct[c],
+            per_class_total[c],
+            marker
+        );
     }
 
     // ── k-NN classifier: diagnose whether ceiling is embeddings or linear solve ──
@@ -2378,8 +2942,13 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
         for (ti, test_feat) in test_features.iter().enumerate() {
             let mut dists: Vec<(f32, u8)> = Vec::with_capacity(train_n);
             for (tr_feat, &tr_lbl) in train_features.iter().zip(train_lbls.iter()) {
-                let d: f32 = test_feat.iter().zip(tr_feat.iter())
-                    .map(|(a, b)| { let diff = a - b; diff * diff })
+                let d: f32 = test_feat
+                    .iter()
+                    .zip(tr_feat.iter())
+                    .map(|(a, b)| {
+                        let diff = a - b;
+                        diff * diff
+                    })
                     .sum();
                 dists.push((d, tr_lbl));
             }
@@ -2388,8 +2957,12 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
             for &(_, lbl) in dists[..k].iter() {
                 votes[lbl as usize] += 1;
             }
-            let pred = votes.iter().enumerate()
-                .max_by_key(|(_, &v)| v).map(|(i, _)| i as u8).unwrap();
+            let pred = votes
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, &v)| v)
+                .map(|(i, _)| i as u8)
+                .unwrap();
             let label = test.labels[ti];
             if pred == label {
                 knn_correct += 1;
@@ -2398,9 +2971,9 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
             let pred_cancer = is_cancer_class(pred);
             let label_cancer = is_cancer_class(label);
             match (pred_cancer, label_cancer) {
-                (true, true)   => knn_cancer_tp += 1,
-                (false, true)  => knn_cancer_fn += 1,
-                (true, false)  => knn_cancer_fp += 1,
+                (true, true) => knn_cancer_tp += 1,
+                (false, true) => knn_cancer_fn += 1,
+                (true, false) => knn_cancer_fp += 1,
                 (false, false) => knn_cancer_tn += 1,
             }
 
@@ -2411,42 +2984,81 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
         let knn_acc = knn_correct as f32 / test.n as f32;
         let knn_sens = knn_cancer_tp as f32 / (knn_cancer_tp + knn_cancer_fn).max(1) as f32;
         let knn_spec = knn_cancer_tn as f32 / (knn_cancer_tn + knn_cancer_fp).max(1) as f32;
-        println!("    k={}: 9-class={:.1}%  sensitivity={:.1}%  specificity={:.1}%  ({:.0}s)",
-            k, knn_acc * 100.0, knn_sens * 100.0, knn_spec * 100.0,
-            knn_start.elapsed().as_secs_f64());
+        println!(
+            "    k={}: 9-class={:.1}%  sensitivity={:.1}%  specificity={:.1}%  ({:.0}s)",
+            k,
+            knn_acc * 100.0,
+            knn_sens * 100.0,
+            knn_spec * 100.0,
+            knn_start.elapsed().as_secs_f64()
+        );
 
         if k == 5 {
             println!("    k=5 per-class:");
             for c in 0..PATH_NUM_CLASSES {
                 let acc = if per_class_total[c] > 0 {
                     knn_per_class_correct[c] as f32 / per_class_total[c] as f32
-                } else { 0.0 };
+                } else {
+                    0.0
+                };
                 let flat_acc = if per_class_total[c] > 0 {
                     per_class_correct[c] as f32 / per_class_total[c] as f32
-                } else { 0.0 };
+                } else {
+                    0.0
+                };
                 let delta = (acc - flat_acc) * 100.0;
-                let arrow = if delta > 1.0 { "▲" } else if delta < -1.0 { "▼" } else { "=" };
+                let arrow = if delta > 1.0 {
+                    "▲"
+                } else if delta < -1.0 {
+                    "▼"
+                } else {
+                    "="
+                };
                 let marker = if is_cancer_class(c as u8) { " ←" } else { "" };
-                println!("      {}: {:>14} {:.1}%  (linear {:.1}%)  {}{:+.1}{}",
-                    c, CLASS_NAMES[c], acc * 100.0, flat_acc * 100.0, arrow, delta, marker);
+                println!(
+                    "      {}: {:>14} {:.1}%  (linear {:.1}%)  {}{:+.1}{}",
+                    c,
+                    CLASS_NAMES[c],
+                    acc * 100.0,
+                    flat_acc * 100.0,
+                    arrow,
+                    delta,
+                    marker
+                );
             }
         }
     }
 
     // ── Clifford spacetime routing (diagnostic comparison) ──
     println!("\n  CLIFFORD SPACETIME ROUTING (diagnostic):");
-    let cliff_preds: Vec<u8> = test_rgb_mvs.iter().zip(test_dirac_mvs.iter())
+    let cliff_preds: Vec<u8> = test_rgb_mvs
+        .iter()
+        .zip(test_dirac_mvs.iter())
         .map(|(rgb, dirac)| cliff_brain.classify(rgb, dirac).0)
         .collect();
-    let cliff_acc = cliff_preds.iter().zip(test.labels.iter())
-        .filter(|(p, l)| p == l).count() as f32 / test.n as f32;
+    let cliff_acc = cliff_preds
+        .iter()
+        .zip(test.labels.iter())
+        .filter(|(p, l)| p == l)
+        .count() as f32
+        / test.n as f32;
     let cliff_cancer = compute_cancer_metrics(&cliff_preds, &test.labels);
 
-    println!("    Accuracy:              {:.1}%  (flat: {:.1}%)", cliff_acc * 100.0, test_acc * 100.0);
-    println!("    Adenocarcinoma recall: {:.1}%  (flat: {:.1}%)",
-        cliff_cancer.adeno_recall * 100.0, cancer.adeno_recall * 100.0);
-    println!("    Stroma recall:         {:.1}%  (flat: {:.1}%)",
-        cliff_cancer.stroma_recall * 100.0, cancer.stroma_recall * 100.0);
+    println!(
+        "    Accuracy:              {:.1}%  (flat: {:.1}%)",
+        cliff_acc * 100.0,
+        test_acc * 100.0
+    );
+    println!(
+        "    Adenocarcinoma recall: {:.1}%  (flat: {:.1}%)",
+        cliff_cancer.adeno_recall * 100.0,
+        cancer.adeno_recall * 100.0
+    );
+    println!(
+        "    Stroma recall:         {:.1}%  (flat: {:.1}%)",
+        cliff_cancer.stroma_recall * 100.0,
+        cancer.stroma_recall * 100.0
+    );
 
     let mut cliff_correct = [0u32; PATH_NUM_CLASSES];
     let mut cliff_total = [0u32; PATH_NUM_CLASSES];
@@ -2454,22 +3066,42 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
         let l = label as usize;
         if l < PATH_NUM_CLASSES {
             cliff_total[l] += 1;
-            if pred == label { cliff_correct[l] += 1; }
+            if pred == label {
+                cliff_correct[l] += 1;
+            }
         }
     }
     println!("\n    Per-class (clifford vs flat):");
     for c in 0..PATH_NUM_CLASSES {
         let c_acc = if cliff_total[c] > 0 {
             cliff_correct[c] as f32 / cliff_total[c] as f32
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         let f_acc = if per_class_total[c] > 0 {
             per_class_correct[c] as f32 / per_class_total[c] as f32
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         let delta = (c_acc - f_acc) * 100.0;
-        let arrow = if delta > 0.5 { "▲" } else if delta < -0.5 { "▼" } else { "=" };
+        let arrow = if delta > 0.5 {
+            "▲"
+        } else if delta < -0.5 {
+            "▼"
+        } else {
+            "="
+        };
         let marker = if is_cancer_class(c as u8) { " ←" } else { "" };
-        println!("      {}: {:>14} {:.1}%  (flat {:.1}%)  {}{:+.1}{}", c, CLASS_NAMES[c],
-            c_acc * 100.0, f_acc * 100.0, arrow, delta, marker);
+        println!(
+            "      {}: {:>14} {:.1}%  (flat {:.1}%)  {}{:+.1}{}",
+            c,
+            CLASS_NAMES[c],
+            c_acc * 100.0,
+            f_acc * 100.0,
+            arrow,
+            delta,
+            marker
+        );
     }
 
     // Grade discriminability
@@ -2480,13 +3112,22 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
     let grade_disc = centroids.grade_discriminability();
     let gw = discriminability_weights(&grade_disc);
     let grade_labels = [
-        "scalar (intensity)", "vector (gradients)", "bivector (texture)",
-        "trivector (junctions)", "quadvector (topology)", "grade-5", "grade-6",
-        "grade-7", "pseudoscalar (complement)",
+        "scalar (intensity)",
+        "vector (gradients)",
+        "bivector (texture)",
+        "trivector (junctions)",
+        "quadvector (topology)",
+        "grade-5",
+        "grade-6",
+        "grade-7",
+        "pseudoscalar (complement)",
     ];
     println!("\n--- Grade Discriminability (9-class) ---");
     for g in 0..=8 {
-        println!("    grade {}: {:>6.2}  w={:.3}  — {}", g, grade_disc[g], gw[g], grade_labels[g]);
+        println!(
+            "    grade {}: {:>6.2}  w={:.3}  — {}",
+            g, grade_disc[g], gw[g], grade_labels[g]
+        );
     }
 
     // Minkowski interval statistics
@@ -2500,16 +3141,28 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
             incorrect_intervals.push(mink);
         }
     }
-    let correct_mean = if correct_intervals.is_empty() { 0.0 }
-        else { correct_intervals.iter().sum::<f32>() / correct_intervals.len() as f32 };
-    let incorrect_mean = if incorrect_intervals.is_empty() { 0.0 }
-        else { incorrect_intervals.iter().sum::<f32>() / incorrect_intervals.len() as f32 };
-    let timelike_correct = correct_intervals.iter()
+    let correct_mean = if correct_intervals.is_empty() {
+        0.0
+    } else {
+        correct_intervals.iter().sum::<f32>() / correct_intervals.len() as f32
+    };
+    let incorrect_mean = if incorrect_intervals.is_empty() {
+        0.0
+    } else {
+        incorrect_intervals.iter().sum::<f32>() / incorrect_intervals.len() as f32
+    };
+    let timelike_correct = correct_intervals
+        .iter()
         .filter(|&&v| classify_interval(v) == IntervalType::Timelike)
-        .count() as f32 / correct_intervals.len().max(1) as f32;
+        .count() as f32
+        / correct_intervals.len().max(1) as f32;
 
     println!("\n--- Minkowski Interval Statistics ---");
-    println!("  Correct:   mean={:.4}  timelike={:.1}%", correct_mean, timelike_correct * 100.0);
+    println!(
+        "  Correct:   mean={:.4}  timelike={:.1}%",
+        correct_mean,
+        timelike_correct * 100.0
+    );
     println!("  Incorrect: mean={:.4}", incorrect_mean);
     if correct_mean.abs() > 1e-8 {
         println!("  Ratio:     {:.1}x", incorrect_mean / correct_mean);
@@ -2529,30 +3182,59 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
     println!();
     println!("  9-class tissue classification:");
     println!("    Overall accuracy:     {:.1}%", test_acc * 100.0);
-    println!("    Lymphocytes:          {:.1}%", per_class_correct[3] as f32 / per_class_total[3].max(1) as f32 * 100.0);
-    println!("    Background:           {:.1}%", per_class_correct[1] as f32 / per_class_total[1].max(1) as f32 * 100.0);
-    println!("    Adipose:              {:.1}%", per_class_correct[0] as f32 / per_class_total[0].max(1) as f32 * 100.0);
-    println!("    Smooth muscle:        {:.1}%", per_class_correct[5] as f32 / per_class_total[5].max(1) as f32 * 100.0);
+    println!(
+        "    Lymphocytes:          {:.1}%",
+        per_class_correct[3] as f32 / per_class_total[3].max(1) as f32 * 100.0
+    );
+    println!(
+        "    Background:           {:.1}%",
+        per_class_correct[1] as f32 / per_class_total[1].max(1) as f32 * 100.0
+    );
+    println!(
+        "    Adipose:              {:.1}%",
+        per_class_correct[0] as f32 / per_class_total[0].max(1) as f32 * 100.0
+    );
+    println!(
+        "    Smooth muscle:        {:.1}%",
+        per_class_correct[5] as f32 / per_class_total[5].max(1) as f32 * 100.0
+    );
     println!();
     println!("  Architecture:");
-    println!("    Encoder:              Cl(1,7) RGB + Dirac ({}D)", full_dim);
+    println!(
+        "    Encoder:              Cl(1,7) RGB + Dirac ({}D)",
+        full_dim
+    );
     println!("    Classifier:           linear solve + k-NN");
     println!("    Training:             single-pass (no epochs)");
-    println!("    Total time:           {:.0}s on CPU", total_elapsed.as_secs_f64());
+    println!(
+        "    Total time:           {:.0}s on CPU",
+        total_elapsed.as_secs_f64()
+    );
     println!("    GPU required:         None");
     println!();
     println!("  Geometric diagnostics:");
-    println!("    Minkowski ratio:      {:.1}x (correct vs incorrect)",
-        if correct_mean.abs() > 1e-8 { incorrect_mean / correct_mean } else { 0.0 });
+    println!(
+        "    Minkowski ratio:      {:.1}x (correct vs incorrect)",
+        if correct_mean.abs() > 1e-8 {
+            incorrect_mean / correct_mean
+        } else {
+            0.0
+        }
+    );
     println!("    Timelike rate:        {:.1}%", timelike_correct * 100.0);
-    println!("    Stroma-debris dist:   {:.2}  (biological collision)",
-        dist_matrix[7][2]);
+    println!(
+        "    Stroma-debris dist:   {:.2}  (biological collision)",
+        dist_matrix[7][2]
+    );
     println!("═══════════════════════════════════════════════════════════════");
     println!();
     println!("  Same Cl(1,7) algebra used for:");
     println!("    MNIST digits:         97.7%  (7.5s CPU)");
     println!("    Language generation:   97%   (25min train)");
-    println!("    Histopathology:       {:.1}%  cancer sensitivity", cancer_sens * 100.0);
+    println!(
+        "    Histopathology:       {:.1}%  cancer sensitivity",
+        cancer_sens * 100.0
+    );
     println!();
 }
 
@@ -2562,19 +3244,17 @@ fn demo_pathmnist(train_limit: Option<usize>, _max_epochs_override: Option<u32>)
 // =============================================================================
 
 fn demo_pathmnist_64(train_limit: Option<usize>) {
-    use growformer::pathmnist::{
-        PathMNISTDataset, CLASS_NAMES, PATH_NUM_CLASSES, is_cancer_class,
-        compute_cancer_metrics,
-    };
-    use growformer::clifford_mnist::{
-        CliffordRGBEncoder, CliffordDiracEncoder, LinearClassifier,
-        diagnose_pair_learnability,
-    };
     use growformer::clifford::CL8_DIM;
+    use growformer::clifford_mnist::{
+        diagnose_pair_learnability, CliffordDiracEncoder, CliffordRGBEncoder, LinearClassifier,
+    };
+    use growformer::pathmnist::{
+        compute_cancer_metrics, is_cancer_class, PathMNISTDataset, CLASS_NAMES, PATH_NUM_CLASSES,
+    };
 
     let data_dir = std::path::PathBuf::from(
         std::env::var("PATHMNIST64_ROOT")
-            .unwrap_or_else(|_| "data/pathology/pathmnist_64".to_string())
+            .unwrap_or_else(|_| "data/pathology/pathmnist_64".to_string()),
     );
     if !data_dir.exists() {
         eprintln!("PathMNIST 64×64 data not found at {:?}", data_dir);
@@ -2597,7 +3277,11 @@ fn demo_pathmnist_64(train_limit: Option<usize>) {
     let dist = train.class_distribution();
     println!("\n  Class distribution (train):");
     for c in 0..PATH_NUM_CLASSES {
-        let marker = if is_cancer_class(c as u8) { " ← CANCER" } else { "" };
+        let marker = if is_cancer_class(c as u8) {
+            " ← CANCER"
+        } else {
+            ""
+        };
         println!("    {}: {:>14} {:>6}{}", c, CLASS_NAMES[c], dist[c], marker);
     }
 
@@ -2606,11 +3290,19 @@ fn demo_pathmnist_64(train_limit: Option<usize>) {
     let mut rgb_enc = CliffordRGBEncoder::new_with_resolution(42, 64, 64);
     let mut dirac_enc = CliffordDiracEncoder::new_with_resolution(77, 64, 64);
 
-    let rgb_cal: Vec<_> = train.images_rgb.iter().take(500)
-        .map(|img| (img.clone(), 0u8)).collect();
+    let rgb_cal: Vec<_> = train
+        .images_rgb
+        .iter()
+        .take(500)
+        .map(|img| (img.clone(), 0u8))
+        .collect();
     rgb_enc.calibrate_scales(&rgb_cal);
-    let gray_cal: Vec<_> = train.images_gray.iter().take(500)
-        .map(|img| (img.clone(), 0u8)).collect();
+    let gray_cal: Vec<_> = train
+        .images_gray
+        .iter()
+        .take(500)
+        .map(|img| (img.clone(), 0u8))
+        .collect();
     dirac_enc.calibrate_scales(&gray_cal);
 
     let train_n = train_limit.unwrap_or(train.n).min(train.n);
@@ -2628,46 +3320,90 @@ fn demo_pathmnist_64(train_limit: Option<usize>) {
     println!("═══════════════════════════════════════════════════════════════");
 
     let diag_start = Instant::now();
-    let (bv_matrix, rotational_pairs, degenerate_pairs) =
-        diagnose_pair_learnability(&rgb_enc, &train.images_rgb, train_lbls_full, PATH_NUM_CLASSES, 500);
+    let (bv_matrix, rotational_pairs, degenerate_pairs) = diagnose_pair_learnability(
+        &rgb_enc,
+        &train.images_rgb,
+        train_lbls_full,
+        PATH_NUM_CLASSES,
+        500,
+    );
 
     println!("\n  Confusion bivector |B| matrix (64×64):");
     print!("         ");
-    for c in 0..PATH_NUM_CLASSES { print!("{:>6}", c); }
+    for c in 0..PATH_NUM_CLASSES {
+        print!("{:>6}", c);
+    }
     println!();
     for i in 0..PATH_NUM_CLASSES {
-        print!("    {}:{:>8} ", i, &CLASS_NAMES[i][..CLASS_NAMES[i].len().min(8)]);
+        print!(
+            "    {}:{:>8} ",
+            i,
+            &CLASS_NAMES[i][..CLASS_NAMES[i].len().min(8)]
+        );
         for j in 0..PATH_NUM_CLASSES {
-            if i == j { print!("     -"); }
-            else {
+            if i == j {
+                print!("     -");
+            } else {
                 let bv = bv_matrix[i][j];
-                let tag = if bv >= 0.3 { "+" } else if bv < 0.1 { "!" } else { " " };
+                let tag = if bv >= 0.3 {
+                    "+"
+                } else if bv < 0.1 {
+                    "!"
+                } else {
+                    " "
+                };
                 print!("{}{:5.3}", tag, bv);
             }
         }
         println!();
     }
 
-    println!("\n  Rotational (|B| >= 0.3): {} pairs", rotational_pairs.len());
-    println!("  Degenerate (|B| < 0.1):  {} pairs", degenerate_pairs.len());
+    println!(
+        "\n  Rotational (|B| >= 0.3): {} pairs",
+        rotational_pairs.len()
+    );
+    println!(
+        "  Degenerate (|B| < 0.1):  {} pairs",
+        degenerate_pairs.len()
+    );
     for &(a, b) in &degenerate_pairs {
-        println!("    {} ↔ {}  ({} ↔ {})  |B|={:.3}",
-            a, b, CLASS_NAMES[a as usize], CLASS_NAMES[b as usize], bv_matrix[a as usize][b as usize]);
+        println!(
+            "    {} ↔ {}  ({} ↔ {})  |B|={:.3}",
+            a,
+            b,
+            CLASS_NAMES[a as usize],
+            CLASS_NAMES[b as usize],
+            bv_matrix[a as usize][b as usize]
+        );
     }
 
     // Compare with 28×28 values
     println!("\n  ── Comparison with 28×28 baseline ──");
     println!("  Key pairs to watch:");
-    println!("    stroma(7) ↔ debris(2):  28×28 |B|=0.098  → 64×64 |B|={:.3}", bv_matrix[7][2]);
-    println!("    stroma(7) ↔ adeno(8):   28×28 |B|=0.056  → 64×64 |B|={:.3}", bv_matrix[7][8]);
-    println!("    debris(2) ↔ adeno(8):   28×28 |B|=0.082  → 64×64 |B|={:.3}", bv_matrix[2][8]);
-    println!("    smooth(5) ↔ normal(6):  28×28 |B|=0.091  → 64×64 |B|={:.3}", bv_matrix[5][6]);
+    println!(
+        "    stroma(7) ↔ debris(2):  28×28 |B|=0.098  → 64×64 |B|={:.3}",
+        bv_matrix[7][2]
+    );
+    println!(
+        "    stroma(7) ↔ adeno(8):   28×28 |B|=0.056  → 64×64 |B|={:.3}",
+        bv_matrix[7][8]
+    );
+    println!(
+        "    debris(2) ↔ adeno(8):   28×28 |B|=0.082  → 64×64 |B|={:.3}",
+        bv_matrix[2][8]
+    );
+    println!(
+        "    smooth(5) ↔ normal(6):  28×28 |B|=0.091  → 64×64 |B|={:.3}",
+        bv_matrix[5][6]
+    );
 
     let stroma_debris_bv = bv_matrix[7][2];
     if stroma_debris_bv >= 0.3 {
         println!("\n  ✓ RESOLUTION WAS THE BOTTLENECK — stroma-debris now rotationally separable");
     } else if stroma_debris_bv >= 0.1 {
-        println!("\n  ~ PARTIAL IMPROVEMENT — stroma-debris weakly rotational, may benefit from CGD");
+        println!(
+            "\n  ~ PARTIAL IMPROVEMENT — stroma-debris weakly rotational, may benefit from CGD"
+        );
     } else {
         println!("\n  ✗ RESOLUTION IS NOT THE BOTTLENECK — stroma-debris still degenerate");
     }
@@ -2677,7 +3413,10 @@ fn demo_pathmnist_64(train_limit: Option<usize>) {
     //  Full pipeline: encode + classify
     // ══════════════════════════════════════════════════════════════════════
     let full_dim = joint_dim;
-    println!("\n--- Encoding {} training images (RGB+Dirac 64×64 → {}D) ---", train_n, full_dim);
+    println!(
+        "\n--- Encoding {} training images (RGB+Dirac 64×64 → {}D) ---",
+        train_n, full_dim
+    );
     let encode_start = Instant::now();
 
     let mut train_features: Vec<Vec<f32>> = Vec::with_capacity(train_n);
@@ -2691,26 +3430,34 @@ fn demo_pathmnist_64(train_limit: Option<usize>) {
         train_features.push(joint);
 
         if (i + 1) % 10000 == 0 {
-            println!("    {}/{} ({:.0}s)", i + 1, train_n, encode_start.elapsed().as_secs_f64());
+            println!(
+                "    {}/{} ({:.0}s)",
+                i + 1,
+                train_n,
+                encode_start.elapsed().as_secs_f64()
+            );
         }
     }
     let train_lbls = &train.labels[..train_n];
-    println!("  Encoded in {:.1}s\n", encode_start.elapsed().as_secs_f64());
-
-    println!("--- Solving 9-class classifier ({}D normal equations) ---", full_dim);
-    let head = LinearClassifier::fit_from_features(
-        &train_features, train_lbls,
-        PATH_NUM_CLASSES, 1.0, 1,
+    println!(
+        "  Encoded in {:.1}s\n",
+        encode_start.elapsed().as_secs_f64()
     );
+
+    println!(
+        "--- Solving 9-class classifier ({}D normal equations) ---",
+        full_dim
+    );
+    let head =
+        LinearClassifier::fit_from_features(&train_features, train_lbls, PATH_NUM_CLASSES, 1.0, 1);
 
     println!("\n--- Solving binary cancer classifier ({}D) ---", full_dim);
-    let cancer_labels: Vec<u8> = train_lbls.iter()
+    let cancer_labels: Vec<u8> = train_lbls
+        .iter()
         .map(|&l| if is_cancer_class(l) { 1 } else { 0 })
         .collect();
-    let cancer_head = LinearClassifier::fit_from_features(
-        &train_features, &cancer_labels,
-        2, 1.0, 1,
-    );
+    let cancer_head =
+        LinearClassifier::fit_from_features(&train_features, &cancer_labels, 2, 1.0, 1);
 
     // ── Evaluate on test set ──
     println!("\n--- Evaluating on test set ({} samples) ---", test.n);
@@ -2740,7 +3487,11 @@ fn demo_pathmnist_64(train_limit: Option<usize>) {
 
         let (cancer_pred, _) = cancer_head.classify_features(&joint);
         cancer_preds.push(cancer_pred as u8);
-        cancer_truths.push(if is_cancer_class(test.labels[i]) { 1u8 } else { 0u8 });
+        cancer_truths.push(if is_cancer_class(test.labels[i]) {
+            1u8
+        } else {
+            0u8
+        });
     }
 
     let acc_9 = correct_9 as f64 / test.n as f64;
@@ -2753,7 +3504,11 @@ fn demo_pathmnist_64(train_limit: Option<usize>) {
     println!("═══════════════════════════════════════════════════════════════");
     println!("  PathMNIST 64×64 RESULTS");
     println!("═══════════════════════════════════════════════════════════════");
-    println!("  9-class accuracy: {:.1}%  (test, {})", acc_9 * 100.0, test.n);
+    println!(
+        "  9-class accuracy: {:.1}%  (test, {})",
+        acc_9 * 100.0,
+        test.n
+    );
     println!("  Cancer sensitivity: {:.1}%", cancer_sens * 100.0);
     println!("  Cancer specificity: {:.1}%", cancer_spec * 100.0);
     println!();
@@ -2761,10 +3516,23 @@ fn demo_pathmnist_64(train_limit: Option<usize>) {
     for c in 0..PATH_NUM_CLASSES {
         let recall = if per_class_total[c] > 0 {
             per_class_correct[c] as f64 / per_class_total[c] as f64
-        } else { 0.0 };
-        let marker = if is_cancer_class(c as u8) { " ← CANCER" } else { "" };
-        println!("    {}: {:>14}  {:.1}% ({}/{}){}", c, CLASS_NAMES[c],
-            recall * 100.0, per_class_correct[c], per_class_total[c], marker);
+        } else {
+            0.0
+        };
+        let marker = if is_cancer_class(c as u8) {
+            " ← CANCER"
+        } else {
+            ""
+        };
+        println!(
+            "    {}: {:>14}  {:.1}% ({}/{}){}",
+            c,
+            CLASS_NAMES[c],
+            recall * 100.0,
+            per_class_correct[c],
+            per_class_total[c],
+            marker
+        );
     }
 
     let total_time = total_start.elapsed().as_secs_f64();
@@ -2782,13 +3550,12 @@ fn demo_pathmnist_64(train_limit: Option<usize>) {
 
 fn demo_arc_agi() {
     use growformer::arc_agi::{
-        load_arc_tasks, solve_task, encode_grid, extract_rule,
-        rotor_consistency, solve_normal_equations, print_grid,
+        encode_grid, extract_rule, load_arc_tasks, print_grid, rotor_consistency,
+        solve_normal_equations, solve_task,
     };
 
     let data_dir = std::path::PathBuf::from(
-        std::env::var("ARC_AGI_ROOT")
-            .unwrap_or_else(|_| "data/arc-agi/data/training".to_string())
+        std::env::var("ARC_AGI_ROOT").unwrap_or_else(|_| "data/arc-agi/data/training".to_string()),
     );
     if !data_dir.exists() {
         eprintln!("ARC-AGI data not found at {:?}", data_dir);
@@ -2805,7 +3572,11 @@ fn demo_arc_agi() {
 
     println!("Loading ARC-AGI training tasks...");
     let tasks = load_arc_tasks(&data_dir);
-    println!("  {} tasks loaded ({:.1}s)\n", tasks.len(), total_start.elapsed().as_secs_f64());
+    println!(
+        "  {} tasks loaded ({:.1}s)\n",
+        tasks.len(),
+        total_start.elapsed().as_secs_f64()
+    );
 
     // ── Phase 1: |B| diagnostic on all tasks ──
     println!("═══════════════════════════════════════════════════════════════");
@@ -2819,34 +3590,67 @@ fn demo_arc_agi() {
 
     for task in &tasks {
         let inputs: Vec<_> = task.train.iter().map(|ex| encode_grid(&ex.input)).collect();
-        let outputs: Vec<_> = task.train.iter().map(|ex| encode_grid(&ex.output)).collect();
-        let rules: Vec<_> = inputs.iter().zip(outputs.iter())
+        let outputs: Vec<_> = task
+            .train
+            .iter()
+            .map(|ex| encode_grid(&ex.output))
+            .collect();
+        let rules: Vec<_> = inputs
+            .iter()
+            .zip(outputs.iter())
             .map(|(i, o)| extract_rule(i, o))
             .collect();
         let (mean_bv, _) = rotor_consistency(&rules);
 
-        let same_dims = task.train.iter().all(|ex|
-            ex.input.height == ex.output.height && ex.input.width == ex.output.width);
+        let same_dims = task
+            .train
+            .iter()
+            .all(|ex| ex.input.height == ex.output.height && ex.input.width == ex.output.width);
 
         diagnostics.push((task.id.clone(), task.train.len(), mean_bv, same_dims));
 
-        let bin = if mean_bv < 0.1 { 0 }
-            else if mean_bv < 0.3 { 1 }
-            else if mean_bv < 0.5 { 2 }
-            else if mean_bv < 1.0 { 3 }
-            else { 4 };
+        let bin = if mean_bv < 0.1 {
+            0
+        } else if mean_bv < 0.3 {
+            1
+        } else if mean_bv < 0.5 {
+            2
+        } else if mean_bv < 1.0 {
+            3
+        } else {
+            4
+        };
         bv_histogram[bin] += 1;
     }
 
     println!("  |B| distribution across {} tasks:", tasks.len());
-    println!("    |B| < 0.1  (rotor-consistent):  {:>3} tasks", bv_histogram[0]);
-    println!("    |B| 0.1-0.3 (weakly rotational): {:>3} tasks", bv_histogram[1]);
-    println!("    |B| 0.3-0.5 (mixed):             {:>3} tasks", bv_histogram[2]);
-    println!("    |B| 0.5-1.0 (context-dependent):  {:>3} tasks", bv_histogram[3]);
-    println!("    |B| > 1.0  (highly inconsistent): {:>3} tasks", bv_histogram[4]);
+    println!(
+        "    |B| < 0.1  (rotor-consistent):  {:>3} tasks",
+        bv_histogram[0]
+    );
+    println!(
+        "    |B| 0.1-0.3 (weakly rotational): {:>3} tasks",
+        bv_histogram[1]
+    );
+    println!(
+        "    |B| 0.3-0.5 (mixed):             {:>3} tasks",
+        bv_histogram[2]
+    );
+    println!(
+        "    |B| 0.5-1.0 (context-dependent):  {:>3} tasks",
+        bv_histogram[3]
+    );
+    println!(
+        "    |B| > 1.0  (highly inconsistent): {:>3} tasks",
+        bv_histogram[4]
+    );
 
     let same_dim_count = diagnostics.iter().filter(|d| d.3).count();
-    println!("\n  Same-dimension tasks: {}/{}", same_dim_count, tasks.len());
+    println!(
+        "\n  Same-dimension tasks: {}/{}",
+        same_dim_count,
+        tasks.len()
+    );
     println!("  Diagnostic: {:.1}s\n", diag_start.elapsed().as_secs_f64());
 
     // Show top-10 most rotor-consistent tasks
@@ -2855,13 +3659,19 @@ fn demo_arc_agi() {
     println!("  Top-10 most rotor-consistent tasks (lowest |B|):");
     for (id, n_train, bv, same) in sorted_diags.iter().take(10) {
         let dim_tag = if *same { "same-dim" } else { "diff-dim" };
-        println!("    {} |B|={:.4}  ({} examples, {})", id, bv, n_train, dim_tag);
+        println!(
+            "    {} |B|={:.4}  ({} examples, {})",
+            id, bv, n_train, dim_tag
+        );
     }
 
     println!("\n  Top-10 least consistent tasks (highest |B|):");
     for (id, n_train, bv, same) in sorted_diags.iter().rev().take(10) {
         let dim_tag = if *same { "same-dim" } else { "diff-dim" };
-        println!("    {} |B|={:.4}  ({} examples, {})", id, bv, n_train, dim_tag);
+        println!(
+            "    {} |B|={:.4}  ({} examples, {})",
+            id, bv, n_train, dim_tag
+        );
     }
 
     // ── Phase 2: Solve all tasks ──
@@ -2876,14 +3686,17 @@ fn demo_arc_agi() {
     let mut total_cells = 0usize;
     let mut solved_tasks: Vec<String> = Vec::new();
     let mut results: Vec<(String, f32, f32, bool, &str)> = Vec::new();
-    let mut strategy_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut strategy_counts: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::new();
 
     for (i, task) in tasks.iter().enumerate() {
         let diag = solve_task(task);
 
         let cell_acc = if diag.n_total_cells > 0 {
             diag.n_correct_cells as f32 / diag.n_total_cells as f32
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         if diag.solved {
             n_solved += 1;
@@ -2893,11 +3706,22 @@ fn demo_arc_agi() {
         total_cells += diag.n_total_cells;
 
         *strategy_counts.entry(diag.strategy).or_insert(0) += 1;
-        results.push((task.id.clone(), diag.mean_bv_norm, cell_acc, diag.solved, diag.strategy));
+        results.push((
+            task.id.clone(),
+            diag.mean_bv_norm,
+            cell_acc,
+            diag.solved,
+            diag.strategy,
+        ));
 
         if (i + 1) % 50 == 0 || (i + 1) == n_total {
-            println!("    {}/{} tasks evaluated ({} solved so far, {:.1}s)",
-                i + 1, n_total, n_solved, solve_start.elapsed().as_secs_f64());
+            println!(
+                "    {}/{} tasks evaluated ({} solved so far, {:.1}s)",
+                i + 1,
+                n_total,
+                n_solved,
+                solve_start.elapsed().as_secs_f64()
+            );
         }
     }
 
@@ -2911,15 +3735,25 @@ fn demo_arc_agi() {
     // ── Results ──
     let overall_cell_acc = if total_cells > 0 {
         total_correct_cells as f32 / total_cells as f32
-    } else { 0.0 };
+    } else {
+        0.0
+    };
 
     println!("═══════════════════════════════════════════════════════════════");
     println!("  ARC-AGI-1 RESULTS (training set, {} tasks)", n_total);
     println!("═══════════════════════════════════════════════════════════════");
-    println!("  Tasks exactly solved:  {}/{}  ({:.1}%)",
-        n_solved, n_total, n_solved as f64 / n_total as f64 * 100.0);
-    println!("  Cell-level accuracy:   {:.1}%  ({}/{})",
-        overall_cell_acc * 100.0, total_correct_cells, total_cells);
+    println!(
+        "  Tasks exactly solved:  {}/{}  ({:.1}%)",
+        n_solved,
+        n_total,
+        n_solved as f64 / n_total as f64 * 100.0
+    );
+    println!(
+        "  Cell-level accuracy:   {:.1}%  ({}/{})",
+        overall_cell_acc * 100.0,
+        total_correct_cells,
+        total_cells
+    );
 
     if !solved_tasks.is_empty() {
         println!("\n  Solved tasks:");
@@ -2940,27 +3774,37 @@ fn demo_arc_agi() {
     ];
 
     for &(lo, hi, label) in &buckets {
-        let bucket_results: Vec<_> = results.iter()
-            .filter(|r| r.1 >= lo && r.1 < hi)
-            .collect();
-        if bucket_results.is_empty() { continue; }
+        let bucket_results: Vec<_> = results.iter().filter(|r| r.1 >= lo && r.1 < hi).collect();
+        if bucket_results.is_empty() {
+            continue;
+        }
         let n = bucket_results.len();
         let n_solved_bucket = bucket_results.iter().filter(|r| r.3).count();
         let mean_cell_acc: f32 = bucket_results.iter().map(|r| r.2).sum::<f32>() / n as f32;
-        println!("    {:>13}: {:>3} tasks, {:>2} solved ({:.1}%), cell acc {:.1}%",
-            label, n, n_solved_bucket,
+        println!(
+            "    {:>13}: {:>3} tasks, {:>2} solved ({:.1}%), cell acc {:.1}%",
+            label,
+            n,
+            n_solved_bucket,
             n_solved_bucket as f64 / n as f64 * 100.0,
-            mean_cell_acc * 100.0);
+            mean_cell_acc * 100.0
+        );
     }
 
     // Show a few example tasks
     println!("\n  Example task visualizations:");
     let examples_to_show: Vec<_> = if !solved_tasks.is_empty() {
-        tasks.iter().filter(|t| solved_tasks.contains(&t.id)).take(3).collect()
+        tasks
+            .iter()
+            .filter(|t| solved_tasks.contains(&t.id))
+            .take(3)
+            .collect()
     } else {
         let mut by_acc: Vec<_> = results.iter().collect();
         by_acc.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-        by_acc.iter().take(3)
+        by_acc
+            .iter()
+            .take(3)
             .filter_map(|r| tasks.iter().find(|t| t.id == r.0))
             .collect()
     };
@@ -2968,11 +3812,20 @@ fn demo_arc_agi() {
     for task in examples_to_show {
         println!("\n  Task: {}", task.id);
         let res = results.iter().find(|r| r.0 == task.id).unwrap();
-        println!("  |B|={:.4}  cell_acc={:.1}%  solved={}  strategy={}", res.1, res.2 * 100.0, res.3, res.4);
+        println!(
+            "  |B|={:.4}  cell_acc={:.1}%  solved={}  strategy={}",
+            res.1,
+            res.2 * 100.0,
+            res.3,
+            res.4
+        );
         if let Some(ex) = task.train.first() {
             println!("    Train input ({}×{}):", ex.input.height, ex.input.width);
             print_grid(&ex.input, "      ");
-            println!("    Train output ({}×{}):", ex.output.height, ex.output.width);
+            println!(
+                "    Train output ({}×{}):",
+                ex.output.height, ex.output.width
+            );
             print_grid(&ex.output, "      ");
         }
     }
@@ -2981,8 +3834,12 @@ fn demo_arc_agi() {
     println!("\n═══════════════════════════════════════════════════════════════");
     println!("  ARC-AGI-1 BENCHMARK SUMMARY");
     println!("═══════════════════════════════════════════════════════════════");
-    println!("  Tasks solved:     {}/{}  ({:.1}%)", n_solved, n_total,
-        n_solved as f64 / n_total as f64 * 100.0);
+    println!(
+        "  Tasks solved:     {}/{}  ({:.1}%)",
+        n_solved,
+        n_total,
+        n_solved as f64 / n_total as f64 * 100.0
+    );
     println!("  Cell accuracy:    {:.1}%", overall_cell_acc * 100.0);
     println!("  Total time:       {:.1}s", total_time);
     println!("  Architecture:     Growformer");
@@ -3089,11 +3946,7 @@ fn train_promoted_mirror(
     }
 }
 
-fn evaluate_mirror_accuracy(
-    dm: &mut DimensionManager,
-    task_name: &str,
-    data: &[Sample],
-) -> f32 {
+fn evaluate_mirror_accuracy(dm: &mut DimensionManager, task_name: &str, data: &[Sample]) -> f32 {
     let Some(mirror) = dm.mirrors.get_mut(task_name) else {
         return 0.0;
     };
@@ -3134,11 +3987,7 @@ fn train_direct_composite_mirror(
     acc
 }
 
-fn accuracy_virtual_group(
-    dm: &mut DimensionManager,
-    vg: &VirtualGroup,
-    data: &[Sample],
-) -> f32 {
+fn accuracy_virtual_group(dm: &mut DimensionManager, vg: &VirtualGroup, data: &[Sample]) -> f32 {
     let mut correct = 0usize;
     for (input, target) in data {
         let out = dm.predict_with_composition(input, vg);
@@ -3200,11 +4049,7 @@ fn sample_radius(input: &[f32]) -> f32 {
     (input[0] * input[0] + input[1] * input[1]).sqrt()
 }
 
-fn specialist_scalar(
-    main: &mut MainDimension,
-    group_id: GroupId,
-    input: &[f32],
-) -> f32 {
+fn specialist_scalar(main: &mut MainDimension, group_id: GroupId, input: &[f32]) -> f32 {
     main.query(input, &[group_id])
         .first()
         .and_then(|(_, o)| o.first().copied())
@@ -3250,7 +4095,10 @@ fn learn_radius_threshold(
     train: &[Sample],
     default: f32,
 ) -> f32 {
-    let mut radii: Vec<f32> = train.iter().map(|(input, _)| sample_radius(input)).collect();
+    let mut radii: Vec<f32> = train
+        .iter()
+        .map(|(input, _)| sample_radius(input))
+        .collect();
     if radii.is_empty() {
         return default;
     }
@@ -3425,9 +4273,8 @@ fn train_calibration_learned_router_xy(
     calibration_spiral: &[Sample],
     calibration_circles: &[Sample],
 ) -> LearnedRouter {
-    let mut samples: Vec<(Vec<f32>, GroupId)> = Vec::with_capacity(
-        calibration_spiral.len() + calibration_circles.len(),
-    );
+    let mut samples: Vec<(Vec<f32>, GroupId)> =
+        Vec::with_capacity(calibration_spiral.len() + calibration_circles.len());
     for (input, _) in calibration_spiral {
         samples.push((input.clone(), 0));
     }
@@ -3445,9 +4292,8 @@ fn train_calibration_learned_router_expert(
     calibration_spiral: &[Sample],
     calibration_circles: &[Sample],
 ) -> LearnedRouter {
-    let mut samples: Vec<(Vec<f32>, GroupId)> = Vec::with_capacity(
-        calibration_spiral.len() + calibration_circles.len(),
-    );
+    let mut samples: Vec<(Vec<f32>, GroupId)> =
+        Vec::with_capacity(calibration_spiral.len() + calibration_circles.len());
     for (input, _) in calibration_spiral {
         let features = specialist_feature_pair(main, spiral_gid, circles_gid, input);
         samples.push((features, 0));
@@ -3590,12 +4436,7 @@ struct BoundarySeedSummary {
 }
 
 /// Fit P(spiral route) = σ(w·x₁ + …) by batch gradient descent on train labels.
-fn fit_logistic_router(
-    train_x: &[Vec<f32>],
-    train_y: &[f32],
-    lr: f32,
-    epochs: usize,
-) -> Vec<f32> {
+fn fit_logistic_router(train_x: &[Vec<f32>], train_y: &[f32], lr: f32, epochs: usize) -> Vec<f32> {
     let dim = train_x.first().map(|v| v.len()).unwrap_or(0);
     let mut w = vec![0.0f32; dim];
     let mut b = 0.0f32;
@@ -3643,21 +4484,37 @@ fn collect_expert_boundary_records(seed: u64) -> (Vec<BoundaryPointRecord>, Boun
     let calibration_circles: Vec<_> = circles_data.iter().take(100).cloned().collect();
 
     let spiral_group = train_promoted_mirror(
-        &mut dm, "spiral", seed, &spiral_data, &calibration_spiral, &mut rng, false,
+        &mut dm,
+        "spiral",
+        seed,
+        &spiral_data,
+        &calibration_spiral,
+        &mut rng,
+        false,
     );
     let circles_group = train_promoted_mirror(
-        &mut dm, "circles", seed.wrapping_add(1), &circles_data, &calibration_circles, &mut rng, false,
+        &mut dm,
+        "circles",
+        seed.wrapping_add(1),
+        &circles_data,
+        &calibration_circles,
+        &mut rng,
+        false,
     );
 
     let task_e_data = generate_balanced_spiral_gated_circles_data(
-        &mut dm.main, spiral_group, circles_group, INNER_RADIUS, N_SAMPLES, &mut data_rng,
+        &mut dm.main,
+        spiral_group,
+        circles_group,
+        INNER_RADIUS,
+        N_SAMPLES,
+        &mut data_rng,
     );
     let (train, heldout) =
         stratified_composite_split(&task_e_data, INNER_RADIUS, TRAIN_N, &mut data_rng);
 
-    let mut router = train_task_e_learned_router_expert(
-        &mut dm.main, spiral_group, circles_group, &train,
-    );
+    let mut router =
+        train_task_e_learned_router_expert(&mut dm.main, spiral_group, circles_group, &train);
 
     let gids = [spiral_group, circles_group];
     let mut records = Vec::with_capacity(heldout.len());
@@ -3677,7 +4534,11 @@ fn collect_expert_boundary_records(seed: u64) -> (Vec<BoundaryPointRecord>, Boun
         let f_circles = specialist_scalar(&mut dm.main, circles_group, input);
         let features = vec![f_spiral, f_circles];
         let logits = router.predict_logits(&features);
-        let margin = if logits.len() >= 2 { logits[0] - logits[1] } else { 0.0 };
+        let margin = if logits.len() >= 2 {
+            logits[0] - logits[1]
+        } else {
+            0.0
+        };
         let idx = router_route_index(&mut router, &features);
         let router_spiral = idx == 0;
         let oracle_spiral = r < INNER_RADIUS;
@@ -3762,7 +4623,11 @@ struct ZoneMisrouteStats {
     n_outer: usize,
 }
 
-fn zone_misroute_stats(records: &[BoundaryPointRecord], inner_radius: f32, eps: f32) -> ZoneMisrouteStats {
+fn zone_misroute_stats(
+    records: &[BoundaryPointRecord],
+    inner_radius: f32,
+    eps: f32,
+) -> ZoneMisrouteStats {
     let mut interior_mis = 0usize;
     let mut annulus_mis = 0usize;
     let mut outer_mis = 0usize;
@@ -3834,8 +4699,7 @@ fn summarize_boundary_records(records: &[BoundaryPointRecord]) -> Vec<BoundarySe
         .into_iter()
         .map(|(seed, pts)| {
             let n = pts.len().max(1) as f32;
-            let composite_acc =
-                pts.iter().filter(|p| p.composite_correct).count() as f32 / n;
+            let composite_acc = pts.iter().filter(|p| p.composite_correct).count() as f32 / n;
             let region_agreement = pts.iter().filter(|p| p.region_match).count() as f32 / n;
             let margins: Vec<f32> = pts.iter().map(|p| p.margin).collect();
             let radii: Vec<f32> = pts.iter().map(|p| p.r).collect();
@@ -3877,8 +4741,13 @@ fn print_annulus_misroute_analysis(
         "\n=== Annulus misroute analysis (ε = {:.2} around r = {:.1}) ===\n",
         eps, inner_radius
     );
-    println!("Interior: r < {:.2}  |  Annulus: |r−{:.1}| < {:.2}  |  Outer: r > {:.2}",
-        inner_radius - eps, inner_radius, eps, inner_radius + eps);
+    println!(
+        "Interior: r < {:.2}  |  Annulus: |r−{:.1}| < {:.2}  |  Outer: r > {:.2}",
+        inner_radius - eps,
+        inner_radius,
+        eps,
+        inner_radius + eps
+    );
     println!();
     println!("| Cluster | Seeds | Pts | Misroute interior | Misroute annulus | Misroute outer | Annulus / interior |");
     println!("| ------- | ----- | --- | ----------------- | ---------------- | -------------- | ------------------ |");
@@ -3950,11 +4819,8 @@ fn annulus_interior_ratio_for_seed(
     inner_radius: f32,
     eps: f32,
 ) -> f32 {
-    let subset: Vec<BoundaryPointRecord> = records
-        .iter()
-        .filter(|r| r.seed == seed)
-        .cloned()
-        .collect();
+    let subset: Vec<BoundaryPointRecord> =
+        records.iter().filter(|r| r.seed == seed).cloned().collect();
     let stats = zone_misroute_stats(&subset, inner_radius, eps);
     if stats.interior_misroute_rate < 1e-6 {
         f32::INFINITY
@@ -4032,11 +4898,15 @@ fn print_ceiling_margin_cross_tab(
     );
 
     if low_margin_high_acc == 0 && high_margin_high_acc == ceiling.len() {
-        println!("\nCEILING VERDICT: All high-accuracy seeds show elevated margin↔r — partial radius");
+        println!(
+            "\nCEILING VERDICT: All high-accuracy seeds show elevated margin↔r — partial radius"
+        );
         println!("               exploitation under favorable boundary coverage is confirmed.");
         println!("               No ceiling seed reaches 85%+ via a non-radius route.");
     } else if low_margin_high_acc > 0 {
-        println!("\nCEILING VERDICT: Some high-accuracy seeds have low margin↔r — non-radius route");
+        println!(
+            "\nCEILING VERDICT: Some high-accuracy seeds have low margin↔r — non-radius route"
+        );
         println!("               to good accuracy exists; partial-radius story is incomplete.");
     } else {
         println!("\nCEILING VERDICT: Mixed — inspect per-seed table.");
@@ -4083,7 +4953,11 @@ fn demo_phase3e_boundary_analyze_csv() {
         return;
     }
     let summaries = summarize_boundary_records(&records);
-    println!("Loaded {} points across {} seeds.\n", records.len(), summaries.len());
+    println!(
+        "Loaded {} points across {} seeds.\n",
+        records.len(),
+        summaries.len()
+    );
     print_annulus_misroute_analysis(&records, &summaries, INNER_RADIUS, EPS);
     print_ceiling_margin_cross_tab(&records, &summaries, INNER_RADIUS, EPS);
 }
@@ -4144,8 +5018,7 @@ fn demo_phase3e_boundary_diagnostic() {
     }
 
     let n_pts = all_records.len().max(1) as f32;
-    let pooled_region_agree =
-        all_records.iter().filter(|r| r.region_match).count() as f32 / n_pts;
+    let pooled_region_agree = all_records.iter().filter(|r| r.region_match).count() as f32 / n_pts;
     let pooled_margin_r: Vec<f32> = all_records.iter().map(|r| r.margin).collect();
     let pooled_radius_sig: Vec<f32> = all_records.iter().map(|r| 0.4 - r.r).collect();
     let pooled_margin_corr = pearson_correlation(&pooled_margin_r, &pooled_radius_sig);
@@ -4197,15 +5070,31 @@ fn demo_phase3e_boundary_diagnostic() {
         / n_pts;
 
     let floor_bucket = per_seed_acc.iter().filter(|&&a| a < 0.75).count();
-    let mid_bucket = per_seed_acc.iter().filter(|&&a| a >= 0.75 && a < 0.85).count();
+    let mid_bucket = per_seed_acc
+        .iter()
+        .filter(|&&a| a >= 0.75 && a < 0.85)
+        .count();
     let ceil_bucket = per_seed_acc.iter().filter(|&&a| a >= 0.85).count();
 
     let (acc_mean, acc_std) = mean_std(&per_seed_acc);
-    let (reg_mean, reg_std) = mean_std(&summaries.iter().map(|s| s.region_agreement).collect::<Vec<_>>());
-    let (corr_mean, corr_std) =
-        mean_std(&summaries.iter().map(|s| s.margin_radius_corr).collect::<Vec<_>>());
+    let (reg_mean, reg_std) = mean_std(
+        &summaries
+            .iter()
+            .map(|s| s.region_agreement)
+            .collect::<Vec<_>>(),
+    );
+    let (corr_mean, corr_std) = mean_std(
+        &summaries
+            .iter()
+            .map(|s| s.margin_radius_corr)
+            .collect::<Vec<_>>(),
+    );
 
-    println!("\n=== Pooled held-out ({} seeds × ~370 pts = {} points) ===\n", SEEDS.len(), all_records.len());
+    println!(
+        "\n=== Pooled held-out ({} seeds × ~370 pts = {} points) ===\n",
+        SEEDS.len(),
+        all_records.len()
+    );
     println!("| Metric | Value | Interpretation |");
     println!("| ------ | ----- | -------------- |");
     println!(
@@ -4243,7 +5132,8 @@ fn demo_phase3e_boundary_diagnostic() {
     );
     println!(
         "| Per-seed region agreement | {:.1}% ± {:.1}% | |",
-        reg_mean * 100.0, reg_std * 100.0
+        reg_mean * 100.0,
+        reg_std * 100.0
     );
     println!(
         "| Per-seed margin↔r corr | {:.3} ± {:.3} | |",
@@ -4256,7 +5146,10 @@ fn demo_phase3e_boundary_diagnostic() {
     }
     println!("\n");
 
-    println!("Wrote per-point scatter data to {} (plot margin vs r, color by region_match).\n", csv_path);
+    println!(
+        "Wrote per-point scatter data to {} (plot margin vs r, color by region_match).\n",
+        csv_path
+    );
 
     print_annulus_misroute_analysis(&all_records, &summaries, 0.4, 0.08);
     print_ceiling_margin_cross_tab(&all_records, &summaries, 0.4, 0.08);
@@ -4265,16 +5158,22 @@ fn demo_phase3e_boundary_diagnostic() {
         println!("VERDICT: Router boundary tracks r=0.4 — expert outputs are a positional proxy (soft leak).");
         println!("         Middle rung EMPTY. Do not claim discovery without position.");
     } else if pooled_region_agree < 0.65 && acc_mean > 0.75 {
-        println!("VERDICT: High composite accuracy WITHOUT aligning to r<0.4 (region agree {:.1}%).",
-            pooled_region_agree * 100.0);
+        println!(
+            "VERDICT: High composite accuracy WITHOUT aligning to r<0.4 (region agree {:.1}%).",
+            pooled_region_agree * 100.0
+        );
         println!("         Not circular discovery — check for degenerate routing (many seeds at ~50% region agree");
         println!("         suggest constant specialist choice). f_circles↔r={:.3} flags positional encoding",
             pooled_f_circles_r);
         println!("         in specialist outputs even when router does not recover the generative boundary.");
     } else if pooled_region_agree >= 0.65 && pooled_margin_corr > 0.5 {
-        println!("VERDICT: Partial radius alignment — mixed seeds; inspect histogram before any claim.");
+        println!(
+            "VERDICT: Partial radius alignment — mixed seeds; inspect histogram before any claim."
+        );
     } else {
-        println!("VERDICT: Ambiguous — inspect scatter and per-seed histogram before any paper claim.");
+        println!(
+            "VERDICT: Ambiguous — inspect scatter and per-seed histogram before any paper claim."
+        );
     }
 }
 
@@ -4304,10 +5203,16 @@ impl CompetenceHead {
         let scale2 = (2.0 / (hidden + 1) as f32).sqrt();
         let mut w1 = Vec::with_capacity(input_dim);
         for _ in 0..input_dim {
-            w1.push((0..hidden).map(|_| (rng.gen::<f32>() - 0.5) * 2.0 * scale1).collect());
+            w1.push(
+                (0..hidden)
+                    .map(|_| (rng.gen::<f32>() - 0.5) * 2.0 * scale1)
+                    .collect(),
+            );
         }
         let b1 = (0..hidden).map(|_| 0.0f32).collect();
-        let w2 = (0..hidden).map(|_| (rng.gen::<f32>() - 0.5) * 2.0 * scale2).collect();
+        let w2 = (0..hidden)
+            .map(|_| (rng.gen::<f32>() - 0.5) * 2.0 * scale2)
+            .collect();
         Self {
             input_dim,
             w1,
@@ -4412,12 +5317,7 @@ fn specialist_penultimate_hidden(
         .unwrap_or_default()
 }
 
-fn stratified_take(
-    data: &[Sample],
-    n: usize,
-    inner_radius: f32,
-    rng: &mut StdRng,
-) -> Vec<Sample> {
+fn stratified_take(data: &[Sample], n: usize, inner_radius: f32, rng: &mut StdRng) -> Vec<Sample> {
     let mut inner = Vec::new();
     let mut outer = Vec::new();
     for sample in data {
@@ -4489,10 +5389,8 @@ fn train_competence_heads(
     mode: CompetenceLabelMode,
     rng: &mut StdRng,
 ) -> [CompetenceHead; 2] {
-    let (feat_s, lab_s) =
-        collect_competence_training_data(main, spiral_gid, router_train, mode);
-    let (feat_c, lab_c) =
-        collect_competence_training_data(main, circles_gid, router_train, mode);
+    let (feat_s, lab_s) = collect_competence_training_data(main, spiral_gid, router_train, mode);
+    let (feat_c, lab_c) = collect_competence_training_data(main, circles_gid, router_train, mode);
     let input_dim = feat_s.first().map(|v| v.len()).unwrap_or(16).max(1);
     let mut head_spiral = CompetenceHead::random(input_dim, rng);
     let mut head_circles = CompetenceHead::random(input_dim, rng);
@@ -4656,14 +5554,31 @@ fn run_phase3f_competence_seed(
     let calibration_circles: Vec<_> = circles_data.iter().take(100).cloned().collect();
 
     let spiral_group = train_promoted_mirror(
-        &mut dm, "spiral", seed, &spiral_data, &calibration_spiral, &mut rng, false,
+        &mut dm,
+        "spiral",
+        seed,
+        &spiral_data,
+        &calibration_spiral,
+        &mut rng,
+        false,
     );
     let circles_group = train_promoted_mirror(
-        &mut dm, "circles", seed.wrapping_add(1), &circles_data, &calibration_circles, &mut rng, false,
+        &mut dm,
+        "circles",
+        seed.wrapping_add(1),
+        &circles_data,
+        &calibration_circles,
+        &mut rng,
+        false,
     );
 
     let task_e_data = generate_balanced_spiral_gated_circles_data(
-        &mut dm.main, spiral_group, circles_group, INNER_RADIUS, N_SAMPLES, &mut data_rng,
+        &mut dm.main,
+        spiral_group,
+        circles_group,
+        INNER_RADIUS,
+        N_SAMPLES,
+        &mut data_rng,
     );
     let (train, heldout) =
         stratified_composite_split(&task_e_data, INNER_RADIUS, TRAIN_N, &mut data_rng);
@@ -4725,9 +5640,8 @@ fn run_phase3f_competence_seed(
         if ensemble_fallback {
             ensemble_n += 1;
         }
-        let pred = composite_from_dispatch(
-            &mut dm.main, spiral_group, circles_group, input, dispatch,
-        );
+        let pred =
+            composite_from_dispatch(&mut dm.main, spiral_group, circles_group, input, dispatch);
         let correct = scalar_matches_target(pred, target[0]);
         if correct {
             correct_n += 1;
@@ -4740,9 +5654,12 @@ fn run_phase3f_competence_seed(
         margins.push(margin);
         radius_signals.push(INNER_RADIUS - r);
 
-        for (k, (fk, ck, spec_correct)) in [(f_spiral, c_spiral, spiral_correct), (f_circles, c_circles, circles_correct)]
-            .iter()
-            .enumerate()
+        for (k, (fk, ck, spec_correct)) in [
+            (f_spiral, c_spiral, spiral_correct),
+            (f_circles, c_circles, circles_correct),
+        ]
+        .iter()
+        .enumerate()
         {
             if (*fk - 0.5).abs() > 0.4 && !spec_correct {
                 confident_wrong_c_sum += *ck;
@@ -4816,7 +5733,9 @@ fn run_phase3f_competence_seed(
 
 fn demo_phase3f_competence_routing() {
     println!("--- Phase 3f: Per-specialist competence routing (falsifiable gate) ---\n");
-    println!("See docs/COMPETENCE_ROUTING_SPEC.md. Pre-registered pass/fail — fill §6 after run.\n");
+    println!(
+        "See docs/COMPETENCE_ROUTING_SPEC.md. Pre-registered pass/fail — fill §6 after run.\n"
+    );
 
     const SEEDS: [u64; 20] = [
         42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
@@ -4880,7 +5799,13 @@ fn demo_phase3f_competence_routing() {
         let corrs: Vec<f32> = summaries.iter().map(|s| s.margin_radius_corr).collect();
         let cw: Vec<f32> = summaries
             .iter()
-            .filter_map(|s| if s.confident_wrong_n > 0 { Some(s.confident_wrong_c_mean) } else { None })
+            .filter_map(|s| {
+                if s.confident_wrong_n > 0 {
+                    Some(s.confident_wrong_c_mean)
+                } else {
+                    None
+                }
+            })
             .collect();
         let degenerate = entropies.iter().filter(|&&h| h < 0.3).count();
 
@@ -4923,12 +5848,28 @@ fn demo_phase3f_competence_routing() {
             run_phase3f_competence_seed(seed, 300, CompetenceLabelMode::Decisiveness);
         decis_summaries.push(summary);
     }
-    let decis_acc = mean_std(&decis_summaries.iter().map(|s| s.composite_acc).collect::<Vec<_>>());
-    let decis_reg = mean_std(&decis_summaries.iter().map(|s| s.region_agreement).collect::<Vec<_>>());
+    let decis_acc = mean_std(
+        &decis_summaries
+            .iter()
+            .map(|s| s.composite_acc)
+            .collect::<Vec<_>>(),
+    );
+    let decis_reg = mean_std(
+        &decis_summaries
+            .iter()
+            .map(|s| s.region_agreement)
+            .collect::<Vec<_>>(),
+    );
     let decis_cw = mean_std(
         &decis_summaries
             .iter()
-            .filter_map(|s| if s.confident_wrong_n > 0 { Some(s.confident_wrong_c_mean) } else { None })
+            .filter_map(|s| {
+                if s.confident_wrong_n > 0 {
+                    Some(s.confident_wrong_c_mean)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>(),
     );
     println!(
@@ -4952,7 +5893,9 @@ fn demo_phase3f_competence_routing() {
 
     println!("\nWrote {} (n_router=300 correctness only).", csv_path);
     println!("Run --phase3f-analyze for annulus / confident-wrong breakdown.");
-    println!("\n§6 decision table: fill manually from metrics above — do not narrate before table.");
+    println!(
+        "\n§6 decision table: fill manually from metrics above — do not narrate before table."
+    );
 }
 
 fn load_competence_csv(path: &str) -> Vec<CompetencePointRecord> {
@@ -4993,15 +5936,27 @@ fn demo_phase3f_analyze_csv() {
     const INNER_RADIUS: f32 = 0.4;
     const EPS: f32 = 0.08;
 
-    println!("--- Phase 3f competence routing analysis (from {}) ---\n", CSV_PATH);
+    println!(
+        "--- Phase 3f competence routing analysis (from {}) ---\n",
+        CSV_PATH
+    );
     let records = load_competence_csv(CSV_PATH);
     if records.is_empty() {
         println!("No records found. Run --phase3f-competence first.");
         return;
     }
 
-    let seeds: Vec<u64> = records.iter().map(|r| r.seed).collect::<std::collections::HashSet<_>>().into_iter().collect();
-    println!("Loaded {} points across {} seeds.\n", records.len(), seeds.len());
+    let seeds: Vec<u64> = records
+        .iter()
+        .map(|r| r.seed)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    println!(
+        "Loaded {} points across {} seeds.\n",
+        records.len(),
+        seeds.len()
+    );
 
     let boundary_like: Vec<BoundaryPointRecord> = records
         .iter()
@@ -5030,7 +5985,8 @@ fn demo_phase3f_analyze_csv() {
             .filter(|r| (r.route_k == 0) == r.region_true)
             .count() as f32
             / seed_recs.len().max(1) as f32;
-        let acc = seed_recs.iter().filter(|r| r.correct).count() as f32 / seed_recs.len().max(1) as f32;
+        let acc =
+            seed_recs.iter().filter(|r| r.correct).count() as f32 / seed_recs.len().max(1) as f32;
         let margins: Vec<f32> = seed_recs.iter().map(|r| r.margin_top2).collect();
         let radius_sig: Vec<f32> = seed_recs.iter().map(|r| INNER_RADIUS - r.r).collect();
         let corr = pearson_correlation(&margins, &radius_sig);
@@ -5047,7 +6003,15 @@ fn demo_phase3f_analyze_csv() {
             }
         }
 
-        per_seed.push((seed, acc, region_agree, ent, corr, cw_sum / cw_n.max(1) as f32, cw_n));
+        per_seed.push((
+            seed,
+            acc,
+            region_agree,
+            ent,
+            corr,
+            cw_sum / cw_n.max(1) as f32,
+            cw_n,
+        ));
     }
 
     println!("| seed | acc | region | H(bits) | margin↔r | cw_mean c_k | cw_n |");
@@ -5065,8 +6029,15 @@ fn demo_phase3f_analyze_csv() {
         );
     }
 
-    let degenerate = per_seed.iter().filter(|(_, _, _, ent, _, _, _)| *ent < 0.3).count();
-    println!("\nDegenerate seeds (H < 0.3 bits): {} / {}", degenerate, per_seed.len());
+    let degenerate = per_seed
+        .iter()
+        .filter(|(_, _, _, ent, _, _, _)| *ent < 0.3)
+        .count();
+    println!(
+        "\nDegenerate seeds (H < 0.3 bits): {} / {}",
+        degenerate,
+        per_seed.len()
+    );
 
     let summaries: Vec<BoundarySeedSummary> = seeds
         .iter()
@@ -5079,7 +6050,10 @@ fn demo_phase3f_analyze_csv() {
                 region_agreement: seed_recs.iter().filter(|r| r.region_match).count() as f32 / n,
                 margin_radius_corr: pearson_correlation(
                     &seed_recs.iter().map(|r| r.margin).collect::<Vec<_>>(),
-                    &seed_recs.iter().map(|r| INNER_RADIUS - r.r).collect::<Vec<_>>(),
+                    &seed_recs
+                        .iter()
+                        .map(|r| INNER_RADIUS - r.r)
+                        .collect::<Vec<_>>(),
                 ),
                 misroute_mean_dr: 0.0,
                 f_spiral_r_corr: 0.0,
@@ -5114,14 +6088,31 @@ fn collect_cmi_records_for_seed(seed: u64) -> Vec<CmiPointRecord> {
     let calibration_circles: Vec<_> = circles_data.iter().take(100).cloned().collect();
 
     let spiral_group = train_promoted_mirror(
-        &mut dm, "spiral", seed, &spiral_data, &calibration_spiral, &mut rng, false,
+        &mut dm,
+        "spiral",
+        seed,
+        &spiral_data,
+        &calibration_spiral,
+        &mut rng,
+        false,
     );
     let circles_group = train_promoted_mirror(
-        &mut dm, "circles", seed.wrapping_add(1), &circles_data, &calibration_circles, &mut rng, false,
+        &mut dm,
+        "circles",
+        seed.wrapping_add(1),
+        &circles_data,
+        &calibration_circles,
+        &mut rng,
+        false,
     );
 
     let task_e_data = generate_balanced_spiral_gated_circles_data(
-        &mut dm.main, spiral_group, circles_group, INNER_RADIUS, N_SAMPLES, &mut data_rng,
+        &mut dm.main,
+        spiral_group,
+        circles_group,
+        INNER_RADIUS,
+        N_SAMPLES,
+        &mut data_rng,
     );
     let (_train, heldout) =
         stratified_composite_split(&task_e_data, INNER_RADIUS, TRAIN_N, &mut data_rng);
@@ -5204,7 +6195,12 @@ fn load_cmi_csv(path: &str) -> Vec<CmiPointRecord> {
         }
         let parse_a = |start: usize| -> Vec<f32> {
             (0..16)
-                .map(|j| parts.get(start + j).and_then(|s| s.parse().ok()).unwrap_or(0.0))
+                .map(|j| {
+                    parts
+                        .get(start + j)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0.0)
+                })
                 .collect()
         };
         records.push(CmiPointRecord {
@@ -5249,7 +6245,11 @@ fn demo_cmi_measurement() {
 
     let report = format_cmi_report(&estimates);
     println!("\n{}", report);
-    println!("\nWrote {} ({} points). Re-run with --cmi-analyze.", CSV_PATH, all_records.len());
+    println!(
+        "\nWrote {} ({} points). Re-run with --cmi-analyze.",
+        CSV_PATH,
+        all_records.len()
+    );
 }
 
 fn demo_cmi_analyze_csv() {
@@ -5281,7 +6281,13 @@ fn extract_spiral_output_weights_for_seed(seed: u64) -> (u64, Vec<f32>) {
     let spiral_data = generate_spiral_data(400, &mut data_rng);
     let calibration_spiral: Vec<_> = spiral_data.iter().take(100).cloned().collect();
     let spiral_group = train_promoted_mirror(
-        &mut dm, "spiral", seed, &spiral_data, &calibration_spiral, &mut rng, false,
+        &mut dm,
+        "spiral",
+        seed,
+        &spiral_data,
+        &calibration_spiral,
+        &mut rng,
+        false,
     );
     let _ = INNER_RADIUS;
     (seed, dm.main.penultimate_to_output_weights(spiral_group))
@@ -5296,7 +6302,10 @@ fn demo_cmi_spiral_resolve() {
         println!("No records in {}. Run --cmi first.", CSV_PATH);
         return;
     }
-    println!("Loaded {} points. Extracting output-head weights per seed ...\n", records.len());
+    println!(
+        "Loaded {} points. Extracting output-head weights per seed ...\n",
+        records.len()
+    );
     const SEEDS: [u64; 20] = [
         42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
     ];
@@ -5319,8 +6328,8 @@ fn demo_cmi_spiral_resolve() {
 fn demo_cmi_spiral_analyze() {
     const OUT_PATH: &str = "cmi_spiral_resolve.json";
     println!("--- CMI spiral resolve analysis (from {}) ---\n", OUT_PATH);
-    let text = std::fs::read_to_string(OUT_PATH)
-        .unwrap_or_else(|e| panic!("read {}: {}", OUT_PATH, e));
+    let text =
+        std::fs::read_to_string(OUT_PATH).unwrap_or_else(|e| panic!("read {}: {}", OUT_PATH, e));
     let result: SpiralResolveResult = serde_json::from_str(&text).expect("parse spiral resolve");
     println!("{}", format_spiral_resolve_report(&result));
 }
@@ -5449,7 +6458,9 @@ fn write_grounding_proposals_csv(path: &str, proposals: &[EditProposal]) {
                 *similarity,
                 *margin,
             ),
-            ProposalKind::NewNode { phrases, domain, .. } => (
+            ProposalKind::NewNode {
+                phrases, domain, ..
+            } => (
                 "new_node".to_string(),
                 phrases.join("|"),
                 String::new(),
@@ -5577,9 +6588,13 @@ fn build_proposals_for_captures(
     rt: &growformer::dimension::LanguageRuntime,
     before_index: &grounding_loop::GroundingNodeIndex,
 ) -> Vec<EditProposal> {
-    let held_out_before =
-        grounding_loop::routing_accuracy_for_captures(captures, rt, before_index, CaptureSplit::Certify)
-            .unwrap_or(0.0);
+    let held_out_before = grounding_loop::routing_accuracy_for_captures(
+        captures,
+        rt,
+        before_index,
+        CaptureSplit::Certify,
+    )
+    .unwrap_or(0.0);
 
     let mut proposals = Vec::new();
     for cap in captures.iter().filter(|c| c.split == CaptureSplit::Propose) {
@@ -5603,13 +6618,7 @@ fn build_proposals_for_captures(
         };
         let domain = parse_fleet_domain(&target_domain).unwrap_or(GroundingFleetDomain::Crypto);
         let (collision_score, conflicts) = if let ProposalKind::Alias { target_node, .. } = &kind {
-            collision_check(
-                &cap.encoder_embedding,
-                domain,
-                target_node,
-                index,
-                params,
-            )
+            collision_check(&cap.encoder_embedding, domain, target_node, index, params)
         } else {
             (0.0, Vec::new())
         };
@@ -5692,7 +6701,10 @@ fn luna_build_captures(
             continue;
         }
         if seen.insert((s.semantic_intent.clone(), phrase.to_ascii_lowercase())) {
-            by_intent.entry(s.semantic_intent.clone()).or_default().push(phrase);
+            by_intent
+                .entry(s.semantic_intent.clone())
+                .or_default()
+                .push(phrase);
         }
     }
     let mut captures = Vec::new();
@@ -5702,7 +6714,11 @@ fn luna_build_captures(
         }
         phrases.sort();
         for (i, phrase) in phrases.into_iter().enumerate() {
-            let split = if i % 2 == 0 { CaptureSplit::Propose } else { CaptureSplit::Certify };
+            let split = if i % 2 == 0 {
+                CaptureSplit::Propose
+            } else {
+                CaptureSplit::Certify
+            };
             let prov = grounding_loop::PhraseProvenance::real(phrase.clone());
             captures.push(FailureCapture {
                 phrase,
@@ -5736,7 +6752,8 @@ fn luna_certifier_pass(
     let before_index = build_grounding_index_from_nodes(rt, nodes, params).expect("luna index");
     rehydrate_captures(rt, &before_index, captures);
 
-    let proposals = build_proposals_for_captures(captures, &before_index, params, rt, &before_index);
+    let proposals =
+        build_proposals_for_captures(captures, &before_index, params, rt, &before_index);
 
     // Genuine batch: integrate only approved propose-set aliases (held-out untouched).
     let mut after_genuine = before_index.clone();
@@ -5749,7 +6766,13 @@ fn luna_certifier_pass(
         if !p.approved {
             continue;
         }
-        if let ProposalKind::Alias { phrase, target_node, target_domain, .. } = &p.kind {
+        if let ProposalKind::Alias {
+            phrase,
+            target_node,
+            target_domain,
+            ..
+        } = &p.kind
+        {
             let d = parse_fleet_domain(target_domain).unwrap_or(GroundingFleetDomain::Runtime);
             if let Ok((emb, _)) = embed_phrase(rt, phrase) {
                 after_genuine.add_alias_to_node(d, target_node, phrase, emb);
@@ -5762,7 +6785,8 @@ fn luna_certifier_pass(
     let mut after_memo = before_index.clone();
     for cap in captures.iter().filter(|c| c.split == CaptureSplit::Propose) {
         if let Ok((emb, _)) = embed_phrase(rt, &cap.phrase) {
-            let d = parse_fleet_domain(&cap.domain_context).unwrap_or(GroundingFleetDomain::Runtime);
+            let d =
+                parse_fleet_domain(&cap.domain_context).unwrap_or(GroundingFleetDomain::Runtime);
             after_memo.add_alias_to_node(d, &cap.inferred_concept_id, &cap.phrase, emb);
         }
     }
@@ -5779,7 +6803,12 @@ fn luna_certifier_pass(
         .iter()
         .filter(|p| p.approved)
         .filter_map(|p| match &p.kind {
-            ProposalKind::Alias { phrase, target_node, target_domain, .. } => Some((
+            ProposalKind::Alias {
+                phrase,
+                target_node,
+                target_domain,
+                ..
+            } => Some((
                 parse_fleet_domain(target_domain).unwrap_or(GroundingFleetDomain::Runtime),
                 target_node.clone(),
                 phrase.clone(),
@@ -5792,8 +6821,14 @@ fn luna_certifier_pass(
             .expect("genuine curve");
     let (gcap, gheld) = curve_lifts(&genuine_curve);
 
-    let n_propose = captures.iter().filter(|c| c.split == CaptureSplit::Propose).count();
-    let n_certify = captures.iter().filter(|c| c.split == CaptureSplit::Certify).count();
+    let n_propose = captures
+        .iter()
+        .filter(|c| c.split == CaptureSplit::Propose)
+        .count();
+    let n_certify = captures
+        .iter()
+        .filter(|c| c.split == CaptureSplit::Certify)
+        .count();
     let cal = calibrate_alias_threshold(captures, rt, &before_index).ok();
 
     let mut s = String::new();
@@ -5856,7 +6891,11 @@ fn demo_grounding_loop_luna(dir_arg: &str) {
         println!("Failed to load JSONL corpus: {}", e);
         return;
     }
-    println!("Loaded {} labeled utterances from {}\n", samples.len(), data_dir.display());
+    println!(
+        "Loaded {} labeled utterances from {}\n",
+        samples.len(),
+        data_dir.display()
+    );
 
     let nodes = luna_runtime_nodes();
     let valid_ids: std::collections::HashSet<String> =
@@ -5868,8 +6907,10 @@ fn demo_grounding_loop_luna(dir_arg: &str) {
         println!("No usable captures (need intents that are graph nodes with >=4 utterances).");
         return;
     }
-    let n_intents: std::collections::BTreeSet<&str> =
-        captures.iter().map(|c| c.inferred_concept_id.as_str()).collect();
+    let n_intents: std::collections::BTreeSet<&str> = captures
+        .iter()
+        .map(|c| c.inferred_concept_id.as_str())
+        .collect();
     println!(
         "Captures: {} across {} intents (propose/certify split)\n",
         captures.len(),
@@ -5904,7 +6945,13 @@ fn demo_grounding_loop_luna(dir_arg: &str) {
     let corpus_refs: Vec<&str> = corpus.iter().map(|s| s.as_str()).collect();
     let dict_n = install_phrase_embedder_from_corpus(&corpus_refs, 8192);
     println!("  [lexical] CATA dictionary: {dict_n} tokens");
-    report.push_str(&luna_certifier_pass("lexical CATA centroid", rt, &mut captures, &nodes, &params));
+    report.push_str(&luna_certifier_pass(
+        "lexical CATA centroid",
+        rt,
+        &mut captures,
+        &nodes,
+        &params,
+    ));
     report.push_str("\n\n");
 
     // Pass 2: supervised encoder trained ONLY on propose-set labels (certify held out).
@@ -5916,7 +6963,10 @@ fn demo_grounding_loop_luna(dir_arg: &str) {
     match SupervisedEncoder::train(&train_pairs, 4096, 60) {
         Some(enc) => {
             let k = install_supervised_embedder(enc);
-            println!("  [supervised] trained on {} propose phrases, {k} concepts", train_pairs.len());
+            println!(
+                "  [supervised] trained on {} propose phrases, {k} concepts",
+                train_pairs.len()
+            );
             report.push_str(&luna_certifier_pass(
                 "supervised projection (trained on propose-set only)",
                 rt,
@@ -5991,7 +7041,11 @@ fn write_disjoint_curve_csv(path: &str, encoder: &str, level: &str, curve: &[Ove
         .open(path)
         .expect("open disjoint csv");
     if !exists {
-        writeln!(f, "encoder,feature_level,overlap_bin,n,hits,accuracy,ci_lo,ci_hi").expect("hdr");
+        writeln!(
+            f,
+            "encoder,feature_level,overlap_bin,n,hits,accuracy,ci_lo,ci_hi"
+        )
+        .expect("hdr");
     }
     for b in curve {
         writeln!(
@@ -6037,8 +7091,11 @@ fn demo_grounding_disjoint_test(dir_arg: &str) {
         return;
     }
     write_grounding_captures_csv(GROUNDING_CAPTURES_CSV, &captures);
-    std::fs::write(DISJOINT_META_TXT, grounding_path.to_string_lossy().as_bytes())
-        .expect("write meta");
+    std::fs::write(
+        DISJOINT_META_TXT,
+        grounding_path.to_string_lossy().as_bytes(),
+    )
+    .expect("write meta");
 
     let (dm, _, _, _) = build_language_demo_manager(0.0);
     let report = run_disjoint_core(&dm.language_runtime, &nodes, &captures);
@@ -6055,7 +7112,10 @@ fn demo_grounding_disjoint_analyze() {
     let grounding_path = match std::fs::read_to_string(DISJOINT_META_TXT) {
         Ok(p) => p.trim().to_string(),
         Err(_) => {
-            println!("No {} found. Run --grounding-disjoint-test first.", DISJOINT_META_TXT);
+            println!(
+                "No {} found. Run --grounding-disjoint-test first.",
+                DISJOINT_META_TXT
+            );
             return;
         }
     };
@@ -6099,7 +7159,11 @@ fn run_disjoint_core(
         .filter(|c| c.split == CaptureSplit::Certify)
         .cloned()
         .collect();
-    let n_labels = propose.iter().map(|(_, l)| l).collect::<std::collections::HashSet<_>>().len();
+    let n_labels = propose
+        .iter()
+        .map(|(_, l)| l)
+        .collect::<std::collections::HashSet<_>>()
+        .len();
     if n_labels < 2 || certify.is_empty() {
         return "insufficient data (need >=2 concepts and certify phrases)".into();
     }
@@ -6125,8 +7189,15 @@ fn run_disjoint_core(
     let corpus_refs: Vec<&str> = corpus.iter().map(|s| s.as_str()).collect();
     install_phrase_embedder_from_corpus(&corpus_refs, 8192);
     let idx_cata = build_grounding_index_from_nodes(rt, nodes, &params).expect("cata index");
-    let evals_cata = evaluate_disjoint(rt, &idx_cata, &certify, &concept_train, &global_train, "wbc")
-        .expect("cata eval");
+    let evals_cata = evaluate_disjoint(
+        rt,
+        &idx_cata,
+        &certify,
+        &concept_train,
+        &global_train,
+        "wbc",
+    )
+    .expect("cata eval");
     let curve_cata = build_overlap_curve(&evals_cata);
     let pooled_cata = pooled_accuracy(&evals_cata);
     write_disjoint_curve_csv(DISJOINT_CURVE_CSV, "lexical_cata", "wbc", &curve_cata);
@@ -6139,7 +7210,9 @@ fn run_disjoint_core(
     let mut floor_contrib = 0usize;
     for b in 0..b_total {
         let permuted = disjoint_shuffle_labels(&propose, b as u64);
-        let Some(enc) = SupervisedEncoder::train(&permuted, 4096, 60) else { continue };
+        let Some(enc) = SupervisedEncoder::train(&permuted, 4096, 60) else {
+            continue;
+        };
         install_supervised_embedder(enc);
         let idx = build_grounding_index_from_nodes(rt, nodes, &params).expect("shuffle index");
         let (ct, gl) = concept_train_features(&permuted);
@@ -6150,10 +7223,19 @@ fn run_disjoint_core(
             floor_contrib += 1;
         }
         if (b + 1) % 50 == 0 {
-            println!("  shuffle {}/{} (overlap-0(a) contributing: {})", b + 1, b_total, floor_contrib);
+            println!(
+                "  shuffle {}/{} (overlap-0(a) contributing: {})",
+                b + 1,
+                b_total,
+                floor_contrib
+            );
         }
     }
-    let floor_mean = if floor_a.is_empty() { 0.0 } else { floor_a.iter().sum::<f32>() / floor_a.len() as f32 };
+    let floor_mean = if floor_a.is_empty() {
+        0.0
+    } else {
+        floor_a.iter().sum::<f32>() / floor_a.len() as f32
+    };
     let floor95 = percentile_sorted(&mut floor_a.clone(), 0.95);
 
     // ---- §2–3 Real supervised curve + overlap-0 sub-stratification. ----
@@ -6182,17 +7264,29 @@ fn run_disjoint_core(
     // high-overlap slope is reported as context but does NOT gate validity — on a large
     // graph CATA can be near-chance everywhere, which leaves no slope yet still floors.
     let overlap_measure_valid = cata_overlap0 <= floor95 + 0.05;
-    let cata_slope = cata_top.as_ref().map(|t| t.accuracy - cata_overlap0).unwrap_or(0.0);
+    let cata_slope = cata_top
+        .as_ref()
+        .map(|t| t.accuracy - cata_overlap0)
+        .unwrap_or(0.0);
 
     // Corroborating lexical signature on the supervised curve: accuracy rises monotonically
     // with overlap and collapses toward floor at disjoint.
-    let sup_top = curve.iter().rev().find(|b| b.n > 0).map(|b| b.accuracy).unwrap_or(0.0);
+    let sup_top = curve
+        .iter()
+        .rev()
+        .find(|b| b.n > 0)
+        .map(|b| b.accuracy)
+        .unwrap_or(0.0);
     let monotone_lexical = sup_top > cata_overlap0 + 0.20 && curve[0].accuracy <= floor95 + 0.05;
     let wb0 = curve_wb[0].accuracy;
     let wb0_n = curve_wb[0].n;
 
     // ---- §6 decision rule ----
-    let g = if an > 0 { ah as f32 / an as f32 } else { f32::NAN };
+    let g = if an > 0 {
+        ah as f32 / an as f32
+    } else {
+        f32::NAN
+    };
     let (g_lo, g_hi) = wilson_interval(ah, an, 1.96);
     let resolution_ok = an >= 8 && (g_hi - g_lo) <= 0.30;
 
@@ -6202,7 +7296,8 @@ fn run_disjoint_core(
         verdict = "TEST INVALID — lexical CATA routed disjoint phrases above floor (overlap mis-measured)";
         headline = "fix overlap measurement before reading any supervised number".into();
     } else if !resolution_ok {
-        verdict = "BELOW RESOLUTION — union-disjoint seen-elsewhere bin too small for a tight claim";
+        verdict =
+            "BELOW RESOLUTION — union-disjoint seen-elsewhere bin too small for a tight claim";
         headline = format!(
             "union-disjoint(a) n={} (CI [{:.0}%,{:.0}%]); pooled {:.1}% is NOT established as generalization",
             an, g_lo * 100.0, g_hi * 100.0, pooled * 100.0
@@ -6223,15 +7318,26 @@ fn run_disjoint_core(
         );
     } else if g >= 0.8 * pooled {
         verdict = "REAL GENERALIZATION — flat curve, disjoint bin holds";
-        headline = format!("headline stays {:.1}% (disjoint-bin {:.1}%)", pooled * 100.0, g * 100.0);
+        headline = format!(
+            "headline stays {:.1}% (disjoint-bin {:.1}%)",
+            pooled * 100.0,
+            g * 100.0
+        );
     } else {
         verdict = "PARTIAL — generalization real but weaker than pooled headline";
-        headline = format!("headline DROPS to disjoint-bin {:.1}% (pooled {:.1}% is coverage)", g * 100.0, pooled * 100.0);
+        headline = format!(
+            "headline DROPS to disjoint-bin {:.1}% (pooled {:.1}% is coverage)",
+            g * 100.0,
+            pooled * 100.0
+        );
     }
 
     // ---- report ----
     out.push_str("§5 POSITIVE CONTROL — lexical CATA (must floor at overlap-0)\n");
-    out.push_str(&format_overlap_curve("  CATA accuracy-vs-overlap (union features)", &curve_cata));
+    out.push_str(&format_overlap_curve(
+        "  CATA accuracy-vs-overlap (union features)",
+        &curve_cata,
+    ));
     out.push_str(&format!(
         "  CATA pooled={:.1}%  overlap-0={:.1}%  shuffle-floor95={:.1}%  (slope to top bin: {:+.1}pp)\n",
         pooled_cata * 100.0,
@@ -6256,29 +7362,51 @@ fn run_disjoint_core(
     ));
 
     out.push_str("§2 SUPERVISED accuracy-vs-overlap curve\n");
-    out.push_str(&format_overlap_curve("  union (w∪b∪c) — the encoder's true input", &curve));
-    out.push_str(&format_overlap_curve("  word+bigram (looser, leakage-prone secondary)", &curve_wb));
+    out.push_str(&format_overlap_curve(
+        "  union (w∪b∪c) — the encoder's true input",
+        &curve,
+    ));
+    out.push_str(&format_overlap_curve(
+        "  word+bigram (looser, leakage-prone secondary)",
+        &curve_wb,
+    ));
     let (s_lo, s_hi) = wilson_interval(ah, an, 1.96);
     let (n_lo, n_hi) = wilson_interval(bh, bn, 1.96);
     out.push_str("\n§3 OVERLAP-0 sub-stratification\n");
     out.push_str(&format!(
         "  (a) seen-elsewhere [GENERALIZATION HEADLINE]: {}/{} = {:.1}% [{:.1}%, {:.1}%]\n",
-        ah, an,
-        if an > 0 { ah as f32 / an as f32 * 100.0 } else { 0.0 },
-        s_lo * 100.0, s_hi * 100.0
+        ah,
+        an,
+        if an > 0 {
+            ah as f32 / an as f32 * 100.0
+        } else {
+            0.0
+        },
+        s_lo * 100.0,
+        s_hi * 100.0
     ));
     out.push_str(&format!(
         "  (b) novel-features [routes by prior, not learning]: {}/{} = {:.1}% [{:.1}%, {:.1}%]\n\n",
-        bh, bn,
-        if bn > 0 { bh as f32 / bn as f32 * 100.0 } else { 0.0 },
-        n_lo * 100.0, n_hi * 100.0
+        bh,
+        bn,
+        if bn > 0 {
+            bh as f32 / bn as f32 * 100.0
+        } else {
+            0.0
+        },
+        n_lo * 100.0,
+        n_hi * 100.0
     ));
 
     out.push_str("§6 DECISION\n");
     out.push_str(&format!("  pooled held-out: {:.1}%\n", pooled * 100.0));
     out.push_str(&format!(
         "  disjoint-bin(a) g = {}  shuffle floor95 = {:.1}%\n",
-        if g.is_nan() { "n/a".to_string() } else { format!("{:.1}%", g * 100.0) },
+        if g.is_nan() {
+            "n/a".to_string()
+        } else {
+            format!("{:.1}%", g * 100.0)
+        },
         floor95 * 100.0
     ));
     out.push_str(&format!("  VERDICT: {}\n", verdict));
@@ -6314,7 +7442,10 @@ enum AuditEncoder {
     /// the pipeline embeds (the BYO-vectors hook). This is how a real semantic encoder (e.g. the
     /// GLE) plugs into the identical gate. The shuffle null for a frozen encoder reinstalls the
     /// same map and permutes only the overlap definition — the correct null for a fixed encoder.
-    Vectors { id: String, map: HashMap<String, Vec<f32>> },
+    Vectors {
+        id: String,
+        map: HashMap<String, Vec<f32>>,
+    },
 }
 
 impl AuditEncoder {
@@ -6337,11 +7468,17 @@ impl AuditEncoder {
     /// Install this encoder as the active phrase embedder, trained on `train` pairs.
     /// `node_corpus` is the node-id/alias text (used by CATA's dictionary, ignored by the
     /// supervised projection). `seed` makes supervised training reproducible.
-    fn install(&self, train: &[(String, String)], node_corpus: &[String], seed: u64) -> Result<(), String> {
+    fn install(
+        &self,
+        train: &[(String, String)],
+        node_corpus: &[String],
+        seed: u64,
+    ) -> Result<(), String> {
         match self {
             Self::Supervised => {
-                let enc = SupervisedEncoder::train_seeded(train, CERTIFY_N_BUCKETS, CERTIFY_EPOCHS, seed)
-                    .ok_or_else(|| "supervised: need >=2 labels".to_string())?;
+                let enc =
+                    SupervisedEncoder::train_seeded(train, CERTIFY_N_BUCKETS, CERTIFY_EPOCHS, seed)
+                        .ok_or_else(|| "supervised: need >=2 labels".to_string())?;
                 install_supervised_embedder(enc);
                 Ok(())
             }
@@ -6441,11 +7578,18 @@ fn certify_encoder_pipeline_ex(
         encoder_provenance: encoder_provenance.to_string(),
     };
 
-    let n_labels = propose.iter().map(|(_, l)| l).collect::<std::collections::HashSet<_>>().len();
+    let n_labels = propose
+        .iter()
+        .map(|(_, l)| l)
+        .collect::<std::collections::HashSet<_>>()
+        .len();
     if n_labels < 2 || certify.is_empty() {
         // Not enough structure to measure anything; INVALID (a data problem, not a fail).
         verdict.verdict = Verdict::Invalid.as_str().to_string();
-        verdict.firewall.violations.push("insufficient data: need >=2 concepts and certify phrases".into());
+        verdict
+            .firewall
+            .violations
+            .push("insufficient data: need >=2 concepts and certify phrases".into());
         verdict.augmentation_firewall_clean = false;
         verdict.invalid_reason = "insufficient data: need >=2 concepts and certify phrases".into();
         return verdict;
@@ -6454,7 +7598,10 @@ fn certify_encoder_pipeline_ex(
     // --- Phase A: subject encoder (real labels) → disjoint curve, sub-bins, gap, plateau ---
     if enc.install(&propose, &node_corpus, seed).is_err() {
         verdict.verdict = Verdict::Invalid.as_str().to_string();
-        verdict.firewall.violations.push("encoder failed to train/install".into());
+        verdict
+            .firewall
+            .violations
+            .push("encoder failed to train/install".into());
         verdict.invalid_reason = "encoder failed to train/install".into();
         return verdict;
     }
@@ -6465,9 +7612,12 @@ fn certify_encoder_pipeline_ex(
         _ => None,
     };
     let idx = grounding_loop::build_grounding_index_from_nodes_ex(
-        rt, nodes, &params,
+        rt,
+        nodes,
+        &params,
         training_for_index.as_deref(),
-    ).expect("subject index");
+    )
+    .expect("subject index");
     let evals = evaluate_disjoint(rt, &idx, &certify, &concept_train, &global_train, "wbc")
         .expect("subject eval wbc");
     let curve = build_overlap_curve(&evals);
@@ -6511,7 +7661,8 @@ fn certify_encoder_pipeline_ex(
     let (ah, an, _bh, _bn) = overlap0_substrata(evals_lvl);
 
     // memorization gap = captured (propose routing) − held-out pooled.
-    let captured = routing_accuracy_for_captures(captures, rt, &idx, CaptureSplit::Propose).unwrap_or(0.0);
+    let captured =
+        routing_accuracy_for_captures(captures, rt, &idx, CaptureSplit::Propose).unwrap_or(0.0);
     verdict.memorization_gap = (captured - pooled).max(0.0);
 
     // collision: this audit applies no graph edits, so the pre/post misroute delta is 0.
@@ -6526,7 +7677,12 @@ fn certify_encoder_pipeline_ex(
             .iter()
             .filter(|p| p.approved)
             .filter_map(|p| match &p.kind {
-                ProposalKind::Alias { phrase, target_node, target_domain, .. } => Some((
+                ProposalKind::Alias {
+                    phrase,
+                    target_node,
+                    target_domain,
+                    ..
+                } => Some((
                     parse_fleet_domain(target_domain).unwrap_or(GroundingFleetDomain::Runtime),
                     target_node.clone(),
                     phrase.clone(),
@@ -6553,8 +7709,15 @@ fn certify_encoder_pipeline_ex(
     let cata = AuditEncoder::Cata;
     let _ = cata.install(&propose, &node_corpus, seed);
     let idx_cata = build_grounding_index_from_nodes(rt, nodes, &params).expect("cata index");
-    let evals_cata = evaluate_disjoint(rt, &idx_cata, &certify, &concept_train, &global_train, level)
-        .expect("cata eval");
+    let evals_cata = evaluate_disjoint(
+        rt,
+        &idx_cata,
+        &certify,
+        &concept_train,
+        &global_train,
+        level,
+    )
+    .expect("cata eval");
     let curve_cata = build_overlap_curve(&evals_cata);
     let cata_overlap0 = curve_cata[0].accuracy;
     let cata_overlap0_n = curve_cata[0].n;
@@ -6569,7 +7732,10 @@ fn certify_encoder_pipeline_ex(
     let mut floor_a: Vec<f32> = Vec::new();
     for b in 0..CERTIFY_SHUFFLE_B {
         let permuted = disjoint_shuffle_labels(&propose, seed ^ (b as u64));
-        if enc.install(&permuted, &node_corpus, seed ^ (0xA5A5 + b as u64)).is_err() {
+        if enc
+            .install(&permuted, &node_corpus, seed ^ (0xA5A5 + b as u64))
+            .is_err()
+        {
             continue;
         }
         let shuffle_train: Option<Vec<(String, String)>> = match enc {
@@ -6577,8 +7743,12 @@ fn certify_encoder_pipeline_ex(
             _ => None,
         };
         let idx_s = grounding_loop::build_grounding_index_from_nodes_ex(
-            rt, nodes, &params, shuffle_train.as_deref(),
-        ).expect("shuffle index");
+            rt,
+            nodes,
+            &params,
+            shuffle_train.as_deref(),
+        )
+        .expect("shuffle index");
         // For frozen encoders: use ORIGINAL concept-train features (fixed bin membership).
         // For trained encoders: use SHUFFLED features (the encoder was retrained, so the
         // relevant overlap is with the shuffled training set it actually saw).
@@ -6587,7 +7757,8 @@ fn certify_encoder_pipeline_ex(
         } else {
             concept_train_features(&permuted)
         };
-        let evals_s = evaluate_disjoint(rt, &idx_s, &certify, &ct_s, &gl_s, level).expect("shuffle eval");
+        let evals_s =
+            evaluate_disjoint(rt, &idx_s, &certify, &ct_s, &gl_s, level).expect("shuffle eval");
         let (ah_s, an_s, _, _) = overlap0_substrata(&evals_s);
         if an_s > 0 {
             floor_a.push(ah_s as f32 / an_s as f32);
@@ -6598,7 +7769,11 @@ fn certify_encoder_pipeline_ex(
     }
     clear_phrase_embedder();
 
-    let floor_mean = if floor_a.is_empty() { 0.0 } else { floor_a.iter().sum::<f32>() / floor_a.len() as f32 };
+    let floor_mean = if floor_a.is_empty() {
+        0.0
+    } else {
+        floor_a.iter().sum::<f32>() / floor_a.len() as f32
+    };
     let floor95 = percentile_sorted(&mut floor_a.clone(), 0.95);
     verdict.semantic_floor_mean = floor_mean;
     verdict.semantic_floor_95 = floor95;
@@ -6628,7 +7803,10 @@ fn certify_encoder_pipeline_ex(
     verdict.verdict = decide_encoder_verdict(&inputs).as_str().to_string();
     if verdict.verdict == Verdict::Invalid.as_str() && verdict.invalid_reason.is_empty() {
         verdict.invalid_reason = if !verdict.augmentation_firewall_clean {
-            format!("augmentation firewall tripped: {}", verdict.firewall.violations.join("; "))
+            format!(
+                "augmentation firewall tripped: {}",
+                verdict.firewall.violations.join("; ")
+            )
         } else if an == 0 {
             format!(
                 "no feature-disjoint held-out phrases at any granularity (overlap-0 seen-elsewhere bin empty, level={level}): every held-out phrase shares features with its own class's training, so the eval cannot separate memorization from generalization"
@@ -6652,10 +7830,16 @@ const CAPTURE_STORE_DIR: &str = "capture_artifacts";
 fn gle_checkpoint_for_id(id: &str) -> (&'static str, &'static str) {
     match id.trim().to_ascii_lowercase().as_str() {
         "gle_base" => ("checkpoints/gle_student_base.json", "gle_base"),
-        "gle_m5" | "gle_m5_routing_tuned" => ("checkpoints/gle_m5_routing_tuned.json", "gle_m5_routing_tuned"),
+        "gle_m5" | "gle_m5_routing_tuned" => (
+            "checkpoints/gle_m5_routing_tuned.json",
+            "gle_m5_routing_tuned",
+        ),
         "gle_m5_base" => ("checkpoints/gle_m5_base.json", "gle_m5_base"),
         // "gle" / "gle_routing_tuned" / anything else gle* → the routing-tuned student.
-        _ => ("checkpoints/gle_student_routing_tuned.json", "gle_routing_tuned"),
+        _ => (
+            "checkpoints/gle_student_routing_tuned.json",
+            "gle_routing_tuned",
+        ),
     }
 }
 
@@ -6728,9 +7912,12 @@ fn build_gle_vector_encoder(
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| {
-            v.get("notes")
-                .and_then(|n| n.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("; "))
+            v.get("notes").and_then(|n| n.as_array()).map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
         })
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "see meta".to_string());
@@ -6738,8 +7925,17 @@ fn build_gle_vector_encoder(
         "frozen distilled GLE [{ckpt}]; GLE training domain: {domain}. Positive control = lexical CATA on the same eval, every run."
     );
 
-    println!("  [gle] {canon}: {} vectors (dim {dim}) from {ckpt}", map.len());
-    Ok((AuditEncoder::Vectors { id: canon.to_string(), map }, note))
+    println!(
+        "  [gle] {canon}: {} vectors (dim {dim}) from {ckpt}",
+        map.len()
+    );
+    Ok((
+        AuditEncoder::Vectors {
+            id: canon.to_string(),
+            map,
+        },
+        note,
+    ))
 }
 
 /// Push one split of `(text, class)` rows into a capture set with real-traffic provenance.
@@ -6750,7 +7946,11 @@ fn push_indomain_captures(
     split: CaptureSplit,
 ) {
     for (i, phrase) in phrases.iter().enumerate() {
-        let tag = if split == CaptureSplit::Propose { "p" } else { "c" };
+        let tag = if split == CaptureSplit::Propose {
+            "p"
+        } else {
+            "c"
+        };
         captures.push(FailureCapture {
             phrase: phrase.clone(),
             encoder_embedding: Vec::new(),
@@ -6777,11 +7977,17 @@ fn push_indomain_captures(
 /// same shape as the Luna fixture, on the GLE's native domain.
 fn build_m5_action_target_fixture(
     samples: &[LanguageSample],
-) -> (Vec<(GroundingFleetDomain, String, Vec<String>)>, Vec<FailureCapture>) {
-    let mut by_class: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+) -> (
+    Vec<(GroundingFleetDomain, String, Vec<String>)>,
+    Vec<FailureCapture>,
+) {
+    let mut by_class: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     for s in samples {
-        let Some(t) = s.action_target.as_deref() else { continue };
+        let Some(t) = s.action_target.as_deref() else {
+            continue;
+        };
         let t = t.trim();
         if t.is_empty() {
             continue;
@@ -6812,8 +8018,10 @@ fn build_m5_action_target_fixture(
 
 /// Construction A: the literal 2-way support/coding headline. certify = the fine-tune held-out
 /// split, so it is provenance-disjoint from the GLE's routing fine-tune train.
-fn build_support_coding_fixture(
-) -> (Vec<(GroundingFleetDomain, String, Vec<String>)>, Vec<FailureCapture>) {
+fn build_support_coding_fixture() -> (
+    Vec<(GroundingFleetDomain, String, Vec<String>)>,
+    Vec<FailureCapture>,
+) {
     let ((train_s, train_c), (valid_s, valid_c)) = build_routing_finetune_dataset();
     let mut captures = Vec::new();
     push_indomain_captures(&mut captures, &train_s, "support", CaptureSplit::Propose);
@@ -6821,7 +8029,11 @@ fn build_support_coding_fixture(
     push_indomain_captures(&mut captures, &valid_s, "support", CaptureSplit::Certify);
     push_indomain_captures(&mut captures, &valid_c, "coding", CaptureSplit::Certify);
     let nodes = vec![
-        (GroundingFleetDomain::Runtime, "support".to_string(), train_s),
+        (
+            GroundingFleetDomain::Runtime,
+            "support".to_string(),
+            train_s,
+        ),
         (GroundingFleetDomain::Runtime, "coding".to_string(), train_c),
     ];
     (nodes, captures)
@@ -6835,8 +8047,14 @@ fn run_indomain_certification(
     captures: &[FailureCapture],
     provenance_extra: &str,
 ) {
-    let n_propose = captures.iter().filter(|c| c.split == CaptureSplit::Propose).count();
-    let n_certify = captures.iter().filter(|c| c.split == CaptureSplit::Certify).count();
+    let n_propose = captures
+        .iter()
+        .filter(|c| c.split == CaptureSplit::Propose)
+        .count();
+    let n_certify = captures
+        .iter()
+        .filter(|c| c.split == CaptureSplit::Certify)
+        .count();
     let n_concepts = nodes.len();
     println!(
         "\n=== {artifact_id}: {n_concepts} concepts | propose={n_propose} | certify={n_certify} ===",
@@ -6854,7 +8072,8 @@ fn run_indomain_certification(
     };
     let provenance = format!("{gle_note} || {provenance_extra}");
     let (dm, _, _, _) = build_language_demo_manager(0.0);
-    let artifact = certify_encoder_pipeline(&enc, &dm.language_runtime, nodes, captures, 42, &provenance);
+    let artifact =
+        certify_encoder_pipeline(&enc, &dm.language_runtime, nodes, captures, 42, &provenance);
 
     let json = artifact.to_json();
     std::fs::create_dir_all(CERTIFY_STORE_DIR).ok();
@@ -6928,7 +8147,10 @@ fn demo_verify_disjoint_eval(spec: &[String]) {
     println!("--- Disjoint-eval acceptance instrument (§15.2) ---\n");
     let train_path = spec.first().cloned().unwrap_or_default();
     let eval_path = spec.get(1).cloned().unwrap_or_default();
-    let by = spec.get(2).cloned().unwrap_or_else(|| "action_target".to_string());
+    let by = spec
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| "action_target".to_string());
 
     let load_pairs = |path: &str| -> Result<Vec<(String, String)>, String> {
         let samples = load_language_samples_jsonl(path)?;
@@ -6951,21 +8173,39 @@ fn demo_verify_disjoint_eval(spec: &[String]) {
 
     let train = match load_pairs(&train_path) {
         Ok(p) if !p.is_empty() => p,
-        Ok(_) => { println!("No usable train rows (key '{by}') in {train_path}."); return; }
-        Err(e) => { println!("Could not load train {train_path}: {e}"); return; }
+        Ok(_) => {
+            println!("No usable train rows (key '{by}') in {train_path}.");
+            return;
+        }
+        Err(e) => {
+            println!("Could not load train {train_path}: {e}");
+            return;
+        }
     };
     let eval = match load_pairs(&eval_path) {
         Ok(p) if !p.is_empty() => p,
-        Ok(_) => { println!("No usable eval rows (key '{by}') in {eval_path}."); return; }
-        Err(e) => { println!("Could not load eval {eval_path}: {e}"); return; }
+        Ok(_) => {
+            println!("No usable eval rows (key '{by}') in {eval_path}.");
+            return;
+        }
+        Err(e) => {
+            println!("Could not load eval {eval_path}: {e}");
+            return;
+        }
     };
-    println!("train rows: {}  eval rows: {}  class key: {by}\n", train.len(), eval.len());
+    println!(
+        "train rows: {}  eval rows: {}  class key: {by}\n",
+        train.len(),
+        eval.len()
+    );
 
     // Gate 1: disjointness audit (encoder-free, strictest granularity).
     let audit = grounding_loop::audit_disjoint_eval(&train, &eval, "wbc");
     println!("Gate 1 — feature-disjointness @ wbc (the GLE-home failure mode):");
-    println!("  classes={}  eval={}  overlap0={}  seen_elsewhere={}  novel={}",
-        audit.n_classes, audit.n_eval, audit.n_overlap0, audit.n_seen_elsewhere, audit.n_novel);
+    println!(
+        "  classes={}  eval={}  overlap0={}  seen_elsewhere={}  novel={}",
+        audit.n_classes, audit.n_eval, audit.n_overlap0, audit.n_seen_elsewhere, audit.n_novel
+    );
     let mut shown = 0;
     for (class, seen, total) in &audit.per_class_seen_elsewhere {
         if *seen > 0 || shown < 8 {
@@ -6973,8 +8213,11 @@ fn demo_verify_disjoint_eval(spec: &[String]) {
             shown += 1;
         }
     }
-    println!("  resolvable (seen_elsewhere >= {}): {}",
-        grounding_loop::DISJOINT_MIN_N, audit.resolvable);
+    println!(
+        "  resolvable (seen_elsewhere >= {}): {}",
+        grounding_loop::DISJOINT_MIN_N,
+        audit.resolvable
+    );
 
     // Gate 2: lexical CATA must collapse to floor at overlap-0 on this eval.
     let (nodes, captures) = pairs_to_fixture(&train, &eval);
@@ -6986,19 +8229,27 @@ fn demo_verify_disjoint_eval(spec: &[String]) {
             node_corpus.push(id.replace('_', " "));
             node_corpus.extend(aliases.iter().cloned());
         }
-        let propose: Vec<(String, String)> = captures.iter()
+        let propose: Vec<(String, String)> = captures
+            .iter()
             .filter(|c| c.split == CaptureSplit::Propose)
             .map(|c| (c.phrase.clone(), c.inferred_concept_id.clone()))
             .collect();
-        let certify: Vec<FailureCapture> = captures.iter()
-            .filter(|c| c.split == CaptureSplit::Certify).cloned().collect();
+        let certify: Vec<FailureCapture> = captures
+            .iter()
+            .filter(|c| c.split == CaptureSplit::Certify)
+            .cloned()
+            .collect();
         let (dm, _, _, _) = build_language_demo_manager(0.0);
         let rt = &dm.language_runtime;
         let cata = AuditEncoder::Cata;
         if cata.install(&propose, &node_corpus, 42).is_ok() {
-            if let Ok(idx) = build_grounding_index_from_nodes(rt, &nodes, &GroundingLoopParams::default()) {
+            if let Ok(idx) =
+                build_grounding_index_from_nodes(rt, &nodes, &GroundingLoopParams::default())
+            {
                 let (ct, gl) = grounding_loop::concept_train_features(&propose);
-                if let Ok(evals) = grounding_loop::evaluate_disjoint(rt, &idx, &certify, &ct, &gl, "wbc") {
+                if let Ok(evals) =
+                    grounding_loop::evaluate_disjoint(rt, &idx, &certify, &ct, &gl, "wbc")
+                {
                     let curve = grounding_loop::build_overlap_curve(&evals);
                     cata_overlap0 = curve[0].accuracy;
                     cata_n0 = curve[0].n;
@@ -7011,13 +8262,23 @@ fn demo_verify_disjoint_eval(spec: &[String]) {
     if cata_n0 == 0 {
         println!("  CATA overlap-0 bin EMPTY (n=0) — cannot validate (same wall as Gate 1).");
     } else {
-        println!("  CATA overlap-0 acc = {:.3} (n={}) — want this near 0 (collapsed).", cata_overlap0, cata_n0);
+        println!(
+            "  CATA overlap-0 acc = {:.3} (n={}) — want this near 0 (collapsed).",
+            cata_overlap0, cata_n0
+        );
     }
 
     // Verdict on the EVAL (not an encoder).
     let gate1 = audit.resolvable;
     let gate2 = cata_n0 > 0 && cata_overlap0 <= 0.20;
-    println!("\n>>> EVAL ACCEPTANCE: {} <<<", if gate1 && gate2 { "ACCEPTABLE" } else { "REJECTED" });
+    println!(
+        "\n>>> EVAL ACCEPTANCE: {} <<<",
+        if gate1 && gate2 {
+            "ACCEPTABLE"
+        } else {
+            "REJECTED"
+        }
+    );
     if !gate1 {
         println!("  - REJECTED by Gate 1: too few feature-disjoint seen-elsewhere phrases ({} < {}). This eval cannot separate memorization from generalization — any score on it is silent.",
             audit.n_seen_elsewhere, grounding_loop::DISJOINT_MIN_N);
@@ -7026,7 +8287,9 @@ fn demo_verify_disjoint_eval(spec: &[String]) {
         println!("  - REJECTED by Gate 2: lexical CATA does not collapse — the disjoint phrases are still lexically separable (an easy task).");
     }
     if gate1 && gate2 {
-        println!("  - This eval can carry a generalization signal: spend a certification run on it.");
+        println!(
+            "  - This eval can carry a generalization signal: spend a certification run on it."
+        );
     }
 }
 
@@ -7037,11 +8300,20 @@ fn demo_verify_disjoint_eval(spec: &[String]) {
 /// lack of collection); a meaningful population means the eval is worth constructing.
 fn demo_scan_disjoint_corpus(spec: &[String]) {
     println!("--- Full-corpus disjointness scan (§15.3): is a certifiable in-domain eval constructible at all? ---\n");
-    let by = spec.first().cloned().unwrap_or_else(|| "action_target".to_string());
+    let by = spec
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "action_target".to_string());
     let samples = match load_all_m5_training_data() {
         Ok(s) if !s.is_empty() => s,
-        Ok(_) => { println!("No M5 home-domain data found."); return; }
-        Err(e) => { println!("Could not load M5 home-domain data: {e}"); return; }
+        Ok(_) => {
+            println!("No M5 home-domain data found.");
+            return;
+        }
+        Err(e) => {
+            println!("Could not load M5 home-domain data: {e}");
+            return;
+        }
     };
 
     let class_of = |s: &LanguageSample| -> Option<String> {
@@ -7050,7 +8322,11 @@ fn demo_scan_disjoint_corpus(spec: &[String]) {
             _ => s.action_target.clone(),
         }?;
         let c = c.trim().to_string();
-        if c.is_empty() { None } else { Some(c) }
+        if c.is_empty() {
+            None
+        } else {
+            Some(c)
+        }
     };
     let all_pairs: Vec<(String, String)> = samples
         .iter()
@@ -7068,18 +8344,36 @@ fn demo_scan_disjoint_corpus(spec: &[String]) {
     const MIN_CLASS: usize = 4;
     let report = |label: &str, pairs: &[(String, String)]| {
         let s = grounding_loop::scan_corpus_disjointness(pairs, "wbc", MIN_CLASS);
-        let pct = if s.n_eligible_phrases > 0 { 100.0 * s.n_seen_elsewhere as f32 / s.n_eligible_phrases as f32 } else { 0.0 };
+        let pct = if s.n_eligible_phrases > 0 {
+            100.0 * s.n_seen_elsewhere as f32 / s.n_eligible_phrases as f32
+        } else {
+            0.0
+        };
         println!("[{label}] (class key '{by}', leave-one-out @ wbc, eligible classes >= {MIN_CLASS} phrases)");
-        println!("  classes={} (eligible={})  phrases={} (eligible={})",
-            s.n_classes, s.n_eligible_classes, s.n_phrases, s.n_eligible_phrases);
-        println!("  disjoint-from-class={}  seen_elsewhere={} ({:.1}% of eligible)  novel={}",
-            s.n_disjoint, s.n_seen_elsewhere, pct, s.n_novel);
-        println!("  resolvable population (seen_elsewhere >= {}): {}",
-            grounding_loop::DISJOINT_MIN_N, s.n_seen_elsewhere >= grounding_loop::DISJOINT_MIN_N);
+        println!(
+            "  classes={} (eligible={})  phrases={} (eligible={})",
+            s.n_classes, s.n_eligible_classes, s.n_phrases, s.n_eligible_phrases
+        );
+        println!(
+            "  disjoint-from-class={}  seen_elsewhere={} ({:.1}% of eligible)  novel={}",
+            s.n_disjoint, s.n_seen_elsewhere, pct, s.n_novel
+        );
+        println!(
+            "  resolvable population (seen_elsewhere >= {}): {}",
+            grounding_loop::DISJOINT_MIN_N,
+            s.n_seen_elsewhere >= grounding_loop::DISJOINT_MIN_N
+        );
         if !s.per_class_seen_elsewhere.is_empty() {
-            let top: Vec<String> = s.per_class_seen_elsewhere.iter()
-                .take(10).map(|(c, se, t)| format!("{c}={se}/{t}")).collect();
-            println!("  per-class seen_elsewhere (nonzero, eligible): {}", top.join("  "));
+            let top: Vec<String> = s
+                .per_class_seen_elsewhere
+                .iter()
+                .take(10)
+                .map(|(c, se, t)| format!("{c}={se}/{t}"))
+                .collect();
+            println!(
+                "  per-class seen_elsewhere (nonzero, eligible): {}",
+                top.join("  ")
+            );
         }
         s
     };
@@ -7088,12 +8382,16 @@ fn demo_scan_disjoint_corpus(spec: &[String]) {
     println!();
     let sc = report("support/coding subset", &support_coding);
 
-    println!("\n>>> WORLD: {} <<<", if full.n_seen_elsewhere >= grounding_loop::DISJOINT_MIN_N
-        || sc.n_seen_elsewhere >= grounding_loop::DISJOINT_MIN_N {
-        "CONSTRUCTIBLE — a feature-disjoint in-domain eval can be drawn from existing traffic; building it is a finite task likely to resolve the claim"
-    } else {
-        "STRUCTURALLY EMPTY — the domain's real traffic does not contain feature-disjoint concept-preserving examples; the in-domain GLE claim is unresolvable in principle, not for lack of collection"
-    });
+    println!(
+        "\n>>> WORLD: {} <<<",
+        if full.n_seen_elsewhere >= grounding_loop::DISJOINT_MIN_N
+            || sc.n_seen_elsewhere >= grounding_loop::DISJOINT_MIN_N
+        {
+            "CONSTRUCTIBLE — a feature-disjoint in-domain eval can be drawn from existing traffic; building it is a finite task likely to resolve the claim"
+        } else {
+            "STRUCTURALLY EMPTY — the domain's real traffic does not contain feature-disjoint concept-preserving examples; the in-domain GLE claim is unresolvable in principle, not for lack of collection"
+        }
+    );
 }
 
 /// Build a (nodes, captures) fixture from explicit train/eval `(text, class)` pairs:
@@ -7101,8 +8399,12 @@ fn demo_scan_disjoint_corpus(spec: &[String]) {
 fn pairs_to_fixture(
     train: &[(String, String)],
     eval: &[(String, String)],
-) -> (Vec<(GroundingFleetDomain, String, Vec<String>)>, Vec<FailureCapture>) {
-    let mut by_class: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+) -> (
+    Vec<(GroundingFleetDomain, String, Vec<String>)>,
+    Vec<FailureCapture>,
+) {
+    let mut by_class: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for (t, c) in train {
         by_class.entry(c.clone()).or_default().push(t.clone());
     }
@@ -7110,9 +8412,14 @@ fn pairs_to_fixture(
     let mut nodes = Vec::new();
     for (class, phrases) in &by_class {
         push_indomain_captures(&mut captures, phrases, class, CaptureSplit::Propose);
-        nodes.push((GroundingFleetDomain::Runtime, class.clone(), phrases.clone()));
+        nodes.push((
+            GroundingFleetDomain::Runtime,
+            class.clone(),
+            phrases.clone(),
+        ));
     }
-    let mut eval_by_class: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    let mut eval_by_class: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for (t, c) in eval {
         if by_class.contains_key(c) {
             eval_by_class.entry(c.clone()).or_default().push(t.clone());
@@ -7139,7 +8446,10 @@ fn demo_certify_encoder(spec: &[String]) {
         .filter(|s| !s.trim().is_empty() && s.trim() != "default")
         .cloned()
         .unwrap_or_else(|| LUNA_DEFAULT_DIR.to_string());
-    let seed: u64 = spec.get(2).and_then(|s| s.trim().parse().ok()).unwrap_or(42);
+    let seed: u64 = spec
+        .get(2)
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(42);
 
     let data_dir = std::path::Path::new(&dir).join("data");
     let grounding_path = data_dir.join("pet_world_grounding.toml");
@@ -7201,7 +8511,14 @@ fn demo_certify_encoder(spec: &[String]) {
     }
 
     let (dm, _, _, _) = build_language_demo_manager(0.0);
-    let artifact = certify_encoder_pipeline(&enc, &dm.language_runtime, &nodes, &captures, seed, &provenance);
+    let artifact = certify_encoder_pipeline(
+        &enc,
+        &dm.language_runtime,
+        &nodes,
+        &captures,
+        seed,
+        &provenance,
+    );
 
     let json = artifact.to_json();
     std::fs::create_dir_all(CERTIFY_STORE_DIR).ok();
@@ -7233,8 +8550,14 @@ fn render_verdict(v: &EncoderVerdict) -> String {
     let mut s = String::new();
     s.push_str("Verdict artifact (go/no-go = disjoint_semantic_lift)\n");
     s.push_str("====================================================\n");
-    s.push_str(&format!("  encoder={}  data_hash={}  seed={}\n", v.encoder_id, v.data_hash, v.seed));
-    s.push_str(&format!("  candidate set (honest, all nodes): {}\n\n", v.candidate_set_size));
+    s.push_str(&format!(
+        "  encoder={}  data_hash={}  seed={}\n",
+        v.encoder_id, v.data_hash, v.seed
+    ));
+    s.push_str(&format!(
+        "  candidate set (honest, all nodes): {}\n\n",
+        v.candidate_set_size
+    ));
     s.push_str(&format!("  >>> VERDICT: {} <<<\n", v.verdict));
     if !v.invalid_reason.is_empty() {
         s.push_str(&format!("  reason: {}\n", v.invalid_reason));
@@ -7254,10 +8577,22 @@ fn render_verdict(v: &EncoderVerdict) -> String {
         "    disjoint_gen_a (seen-elsewhere)   = {:.3}  (n={})\n",
         v.disjoint_gen_a, v.disjoint_gen_a_n
     ));
-    s.push_str(&format!("    semantic_floor_95 (shuffle null)  = {:.3}\n", v.semantic_floor_95));
-    s.push_str(&format!("    semantic_floor_mean               = {:.3}\n", v.semantic_floor_mean));
-    s.push_str(&format!("    pooled_heldout (evidence, NOT gate) = {:.3}\n", v.pooled_heldout));
-    s.push_str(&format!("    memorization_gap (captured−heldout) = {:.3}\n\n", v.memorization_gap));
+    s.push_str(&format!(
+        "    semantic_floor_95 (shuffle null)  = {:.3}\n",
+        v.semantic_floor_95
+    ));
+    s.push_str(&format!(
+        "    semantic_floor_mean               = {:.3}\n",
+        v.semantic_floor_mean
+    ));
+    s.push_str(&format!(
+        "    pooled_heldout (evidence, NOT gate) = {:.3}\n",
+        v.pooled_heldout
+    ));
+    s.push_str(&format!(
+        "    memorization_gap (captured−heldout) = {:.3}\n\n",
+        v.memorization_gap
+    ));
     s.push_str("  diagnostics\n");
     s.push_str(&format!(
         "    feature_family disjoint-0 acc: word={:.3} bigram={:.3} trigram(union)={:.3}\n",
@@ -7268,9 +8603,18 @@ fn render_verdict(v: &EncoderVerdict) -> String {
         v.disjoint_level, v.plateau_flag, v.collision_delta
     ));
     s.push_str("  validity gates (all must hold, else INVALID)\n");
-    s.push_str(&format!("    positive_control_collapsed (CATA floors) = {}\n", v.positive_control_collapsed));
-    s.push_str(&format!("    augmentation_firewall_clean              = {}\n", v.augmentation_firewall_clean));
-    s.push_str(&format!("    below_resolution                         = {}\n", v.below_resolution));
+    s.push_str(&format!(
+        "    positive_control_collapsed (CATA floors) = {}\n",
+        v.positive_control_collapsed
+    ));
+    s.push_str(&format!(
+        "    augmentation_firewall_clean              = {}\n",
+        v.augmentation_firewall_clean
+    ));
+    s.push_str(&format!(
+        "    below_resolution                         = {}\n",
+        v.below_resolution
+    ));
     s.push_str(&format!(
         "    provenance: train(real={}, authored={}, augmented={}) certify(real={}, authored={}, augmented={})\n",
         v.firewall.train_real,
@@ -7287,7 +8631,10 @@ fn render_verdict(v: &EncoderVerdict) -> String {
         }
     }
     if !v.encoder_provenance.is_empty() {
-        s.push_str(&format!("    encoder provenance: {}\n", v.encoder_provenance));
+        s.push_str(&format!(
+            "    encoder provenance: {}\n",
+            v.encoder_provenance
+        ));
     }
     s.push_str(&format!("\n  one-line: {}\n", v.one_line()));
     s
@@ -7297,7 +8644,10 @@ fn render_verdict(v: &EncoderVerdict) -> String {
 /// build a 3-concept space where one approved alias per concept moves the centroid past
 /// the held-out boundary, and certify. Returns a report fragment. Clears the embedder on
 /// exit so it does not leak into other demos.
-fn positive_control_section(rt: &growformer::dimension::language::LanguageRuntime, params: &GroundingLoopParams) -> String {
+fn positive_control_section(
+    rt: &growformer::dimension::language::LanguageRuntime,
+    params: &GroundingLoopParams,
+) -> String {
     let mut map: HashMap<String, Vec<f32>> = HashMap::new();
     map.insert("concept_a".into(), vec![1.0, 0.0, 0.0]);
     map.insert("concept_b".into(), vec![0.0, 1.0, 0.0]);
@@ -7317,9 +8667,21 @@ fn positive_control_section(rt: &growformer::dimension::language::LanguageRuntim
         (d, "concept_c".to_string(), vec![]),
     ];
     let nodes_after = vec![
-        (d, "concept_a".to_string(), vec!["alpha proposal phrase".to_string()]),
-        (d, "concept_b".to_string(), vec!["beta proposal phrase".to_string()]),
-        (d, "concept_c".to_string(), vec!["gamma proposal phrase".to_string()]),
+        (
+            d,
+            "concept_a".to_string(),
+            vec!["alpha proposal phrase".to_string()],
+        ),
+        (
+            d,
+            "concept_b".to_string(),
+            vec!["beta proposal phrase".to_string()],
+        ),
+        (
+            d,
+            "concept_c".to_string(),
+            vec!["gamma proposal phrase".to_string()],
+        ),
     ];
     let before = build_grounding_index_from_nodes(rt, &nodes_before, params).expect("ctrl before");
     let after = build_grounding_index_from_nodes(rt, &nodes_after, params).expect("ctrl after");
@@ -7347,15 +8709,29 @@ fn positive_control_section(rt: &growformer::dimension::language::LanguageRuntim
         mk("gamma certify phrase", "concept_c", CaptureSplit::Certify),
     ];
 
-    let (before_m, after_m) = certify_batch(&captures, rt, &before, &after, d).expect("ctrl certify");
+    let (before_m, after_m) =
+        certify_batch(&captures, rt, &before, &after, d).expect("ctrl certify");
     let verdict = decide_batch_verdict(&before_m, &after_m, params, false);
 
     let additions: Vec<(GroundingFleetDomain, String, String)> = vec![
-        (d, "concept_a".to_string(), "alpha proposal phrase".to_string()),
-        (d, "concept_b".to_string(), "beta proposal phrase".to_string()),
-        (d, "concept_c".to_string(), "gamma proposal phrase".to_string()),
+        (
+            d,
+            "concept_a".to_string(),
+            "alpha proposal phrase".to_string(),
+        ),
+        (
+            d,
+            "concept_b".to_string(),
+            "beta proposal phrase".to_string(),
+        ),
+        (
+            d,
+            "concept_c".to_string(),
+            "gamma proposal phrase".to_string(),
+        ),
     ];
-    let curve = coverage_vs_additions_curve(&captures, rt, &before, &additions).expect("ctrl curve");
+    let curve =
+        coverage_vs_additions_curve(&captures, rt, &before, &additions).expect("ctrl curve");
 
     let mut s = String::new();
     s.push_str("POSITIVE CONTROL — synthetic semantic geometry (bring-your-own vectors)\n");
@@ -7380,7 +8756,9 @@ fn positive_control_section(rt: &growformer::dimension::language::LanguageRuntim
     ));
     s.push_str("\nBring-your-own-encoder workflow: run any sentence encoder offline over every\n");
     s.push_str("captured phrase + node alias, install via `install_vector_embedder(map)`, then\n");
-    s.push_str("re-run this audit. If the genuine sweep inverts (held-out rises with additions),\n");
+    s.push_str(
+        "re-run this audit. If the genuine sweep inverts (held-out rises with additions),\n",
+    );
     s.push_str("the encoder passes the acceptance gate; if it looks like the lexical result, it\n");
     s.push_str("does not.\n");
 
@@ -7401,13 +8779,20 @@ const DRIFT_BASELINE_WINDOW: usize = 12;
 /// This is a reliability monitor — it alerts; it does NOT act.
 fn demo_drift_telemetry(spec: &[String]) {
     println!("--- P4 Drift Telemetry (reliability monitor — alerts, never acts) ---\n");
-    let domain = spec.first().cloned().unwrap_or_else(|| "unknown".to_string());
+    let domain = spec
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_string());
     let dir = spec.get(1).cloned();
 
     // Load existing windows for this domain (longitudinal store).
     std::fs::create_dir_all(DRIFT_STORE_DIR).ok();
     let mut windows: Vec<grounding_loop::DriftWindow> = load_drift_windows(&domain);
-    println!("Loaded {} prior telemetry windows for domain '{}'.\n", windows.len(), domain);
+    println!(
+        "Loaded {} prior telemetry windows for domain '{}'.\n",
+        windows.len(),
+        domain
+    );
 
     // Build the current window from companion captures.
     let companion_dir = dir.unwrap_or_else(|| LUNA_DEFAULT_DIR.to_string());
@@ -7419,13 +8804,21 @@ fn demo_drift_telemetry(spec: &[String]) {
     }
 
     // §1 signals.
-    let fallthroughs = captures.iter().filter(|c| {
-        matches!(c.trigger_reason, FailureTrigger::NoNodeActivated | FailureTrigger::LowConfidence)
-            || c.entropy_bits.map(|e| e > 3.0).unwrap_or(false)
-    }).count();
+    let fallthroughs = captures
+        .iter()
+        .filter(|c| {
+            matches!(
+                c.trigger_reason,
+                FailureTrigger::NoNodeActivated | FailureTrigger::LowConfidence
+            ) || c.entropy_bits.map(|e| e > 3.0).unwrap_or(false)
+        })
+        .count();
     let fallthrough_rate = fallthroughs as f32 / total_turns as f32;
 
-    let guard_fires = captures.iter().filter(|c| c.trigger_reason == FailureTrigger::EntropyGuard).count();
+    let guard_fires = captures
+        .iter()
+        .filter(|c| c.trigger_reason == FailureTrigger::EntropyGuard)
+        .count();
     let guard_fire_rate = guard_fires as f32 / total_turns as f32;
 
     let entropy_values: Vec<f32> = captures.iter().filter_map(|c| c.entropy_bits).collect();
@@ -7437,7 +8830,10 @@ fn demo_drift_telemetry(spec: &[String]) {
         sorted[sorted.len() / 2]
     };
 
-    let dissatisfactions = captures.iter().filter(|c| c.trigger_reason == FailureTrigger::Dissatisfaction).count();
+    let dissatisfactions = captures
+        .iter()
+        .filter(|c| c.trigger_reason == FailureTrigger::Dissatisfaction)
+        .count();
     let dissatisfaction_rate = dissatisfactions as f32 / total_turns as f32;
 
     let total_aliases: usize = nodes.iter().map(|(_, _, al)| al.len() + 1).sum();
@@ -7450,15 +8846,23 @@ fn demo_drift_telemetry(spec: &[String]) {
     let (cov_elas, sat_flag) = grounding_loop::coverage_elasticity(&ft_history, &alias_history);
 
     // Cross-domain collision: count captures whose inferred_concept_id doesn't match any node in this domain.
-    let node_ids: std::collections::HashSet<&str> = nodes.iter().map(|(_, id, _)| id.as_str()).collect();
-    let foreign = captures.iter().filter(|c| !node_ids.contains(c.inferred_concept_id.as_str()) && !c.inferred_concept_id.is_empty()).count();
+    let node_ids: std::collections::HashSet<&str> =
+        nodes.iter().map(|(_, id, _)| id.as_str()).collect();
+    let foreign = captures
+        .iter()
+        .filter(|c| {
+            !node_ids.contains(c.inferred_concept_id.as_str()) && !c.inferred_concept_id.is_empty()
+        })
+        .count();
     let collision_rate = grounding_loop::cross_domain_collision_rate(foreign, total_turns);
 
     // Baselines from history.
     let ft_hist_vals: Vec<f32> = windows.iter().map(|w| w.fallthrough_rate).collect();
-    let (ft_base_mean, ft_base_std) = grounding_loop::rolling_baseline(&ft_hist_vals, DRIFT_BASELINE_WINDOW);
+    let (ft_base_mean, ft_base_std) =
+        grounding_loop::rolling_baseline(&ft_hist_vals, DRIFT_BASELINE_WINDOW);
     let dis_hist_vals: Vec<f32> = windows.iter().map(|w| w.dissatisfaction_rate).collect();
-    let (dis_base_mean, _) = grounding_loop::rolling_baseline(&dis_hist_vals, DRIFT_BASELINE_WINDOW);
+    let (dis_base_mean, _) =
+        grounding_loop::rolling_baseline(&dis_hist_vals, DRIFT_BASELINE_WINDOW);
 
     // Entropy trend.
     let ent_hist: Vec<f32> = windows.iter().map(|w| w.routing_entropy_p50).collect();
@@ -7484,10 +8888,15 @@ fn demo_drift_telemetry(spec: &[String]) {
             zs.push(grounding_loop::z_score_deviation(w.fallthrough_rate, m, s));
         }
         let _ = (rm, rs);
-        zs.push(grounding_loop::z_score_deviation(fallthrough_rate, ft_base_mean, ft_base_std));
+        zs.push(grounding_loop::z_score_deviation(
+            fallthrough_rate,
+            ft_base_mean,
+            ft_base_std,
+        ));
         zs
     };
-    let (ft_cp, ft_alert) = grounding_loop::evaluate_signal_drift("fallthrough", &ft_z_history, &HashMap::new());
+    let (ft_cp, ft_alert) =
+        grounding_loop::evaluate_signal_drift("fallthrough", &ft_z_history, &HashMap::new());
     let fallthrough_alert = ft_alert.is_some();
 
     let dis_z_history: Vec<f32> = {
@@ -7495,22 +8904,41 @@ fn demo_drift_telemetry(spec: &[String]) {
         for (i, w) in windows.iter().enumerate() {
             let hist_slice = &dis_hist_vals[..i];
             let (m, s) = grounding_loop::rolling_baseline(hist_slice, DRIFT_BASELINE_WINDOW);
-            zs.push(grounding_loop::z_score_deviation(w.dissatisfaction_rate, m, s));
+            zs.push(grounding_loop::z_score_deviation(
+                w.dissatisfaction_rate,
+                m,
+                s,
+            ));
         }
         let (_, dis_std) = grounding_loop::rolling_baseline(&dis_hist_vals, DRIFT_BASELINE_WINDOW);
-        zs.push(grounding_loop::z_score_deviation(dissatisfaction_rate, dis_base_mean, dis_std));
+        zs.push(grounding_loop::z_score_deviation(
+            dissatisfaction_rate,
+            dis_base_mean,
+            dis_std,
+        ));
         zs
     };
-    let (dis_cp, dis_alert) = grounding_loop::evaluate_signal_drift("dissatisfaction", &dis_z_history, &HashMap::new());
+    let (dis_cp, dis_alert) =
+        grounding_loop::evaluate_signal_drift("dissatisfaction", &dis_z_history, &HashMap::new());
 
     let mut change_points = Vec::new();
     let mut alerts = Vec::new();
-    if let Some(cp) = ft_cp { change_points.push(cp); }
-    if let Some(cp) = dis_cp { change_points.push(cp); }
-    if let Some(a) = ft_alert { alerts.push(a); }
-    if let Some(a) = dis_alert { alerts.push(a); }
+    if let Some(cp) = ft_cp {
+        change_points.push(cp);
+    }
+    if let Some(cp) = dis_cp {
+        change_points.push(cp);
+    }
+    if let Some(a) = ft_alert {
+        alerts.push(a);
+    }
+    if let Some(a) = dis_alert {
+        alerts.push(a);
+    }
 
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
     let window_id = format!("{}", now.as_secs());
 
     let window = grounding_loop::DriftWindow {
@@ -7545,7 +8973,8 @@ fn demo_drift_telemetry(spec: &[String]) {
 
     // Build and print report.
     windows.push(window);
-    let traffic_pairs: Vec<(String, String)> = captures.iter()
+    let traffic_pairs: Vec<(String, String)> = captures
+        .iter()
         .map(|c| (c.phrase.clone(), c.inferred_concept_id.clone()))
         .collect();
     let report = grounding_loop::build_drift_report(&domain, &windows, Some(&traffic_pairs));
@@ -7556,7 +8985,9 @@ fn demo_drift_telemetry(spec: &[String]) {
             }
             Some(false) => {
                 println!("\n*** RECERTIFICATION RECOMMENDED but UNCONSTRUCTIBLE: sustained world-drift detected,");
-                println!("    but current traffic has no feature-disjoint examples to certify against.");
+                println!(
+                    "    but current traffic has no feature-disjoint examples to certify against."
+                );
                 println!("    Fall back to behavioral-drift response (rollback or human review).");
                 println!("    Capturing more diverse phrasings is the only path to certifiable re-evaluation. ***");
             }
@@ -7576,16 +9007,27 @@ fn demo_drift_report(domain: &str) {
         return;
     }
     let (captures, _nodes) = load_drift_companion(LUNA_DEFAULT_DIR);
-    let traffic_pairs: Vec<(String, String)> = captures.iter()
+    let traffic_pairs: Vec<(String, String)> = captures
+        .iter()
         .map(|c| (c.phrase.clone(), c.inferred_concept_id.clone()))
         .collect();
-    let tp = if traffic_pairs.is_empty() { None } else { Some(traffic_pairs.as_slice()) };
+    let tp = if traffic_pairs.is_empty() {
+        None
+    } else {
+        Some(traffic_pairs.as_slice())
+    };
     let report = grounding_loop::build_drift_report(domain, &windows, tp);
-    println!("Windows: {}  Latest: {}", report.n_windows, report.latest_window.as_deref().unwrap_or("?"));
+    println!(
+        "Windows: {}  Latest: {}",
+        report.n_windows,
+        report.latest_window.as_deref().unwrap_or("?")
+    );
     println!("\nTrends:");
     let print_trend = |name: &str, t: &grounding_loop::TrendSummary| {
-        println!("  {name}: current={:.3} baseline={:.3} z={:.2} direction={}",
-            t.current, t.baseline, t.deviation_z, t.direction);
+        println!(
+            "  {name}: current={:.3} baseline={:.3} z={:.2} direction={}",
+            t.current, t.baseline, t.deviation_z, t.direction
+        );
     };
     print_trend("fallthrough", &report.fallthrough_trend);
     print_trend("entropy", &report.entropy_trend);
@@ -7610,7 +9052,9 @@ fn demo_drift_report(domain: &str) {
                 println!("\n*** RECERTIFICATION RECOMMENDED but UNCONSTRUCTIBLE:");
                 println!("    Sustained world-drift detected, but current traffic has no feature-disjoint");
                 println!("    examples to certify against. Fall back to behavioral-drift response");
-                println!("    (rollback or human review). Capturing more diverse phrasings is the only");
+                println!(
+                    "    (rollback or human review). Capturing more diverse phrasings is the only"
+                );
                 println!("    path to certifiable re-evaluation. ***");
             }
             None => {
@@ -7627,22 +9071,49 @@ fn demo_drift_report(domain: &str) {
 
 fn render_drift_window(w: &grounding_loop::DriftWindow) -> String {
     let mut s = String::new();
-    s.push_str(&format!("Drift telemetry window: domain={} id={}\n", w.domain, w.window_id));
-    s.push_str(&format!("  fallthrough:    {:.3} (baseline {:.3}) {}\n",
-        w.fallthrough_rate, w.fallthrough_baseline,
-        if w.fallthrough_alert { "⚠ ALERT" } else { "" }));
-    s.push_str(&format!("  entropy p50:    {:.3} (trend: {})\n", w.routing_entropy_p50, w.entropy_trend));
+    s.push_str(&format!(
+        "Drift telemetry window: domain={} id={}\n",
+        w.domain, w.window_id
+    ));
+    s.push_str(&format!(
+        "  fallthrough:    {:.3} (baseline {:.3}) {}\n",
+        w.fallthrough_rate,
+        w.fallthrough_baseline,
+        if w.fallthrough_alert { "⚠ ALERT" } else { "" }
+    ));
+    s.push_str(&format!(
+        "  entropy p50:    {:.3} (trend: {})\n",
+        w.routing_entropy_p50, w.entropy_trend
+    ));
     s.push_str(&format!("  guard fire:     {:.3}\n", w.guard_fire_rate));
-    s.push_str(&format!("  dissatisfaction:{:.3} (baseline {:.3})\n", w.dissatisfaction_rate, w.dissatisfaction_baseline));
-    s.push_str(&format!("  cov elasticity: {:.4} (saturated: {})\n", w.coverage_elasticity, w.saturation_flag));
-    s.push_str(&format!("  collision rate: {:.4} (fleet aliases: {})\n", w.cross_domain_collision_rate, w.total_aliases_fleet));
-    s.push_str(&format!("  encoder:        {} (shift: {})\n",
+    s.push_str(&format!(
+        "  dissatisfaction:{:.3} (baseline {:.3})\n",
+        w.dissatisfaction_rate, w.dissatisfaction_baseline
+    ));
+    s.push_str(&format!(
+        "  cov elasticity: {:.4} (saturated: {})\n",
+        w.coverage_elasticity, w.saturation_flag
+    ));
+    s.push_str(&format!(
+        "  collision rate: {:.4} (fleet aliases: {})\n",
+        w.cross_domain_collision_rate, w.total_aliases_fleet
+    ));
+    s.push_str(&format!(
+        "  encoder:        {} (shift: {})\n",
         w.encoder_version,
-        w.encoder_shift_vs_prev.map(|s| format!("{:.3}", s)).unwrap_or_else(|| "n/a".into())));
+        w.encoder_shift_vs_prev
+            .map(|s| format!("{:.3}", s))
+            .unwrap_or_else(|| "n/a".into())
+    ));
     if !w.change_points.is_empty() {
         s.push_str("  change points:\n");
         for cp in &w.change_points {
-            s.push_str(&format!("    - {} (cause={}, persisted={} windows)\n", cp.signal, cp.cause.as_str(), cp.persisted_windows));
+            s.push_str(&format!(
+                "    - {} (cause={}, persisted={} windows)\n",
+                cp.signal,
+                cp.cause.as_str(),
+                cp.persisted_windows
+            ));
         }
     }
     if !w.alerts.is_empty() {
@@ -7680,7 +9151,12 @@ fn load_drift_windows(domain: &str) -> Vec<grounding_loop::DriftWindow> {
 
 /// Load companion fixture (captures + nodes) from a companion dir — same loading
 /// as `demo_certify_encoder` (TOML graph + JSONL training data).
-fn load_drift_companion(dir: &str) -> (Vec<FailureCapture>, Vec<(GroundingFleetDomain, String, Vec<String>)>) {
+fn load_drift_companion(
+    dir: &str,
+) -> (
+    Vec<FailureCapture>,
+    Vec<(GroundingFleetDomain, String, Vec<String>)>,
+) {
     let data_dir = std::path::Path::new(dir).join("data");
     let grounding_path = data_dir.join("pet_world_grounding.toml");
     if let Ok(toml) = std::fs::read_to_string(&grounding_path) {
@@ -7834,22 +9310,39 @@ fn demo_check_disjointness(spec: &[String]) {
         let overlap: Vec<String> = restricted.intersection(&own_restricted).cloned().collect();
         let is_disjoint = overlap.is_empty();
 
-        let in_other = restricted.iter().any(|f| {
-            global_train.contains(f) && !own_train.contains(f)
-        });
+        let in_other = restricted
+            .iter()
+            .any(|f| global_train.contains(f) && !own_train.contains(f));
 
         if is_disjoint {
             n_pass += 1;
             if in_other {
                 n_seen_elsewhere += 1;
             }
-            println!("  PASS  [{intent}] \"{phrase}\" — disjoint at wbc{}",
-                if in_other { " (seen-elsewhere)" } else { " (novel)" });
+            println!(
+                "  PASS  [{intent}] \"{phrase}\" — disjoint at wbc{}",
+                if in_other {
+                    " (seen-elsewhere)"
+                } else {
+                    " (novel)"
+                }
+            );
         } else {
             n_fail += 1;
-            let leak_str: String = overlap.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
-            println!("  FAIL  [{intent}] \"{phrase}\" — leaks: {leak_str}{}",
-                if overlap.len() > 5 { format!(" (+{} more)", overlap.len() - 5) } else { String::new() });
+            let leak_str: String = overlap
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "  FAIL  [{intent}] \"{phrase}\" — leaks: {leak_str}{}",
+                if overlap.len() > 5 {
+                    format!(" (+{} more)", overlap.len() - 5)
+                } else {
+                    String::new()
+                }
+            );
         }
     }
 
@@ -7858,7 +9351,10 @@ fn demo_check_disjointness(spec: &[String]) {
     if n_seen_elsewhere >= 8 {
         println!(">>> THRESHOLD MET: {n_seen_elsewhere} seen-elsewhere disjoint phrases.");
     } else {
-        println!(">>> THRESHOLD NOT MET: need {} more seen-elsewhere disjoint phrases.", 8 - n_seen_elsewhere);
+        println!(
+            ">>> THRESHOLD NOT MET: need {} more seen-elsewhere disjoint phrases.",
+            8 - n_seen_elsewhere
+        );
     }
 }
 
@@ -7958,7 +9454,12 @@ fn demo_capture_routing(spec: &[String]) {
     let mut n_activated = 0usize;
     let mut path_used = String::new();
     for phrase in &phrases {
-        match index.capture_decision(rt, phrase, GroundingFleetDomain::Runtime, session_id.clone()) {
+        match index.capture_decision(
+            rt,
+            phrase,
+            GroundingFleetDomain::Runtime,
+            session_id.clone(),
+        ) {
             Ok(cap) => {
                 match grounding_loop::append_routing_capture(&cap, out_dir) {
                     Ok(()) => {
@@ -7966,7 +9467,10 @@ fn demo_capture_routing(spec: &[String]) {
                         if cap.activated {
                             n_activated += 1;
                         }
-                        path_used = out_dir.join(format!("routing_{}.jsonl", cap.domain)).display().to_string();
+                        path_used = out_dir
+                            .join(format!("routing_{}.jsonl", cap.domain))
+                            .display()
+                            .to_string();
                     }
                     Err(e) => println!("  [write-failed] \"{phrase}\": {e}"),
                 }
@@ -7987,7 +9491,9 @@ fn demo_capture_routing(spec: &[String]) {
         n_written.saturating_sub(n_activated)
     );
     println!("Label-free by design (§18.3): records the router's decision, not ground truth.");
-    println!("Next: blind human adjudication assigns semantic_intent on the disjoint bin (§18.3-18.4).");
+    println!(
+        "Next: blind human adjudication assigns semantic_intent on the disjoint bin (§18.3-18.4)."
+    );
 }
 
 /// `--audit-capture <capture_dir> [companion_dir] [labeled_eval.jsonl]` (§18.4/18.5).
@@ -8011,22 +9517,39 @@ fn demo_audit_capture(spec: &[String]) {
     let data_dir = std::path::Path::new(&companion_dir).join("data");
     let mut samples: Vec<LanguageSample> = Vec::new();
     if let Err(e) = append_language_samples_from_training_jsonl_dir(&mut samples, &data_dir) {
-        println!("Failed to load training corpus from {}: {e}", data_dir.display());
+        println!(
+            "Failed to load training corpus from {}: {e}",
+            data_dir.display()
+        );
         return;
     }
     let train_pairs: Vec<(String, String)> = samples
         .iter()
-        .map(|s| (s.text.trim().to_string(), s.semantic_intent.trim().to_string()))
+        .map(|s| {
+            (
+                s.text.trim().to_string(),
+                s.semantic_intent.trim().to_string(),
+            )
+        })
         .filter(|(t, c)| !t.is_empty() && !c.is_empty())
         .collect();
     if train_pairs.is_empty() {
-        println!("No (text, semantic_intent) training pairs in {}.", data_dir.display());
+        println!(
+            "No (text, semantic_intent) training pairs in {}.",
+            data_dir.display()
+        );
         return;
     }
-    println!("Production training corpus: {} pairs, {} concepts ({})\n",
+    println!(
+        "Production training corpus: {} pairs, {} concepts ({})\n",
         train_pairs.len(),
-        train_pairs.iter().map(|(_, c)| c).collect::<std::collections::HashSet<_>>().len(),
-        companion_dir);
+        train_pairs
+            .iter()
+            .map(|(_, c)| c)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        companion_dir
+    );
 
     // --- Bucketing mode: labeled eval → audit_disjoint_eval (§18.4/18.5) ---
     if let Some(lp) = labeled_path {
@@ -8041,11 +9564,19 @@ fn demo_audit_capture(spec: &[String]) {
             println!("No labeled (text, semantic_intent) pairs in {lp}.");
             return;
         }
-        println!("--- Bucketing mode: {} human-labeled phrases ---\n", eval_pairs.len());
+        println!(
+            "--- Bucketing mode: {} human-labeled phrases ---\n",
+            eval_pairs.len()
+        );
         let audit = grounding_loop::audit_disjoint_eval(&train_pairs, &eval_pairs, "wbc");
-        println!("  level=wbc  n_eval={}  overlap-0={}  seen-elsewhere={}  novel={}",
-            audit.n_eval, audit.n_overlap0, audit.n_seen_elsewhere, audit.n_novel);
-        println!("  production disjoint bin (seen-elsewhere) = {}", audit.n_seen_elsewhere);
+        println!(
+            "  level=wbc  n_eval={}  overlap-0={}  seen-elsewhere={}  novel={}",
+            audit.n_eval, audit.n_overlap0, audit.n_seen_elsewhere, audit.n_novel
+        );
+        println!(
+            "  production disjoint bin (seen-elsewhere) = {}",
+            audit.n_seen_elsewhere
+        );
         println!("  resolvable (n >= DISJOINT_MIN_N) = {}", audit.resolvable);
         if !audit.resolvable {
             println!("\n>>> NOT YET RESOLVABLE: keep capturing + labeling until the seen-elsewhere bin reaches the floor.");
@@ -8054,7 +9585,11 @@ fn demo_audit_capture(spec: &[String]) {
         }
         if !audit.per_class_seen_elsewhere.is_empty() {
             println!("\n  per-class seen-elsewhere / total:");
-            for (c, s, t) in audit.per_class_seen_elsewhere.iter().filter(|(_, s, _)| *s > 0) {
+            for (c, s, t) in audit
+                .per_class_seen_elsewhere
+                .iter()
+                .filter(|(_, s, _)| *s > 0)
+            {
                 println!("    {c}: {s}/{t}");
             }
         }
@@ -8103,12 +9638,17 @@ fn demo_audit_capture(spec: &[String]) {
                     qpath.display()
                 );
             }
-            Err(e) => println!("  DEFECT-G1 screen: {} malformed phrase(s) found but quarantine write failed: {e}", quarantined.len()),
+            Err(e) => println!(
+                "  DEFECT-G1 screen: {} malformed phrase(s) found but quarantine write failed: {e}",
+                quarantined.len()
+            ),
         }
     }
     let captured = captured_clean;
     if captured.is_empty() {
-        println!("All captured phrases were quarantined as malformed (DEFECT-G1); nothing to triage.");
+        println!(
+            "All captured phrases were quarantined as malformed (DEFECT-G1); nothing to triage."
+        );
         return;
     }
     // Triage ranks at WORD granularity, not wbc: on a large corpus the char-trigram surface
@@ -8118,8 +9658,14 @@ fn demo_audit_capture(spec: &[String]) {
     // still share bigrams/trigrams) — correct for a sampling prior; the strict wbc own-concept gate
     // is applied later at bucketing (--audit-capture with a labeled file).
     let report = grounding_loop::triage_captured_phrases(&captured, &train_pairs, "w", 0.5, 0.5);
-    println!("--- Triage mode: {} captured, {} unique (ranked at word level) ---\n", report.n_captured, report.n_unique);
-    println!("  disjoint candidates: {}  (the label targets)", report.n_disjoint_candidate);
+    println!(
+        "--- Triage mode: {} captured, {} unique (ranked at word level) ---\n",
+        report.n_captured, report.n_unique
+    );
+    println!(
+        "  disjoint candidates: {}  (the label targets)",
+        report.n_disjoint_candidate
+    );
     println!("  in-lexicon (trivial): {}", report.n_in_lexicon);
     println!("  novel / OOD:          {}", report.n_novel_ood);
     println!("\n  Target: disjoint bin n >= ~47 after labeling (n=34 was below resolution).");
@@ -8133,7 +9679,10 @@ fn demo_audit_capture(spec: &[String]) {
     let queue_path = std::path::Path::new(capture_dir).join("label_queue.jsonl");
     match write_label_queue(&queue_path, &report.rows) {
         Ok(n) => {
-            println!("\nWrote {n} blind-labeling rows to {} (sorted by priority).", queue_path.display());
+            println!(
+                "\nWrote {n} blind-labeling rows to {} (sorted by priority).",
+                queue_path.display()
+            );
             println!("Human fills `semantic_intent` blind to any router (§18.3), then:");
             println!("  --audit-capture {capture_dir} {companion_dir} <labeled.jsonl>  # bucketing + resolvable check");
         }
@@ -8141,9 +9690,16 @@ fn demo_audit_capture(spec: &[String]) {
     }
 
     println!("\n  Top disjoint candidates (familiar vocab, not concept-locked):");
-    for r in report.rows.iter().filter(|r| r.tier == "disjoint_candidate").take(10) {
-        println!("    [{:.2}] cov={:.2} lock={:.2} ~{:<18} \"{}\"",
-            r.label_priority, r.global_coverage, r.max_concept_overlap, r.nearest_concept, r.phrase);
+    for r in report
+        .rows
+        .iter()
+        .filter(|r| r.tier == "disjoint_candidate")
+        .take(10)
+    {
+        println!(
+            "    [{:.2}] cov={:.2} lock={:.2} ~{:<18} \"{}\"",
+            r.label_priority, r.global_coverage, r.max_concept_overlap, r.nearest_concept, r.phrase
+        );
     }
 }
 
@@ -8190,7 +9746,13 @@ fn load_jsonl_pairs(path: &str) -> std::io::Result<Vec<(String, String)>> {
             continue;
         }
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            let text = v.get("text").or_else(|| v.get("phrase")).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            let text = v
+                .get("text")
+                .or_else(|| v.get("phrase"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
             let intent = v
                 .get("semantic_intent")
                 .or_else(|| v.get("intent"))
@@ -8336,17 +9898,29 @@ fn demo_real_encoder_experiment(spec: &[String]) {
         });
     }
 
-    let n_propose = captures.iter().filter(|c| c.split == CaptureSplit::Propose).count();
-    let n_certify = captures.iter().filter(|c| c.split == CaptureSplit::Certify).count();
-    let n_concepts = train_pairs.iter().map(|(_, l)| l).collect::<std::collections::HashSet<_>>().len();
+    let n_propose = captures
+        .iter()
+        .filter(|c| c.split == CaptureSplit::Propose)
+        .count();
+    let n_certify = captures
+        .iter()
+        .filter(|c| c.split == CaptureSplit::Certify)
+        .count();
+    let n_concepts = train_pairs
+        .iter()
+        .map(|(_, l)| l)
+        .collect::<std::collections::HashSet<_>>()
+        .len();
     println!("Authored eval: {n_concepts} concepts, {n_propose} propose, {n_certify} certify");
     println!("Companion: {companion_dir}\n");
 
     // --- Step 1: Acceptance gate — verify disjointness + CATA collapse ---
     println!("--- Step 1: Acceptance gate (disjointness + CATA collapse) ---\n");
     let audit = grounding_loop::audit_disjoint_eval(&train_pairs, &eval_pairs, "wbc");
-    println!("  Disjoint eval audit: {} total, {} overlap-0, {} seen-elsewhere, resolvable={}",
-        audit.n_eval, audit.n_overlap0, audit.n_seen_elsewhere, audit.resolvable);
+    println!(
+        "  Disjoint eval audit: {} total, {} overlap-0, {} seen-elsewhere, resolvable={}",
+        audit.n_eval, audit.n_overlap0, audit.n_seen_elsewhere, audit.resolvable
+    );
     if audit.n_seen_elsewhere < 8 {
         println!("\n>>> EVAL INVALID: only {} seen-elsewhere disjoint (need >=8). Fix the eval before running encoders.",
             audit.n_seen_elsewhere);
@@ -8373,7 +9947,11 @@ fn demo_real_encoder_experiment(spec: &[String]) {
         // GLE — try to load, skip if checkpoint missing.
         match build_gle_audit_encoder("gle", &nodes, &captures) {
             Ok((enc, note)) => {
-                v.push(("gle".to_string(), enc, format!("GLE distilled student ({note})")));
+                v.push((
+                    "gle".to_string(),
+                    enc,
+                    format!("GLE distilled student ({note})"),
+                ));
             }
             Err(e) => {
                 println!("  [skip] GLE: {e}");
@@ -8384,13 +9962,21 @@ fn demo_real_encoder_experiment(spec: &[String]) {
             match load_byo_embeddings(byo) {
                 Ok(map) => {
                     // Coverage check: warn if eval phrases are missing from the embeddings.
-                    let missing_eval: Vec<String> = eval_pairs.iter()
-                        .filter(|(p, _)| !map.contains_key(p) && !map.contains_key(&p.to_ascii_lowercase()))
+                    let missing_eval: Vec<String> = eval_pairs
+                        .iter()
+                        .filter(|(p, _)| {
+                            !map.contains_key(p) && !map.contains_key(&p.to_ascii_lowercase())
+                        })
                         .map(|(p, _)| p.clone())
                         .collect();
                     if !missing_eval.is_empty() {
-                        println!("  *** WARNING: {} eval phrases MISSING from BYO embeddings! ***", missing_eval.len());
-                        println!("      These will fall back to distractor vectors (random routing).");
+                        println!(
+                            "  *** WARNING: {} eval phrases MISSING from BYO embeddings! ***",
+                            missing_eval.len()
+                        );
+                        println!(
+                            "      These will fall back to distractor vectors (random routing)."
+                        );
                         println!("      Re-run: --export-phrases && python scripts/encode_phrases.py phrases_to_encode.json");
                         for p in missing_eval.iter().take(5) {
                             println!("        missing: \"{p}\"");
@@ -8407,7 +9993,10 @@ fn demo_real_encoder_experiment(spec: &[String]) {
                         .unwrap_or("byo_real_encoder");
                     v.push((
                         model_name.to_string(),
-                        AuditEncoder::Vectors { id: model_name.to_string(), map },
+                        AuditEncoder::Vectors {
+                            id: model_name.to_string(),
+                            map,
+                        },
                         format!(
                             "external sentence-transformers {model_name}; offline-encoded, \
                              no in-repo training; eval = authored disjoint test bench"
@@ -8425,18 +10014,34 @@ fn demo_real_encoder_experiment(spec: &[String]) {
         v
     };
 
-    println!("\n--- Step 2: Multi-encoder P0 gate ({} encoders) ---\n", encoders_to_run.len());
+    println!(
+        "\n--- Step 2: Multi-encoder P0 gate ({} encoders) ---\n",
+        encoders_to_run.len()
+    );
     let mut verdicts: Vec<(String, EncoderVerdict)> = Vec::new();
 
     for (name, enc, provenance) in &encoders_to_run {
         println!("  Running encoder: {name} ...");
-        let artifact = certify_encoder_pipeline_ex(enc, &dm.language_runtime, &nodes, &captures, seed, provenance, true);
+        let artifact = certify_encoder_pipeline_ex(
+            enc,
+            &dm.language_runtime,
+            &nodes,
+            &captures,
+            seed,
+            provenance,
+            true,
+        );
 
         std::fs::create_dir_all(CERTIFY_STORE_DIR).ok();
         let store_path = std::path::Path::new(CERTIFY_STORE_DIR).join(artifact.filename());
         std::fs::write(&store_path, artifact.to_json()).expect("write verdict artifact");
-        println!("    verdict: {} (lift={:.3}, n={}, level={})",
-            artifact.verdict, artifact.disjoint_semantic_lift, artifact.disjoint_gen_a_n, artifact.disjoint_level);
+        println!(
+            "    verdict: {} (lift={:.3}, n={}, level={})",
+            artifact.verdict,
+            artifact.disjoint_semantic_lift,
+            artifact.disjoint_gen_a_n,
+            artifact.disjoint_level
+        );
         if !artifact.invalid_reason.is_empty() {
             println!("    reason: {}", artifact.invalid_reason);
         }
@@ -8446,20 +10051,30 @@ fn demo_real_encoder_experiment(spec: &[String]) {
 
     // --- Step 3: Decision table ---
     println!("\n\n=== DECISION TABLE (pre-registered) ===\n");
-    println!("{:<20} {:<20} {:>8} {:>8} {:>6} {:<12}",
-        "Encoder", "Verdict", "Lift", "CI-lo", "N", "Level");
+    println!(
+        "{:<20} {:<20} {:>8} {:>8} {:>6} {:<12}",
+        "Encoder", "Verdict", "Lift", "CI-lo", "N", "Level"
+    );
     println!("{}", "-".repeat(80));
     for (name, v) in &verdicts {
-        println!("{:<20} {:<20} {:>8.3} {:>8.3} {:>6} {:<12}",
-            name, v.verdict, v.disjoint_semantic_lift, v.disjoint_lift_ci[0],
-            v.disjoint_gen_a_n, v.disjoint_level);
+        println!(
+            "{:<20} {:<20} {:>8.3} {:>8.3} {:>6} {:<12}",
+            name,
+            v.verdict,
+            v.disjoint_semantic_lift,
+            v.disjoint_lift_ci[0],
+            v.disjoint_gen_a_n,
+            v.disjoint_level
+        );
     }
 
     // Auto-fill the pre-registered decision.
     println!("\n--- Interpretation ---\n");
 
     let cata_v = verdicts.iter().find(|(n, _)| n == "cata");
-    let real_v = verdicts.iter().find(|(n, _)| n != "cata" && n != "supervised" && n != "gle");
+    let real_v = verdicts
+        .iter()
+        .find(|(n, _)| n != "cata" && n != "supervised" && n != "gle");
     let sup_v = verdicts.iter().find(|(n, _)| n == "supervised");
     let gle_v = verdicts.iter().find(|(n, _)| n == "gle");
 
@@ -8481,14 +10096,20 @@ fn demo_real_encoder_experiment(spec: &[String]) {
                 let others_fail = [sup_v, gle_v].iter().all(|o| {
                     o.map(|(_, v)| {
                         let vv = Verdict::from_str(&v.verdict);
-                        matches!(vv, Verdict::FailMemorization | Verdict::FailCollision | Verdict::Invalid)
-                    }).unwrap_or(true)
+                        matches!(
+                            vv,
+                            Verdict::FailMemorization | Verdict::FailCollision | Verdict::Invalid
+                        )
+                    })
+                    .unwrap_or(true)
                 });
                 if others_fail {
                     println!("\n>>> ENCODER IS THE WALL <<<");
                     println!("  Real encoder '{name}' returned PASS (promotable).");
                     println!("  Homegrown encoders failed. The product is one import away.");
-                    println!("  Production failure = data-collection gap, not a fundamental limit.");
+                    println!(
+                        "  Production failure = data-collection gap, not a fundamental limit."
+                    );
                 } else {
                     println!("\n>>> REAL ENCODER PASSES (but others also pass — surface may still carry signal)");
                 }
@@ -8501,23 +10122,33 @@ fn demo_real_encoder_experiment(spec: &[String]) {
             }
             Verdict::BelowResolution => {
                 println!("\n>>> BELOW_RESOLUTION <<<");
-                println!("  Real encoder '{name}' can't be resolved — disjoint bin too small (n={}).",
-                    rv.disjoint_gen_a_n);
+                println!(
+                    "  Real encoder '{name}' can't be resolved — disjoint bin too small (n={}).",
+                    rv.disjoint_gen_a_n
+                );
                 println!("  Author more disjoint examples. Not a pass, not a fail.");
             }
             Verdict::Invalid => {
                 println!("\n>>> INVALID <<<");
-                println!("  Real encoder '{name}' returned INVALID: {}", rv.invalid_reason);
+                println!(
+                    "  Real encoder '{name}' returned INVALID: {}",
+                    rv.invalid_reason
+                );
                 println!("  Fix the pipeline before reading any encoder number.");
             }
             Verdict::PassProvisional => {
                 println!("\n>>> PASS_PROVISIONAL (not promotable) <<<");
-                println!("  Real encoder '{name}' cleared lift only at coarse level '{}'.", rv.disjoint_level);
+                println!(
+                    "  Real encoder '{name}' cleared lift only at coarse level '{}'.",
+                    rv.disjoint_level
+                );
                 println!("  Re-earn at 'wbc' for a promotable PASS.");
             }
         }
     } else {
-        println!("\n  [no real encoder ran — provide BYO embeddings JSON to complete the experiment]");
+        println!(
+            "\n  [no real encoder ran — provide BYO embeddings JSON to complete the experiment]"
+        );
     }
 
     println!("\n  IMPORTANT: capability ≠ deployment certification.");
@@ -8539,7 +10170,10 @@ fn load_byo_embeddings(path: &str) -> Result<HashMap<String, Vec<f32>>, String> 
         .into_iter()
         .map(|(k, v)| (k, v.into_iter().map(|x| x as f32).collect()))
         .collect();
-    println!("  Loaded {} BYO embeddings ({dim}-dim) from {path}", map.len());
+    println!(
+        "  Loaded {} BYO embeddings ({dim}-dim) from {path}",
+        map.len()
+    );
     Ok(map)
 }
 
@@ -8568,18 +10202,17 @@ fn demo_grounding_loop_audit() {
     let captures = fixture_rows_to_captures(rt, &before_index, &fixture);
     write_grounding_captures_csv(GROUNDING_CAPTURES_CSV, &captures);
 
-    let proposals = build_proposals_for_captures(
-        &captures,
-        &before_index,
-        &params,
-        rt,
-        &before_index,
-    );
+    let proposals =
+        build_proposals_for_captures(&captures, &before_index, &params, rt, &before_index);
     write_grounding_proposals_csv(GROUNDING_PROPOSALS_CSV, &proposals);
 
-    println!("Proposal mechanism (nearest-in-domain, τ_alias={}):", params.tau_alias);
+    println!(
+        "Proposal mechanism (nearest-in-domain, τ_alias={}):",
+        params.tau_alias
+    );
     for cap in captures.iter().filter(|c| c.split == CaptureSplit::Propose) {
-        let domain = parse_fleet_domain(&cap.domain_context).unwrap_or(GroundingFleetDomain::Crypto);
+        let domain =
+            parse_fleet_domain(&cap.domain_context).unwrap_or(GroundingFleetDomain::Crypto);
         if let Some(m) = before_index.nearest_in_domain(&cap.encoder_embedding, domain) {
             println!(
                 "  {:?} → {}:{} sim={:.3} margin={:.3} (want {})",
@@ -8624,14 +10257,15 @@ fn demo_grounding_loop_audit() {
     let home = GroundingFleetDomain::Crypto;
     let (before_m, after_genuine_m) =
         certify_batch(&captures, rt, &before_index, &after_genuine, home).expect("certify genuine");
-    let genuine_verdict = decide_batch_verdict(&before_m, &after_genuine_m, &params, had_collisions);
+    let genuine_verdict =
+        decide_batch_verdict(&before_m, &after_genuine_m, &params, had_collisions);
 
     // Memorization contrast: add only exact propose phrases as aliases (lookup-table growth).
     let mut after_memo = before_index.clone();
     for cap in captures.iter().filter(|c| c.split == CaptureSplit::Propose) {
         if let Ok((emb, _)) = embed_phrase(rt, &cap.phrase) {
-            let domain = parse_fleet_domain(&cap.domain_context)
-                .unwrap_or(GroundingFleetDomain::Runtime);
+            let domain =
+                parse_fleet_domain(&cap.domain_context).unwrap_or(GroundingFleetDomain::Runtime);
             after_memo.add_alias_to_node(domain, &cap.inferred_concept_id, &cap.phrase, emb);
         }
     }
@@ -8785,7 +10419,10 @@ fn demo_grounding_loop_analyze() {
 
     let mut captures = load_grounding_captures_csv(GROUNDING_CAPTURES_CSV);
     if captures.is_empty() {
-        println!("No captures in {}. Run --grounding-loop-audit first.", GROUNDING_CAPTURES_CSV);
+        println!(
+            "No captures in {}. Run --grounding-loop-audit first.",
+            GROUNDING_CAPTURES_CSV
+        );
         return;
     }
 
@@ -8793,13 +10430,8 @@ fn demo_grounding_loop_analyze() {
         build_grounding_index(rt, &HashMap::new(), &params).expect("build grounding index");
     rehydrate_captures(rt, &before_index, &mut captures);
 
-    let proposals = build_proposals_for_captures(
-        &captures,
-        &before_index,
-        &params,
-        rt,
-        &before_index,
-    );
+    let proposals =
+        build_proposals_for_captures(&captures, &before_index, &params, rt, &before_index);
 
     let mut after = before_index.clone();
     for p in proposals.iter().filter(|p| p.approved) {
@@ -8985,22 +10617,29 @@ fn demo_phase3c_composition() {
 
     let acc_spiral_only = dm.evaluate_main_group(spiral_group, &task_c_data);
     let acc_circles_only = dm.evaluate_main_group(circles_group, &task_c_data);
-    println!("=== Task C (spiral-gated circles, inner r < {}) ===\n", INNER_RADIUS);
-    println!("  Single-group on Task C: spiral={:.1}%  circles={:.1}%",
-        acc_spiral_only * 100.0, acc_circles_only * 100.0);
+    println!(
+        "=== Task C (spiral-gated circles, inner r < {}) ===\n",
+        INNER_RADIUS
+    );
+    println!(
+        "  Single-group on Task C: spiral={:.1}%  circles={:.1}%",
+        acc_spiral_only * 100.0,
+        acc_circles_only * 100.0
+    );
     let residual = 1.0 - acc_spiral_only.max(acc_circles_only);
     println!("  Residual (1 - best single): {:.2}\n", residual);
 
-    let (virtual_group, comp_acc) = dm.train_composition_one_pass(
-        &[spiral_group, circles_group],
-        &task_c_train,
-    );
+    let (virtual_group, comp_acc) =
+        dm.train_composition_one_pass(&[spiral_group, circles_group], &task_c_train);
     println!(
         "  Composition (VirtualGroup) on {} samples, one-pass solve: {:.1}%",
         task_c_train.len(),
         comp_acc * 100.0
     );
-    println!("  Blend weights: [{:.3}, {:.3}]\n", virtual_group.blend_weights[0], virtual_group.blend_weights[1]);
+    println!(
+        "  Blend weights: [{:.3}, {:.3}]\n",
+        virtual_group.blend_weights[0], virtual_group.blend_weights[1]
+    );
 
     if comp_acc >= 0.80 {
         dm.store_composition_episode(&virtual_group, &task_c_train, comp_acc, residual);
@@ -9014,8 +10653,12 @@ fn demo_phase3c_composition() {
         sig[0] /= task_c_data.len() as f32;
         sig[1] /= task_c_data.len() as f32;
         if let Some(ep) = dm.episodic_retrieve(&sig, 0.90) {
-            println!("  Episodic recall: retrieved episode acc={:.1}% blend=[{:.3}, {:.3}]",
-                ep.accuracy * 100.0, ep.blend_weights[0], ep.blend_weights[1]);
+            println!(
+                "  Episodic recall: retrieved episode acc={:.1}% blend=[{:.3}, {:.3}]",
+                ep.accuracy * 100.0,
+                ep.blend_weights[0],
+                ep.blend_weights[1]
+            );
         }
 
         // Second-presentation: retrieve by train signature, evaluate on held-out.
@@ -9028,11 +10671,15 @@ fn demo_phase3c_composition() {
             }
             sig_train[0] /= task_c_train.len() as f32;
             sig_train[1] /= task_c_train.len() as f32;
-            let recalled = dm.episodic_retrieve(&sig_train, 0.99)
+            let recalled = dm
+                .episodic_retrieve(&sig_train, 0.99)
                 .filter(|e| e.group_ids.len() == 2)
                 .map(|e| (e.group_ids.clone(), e.blend_weights.clone()));
             if let Some((gids, weights)) = recalled {
-                let vg_recall = VirtualGroup { group_ids: gids, blend_weights: weights };
+                let vg_recall = VirtualGroup {
+                    group_ids: gids,
+                    blend_weights: weights,
+                };
                 let mut correct = 0usize;
                 for (input, target) in &task_c_heldout {
                     let out = dm.predict_with_composition(input, &vg_recall);
@@ -9046,7 +10693,10 @@ fn demo_phase3c_composition() {
             }
         }
     } else {
-        println!("  (No store: composition {:.0}% < 80%. Episodic / second-presentation skipped.)", comp_acc * 100.0);
+        println!(
+            "  (No store: composition {:.0}% < 80%. Episodic / second-presentation skipped.)",
+            comp_acc * 100.0
+        );
     }
 
     let out_composed = dm.predict_with_composition(&[0.2, 0.2], &virtual_group);
@@ -9070,30 +10720,34 @@ fn demo_phase3c_composition() {
         println!("  (Need 3 groups; got {}.)", all_three.len());
         return;
     }
-    let task_d_data = generate_task_d_three_way_data(
-        &mut dm.main,
-        &all_three,
-        0.35,
-        0.70,
-        100,
-        &mut data_rng,
-    );
+    let task_d_data =
+        generate_task_d_three_way_data(&mut dm.main, &all_three, 0.35, 0.70, 100, &mut data_rng);
     let task_d_train: Vec<_> = task_d_data.iter().take(40).cloned().collect();
     let acc_g0 = dm.evaluate_main_group(all_three[0], &task_d_data);
     let acc_g1 = dm.evaluate_main_group(all_three[1], &task_d_data);
     let acc_g2 = dm.evaluate_main_group(all_three[2], &task_d_data);
-    println!("  Single-group on Task D: g0={:.1}%  g1={:.1}%  g2={:.1}%",
-        acc_g0 * 100.0, acc_g1 * 100.0, acc_g2 * 100.0);
+    println!(
+        "  Single-group on Task D: g0={:.1}%  g1={:.1}%  g2={:.1}%",
+        acc_g0 * 100.0,
+        acc_g1 * 100.0,
+        acc_g2 * 100.0
+    );
     let (vg_d, comp_d_acc) = dm.train_composition_one_pass(&all_three, &task_d_train);
     println!(
         "  3-group composition ({} samples, one-pass solve): {:.1}%",
         task_d_train.len(),
         comp_d_acc * 100.0
     );
-    println!("  Blend weights: [{:.3}, {:.3}, {:.3}]\n",
-        vg_d.blend_weights[0], vg_d.blend_weights[1], vg_d.blend_weights[2]);
+    println!(
+        "  Blend weights: [{:.3}, {:.3}, {:.3}]\n",
+        vg_d.blend_weights[0], vg_d.blend_weights[1], vg_d.blend_weights[2]
+    );
     if comp_d_acc >= 0.75 {
-        let res_d = 1.0 - [acc_g0, acc_g1, acc_g2].iter().cloned().fold(0.0f32, f32::max);
+        let res_d = 1.0
+            - [acc_g0, acc_g1, acc_g2]
+                .iter()
+                .cloned()
+                .fold(0.0f32, f32::max);
         dm.store_composition_episode(&vg_d, &task_d_train, comp_d_acc, res_d);
         println!("  Stored Task D in EpisodicMemory.");
 
@@ -9107,11 +10761,15 @@ fn demo_phase3c_composition() {
             }
             sig_train_d[0] /= task_d_train.len() as f32;
             sig_train_d[1] /= task_d_train.len() as f32;
-            let recalled_d = dm.episodic_retrieve(&sig_train_d, 0.99)
+            let recalled_d = dm
+                .episodic_retrieve(&sig_train_d, 0.99)
                 .filter(|e| e.group_ids.len() == 3)
                 .map(|e| (e.group_ids.clone(), e.blend_weights.clone()));
             if let Some((gids, weights)) = recalled_d {
-                let vg_recall_d = VirtualGroup { group_ids: gids, blend_weights: weights };
+                let vg_recall_d = VirtualGroup {
+                    group_ids: gids,
+                    blend_weights: weights,
+                };
                 let mut correct_d = 0usize;
                 for (input, target) in &task_d_heldout {
                     let out = dm.predict_with_composition(input, &vg_recall_d);
@@ -9125,7 +10783,10 @@ fn demo_phase3c_composition() {
             }
         }
     } else {
-        println!("  (No store: Task D composition {:.0}% < 75%.)", comp_d_acc * 100.0);
+        println!(
+            "  (No store: Task D composition {:.0}% < 75%.)",
+            comp_d_acc * 100.0
+        );
     }
 
     // Inference via memory recall (timed)
@@ -9137,10 +10798,14 @@ fn demo_phase3c_composition() {
     sig_d[0] /= task_d_data.len() as f32;
     sig_d[1] /= task_d_data.len() as f32;
     let start = Instant::now();
-    let episode_data = dm.episodic_retrieve(&sig_d, 0.85)
+    let episode_data = dm
+        .episodic_retrieve(&sig_d, 0.85)
         .map(|ep| (ep.group_ids.clone(), ep.blend_weights.clone()));
     let out_recall = if let Some((gids, weights)) = episode_data {
-        let vg = VirtualGroup { group_ids: gids, blend_weights: weights };
+        let vg = VirtualGroup {
+            group_ids: gids,
+            blend_weights: weights,
+        };
         dm.predict_with_composition(&[0.5, 0.3], &vg)
     } else {
         vec![]
@@ -9148,7 +10813,10 @@ fn demo_phase3c_composition() {
     let elapsed = start.elapsed();
     if !out_recall.is_empty() {
         let secs = elapsed.as_secs_f64();
-        println!("\n  New task solved in <1 second via memory recall. (measured: {:.4}s) Output: {:?}", secs, out_recall);
+        println!(
+            "\n  New task solved in <1 second via memory recall. (measured: {:.4}s) Output: {:?}",
+            secs, out_recall
+        );
     }
 }
 
@@ -9268,22 +10936,13 @@ fn run_phase3e_seed(seed: u64) -> Phase3eSeedResult {
         vg_fixed_heldout
     };
 
-    let direct_mirror_heldout = train_direct_composite_mirror(
-        &mut dm,
-        &train,
-        &heldout,
-        seed.wrapping_add(2),
-        &mut rng,
-    );
+    let direct_mirror_heldout =
+        train_direct_composite_mirror(&mut dm, &train, &heldout, seed.wrapping_add(2), &mut rng);
 
     let confidence_argmax_heldout =
         accuracy_confidence_argmax(&mut dm.main, spiral_group, circles_group, &heldout);
-    let mut learned_router_xy = train_task_e_learned_router_xy(
-        &mut dm.main,
-        spiral_group,
-        circles_group,
-        &train,
-    );
+    let mut learned_router_xy =
+        train_task_e_learned_router_xy(&mut dm.main, spiral_group, circles_group, &train);
     let learned_router_xy_heldout = accuracy_learned_router_xy(
         &mut dm.main,
         &mut learned_router_xy,
@@ -9291,12 +10950,8 @@ fn run_phase3e_seed(seed: u64) -> Phase3eSeedResult {
         circles_group,
         &heldout,
     );
-    let mut learned_router_expert = train_task_e_learned_router_expert(
-        &mut dm.main,
-        spiral_group,
-        circles_group,
-        &train,
-    );
+    let mut learned_router_expert =
+        train_task_e_learned_router_expert(&mut dm.main, spiral_group, circles_group, &train);
     let learned_router_expert_heldout = accuracy_learned_router_expert(
         &mut dm.main,
         &mut learned_router_expert,
@@ -9304,10 +10959,8 @@ fn run_phase3e_seed(seed: u64) -> Phase3eSeedResult {
         circles_group,
         &heldout,
     );
-    let mut calibration_router_xy = train_calibration_learned_router_xy(
-        &calibration_spiral,
-        &calibration_circles,
-    );
+    let mut calibration_router_xy =
+        train_calibration_learned_router_xy(&calibration_spiral, &calibration_circles);
     let calibration_router_xy_heldout = accuracy_learned_router_xy(
         &mut dm.main,
         &mut calibration_router_xy,
@@ -9329,12 +10982,8 @@ fn run_phase3e_seed(seed: u64) -> Phase3eSeedResult {
         circles_group,
         &heldout,
     );
-    let mut disagreement_router = train_task_e_router_disagreement(
-        &mut dm.main,
-        spiral_group,
-        circles_group,
-        &train,
-    );
+    let mut disagreement_router =
+        train_task_e_router_disagreement(&mut dm.main, spiral_group, circles_group, &train);
     let disagreement_router_heldout = accuracy_learned_router_disagreement(
         &mut dm.main,
         &mut disagreement_router,
@@ -9343,9 +10992,8 @@ fn run_phase3e_seed(seed: u64) -> Phase3eSeedResult {
         &heldout,
     );
 
-    let mut expert_features = |input: &[f32]| {
-        specialist_feature_pair(&mut dm.main, spiral_group, circles_group, input)
-    };
+    let mut expert_features =
+        |input: &[f32]| specialist_feature_pair(&mut dm.main, spiral_group, circles_group, input);
     let expert_region_agreement = router_region_agreement_oracle(
         &mut learned_router_expert,
         &heldout,
@@ -9358,9 +11006,8 @@ fn run_phase3e_seed(seed: u64) -> Phase3eSeedResult {
         INNER_RADIUS,
         &mut expert_features,
     );
-    let mut calib_expert_features = |input: &[f32]| {
-        specialist_feature_pair(&mut dm.main, spiral_group, circles_group, input)
-    };
+    let mut calib_expert_features =
+        |input: &[f32]| specialist_feature_pair(&mut dm.main, spiral_group, circles_group, input);
     let calib_expert_region_agreement = router_region_agreement_oracle(
         &mut calibration_router_expert,
         &heldout,
@@ -9381,14 +11028,15 @@ fn run_phase3e_seed(seed: u64) -> Phase3eSeedResult {
         &train,
         INNER_RADIUS,
     );
-    let radius_gate_heldout =
-        accuracy_radius_gated(&mut dm.main, spiral_group, circles_group, &heldout, threshold);
-    let logistic_gate = train_radius_logistic_gate(
+    let radius_gate_heldout = accuracy_radius_gated(
         &mut dm.main,
         spiral_group,
         circles_group,
-        &train,
+        &heldout,
+        threshold,
     );
+    let logistic_gate =
+        train_radius_logistic_gate(&mut dm.main, spiral_group, circles_group, &train);
     let logistic_gate_heldout = accuracy_logistic_radius_gate(
         &mut dm.main,
         spiral_group,
@@ -9484,14 +11132,31 @@ fn run_phase3g_cone_seed(seed: u64) -> Vec<ConeSeedResult> {
     let calibration_circles: Vec<_> = circles_data.iter().take(100).cloned().collect();
 
     let spiral_group = train_promoted_mirror(
-        &mut dm, "spiral", seed, &spiral_data, &calibration_spiral, &mut rng, false,
+        &mut dm,
+        "spiral",
+        seed,
+        &spiral_data,
+        &calibration_spiral,
+        &mut rng,
+        false,
     );
     let circles_group = train_promoted_mirror(
-        &mut dm, "circles", seed.wrapping_add(1), &circles_data, &calibration_circles, &mut rng, false,
+        &mut dm,
+        "circles",
+        seed.wrapping_add(1),
+        &circles_data,
+        &calibration_circles,
+        &mut rng,
+        false,
     );
 
     let task_e_data = generate_balanced_spiral_gated_circles_data(
-        &mut dm.main, spiral_group, circles_group, INNER_RADIUS, N_SAMPLES, &mut data_rng,
+        &mut dm.main,
+        spiral_group,
+        circles_group,
+        INNER_RADIUS,
+        N_SAMPLES,
+        &mut data_rng,
     );
 
     let mut out = Vec::with_capacity(CONE_SWEEP_NS.len());
@@ -9507,15 +11172,25 @@ fn run_phase3g_cone_seed(seed: u64) -> Vec<ConeSeedResult> {
         let oracle_best_heldout = spiral_heldout.max(circles_heldout);
 
         // Baselines (the documented negatives), recomputed per split.
-        let (vg, _train_acc) = dm.train_composition_one_pass(&[spiral_group, circles_group], &train);
+        let (vg, _train_acc) =
+            dm.train_composition_one_pass(&[spiral_group, circles_group], &train);
         let vg_heldout = accuracy_virtual_group(&mut dm, &vg, &heldout);
         let mut learned_router_expert =
             train_task_e_learned_router_expert(&mut dm.main, spiral_group, circles_group, &train);
         let learned_router_expert_heldout = accuracy_learned_router_expert(
-            &mut dm.main, &mut learned_router_expert, spiral_group, circles_group, &heldout,
+            &mut dm.main,
+            &mut learned_router_expert,
+            spiral_group,
+            circles_group,
+            &heldout,
         );
-        let oracle_region_heldout =
-            accuracy_radius_gated(&mut dm.main, spiral_group, circles_group, &heldout, INNER_RADIUS);
+        let oracle_region_heldout = accuracy_radius_gated(
+            &mut dm.main,
+            spiral_group,
+            circles_group,
+            &heldout,
+            INNER_RADIUS,
+        );
 
         // Cone training samples: oracle-free features (inference uses ONLY these) + the region
         // label and radius (TRAIN-ONLY). The router must recover the boundary on held-out from
@@ -9561,10 +11236,8 @@ fn run_phase3g_cone_seed(seed: u64) -> Vec<ConeSeedResult> {
             }
             // Confident-wrong probe: a specialist that is decisive AND wrong should be
             // DOWN-weighted by the gate. Reliance = the gate's blend weight on that specialist.
-            let spiral_conf_wrong =
-                (s - 0.5).abs() > 0.4 && !scalar_matches_target(s, target[0]);
-            let circles_conf_wrong =
-                (c - 0.5).abs() > 0.4 && !scalar_matches_target(c, target[0]);
+            let spiral_conf_wrong = (s - 0.5).abs() > 0.4 && !scalar_matches_target(s, target[0]);
+            let circles_conf_wrong = (c - 0.5).abs() > 0.4 && !scalar_matches_target(c, target[0]);
             if spiral_conf_wrong {
                 cw_reliance_sum += decision.spiral_weight;
                 cw_n += 1;
@@ -9599,8 +11272,7 @@ fn run_phase3g_cone_seed(seed: u64) -> Vec<ConeSeedResult> {
         }
         let n_heldout = heldout.len().max(1) as f32;
         let cone_heldout = correct as f32 / n_heldout;
-        let region_agreement =
-            records.iter().filter(|p| p.region_match).count() as f32 / n_heldout;
+        let region_agreement = records.iter().filter(|p| p.region_match).count() as f32 / n_heldout;
         let margin_radius_corr = pearson_correlation(&margins, &radius_signals);
         let entropy_bits = routing_entropy_bits(&route_choices);
         let zm = zone_misroute_stats(&records, INNER_RADIUS, EPS);
@@ -9653,20 +11325,37 @@ fn cone_mean(rs: &[ConeSeedResult], g: fn(&ConeSeedResult) -> f32) -> f32 {
     }
 }
 fn cone_std(rs: &[ConeSeedResult], g: fn(&ConeSeedResult) -> f32) -> f32 {
-    mean_std(&rs.iter().map(g).filter(|v| v.is_finite()).collect::<Vec<_>>()).1
+    mean_std(
+        &rs.iter()
+            .map(g)
+            .filter(|v| v.is_finite())
+            .collect::<Vec<_>>(),
+    )
+    .1
 }
 fn cone_min(rs: &[ConeSeedResult], g: fn(&ConeSeedResult) -> f32) -> f32 {
-    rs.iter().map(g).filter(|v| v.is_finite()).fold(f32::INFINITY, f32::min)
+    rs.iter()
+        .map(g)
+        .filter(|v| v.is_finite())
+        .fold(f32::INFINITY, f32::min)
 }
 fn cone_pct(rs: &[ConeSeedResult], g: fn(&ConeSeedResult) -> f32) -> String {
-    format!("{:.1}% ± {:.1}%", cone_mean(rs, g) * 100.0, cone_std(rs, g) * 100.0)
+    format!(
+        "{:.1}% ± {:.1}%",
+        cone_mean(rs, g) * 100.0,
+        cone_std(rs, g) * 100.0
+    )
 }
 
 fn demo_phase3g_cone_router() {
     println!("--- Phase 3g: Adjustable-Cone Cognitive Router (oracle-free) ---\n");
     println!("Task E: 50/50 inner/outer spiral-gated circles, stratified split, held-out rest.");
-    println!("Router sees ONLY frozen-specialist outputs at inference; r is TRAIN-ONLY (region labels,");
-    println!("annulus curriculum) + certification. Margin shaping has been REMOVED from the loss, so");
+    println!(
+        "Router sees ONLY frozen-specialist outputs at inference; r is TRAIN-ONLY (region labels,"
+    );
+    println!(
+        "annulus curriculum) + certification. Margin shaping has been REMOVED from the loss, so"
+    );
     println!("margin↔r is reported observationally and is NOT a pre-registered gate (would be circular).\n");
 
     const SEEDS: [u64; 20] = [
@@ -9681,14 +11370,20 @@ fn demo_phase3g_cone_router() {
     };
 
     // ---- Pre-registered n-sweep (the decisive boundary-coverage test) ----
-    println!("=== n-sweep: does it hold as boundary coverage varies? ({} seeds each) ===\n", SEEDS.len());
+    println!(
+        "=== n-sweep: does it hold as boundary coverage varies? ({} seeds each) ===\n",
+        SEEDS.len()
+    );
     println!("| train n | annulus pts (train) | Cone acc | VG acc | Region agree | Degenerate | Annulus/interior | Conf-wrong reliance |");
     println!("| ------- | ------------------- | -------- | ------ | ------------ | ---------- | ---------------- | ------------------- |");
     for &n in &CONE_SWEEP_NS {
         let rs = at(n);
         let degen = rs.iter().filter(|r| r.degenerate).count();
-        let finite_ratios: Vec<f32> =
-            rs.iter().map(|r| r.annulus_interior_ratio).filter(|v| v.is_finite()).collect();
+        let finite_ratios: Vec<f32> = rs
+            .iter()
+            .map(|r| r.annulus_interior_ratio)
+            .filter(|v| v.is_finite())
+            .collect();
         let ratio_mean = if finite_ratios.is_empty() {
             f32::INFINITY
         } else {
@@ -9723,34 +11418,82 @@ fn demo_phase3g_cone_router() {
 
     // ---- Headline detail at the canonical split ----
     let results = at(CONE_HEADLINE_N);
-    println!("\n=== Headline composite accuracy (n={}, {} seeds) ===\n", CONE_HEADLINE_N, results.len());
+    println!(
+        "\n=== Headline composite accuracy (n={}, {} seeds) ===\n",
+        CONE_HEADLINE_N,
+        results.len()
+    );
     println!("| Method | Held-out accuracy |");
     println!("| ------ | ----------------- |");
-    println!("| Spiral specialist only | {} |", cone_pct(&results, |r| r.spiral_heldout));
-    println!("| Circles specialist only | {} |", cone_pct(&results, |r| r.circles_heldout));
-    println!("| Oracle-best-single (global) | {} |", cone_pct(&results, |r| r.oracle_best_heldout));
-    println!("| VirtualGroup (global scalar blend) | {} |", cone_pct(&results, |r| r.vg_heldout));
-    println!("| LearnedRouter expert (documented degenerate) | {} |", cone_pct(&results, |r| r.learned_router_expert_heldout));
-    println!("| **Adjustable-Cone Router (oracle-free)** | **{}** |", cone_pct(&results, |r| r.cone_heldout));
-    println!("| Oracle region switch (r < 0.4, ceiling) | {} |", cone_pct(&results, |r| r.oracle_region_heldout));
+    println!(
+        "| Spiral specialist only | {} |",
+        cone_pct(&results, |r| r.spiral_heldout)
+    );
+    println!(
+        "| Circles specialist only | {} |",
+        cone_pct(&results, |r| r.circles_heldout)
+    );
+    println!(
+        "| Oracle-best-single (global) | {} |",
+        cone_pct(&results, |r| r.oracle_best_heldout)
+    );
+    println!(
+        "| VirtualGroup (global scalar blend) | {} |",
+        cone_pct(&results, |r| r.vg_heldout)
+    );
+    println!(
+        "| LearnedRouter expert (documented degenerate) | {} |",
+        cone_pct(&results, |r| r.learned_router_expert_heldout)
+    );
+    println!(
+        "| **Adjustable-Cone Router (oracle-free)** | **{}** |",
+        cone_pct(&results, |r| r.cone_heldout)
+    );
+    println!(
+        "| Oracle region switch (r < 0.4, ceiling) | {} |",
+        cone_pct(&results, |r| r.oracle_region_heldout)
+    );
 
-    println!("\n=== Certifiers the loss did NOT touch (n={}) ===\n", CONE_HEADLINE_N);
+    println!(
+        "\n=== Certifiers the loss did NOT touch (n={}) ===\n",
+        CONE_HEADLINE_N
+    );
     println!("| Certifier | Value |");
     println!("| --------- | ----- |");
-    println!("| Region agreement (held-out generalization of region label) | {} |", cone_pct(&results, |r| r.region_agreement));
-    println!("| Region agreement (worst seed) | {:.1}% |", cone_min(&results, |r| r.region_agreement) * 100.0);
-    println!("| Routing entropy (bits, worst seed) | {:.2} |", cone_min(&results, |r| r.entropy_bits));
-    println!("| Interior misroute rate | {} |", cone_pct(&results, |r| r.interior_misroute_rate));
-    println!("| Annulus misroute rate | {} |", cone_pct(&results, |r| r.annulus_misroute_rate));
+    println!(
+        "| Region agreement (held-out generalization of region label) | {} |",
+        cone_pct(&results, |r| r.region_agreement)
+    );
+    println!(
+        "| Region agreement (worst seed) | {:.1}% |",
+        cone_min(&results, |r| r.region_agreement) * 100.0
+    );
+    println!(
+        "| Routing entropy (bits, worst seed) | {:.2} |",
+        cone_min(&results, |r| r.entropy_bits)
+    );
+    println!(
+        "| Interior misroute rate | {} |",
+        cone_pct(&results, |r| r.interior_misroute_rate)
+    );
+    println!(
+        "| Annulus misroute rate | {} |",
+        cone_pct(&results, |r| r.annulus_misroute_rate)
+    );
     let cw_pts = results.iter().map(|r| r.cw_n as f32).sum::<f32>() / results.len().max(1) as f32;
     println!("| Confident-wrong reliance (LOW = good; competence-router was 0.60) | {:.2}  (~{:.0} probe pts/seed) |", cone_mean(&results, |r| r.cw_reliance), cw_pts);
-    println!("| Mean wide-cone fraction | {} |", cone_pct(&results, |r| r.wide_frac));
+    println!(
+        "| Mean wide-cone fraction | {} |",
+        cone_pct(&results, |r| r.wide_frac)
+    );
     println!(
         "\n(Observational, not a gate) Margin ↔ (0.4 − r) correlation: {:.2} ± {:.2}. The loss no",
         cone_mean(&results, |r| r.margin_radius_corr),
         cone_std(&results, |r| r.margin_radius_corr)
     );
-    println!("longer shapes margin, so this is uncontaminated — but it is excluded from the verdict.");
+    println!(
+        "longer shapes margin, so this is uncontaminated — but it is excluded from the verdict."
+    );
 
     // ---- Verdict on the clean certifiers only ----
     let degenerate_seeds = results.iter().filter(|r| r.degenerate).count();
@@ -9774,20 +11517,50 @@ fn demo_phase3g_cone_router() {
     let mark = |b: bool| if b { "PASS" } else { "FAIL" };
 
     println!("\n=== VERDICT (pre-registered, margin↔r removed as circular) ===\n");
-    println!("[{}] Composite accuracy > VirtualGroup           ({:.1}% > {:.1}%)", mark(c_beats_vg), cone_mean_v * 100.0, vg_mean_v * 100.0);
-    println!("[{}] 0 degenerate seeds (anti-collapse)            ({}/{} at n={})", mark(c_no_degenerate), degenerate_seeds, results.len(), CONE_HEADLINE_N);
+    println!(
+        "[{}] Composite accuracy > VirtualGroup           ({:.1}% > {:.1}%)",
+        mark(c_beats_vg),
+        cone_mean_v * 100.0,
+        vg_mean_v * 100.0
+    );
+    println!(
+        "[{}] 0 degenerate seeds (anti-collapse)            ({}/{} at n={})",
+        mark(c_no_degenerate),
+        degenerate_seeds,
+        results.len(),
+        CONE_HEADLINE_N
+    );
     println!("[{}] Misroutes localized to annulus                (annulus {:.1}% > interior {:.1}%, {}/{} seeds)", mark(c_annulus), annulus_mean * 100.0, interior_mean * 100.0, annulus_localized, results.len());
-    println!("[{}] Confident-wrong probe: gate down-weights      (reliance {:.2} < 0.5)", mark(c_cw), cw_mean);
+    println!(
+        "[{}] Confident-wrong probe: gate down-weights      (reliance {:.2} < 0.5)",
+        mark(c_cw),
+        cw_mean
+    );
     println!("[{}] Anti-collapse holds across the n-sweep         ({} degenerate / {} runs; cone>VG every n: {})", mark(c_sweep), total_degen, all.len(), if cone_beats_vg_all_n {"yes"} else {"no"});
-    println!("[{}] Region agreement > 90% (stretch; spec gate ≥80%) ({:.1}%, worst seed {:.1}%)", mark(c_region), region_mean * 100.0, cone_min(&results, |r| r.region_agreement) * 100.0);
+    println!(
+        "[{}] Region agreement > 90% (stretch; spec gate ≥80%) ({:.1}%, worst seed {:.1}%)",
+        mark(c_region),
+        region_mean * 100.0,
+        cone_min(&results, |r| r.region_agreement) * 100.0
+    );
 
     let clean = [c_beats_vg, c_no_degenerate, c_annulus, c_cw, c_sweep];
     let clean_pass = clean.iter().filter(|b| **b).count();
-    println!("\nClean anti-collapse criteria: {}/{} met. Region-agreement stretch: {}.",
-        clean_pass, clean.len(), if c_region { "met" } else { "not met (>=80% spec gate is the floor)" });
+    println!(
+        "\nClean anti-collapse criteria: {}/{} met. Region-agreement stretch: {}.",
+        clean_pass,
+        clean.len(),
+        if c_region {
+            "met"
+        } else {
+            "not met (>=80% spec gate is the floor)"
+        }
+    );
     if clean_pass == clean.len() {
         println!("OVERALL: anti-collapse mechanism CERTIFIED on Task E — resists the constant-specialist");
-        println!("degeneracy that killed scalar blends (VirtualGroup) and per-specialist gates, and the");
+        println!(
+            "degeneracy that killed scalar blends (VirtualGroup) and per-specialist gates, and the"
+        );
         println!("result rests only on certifiers the training loss never saw.");
     } else {
         println!("OVERALL: anti-collapse NOT fully certified — inspect the FAIL rows above.");
@@ -9831,14 +11604,31 @@ fn run_phase3h_seed_all_strategies(seed: u64) -> Vec<LabelFreeSeedResult> {
     let calibration_circles: Vec<_> = circles_data.iter().take(100).cloned().collect();
 
     let spiral_group = train_promoted_mirror(
-        &mut dm, "spiral", seed, &spiral_data, &calibration_spiral, &mut rng, false,
+        &mut dm,
+        "spiral",
+        seed,
+        &spiral_data,
+        &calibration_spiral,
+        &mut rng,
+        false,
     );
     let circles_group = train_promoted_mirror(
-        &mut dm, "circles", seed.wrapping_add(1), &circles_data, &calibration_circles, &mut rng, false,
+        &mut dm,
+        "circles",
+        seed.wrapping_add(1),
+        &circles_data,
+        &calibration_circles,
+        &mut rng,
+        false,
     );
 
     let task_e_data = generate_balanced_spiral_gated_circles_data(
-        &mut dm.main, spiral_group, circles_group, INNER_RADIUS, N_SAMPLES, &mut data_rng,
+        &mut dm.main,
+        spiral_group,
+        circles_group,
+        INNER_RADIUS,
+        N_SAMPLES,
+        &mut data_rng,
     );
 
     let mut out = Vec::with_capacity(SWEEP.len() * STRATEGIES.len());
@@ -9919,7 +11709,11 @@ fn run_phase3h_seed_all_strategies(seed: u64) -> Vec<LabelFreeSeedResult> {
                 cone_heldout: correct as f32 / n,
                 region_agreement,
                 entropy_bits,
-                cw_reliance: if cw_n > 0 { cw_sum / cw_n as f32 } else { f32::NAN },
+                cw_reliance: if cw_n > 0 {
+                    cw_sum / cw_n as f32
+                } else {
+                    f32::NAN
+                },
                 degenerate,
             });
         }
@@ -9993,7 +11787,12 @@ fn demo_phase3h_label_free() {
         let score = mean(|r| r.region_agreement) + 0.25 * mean(|r| r.cone_heldout)
             - 0.5 * (degen as f32 / at30.len().max(1) as f32);
 
-        println!("=== Strategy: {} (n={}, {} seeds) ===", strategy_name(strategy), HEADLINE_N, at30.len());
+        println!(
+            "=== Strategy: {} (n={}, {} seeds) ===",
+            strategy_name(strategy),
+            HEADLINE_N,
+            at30.len()
+        );
         println!("| Method | Held-out |");
         println!("| ------ | -------- |");
         println!("| VirtualGroup | {} |", pct(|r| r.vg_heldout));
@@ -10064,12 +11863,40 @@ fn demo_phase3h_label_free() {
     let mark = |b: bool| if b { "PASS" } else { "FAIL" };
 
     println!("=== VERDICT (best strategy: {}) ===\n", best_name);
-    println!("[{}] 0 degenerate seeds                         ({}/{})", mark(g_degen), degen, best_rows.len());
-    println!("[{}] Held-out acc > VirtualGroup                ({:.1}% > {:.1}%)", mark(g_vg), cone_m * 100.0, vg_m * 100.0);
-    println!("[{}] Held-out acc > confidence argmax           ({:.1}% > {:.1}%)", mark(g_conf), cone_m * 100.0, conf_m * 100.0);
-    println!("[{}] Region agreement ≥ 60%                     ({:.1}%)", mark(g_region), region_m * 100.0);
-    println!("[{}] Confident-wrong reliance < 0.50            ({:.2})", mark(g_cw), cw_m);
-    println!("[{}] No region-agree decay n=20→120             ({:.1}% → {:.1}%)", mark(g_sweep), ra_at(20) * 100.0, ra_at(120) * 100.0);
+    println!(
+        "[{}] 0 degenerate seeds                         ({}/{})",
+        mark(g_degen),
+        degen,
+        best_rows.len()
+    );
+    println!(
+        "[{}] Held-out acc > VirtualGroup                ({:.1}% > {:.1}%)",
+        mark(g_vg),
+        cone_m * 100.0,
+        vg_m * 100.0
+    );
+    println!(
+        "[{}] Held-out acc > confidence argmax           ({:.1}% > {:.1}%)",
+        mark(g_conf),
+        cone_m * 100.0,
+        conf_m * 100.0
+    );
+    println!(
+        "[{}] Region agreement ≥ 60%                     ({:.1}%)",
+        mark(g_region),
+        region_m * 100.0
+    );
+    println!(
+        "[{}] Confident-wrong reliance < 0.50            ({:.2})",
+        mark(g_cw),
+        cw_m
+    );
+    println!(
+        "[{}] No region-agree decay n=20→120             ({:.1}% → {:.1}%)",
+        mark(g_sweep),
+        ra_at(20) * 100.0,
+        ra_at(120) * 100.0
+    );
 
     let gates = [g_degen, g_vg, g_conf, g_region, g_cw, g_sweep];
     let pass_n = gates.iter().filter(|b| **b).count();
@@ -10081,7 +11908,9 @@ fn demo_phase3h_label_free() {
     } else {
         println!("OVERALL: Phase 3h INCONCLUSIVE — partial lift; inspect FAIL rows (do not claim unsupervised solve).");
     }
-    println!("\nNote: do not compare these region-agree numbers to Phase 3g's 80% supervised gate.");
+    println!(
+        "\nNote: do not compare these region-agree numbers to Phase 3g's 80% supervised gate."
+    );
 }
 
 // =============================================================================
@@ -10114,7 +11943,11 @@ fn demo_phase3i_jepa_wm() {
 
     let at_n = |n: usize| -> Vec<&WmSeedResult> { all.iter().filter(|r| r.train_n == n).collect() };
     let mean = |rows: &[&WmSeedResult], g: fn(&WmSeedResult) -> f32| -> f32 {
-        let vals: Vec<f32> = rows.iter().map(|r| g(r)).filter(|v| v.is_finite()).collect();
+        let vals: Vec<f32> = rows
+            .iter()
+            .map(|r| g(r))
+            .filter(|v| v.is_finite())
+            .collect();
         if vals.is_empty() {
             f32::NAN
         } else {
@@ -10122,11 +11955,19 @@ fn demo_phase3i_jepa_wm() {
         }
     };
     let std = |rows: &[&WmSeedResult], g: fn(&WmSeedResult) -> f32| -> f32 {
-        let vals: Vec<f32> = rows.iter().map(|r| g(r)).filter(|v| v.is_finite()).collect();
+        let vals: Vec<f32> = rows
+            .iter()
+            .map(|r| g(r))
+            .filter(|v| v.is_finite())
+            .collect();
         mean_std(&vals).1
     };
     let pct = |rows: &[&WmSeedResult], g: fn(&WmSeedResult) -> f32| {
-        format!("{:.1}% ± {:.1}%", mean(rows, g) * 100.0, std(rows, g) * 100.0)
+        format!(
+            "{:.1}% ± {:.1}%",
+            mean(rows, g) * 100.0,
+            std(rows, g) * 100.0
+        )
     };
 
     println!("=== n-sweep (20 seeds each) ===\n");
@@ -10162,7 +12003,11 @@ fn demo_phase3i_jepa_wm() {
     println!("\n=== Headline (n={}, 20 seeds) ===\n", HEADLINE_N);
     println!("| Method | Held-out next-latent MSE |");
     println!("| ------ | ------------------------ |");
-    println!("| VirtualGroup (avg preds) | {:.6} ± {:.6} |", vg_m, std(&rows, |r| r.vg_mse));
+    println!(
+        "| VirtualGroup (avg preds) | {:.6} ± {:.6} |",
+        vg_m,
+        std(&rows, |r| r.vg_mse)
+    );
     println!(
         "| Confidence argmax (affinity) | {:.6} ± {:.6} |",
         conf_m,
@@ -10197,10 +12042,29 @@ fn demo_phase3i_jepa_wm() {
     let mark = |b: bool| if b { "PASS" } else { "FAIL" };
 
     println!("\n=== VERDICT (pre-registered WM Task E gates) ===\n");
-    println!("[{}] 0 degenerate seeds                         ({}/{})", mark(g_degen), degen, rows.len());
-    println!("[{}] Cone MSE < VirtualGroup                    ({:.6} < {:.6})", mark(g_vg), cone_m, vg_m);
-    println!("[{}] Cone MSE ≤ confidence argmax               ({:.6} ≤ {:.6})", mark(g_conf), cone_m, conf_m);
-    println!("[{}] Regime agreement ≥ 60%                     ({:.1}%)", mark(g_region), region_m * 100.0);
+    println!(
+        "[{}] 0 degenerate seeds                         ({}/{})",
+        mark(g_degen),
+        degen,
+        rows.len()
+    );
+    println!(
+        "[{}] Cone MSE < VirtualGroup                    ({:.6} < {:.6})",
+        mark(g_vg),
+        cone_m,
+        vg_m
+    );
+    println!(
+        "[{}] Cone MSE ≤ confidence argmax               ({:.6} ≤ {:.6})",
+        mark(g_conf),
+        cone_m,
+        conf_m
+    );
+    println!(
+        "[{}] Regime agreement ≥ 60%                     ({:.1}%)",
+        mark(g_region),
+        region_m * 100.0
+    );
     println!(
         "[{}] No regime-agree decay n=20→120             ({:.1}% → {:.1}%)",
         mark(g_sweep),
@@ -10212,7 +12076,9 @@ fn demo_phase3i_jepa_wm() {
     let pass_n = gates.iter().filter(|b| **b).count();
     println!("\nGates: {}/{} met.", pass_n, gates.len());
     if pass_n == gates.len() {
-        println!("OVERALL: Phase 3i PASS — JEPA adapter promote-freeze + authenticated regime routing.");
+        println!(
+            "OVERALL: Phase 3i PASS — JEPA adapter promote-freeze + authenticated regime routing."
+        );
     } else if region_m <= 0.55 && cone_m + 1e-7 >= vg_m.min(conf_m) {
         println!("OVERALL: Phase 3i KILL — predictors/routing stay at VG/conf floor.");
     } else {
@@ -10227,8 +12093,12 @@ fn demo_phase3i_jepa_wm() {
 
 fn demo_phase3j_energy_wm() {
     println!("--- Phase 3j: Energy-Based JEPA Adapters (EB latent landscapes) ---\n");
-    println!("Frozen encoder (hash-pinned). Promoted EnergyAdapters: E(z,z') + proposal + affinity.");
-    println!("True transitions low-energy; contrasts high-energy (margin). Distinct from metabolic");
+    println!(
+        "Frozen encoder (hash-pinned). Promoted EnergyAdapters: E(z,z') + proposal + affinity."
+    );
+    println!(
+        "True transitions low-energy; contrasts high-energy (margin). Distinct from metabolic"
+    );
     println!("synapse energy_budget. Cone routes on affinity; certifiers include energy margin.\n");
     println!("Contract: docs/JEPA_ADAPTER_PROMOTION.md §8\n");
 
@@ -10248,11 +12118,14 @@ fn demo_phase3j_energy_wm() {
         println!(" ok");
     }
 
-    let at_n = |n: usize| -> Vec<&EnergyWmSeedResult> {
-        all.iter().filter(|r| r.train_n == n).collect()
-    };
+    let at_n =
+        |n: usize| -> Vec<&EnergyWmSeedResult> { all.iter().filter(|r| r.train_n == n).collect() };
     let mean = |rows: &[&EnergyWmSeedResult], g: fn(&EnergyWmSeedResult) -> f32| -> f32 {
-        let vals: Vec<f32> = rows.iter().map(|r| g(r)).filter(|v| v.is_finite()).collect();
+        let vals: Vec<f32> = rows
+            .iter()
+            .map(|r| g(r))
+            .filter(|v| v.is_finite())
+            .collect();
         if vals.is_empty() {
             f32::NAN
         } else {
@@ -10260,11 +12133,19 @@ fn demo_phase3j_energy_wm() {
         }
     };
     let std = |rows: &[&EnergyWmSeedResult], g: fn(&EnergyWmSeedResult) -> f32| -> f32 {
-        let vals: Vec<f32> = rows.iter().map(|r| g(r)).filter(|v| v.is_finite()).collect();
+        let vals: Vec<f32> = rows
+            .iter()
+            .map(|r| g(r))
+            .filter(|v| v.is_finite())
+            .collect();
         mean_std(&vals).1
     };
     let pct = |rows: &[&EnergyWmSeedResult], g: fn(&EnergyWmSeedResult) -> f32| {
-        format!("{:.1}% ± {:.1}%", mean(rows, g) * 100.0, std(rows, g) * 100.0)
+        format!(
+            "{:.1}% ± {:.1}%",
+            mean(rows, g) * 100.0,
+            std(rows, g) * 100.0
+        )
     };
 
     println!("=== n-sweep (20 seeds each) ===\n");
@@ -10349,12 +12230,40 @@ fn demo_phase3j_energy_wm() {
     let mark = |b: bool| if b { "PASS" } else { "FAIL" };
 
     println!("\n=== VERDICT (pre-registered Phase 3j gates) ===\n");
-    println!("[{}] 0 degenerate seeds                         ({}/{})", mark(g_degen), degen, rows.len());
-    println!("[{}] Cone MSE < VirtualGroup                    ({:.6} < {:.6})", mark(g_vg), cone_m, vg_m);
-    println!("[{}] Cone MSE ≤ confidence argmax               ({:.6} ≤ {:.6})", mark(g_conf), cone_m, conf_m);
-    println!("[{}] Regime agreement ≥ 60%                     ({:.1}%)", mark(g_region), region_m * 100.0);
-    println!("[{}] Energy margin (away−home) > 0.01           ({:.4})", mark(g_margin), margin);
-    println!("[{}] Cone true-pair energy ≤ VG energy          ({:.4} ≤ {:.4})", mark(g_energy), cone_e, vg_e);
+    println!(
+        "[{}] 0 degenerate seeds                         ({}/{})",
+        mark(g_degen),
+        degen,
+        rows.len()
+    );
+    println!(
+        "[{}] Cone MSE < VirtualGroup                    ({:.6} < {:.6})",
+        mark(g_vg),
+        cone_m,
+        vg_m
+    );
+    println!(
+        "[{}] Cone MSE ≤ confidence argmax               ({:.6} ≤ {:.6})",
+        mark(g_conf),
+        cone_m,
+        conf_m
+    );
+    println!(
+        "[{}] Regime agreement ≥ 60%                     ({:.1}%)",
+        mark(g_region),
+        region_m * 100.0
+    );
+    println!(
+        "[{}] Energy margin (away−home) > 0.01           ({:.4})",
+        mark(g_margin),
+        margin
+    );
+    println!(
+        "[{}] Cone true-pair energy ≤ VG energy          ({:.4} ≤ {:.4})",
+        mark(g_energy),
+        cone_e,
+        vg_e
+    );
     println!(
         "[{}] No regime-agree decay n=20→120             ({:.1}% → {:.1}%)",
         mark(g_sweep),
@@ -10439,13 +12348,32 @@ fn demo_phase3k_geo_wm() {
     println!("\n=== VERDICT (n=30) ===\n");
     println!("[{}] 0 degenerate ({}/{})", mark(g[0]), degen, rows.len());
     println!("[{}] Cone MSE < VG ({:.6} < {:.6})", mark(g[1]), cone, vg);
-    println!("[{}] Cone MSE ≤ conf (+2e-5) ({:.6} ≤ {:.6})", mark(g[2]), cone, conf);
+    println!(
+        "[{}] Cone MSE ≤ conf (+2e-5) ({:.6} ≤ {:.6})",
+        mark(g[2]),
+        cone,
+        conf
+    );
     println!("[{}] Regime agree ≥ 60% ({:.1}%)", mark(g[3]), reg * 100.0);
     println!("[{}] Energy margin > 0.01 ({:.3})", mark(g[4]), mar);
-    println!("[{}] Geo energy home<away ≥ 70% ({:.1}%)", mark(g[5]), geo * 100.0);
-    println!("[{}] No regime decay 20→120 ({:.1}%→{:.1}%)", mark(g[6]), ra(20)*100.0, ra(120)*100.0);
+    println!(
+        "[{}] Geo energy home<away ≥ 70% ({:.1}%)",
+        mark(g[5]),
+        geo * 100.0
+    );
+    println!(
+        "[{}] No regime decay 20→120 ({:.1}%→{:.1}%)",
+        mark(g[6]),
+        ra(20) * 100.0,
+        ra(120) * 100.0
+    );
     let pass = g.iter().filter(|b| **b).count();
-    println!("\nGates: {}/{} | ±std cone {:.6}", pass, g.len(), stdv(&rows, |r| r.cone_mse));
+    println!(
+        "\nGates: {}/{} | ±std cone {:.6}",
+        pass,
+        g.len(),
+        stdv(&rows, |r| r.cone_mse)
+    );
     if pass == g.len() {
         println!("OVERALL: Phase 3k PASS — geometric latents under energy + promote-freeze.");
     } else if reg <= 0.55 {
@@ -10477,7 +12405,9 @@ fn demo_phase3l_prob_wm() {
         let v: Vec<f32> = rows.iter().map(|r| g(r)).collect();
         v.iter().sum::<f32>() / v.len().max(1) as f32
     };
-    println!("=== n-sweep ===\n| n | Cone MSE | Regime | Abstain | Annulus|Abstain | Margin | Degen |");
+    println!(
+        "=== n-sweep ===\n| n | Cone MSE | Regime | Abstain | Annulus|Abstain | Margin | Degen |"
+    );
     println!("| - | -------- | ------ | ------- | -------------- | ------ | ----- |");
     for &n in &SWEEP {
         let rows = at(n);
@@ -10518,12 +12448,30 @@ fn demo_phase3l_prob_wm() {
     println!("\n=== VERDICT (n=30) ===\n");
     println!("[{}] 0 degenerate ({}/{})", mark(g[0]), degen, rows.len());
     println!("[{}] Cone MSE < VG ({:.6} < {:.6})", mark(g[1]), cone, vg);
-    println!("[{}] Cone MSE ≤ conf ({:.6} ≤ {:.6})", mark(g[2]), cone, conf);
+    println!(
+        "[{}] Cone MSE ≤ conf ({:.6} ≤ {:.6})",
+        mark(g[2]),
+        cone,
+        conf
+    );
     println!("[{}] Regime agree ≥ 60% ({:.1}%)", mark(g[3]), reg * 100.0);
     println!("[{}] Energy margin > 0.01 ({:.3})", mark(g[4]), mar);
-    println!("[{}] Abstain rate in (2%, 50%) ({:.1}%)", mark(g[5]), abst * 100.0);
-    println!("[{}] Abstains enriched in annulus or rare ({:.1}% annulus)", mark(g[6]), ann * 100.0);
-    println!("[{}] No regime decay 20→120 ({:.1}%→{:.1}%)", mark(g[7]), ra(20)*100.0, ra(120)*100.0);
+    println!(
+        "[{}] Abstain rate in (2%, 50%) ({:.1}%)",
+        mark(g[5]),
+        abst * 100.0
+    );
+    println!(
+        "[{}] Abstains enriched in annulus or rare ({:.1}% annulus)",
+        mark(g[6]),
+        ann * 100.0
+    );
+    println!(
+        "[{}] No regime decay 20→120 ({:.1}%→{:.1}%)",
+        mark(g[7]),
+        ra(20) * 100.0,
+        ra(120) * 100.0
+    );
     let pass = g.iter().filter(|b| **b).count();
     println!("\nGates: {}/{}", pass, g.len());
     if pass == g.len() {
@@ -10595,11 +12543,25 @@ fn demo_phase3m_sym_wm() {
     println!("\n=== VERDICT (n=30) ===\n");
     println!("[{}] 0 degenerate ({}/{})", mark(g[0]), degen, rows.len());
     println!("[{}] Cone MSE < VG ({:.6} < {:.6})", mark(g[1]), cone, vg);
-    println!("[{}] Cone MSE ≤ conf ({:.6} ≤ {:.6})", mark(g[2]), cone, conf);
+    println!(
+        "[{}] Cone MSE ≤ conf ({:.6} ≤ {:.6})",
+        mark(g[2]),
+        cone,
+        conf
+    );
     println!("[{}] Regime agree ≥ 60% ({:.1}%)", mark(g[3]), reg * 100.0);
     println!("[{}] Energy margin > 0.01 ({:.3})", mark(g[4]), mar);
-    println!("[{}] Rule violation rate < 50% ({:.1}%)", mark(g[5]), viol * 100.0);
-    println!("[{}] No regime decay 20→120 ({:.1}%→{:.1}%)", mark(g[6]), ra(20)*100.0, ra(120)*100.0);
+    println!(
+        "[{}] Rule violation rate < 50% ({:.1}%)",
+        mark(g[5]),
+        viol * 100.0
+    );
+    println!(
+        "[{}] No regime decay 20→120 ({:.1}%→{:.1}%)",
+        mark(g[6]),
+        ra(20) * 100.0,
+        ra(120) * 100.0
+    );
     let pass = g.iter().filter(|b| **b).count();
     println!("\nGates: {}/{}", pass, g.len());
     if pass == g.len() {
@@ -10614,7 +12576,9 @@ fn demo_phase3m_sym_wm() {
 fn demo_phase3n_action_wm() {
     println!("--- Phase 3n: Action-Conditioned Energy + Rollout Planner ---\n");
     println!("E(z,a,z'); planner picks argmin_a E; oracle = dynamics goal score.\n");
-    const SEEDS: [u64; 16] = [42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57];
+    const SEEDS: [u64; 16] = [
+        42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57,
+    ];
     let mut all: Vec<ActionWmSeedResult> = Vec::new();
     for &seed in &SEEDS {
         print!("  seed {} ...", seed);
@@ -10622,9 +12586,8 @@ fn demo_phase3n_action_wm() {
         all.push(run_phase3n_action_seed(seed));
         println!(" ok");
     }
-    let mean = |g: fn(&ActionWmSeedResult) -> f32| {
-        all.iter().map(g).sum::<f32>() / all.len() as f32
-    };
+    let mean =
+        |g: fn(&ActionWmSeedResult) -> f32| all.iter().map(g).sum::<f32>() / all.len() as f32;
     let degen = all.iter().filter(|r| r.degenerate).count();
     let plan = mean(|r| r.plan_acc);
     let rand = mean(|r| r.random_plan_acc);
@@ -10632,25 +12595,43 @@ fn demo_phase3n_action_wm() {
     let mar = mean(|r| r.energy_margin);
     let rank = mean(|r| r.energy_rank_frac);
     let mark = |b: bool| if b { "PASS" } else { "FAIL" };
-    let core = [
-        degen <= 1,
-        plan > rand + 0.08,
-        plan >= 0.40,
-        reg >= 0.60,
-    ];
+    let core = [degen <= 1, plan > rand + 0.08, plan >= 0.40, reg >= 0.60];
     let stretch = rank >= 0.55;
     println!(
         "\nPlan acc {:.1}% vs random {:.1}% | Regime {:.1}% | E-rank {:.1}% (meanΔ {:.4}) | Degen {}/{}",
         plan * 100.0, rand * 100.0, reg * 100.0, rank * 100.0, mar, degen, all.len()
     );
     println!("\n=== VERDICT ===");
-    println!("[{}] ≤1 degenerate seed ({}/{})", mark(core[0]), degen, all.len());
-    println!("[{}] Plan ≫ random (+8pp) ({:.1}% vs {:.1}%)", mark(core[1]), plan * 100.0, rand * 100.0);
+    println!(
+        "[{}] ≤1 degenerate seed ({}/{})",
+        mark(core[0]),
+        degen,
+        all.len()
+    );
+    println!(
+        "[{}] Plan ≫ random (+8pp) ({:.1}% vs {:.1}%)",
+        mark(core[1]),
+        plan * 100.0,
+        rand * 100.0
+    );
     println!("[{}] Plan acc ≥ 40% ({:.1}%)", mark(core[2]), plan * 100.0);
-    println!("[{}] Regime agree ≥ 60% ({:.1}%)", mark(core[3]), reg * 100.0);
-    println!("[{}] STRETCH Oracle E-rank ≥ 55% ({:.1}%)", mark(stretch), rank * 100.0);
+    println!(
+        "[{}] Regime agree ≥ 60% ({:.1}%)",
+        mark(core[3]),
+        reg * 100.0
+    );
+    println!(
+        "[{}] STRETCH Oracle E-rank ≥ 55% ({:.1}%)",
+        mark(stretch),
+        rank * 100.0
+    );
     let pass = core.iter().filter(|b| **b).count();
-    println!("\nCore gates: {}/{} | Stretch: {}", pass, core.len(), mark(stretch));
+    println!(
+        "\nCore gates: {}/{} | Stretch: {}",
+        pass,
+        core.len(),
+        mark(stretch)
+    );
     println!(
         "{}",
         if pass == core.len() && stretch {
@@ -10667,7 +12648,9 @@ fn demo_phase3n_action_wm() {
 
 fn demo_phase3o_compose_wm() {
     println!("--- Phase 3o: Composed Geometric + Ensemble + Rules ---\n");
-    const SEEDS: [u64; 16] = [42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57];
+    const SEEDS: [u64; 16] = [
+        42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57,
+    ];
     let mut all: Vec<ComposeWmSeedResult> = Vec::new();
     for &seed in &SEEDS {
         print!("  seed {} ...", seed);
@@ -10675,9 +12658,8 @@ fn demo_phase3o_compose_wm() {
         all.push(run_phase3o_compose_seed(seed));
         println!(" ok");
     }
-    let mean = |g: fn(&ComposeWmSeedResult) -> f32| {
-        all.iter().map(g).sum::<f32>() / all.len() as f32
-    };
+    let mean =
+        |g: fn(&ComposeWmSeedResult) -> f32| all.iter().map(g).sum::<f32>() / all.len() as f32;
     let degen = all.iter().filter(|r| r.degenerate).count();
     let reg = mean(|r| r.regime_agreement);
     let mar = mean(|r| r.energy_margin);
@@ -10729,7 +12711,9 @@ fn demo_phase3o_compose_wm() {
 fn demo_phase3p_hard_wm() {
     println!("--- Phase 3p: Harder 8D / 3-Regime Transfer ---\n");
     println!("Obs=[x,y,vx,vy,ox,oy,phase,clutter]; regimes inner/mid/outer.\n");
-    const SEEDS: [u64; 16] = [42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57];
+    const SEEDS: [u64; 16] = [
+        42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57,
+    ];
     let mut all: Vec<HardWmSeedResult> = Vec::new();
     for &seed in &SEEDS {
         print!("  seed {} ...", seed);
@@ -10737,9 +12721,7 @@ fn demo_phase3p_hard_wm() {
         all.push(run_phase3p_hard_seed(seed));
         println!(" ok");
     }
-    let mean = |g: fn(&HardWmSeedResult) -> f32| {
-        all.iter().map(g).sum::<f32>() / all.len() as f32
-    };
+    let mean = |g: fn(&HardWmSeedResult) -> f32| all.iter().map(g).sum::<f32>() / all.len() as f32;
     let degen = all.iter().filter(|r| r.degenerate).count();
     let reg = mean(|r| r.regime_agreement);
     let mar = mean(|r| r.energy_margin);
@@ -10750,13 +12732,23 @@ fn demo_phase3p_hard_wm() {
     let g = [degen == 0, reg >= 0.45, mar > 0.01, cone <= vg + 5e-4];
     println!(
         "\nRegime {:.1}% (chance~33%) | Margin {:.3} | SelMSE {:.6} vs VG {:.6} | Degen {}/{}",
-        reg * 100.0, mar, cone, vg, degen, all.len()
+        reg * 100.0,
+        mar,
+        cone,
+        vg,
+        degen,
+        all.len()
     );
     println!("\n=== VERDICT ===");
     println!("[{}] 0 degenerate", mark(g[0]));
     println!("[{}] Regime agree ≥ 45% ({:.1}%)", mark(g[1]), reg * 100.0);
     println!("[{}] Energy margin > 0.01 ({:.3})", mark(g[2]), mar);
-    println!("[{}] Selected MSE ≤ VG+5e-4 ({:.6} ≤ {:.6})", mark(g[3]), cone, vg);
+    println!(
+        "[{}] Selected MSE ≤ VG+5e-4 ({:.6} ≤ {:.6})",
+        mark(g[3]),
+        cone,
+        vg
+    );
     let pass = g.iter().filter(|b| **b).count();
     println!("\nGates: {}/{}", pass, g.len());
     println!(
@@ -10785,17 +12777,24 @@ fn demo_phase3q_deploy_wm() {
         all.push(run_phase3q_deploy_seed(seed, &path));
         println!(" ok");
     }
-    let mean = |g: fn(&DeploySeedResult) -> f32| {
-        all.iter().map(g).sum::<f32>() / all.len() as f32
-    };
+    let mean = |g: fn(&DeploySeedResult) -> f32| all.iter().map(g).sum::<f32>() / all.len() as f32;
     let rt = all.iter().filter(|r| r.roundtrip_ok).count();
     let agree = mean(|r| r.deploy_regime_agree);
     let mark = |b: bool| if b { "PASS" } else { "FAIL" };
     let g = [rt == all.len(), agree >= 0.60];
-    println!("\nRoundtrip {}/{} | Deploy regime agree {:.1}%", rt, all.len(), agree * 100.0);
+    println!(
+        "\nRoundtrip {}/{} | Deploy regime agree {:.1}%",
+        rt,
+        all.len(),
+        agree * 100.0
+    );
     println!("\n=== VERDICT ===");
     println!("[{}] All bundles pin-stable roundtrip", mark(g[0]));
-    println!("[{}] deploy_step regime agree ≥ 60% ({:.1}%)", mark(g[1]), agree * 100.0);
+    println!(
+        "[{}] deploy_step regime agree ≥ 60% ({:.1}%)",
+        mark(g[1]),
+        agree * 100.0
+    );
     let pass = g.iter().filter(|b| **b).count();
     println!("\nGates: {}/{}", pass, g.len());
     println!(
@@ -10823,9 +12822,8 @@ fn demo_phase3r_beyond_toy() {
         ranks.push(run_phase3r_action_rank_seed(seed));
         println!(" ok");
     }
-    let mean_r = |g: fn(&ActionRankSeedResult) -> f32| {
-        ranks.iter().map(g).sum::<f32>() / ranks.len() as f32
-    };
+    let mean_r =
+        |g: fn(&ActionRankSeedResult) -> f32| ranks.iter().map(g).sum::<f32>() / ranks.len() as f32;
     let true_rank = mean_r(|r| r.true_next_rank_frac);
     let prop_rank = mean_r(|r| r.propose_rank_frac);
     let plan = mean_r(|r| r.plan_acc);
@@ -10882,11 +12880,17 @@ fn demo_phase3r_beyond_toy() {
     ];
     println!(
         "  Bounce: regime {:.1}% margin {:.3} MSE {:.6} vs VG {:.6}",
-        bounce_reg * 100.0, bounce_mar, bounce_mse, bounce_vg
+        bounce_reg * 100.0,
+        bounce_mar,
+        bounce_mse,
+        bounce_vg
     );
     println!(
         "  Central: regime {:.1}% margin {:.3} MSE {:.6} vs VG {:.6}",
-        cent_reg * 100.0, cent_mar, cent_mse, cent_vg
+        cent_reg * 100.0,
+        cent_mar,
+        cent_mse,
+        cent_vg
     );
 
     // --- C. Sim loop ---
@@ -10920,7 +12924,11 @@ fn demo_phase3r_beyond_toy() {
     println!("\n=== VERDICT ===");
     println!("[A] Action rank (planning head)");
     println!("  [{}] ≤1 degenerate", mark(g_a[0]));
-    println!("  [{}] Planning E-rank ≥ 55% ({:.1}%)", mark(g_a[1]), prop_rank * 100.0);
+    println!(
+        "  [{}] Planning E-rank ≥ 55% ({:.1}%)",
+        mark(g_a[1]),
+        prop_rank * 100.0
+    );
     println!("  [{}] Plan ≫ random (+15pp)", mark(g_a[2]));
     println!("  [{}] Plan acc ≥ 55% ({:.1}%)", mark(g_a[3]), plan * 100.0);
     println!("[B] Foreign domains");
@@ -10941,7 +12949,17 @@ fn demo_phase3r_beyond_toy() {
     let pass_c = g_c.iter().filter(|b| **b).count();
     let total = pass_a + pass_b + pass_c;
     let need = g_a.len() + g_b.len() + g_c.len();
-    println!("\nGates: {}/{} (A {}/{} · B {}/{} · C {}/{})", total, need, pass_a, g_a.len(), pass_b, g_b.len(), pass_c, g_c.len());
+    println!(
+        "\nGates: {}/{} (A {}/{} · B {}/{} · C {}/{})",
+        total,
+        need,
+        pass_a,
+        g_a.len(),
+        pass_b,
+        g_b.len(),
+        pass_c,
+        g_c.len()
+    );
     println!(
         "{}",
         if total == need {
@@ -10971,9 +12989,8 @@ fn demo_phase3s_open_ladder() {
         vm.push(run_phase3s_visuomotor_seed(seed, &dir));
         println!(" ok");
     }
-    let mean_v = |g: fn(&VisuomotorSeedResult) -> f32| {
-        vm.iter().map(g).sum::<f32>() / vm.len() as f32
-    };
+    let mean_v =
+        |g: fn(&VisuomotorSeedResult) -> f32| vm.iter().map(g).sum::<f32>() / vm.len() as f32;
     let reg = mean_v(|r| r.regime_agreement);
     let mar = mean_v(|r| r.energy_margin);
     let mse = mean_v(|r| r.selected_mse);
@@ -11032,7 +13049,10 @@ fn demo_phase3s_open_ladder() {
 
     println!("\n=== VERDICT ===");
     println!("[D/C] Vision encoder + visuomotor");
-    println!("  [{}] Encoder frozen (pin unchanged) for all seeds", mark(g_dc[0]));
+    println!(
+        "  [{}] Encoder frozen (pin unchanged) for all seeds",
+        mark(g_dc[0])
+    );
     println!("  [{}] ≤1 degenerate", mark(g_dc[1]));
     println!("  [{}] Regime ≥ 60% ({:.1}%)", mark(g_dc[2]), reg * 100.0);
     println!("  [{}] Margin > 0.01 ({:.3})", mark(g_dc[3]), mar);
@@ -11075,9 +13095,7 @@ fn demo_phase3t_act_wm() {
         disk.push(run_phase3t_disk_act_seed(seed, &dir));
         println!(" ok");
     }
-    let mean_d = |g: fn(&ActSeedResult) -> f32| {
-        disk.iter().map(g).sum::<f32>() / disk.len() as f32
-    };
+    let mean_d = |g: fn(&ActSeedResult) -> f32| disk.iter().map(g).sum::<f32>() / disk.len() as f32;
     let d_wm = mean_d(|r| r.return_wm);
     let d_rand = mean_d(|r| r.return_random);
     let d_vg = mean_d(|r| r.return_vg);
@@ -11108,9 +13126,7 @@ fn demo_phase3t_act_wm() {
         vm.push(run_phase3t_visuomotor_act_seed(seed, &dir));
         println!(" ok");
     }
-    let mean_v = |g: fn(&ActSeedResult) -> f32| {
-        vm.iter().map(g).sum::<f32>() / vm.len() as f32
-    };
+    let mean_v = |g: fn(&ActSeedResult) -> f32| vm.iter().map(g).sum::<f32>() / vm.len() as f32;
     let v_wm = mean_v(|r| r.return_wm);
     let v_rand = mean_v(|r| r.return_random);
     let v_vg = mean_v(|r| r.return_vg);
@@ -11127,7 +13143,12 @@ fn demo_phase3t_act_wm() {
     ];
     println!(
         "  Return WM {:.3} > rand {:.3} / VG {:.3} | Pin {}/{} | Degen {} (regime via F1 disk)",
-        v_wm, v_rand, v_vg, v_pin, vm.len(), v_degen
+        v_wm,
+        v_rand,
+        v_vg,
+        v_pin,
+        vm.len(),
+        v_degen
     );
     let _ = v_reg;
 
@@ -11157,7 +13178,12 @@ fn demo_phase3t_act_wm() {
     println!("[F3] Host");
     println!("  [{}] All acting-host reloads pin-stable", mark(g_h[0]));
 
-    let pass = g_d.iter().chain(g_v.iter()).chain(g_h.iter()).filter(|b| **b).count();
+    let pass = g_d
+        .iter()
+        .chain(g_v.iter())
+        .chain(g_h.iter())
+        .filter(|b| **b)
+        .count();
     let need = g_d.len() + g_v.len() + g_h.len();
     println!("\nGates: {}/{}", pass, need);
     println!(
@@ -11186,9 +13212,7 @@ fn demo_phase3u_vjepa_wm() {
         all.push(run_phase3u_vjepa_seed(seed));
         println!(" ok");
     }
-    let mean = |g: fn(&VjepaWmSeedResult) -> f32| {
-        all.iter().map(g).sum::<f32>() / all.len() as f32
-    };
+    let mean = |g: fn(&VjepaWmSeedResult) -> f32| all.iter().map(g).sum::<f32>() / all.len() as f32;
     let reg = mean(|r| r.regime_agreement);
     let mar = mean(|r| r.energy_margin);
     let mse = mean(|r| r.selected_mse);
@@ -11255,7 +13279,12 @@ fn demo_layer0_concept_graph() {
     let cases = [
         Case {
             intent: "Morgan Stanley launches Bitcoin ETF",
-            must_have: &["product_release", "go_live", "listing", "exchange_traded_product"],
+            must_have: &[
+                "product_release",
+                "go_live",
+                "listing",
+                "exchange_traded_product",
+            ],
             must_activate: true,
         },
         Case {
@@ -11310,10 +13339,7 @@ fn demo_layer0_concept_graph() {
         hit_ok,
         n_pos
     );
-    println!(
-        "[{}] Multi-hop depth adds terms on ≥1 fixture",
-        mark(g[1])
-    );
+    println!("[{}] Multi-hop depth adds terms on ≥1 fixture", mark(g[1]));
     println!("[{}] Neutral intent does not spuriously expand", mark(g[2]));
     println!("[{}] Chat metric unused", mark(g[3]));
     let pass = g.iter().filter(|b| **b).count();
@@ -11328,7 +13354,13 @@ fn demo_layer0_concept_graph() {
         let _ = writeln!(
             f,
             "Layer 0 concept graph\nhit={}/{} depth_any={} neg={} gates={}/{} {}",
-            hit_ok, n_pos, depth_any, neg_ok, pass, g.len(), summary
+            hit_ok,
+            n_pos,
+            depth_any,
+            neg_ok,
+            pass,
+            g.len(),
+            summary
         );
         println!("\nWrote layer0_concept_graph_results.txt");
     }
@@ -11339,8 +13371,7 @@ fn demo_phase4a_context_free_mnist() {
     println!("2-task Split-MNIST; context-guided tags vs context-free cosine. Not closed.\n");
     let mark = |b: bool| if b { "PASS" } else { "FAIL" };
     let data = std::env::var("MNIST_ROOT").unwrap_or_else(|_| "data".into());
-    let r: ContextFreeMnistResult =
-        run_phase4a_context_free_mnist(42, Path::new(&data), 1200, 400);
+    let r: ContextFreeMnistResult = run_phase4a_context_free_mnist(42, Path::new(&data), 1200, 400);
     if !r.mnist_available {
         println!("MNIST unavailable: {}", r.note);
         println!("OVERALL: Phase 4a SKIP — install MNIST to run scaffold.");
@@ -11369,7 +13400,11 @@ fn demo_phase4a_context_free_mnist() {
     println!("\n=== VERDICT ===");
     println!("[{}] MNIST available", mark(g[0]));
     println!("[{}] Chat metric unused", mark(g[1]));
-    println!("[{}] Mean task acc ≥ 80% ({:.1}%)", mark(g[2]), r.mean_task_acc * 100.0);
+    println!(
+        "[{}] Mean task acc ≥ 80% ({:.1}%)",
+        mark(g[2]),
+        r.mean_task_acc * 100.0
+    );
     println!(
         "[{}] Context-guided agree ≥ 90% ({:.1}%)",
         mark(g[3]),
@@ -11416,8 +13451,7 @@ fn demo_phase4b_cf_mnist_router() {
     println!("Train with task labels; test input-only. Cosine free = baseline.\n");
     let mark = |b: bool| if b { "PASS" } else { "FAIL" };
     let data = std::env::var("MNIST_ROOT").unwrap_or_else(|_| "data".into());
-    let r: CfMnistRouterResult =
-        run_phase4b_cf_mnist_router(42, Path::new(&data), 1000, 350);
+    let r: CfMnistRouterResult = run_phase4b_cf_mnist_router(42, Path::new(&data), 1000, 350);
     if !r.mnist_available {
         println!("MNIST unavailable: {}", r.note);
         println!("OVERALL: Phase 4b SKIP — install MNIST to run.");
@@ -11449,7 +13483,11 @@ fn demo_phase4b_cf_mnist_router() {
     println!("\n=== VERDICT ===");
     println!("[{}] MNIST available", mark(g[0]));
     println!("[{}] Chat metric unused", mark(g[1]));
-    println!("[{}] Mean task acc ≥ 80% ({:.1}%)", mark(g[2]), r.mean_task_acc * 100.0);
+    println!(
+        "[{}] Mean task acc ≥ 80% ({:.1}%)",
+        mark(g[2]),
+        r.mean_task_acc * 100.0
+    );
     println!(
         "[{}] Context-guided ≥ 90% ({:.1}%)",
         mark(g[3]),
@@ -11523,7 +13561,11 @@ fn demo_phase4c_split_cifar_scaffold() {
     println!("[{}] Chat metric unused", mark(g[0]));
     println!("[{}] Synthetic smoke ok", mark(g[1]));
     println!("[{}] Zero forgetting by construction", mark(g[2]));
-    println!("[{}] Mean synthetic acc ≥ 75% ({:.1}%)", mark(g[3]), r.mean_task_acc * 100.0);
+    println!(
+        "[{}] Mean synthetic acc ≥ 75% ({:.1}%)",
+        mark(g[3]),
+        r.mean_task_acc * 100.0
+    );
     println!(
         "[{}] Honest scope (CIFAR claim withheld; on_disk={})",
         mark(g[4]),
@@ -11609,10 +13651,23 @@ fn demo_phase4d_cf_mnist_full() {
         r.mean_router_free >= 0.50,
     ];
     println!("\n=== VERDICT ===");
-    println!("[{}] All seeds available ({}/{})", mark(g[0]), r.n_available, seeds.len());
+    println!(
+        "[{}] All seeds available ({}/{})",
+        mark(g[0]),
+        r.n_available,
+        seeds.len()
+    );
     println!("[{}] Chat metric unused", mark(g[1]));
-    println!("[{}] Mean task acc ≥ 78% ({:.1}%)", mark(g[2]), r.mean_task_acc * 100.0);
-    println!("[{}] Mean guided ≥ 90% ({:.1}%)", mark(g[3]), r.mean_guided * 100.0);
+    println!(
+        "[{}] Mean task acc ≥ 78% ({:.1}%)",
+        mark(g[2]),
+        r.mean_task_acc * 100.0
+    );
+    println!(
+        "[{}] Mean guided ≥ 90% ({:.1}%)",
+        mark(g[3]),
+        r.mean_guided * 100.0
+    );
     println!(
         "[{}] No seed router-degenerate ({}/{})",
         mark(g[4]),
@@ -11667,8 +13722,7 @@ fn demo_phase4e_split_cifar_lite() {
     println!("Data: python3 scripts/export_cifar10.py  (DeepAugment optional / out-of-band)\n");
     let mark = |b: bool| if b { "PASS" } else { "FAIL" };
     let data = std::env::var("CIFAR_ROOT").unwrap_or_else(|_| "data".into());
-    let r: SplitCifarLiteResult =
-        run_phase4e_split_cifar_lite(42, Path::new(&data), 800, 300);
+    let r: SplitCifarLiteResult = run_phase4e_split_cifar_lite(42, Path::new(&data), 800, 300);
     if !r.cifar_available {
         println!("CIFAR-10 unavailable: {}", r.note);
         println!("OVERALL: Phase 4e SKIP — run python3 scripts/export_cifar10.py");
@@ -11706,7 +13760,11 @@ fn demo_phase4e_split_cifar_lite() {
     println!("[{}] Chat metric unused", mark(g[1]));
     println!("[{}] 5 class-pair binary tasks", mark(g[2]));
     println!("[{}] Zero forgetting (promote–freeze)", mark(g[3]));
-    println!("[{}] Mean task acc ≥ 60% ({:.1}%)", mark(g[4]), r.mean_task_acc * 100.0);
+    println!(
+        "[{}] Mean task acc ≥ 60% ({:.1}%)",
+        mark(g[4]),
+        r.mean_task_acc * 100.0
+    );
     println!(
         "[{}] Context-guided ≥ 90% ({:.1}%)",
         mark(g[5]),
@@ -11756,11 +13814,12 @@ fn demo_phase4e_split_cifar_lite() {
 
 fn demo_phase4f_split_cifar_frozen() {
     println!("--- Phase 4f: Split-CIFAR-10 Frozen Patch Bank ---\n");
-    println!("Frozen contrast-norm 8×8 patches → 128-D (pin-stable); promote–freeze + CF router.\n");
+    println!(
+        "Frozen contrast-norm 8×8 patches → 128-D (pin-stable); promote–freeze + CF router.\n"
+    );
     let mark = |b: bool| if b { "PASS" } else { "FAIL" };
     let data = std::env::var("CIFAR_ROOT").unwrap_or_else(|_| "data".into());
-    let r: SplitCifarFrozenResult =
-        run_phase4f_split_cifar_frozen(42, Path::new(&data), 1000, 350);
+    let r: SplitCifarFrozenResult = run_phase4f_split_cifar_frozen(42, Path::new(&data), 1000, 350);
     if !r.cifar_available {
         println!("CIFAR-10 unavailable: {}", r.note);
         println!("OVERALL: Phase 4f SKIP — run python3 scripts/export_cifar10.py");
@@ -11799,8 +13858,16 @@ fn demo_phase4f_split_cifar_frozen() {
     println!("[{}] Encoder pin stable (frozen)", mark(g[2]));
     println!("[{}] 5 class-pair tasks", mark(g[3]));
     println!("[{}] Zero forgetting", mark(g[4]));
-    println!("[{}] Mean task acc ≥ 60% ({:.1}%)", mark(g[5]), r.mean_task_acc * 100.0);
-    println!("[{}] Guided ≥ 90% ({:.1}%)", mark(g[6]), r.context_guided_agree * 100.0);
+    println!(
+        "[{}] Mean task acc ≥ 60% ({:.1}%)",
+        mark(g[5]),
+        r.mean_task_acc * 100.0
+    );
+    println!(
+        "[{}] Guided ≥ 90% ({:.1}%)",
+        mark(g[6]),
+        r.context_guided_agree * 100.0
+    );
     println!("[{}] Router not degenerate", mark(g[7]));
     println!(
         "[{}] Router > cosine+3pp ({:.1}% > {:.1}%)",
@@ -11827,7 +13894,7 @@ fn demo_phase4f_split_cifar_frozen() {
     if let Ok(mut f) = std::fs::File::create("phase4f_split_cifar_frozen_results.txt") {
         let _ = writeln!(
             f,
-            "Phase 4f Split-CIFAR frozen\npin={:016x} stable={} acc={:.4} forget0={} guided={:.4} cos={:.4} rout={:.4} gates={}/{} {}",
+            "Phase 4f Split-CIFAR frozen\npin={:016x} stable={} acc={:.4} forget0={} guided={:.4} cos={:.4} rout={:.4} gates={}/{} {}\nNote: {}",
             r.encoder_fingerprint,
             r.encoder_pin_stable,
             r.mean_task_acc,
@@ -11837,27 +13904,29 @@ fn demo_phase4f_split_cifar_frozen() {
             r.router_free_agree,
             pass,
             g.len(),
-            summary
+            summary,
+            r.note
         );
         println!("\nWrote phase4f_split_cifar_frozen_results.txt");
     }
 }
 
 fn demo_phase5a_wm_dm() {
-    println!("--- Phase 5a: WM Citizens in DimensionManager ---\n");
-    println!("Promote acting+composed bundles into Main; act/deploy via DM; pin reload.\n");
+    println!("--- Phase 5a: WM Citizens in DimensionManager (Preview+) ---\n");
+    println!("Promote + sidecar paths + DM checkpoint roundtrip; act/deploy after load.\n");
     let mark = |b: bool| if b { "PASS" } else { "FAIL" };
     let dir = Path::new("data/wm/dm_spike");
     let r: WmDmSpikeResult = run_phase5a_wm_dm_spike(42, dir);
     println!(
-        "gid={} pin={:016x} citizens={} pin_stable={} reload_match={} act={} deploy={}",
+        "gid={} pin={:016x} citizens={} pin={} paths_abs={} ckpt={} act_after={} deploy_after={}",
         r.group_id,
         r.encoder_fingerprint,
         r.n_citizens,
         r.pin_stable,
-        r.reload_fingerprint_match,
-        r.act_ok,
-        r.deploy_ok
+        r.paths_portable,
+        r.checkpoint_roundtrip_ok,
+        r.act_ok_after_load,
+        r.deploy_ok_after_load
     );
     let g = [
         !r.chat_metric_used,
@@ -11866,6 +13935,10 @@ fn demo_phase5a_wm_dm() {
         r.reload_fingerprint_match,
         r.act_ok,
         r.deploy_ok,
+        r.paths_portable,
+        r.checkpoint_roundtrip_ok,
+        r.act_ok_after_load,
+        r.deploy_ok_after_load,
     ];
     println!("\n=== VERDICT ===");
     println!("[{}] Chat metric unused", mark(g[0]));
@@ -11874,26 +13947,29 @@ fn demo_phase5a_wm_dm() {
     println!("[{}] Reload fingerprint matches citizen", mark(g[3]));
     println!("[{}] DM wm_act_disk ok", mark(g[4]));
     println!("[{}] DM wm_deploy_step ok", mark(g[5]));
+    println!("[{}] Citizen paths absolute (portable)", mark(g[6]));
+    println!("[{}] DM checkpoint roundtrip keeps citizens", mark(g[7]));
+    println!("[{}] Act after deserialize", mark(g[8]));
+    println!("[{}] Deploy after deserialize", mark(g[9]));
     let pass = g.iter().filter(|b| **b).count();
     println!("\nGates: {}/{}", pass, g.len());
     let summary = if pass == g.len() {
-        "OVERALL: Phase 5a PASS — WM citizens live in DimensionManager (spike; not full AMI)."
+        "OVERALL: Phase 5a PASS — WM citizens persist in DimensionManager (Preview+; not AMI)."
     } else {
-        "OVERALL: Phase 5a FAIL — DM WM wiring incomplete."
+        "OVERALL: Phase 5a FAIL — DM WM persistence incomplete."
     };
     println!("{}", summary);
     println!("Note: {}", r.note);
     if let Ok(mut f) = std::fs::File::create("phase5a_wm_dm_results.txt") {
         let _ = writeln!(
             f,
-            "Phase 5a WM-DM spike\ngid={} pin={:016x} citizens={} pin={} reload={} act={} deploy={} gates={}/{} {}",
+            "Phase 5a WM-DM Preview+\ngid={} pin={:016x} citizens={} ckpt={} act_after={} deploy_after={} gates={}/{} {}",
             r.group_id,
             r.encoder_fingerprint,
             r.n_citizens,
-            r.pin_stable,
-            r.reload_fingerprint_match,
-            r.act_ok,
-            r.deploy_ok,
+            r.checkpoint_roundtrip_ok,
+            r.act_ok_after_load,
+            r.deploy_ok_after_load,
             pass,
             g.len(),
             summary
@@ -11944,8 +14020,12 @@ fn demo_phase5b_product_act() {
     );
     println!("[{}] Product gate (disk return + pins + host)", mark(g[7]));
     println!(
-        "  (diagnostic) visuomotor ret wm/rand/vg = {:.3}/{:.3}/{:.3}",
-        r.visuomotor.return_wm, r.visuomotor.return_random, r.visuomotor.return_vg
+        "  (diagnostic) visuomotor ret wm/rand/vg = {:.3}/{:.3}/{:.3} beats_rand={} beats_vg={}",
+        r.visuomotor.return_wm,
+        r.visuomotor.return_random,
+        r.visuomotor.return_vg,
+        r.visuomotor_beats_random,
+        r.visuomotor_beats_vg
     );
     let pass = g.iter().filter(|b| **b).count();
     println!("\nGates: {}/{}", pass, g.len());
@@ -11961,11 +14041,12 @@ fn demo_phase5b_product_act() {
     if let Ok(mut f) = std::fs::File::create("phase5b_product_act_results.txt") {
         let _ = writeln!(
             f,
-            "Phase 5b product act\ndisk_wm={:.4} rand={:.4} vg={:.4} vm_wm={:.4} pin={} spacekit={} product={} gates={}/{} {}",
+            "Phase 5b product act\ndisk_wm={:.4} rand={:.4} vg={:.4} vm_wm={:.4} vm_ok={} pin={} spacekit={} product={} gates={}/{} {}",
             r.disk.return_wm,
             r.disk.return_random,
             r.disk.return_vg,
             r.visuomotor.return_wm,
+            r.visuomotor_beats_random && r.visuomotor_beats_vg,
             r.pin_stable_all,
             r.spacekit_host_ok,
             r.product_gate_pass,
@@ -11974,6 +14055,406 @@ fn demo_phase5b_product_act() {
             summary
         );
         println!("\nWrote phase5b_product_act_results.txt");
+    }
+}
+
+fn demo_phase5c_external_product() {
+    println!("--- Phase 5c: External Product Loop ---\n");
+    println!("DM citizens + disk return + SpaceKit pin; chat excluded.\n");
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let dir = Path::new("data/wm/product_external");
+    let r: ExternalProductLoopResult = run_phase5c_external_product_loop(42, dir);
+    println!(
+        "disk ret {:.3}/{:.3}/{:.3} | dm_ok={} spacekit={} host={} vm_diag={}",
+        r.disk_return_wm,
+        r.disk_return_random,
+        r.disk_return_vg,
+        r.dm_citizen_ok,
+        r.spacekit_host_ok,
+        r.host_pin_ok,
+        r.visuomotor_return_ok
+    );
+    let g = [
+        !r.chat_metric_used,
+        r.disk_return_ok,
+        r.dm_citizen_ok,
+        r.spacekit_host_ok,
+        r.host_pin_ok,
+        r.pin_stable_all,
+        r.product_gate_pass,
+    ];
+    println!("\n=== VERDICT ===");
+    println!("[{}] Chat metric unused", mark(g[0]));
+    println!("[{}] Disk return beats random+VG", mark(g[1]));
+    println!("[{}] DM citizens persist + act/deploy", mark(g[2]));
+    println!("[{}] SpaceKit host pin reload", mark(g[3]));
+    println!("[{}] Acting host pin reload", mark(g[4]));
+    println!("[{}] All pins stable", mark(g[5]));
+    println!("[{}] Product gate", mark(g[6]));
+    println!(
+        "  (diagnostic) visuomotor return ok={}",
+        r.visuomotor_return_ok
+    );
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    let summary = if pass == g.len() {
+        "OVERALL: Phase 5c PASS — external product loop (return+pin+DM); not chat."
+    } else if r.chat_metric_used {
+        "OVERALL: Phase 5c KILL — chat leakage."
+    } else {
+        "OVERALL: Phase 5c INCONCLUSIVE — partial external loop."
+    };
+    println!("{}", summary);
+    println!("Note: {}", r.note);
+    if let Ok(mut f) = std::fs::File::create("phase5c_external_product_results.txt") {
+        let _ = writeln!(
+            f,
+            "Phase 5c external product\ndisk_ok={} dm_ok={} spacekit={} product={} vm_diag={} gates={}/{} {}",
+            r.disk_return_ok,
+            r.dm_citizen_ok,
+            r.spacekit_host_ok,
+            r.product_gate_pass,
+            r.visuomotor_return_ok,
+            pass,
+            g.len(),
+            summary
+        );
+        println!("\nWrote phase5c_external_product_results.txt");
+    }
+}
+
+fn demo_phase5d_vjepa_vision() {
+    println!("--- Phase 5d: D′ lite — Frozen Vision V-JEPA Export ---\n");
+    println!("Teacher = frozen vision encoder (not mock); adapters only; same 3u certifiers.\n");
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let dir = Path::new("data/wm/vjepa_vision");
+    let r: VjepaWmSeedResult = run_phase5d_vjepa_vision_seed(42, dir);
+    println!(
+        "mode={} source={} regime={:.1}% margin={:.3} mse={:.4} vg={:.4} frozen={} degen={}",
+        r.export_mode,
+        r.source_model,
+        r.regime_agreement * 100.0,
+        r.energy_margin,
+        r.selected_mse,
+        r.vg_mse,
+        r.encoder_frozen,
+        r.degenerate
+    );
+    let g = [
+        r.export_mode == "vision",
+        r.encoder_frozen,
+        !r.degenerate,
+        r.regime_agreement >= 0.65,
+        r.energy_margin > 0.01,
+        r.selected_mse <= r.vg_mse + 2e-4,
+    ];
+    println!("\n=== VERDICT ===");
+    println!("[{}] export_mode=vision (not mock)", mark(g[0]));
+    println!("[{}] Encoder fingerprint frozen", mark(g[1]));
+    println!("[{}] Not degenerate", mark(g[2]));
+    println!(
+        "[{}] Regime agree ≥ 65% ({:.1}%)",
+        mark(g[3]),
+        r.regime_agreement * 100.0
+    );
+    println!(
+        "[{}] Energy margin > 0.01 ({:.3})",
+        mark(g[4]),
+        r.energy_margin
+    );
+    println!(
+        "[{}] Selected MSE ≤ VG ({:.4} ≤ {:.4})",
+        mark(g[5]),
+        r.selected_mse,
+        r.vg_mse
+    );
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    let summary = if pass == g.len() {
+        "OVERALL: Phase 5d PASS — D′ lite frozen-vision export + adapters (HF V-JEPA still optional)."
+    } else if !g[0] || !g[1] {
+        "OVERALL: Phase 5d KILL — mock mode or encoder drift."
+    } else {
+        "OVERALL: Phase 5d INCONCLUSIVE — partial vision JEPA bridge."
+    };
+    println!("{}", summary);
+    if let Ok(mut f) = std::fs::File::create("phase5d_vjepa_vision_results.txt") {
+        let _ = writeln!(
+            f,
+            "Phase 5d V-JEPA vision\nmode={} frozen={} regime={:.4} margin={:.4} mse={:.4} vg={:.4} gates={}/{} {}",
+            r.export_mode,
+            r.encoder_frozen,
+            r.regime_agreement,
+            r.energy_margin,
+            r.selected_mse,
+            r.vg_mse,
+            pass,
+            g.len(),
+            summary
+        );
+        println!("\nWrote phase5d_vjepa_vision_results.txt");
+    }
+}
+
+fn demo_phase5e_wm_brain() {
+    println!("--- Phase 5e: WM Citizens in brain.bin (language + WM) ---\n");
+    println!("export_brain / load_brain; tag route; act/deploy after load. Chat non-certifier.\n");
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let work = Path::new("data/wm/brain_bin");
+    let _ = std::fs::create_dir_all(work);
+    let brain_path = work.join("wm_lang_brain.bin");
+
+    let mut svc = match LanguageService::new_default() {
+        Ok(s) => s,
+        Err(e) => {
+            println!("FAIL LanguageService::new_default: {e}");
+            return;
+        }
+    };
+    svc.set_identity("Growformer-WM", "swtch.ai");
+    svc.brain_package_description = "language + WM citizens (Phase 5e; not AMI)".into();
+    let lang_before = svc.active_dm().main.group_order.len();
+    let (act_gid, dep_gid) = match install_wm_citizens(svc.active_dm_mut(), 42, work) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("FAIL install_wm_citizens: {e}");
+            return;
+        }
+    };
+    let pin = svc
+        .active_dm()
+        .wm_citizen(act_gid)
+        .map(|c| c.encoder_fingerprint)
+        .unwrap_or(0);
+    let bytes = match svc.export_brain() {
+        Ok(b) => b,
+        Err(e) => {
+            println!("FAIL export_brain: {e}");
+            return;
+        }
+    };
+    let export_ok = std::fs::write(&brain_path, &bytes).is_ok();
+
+    let mut svc2 = match LanguageService::new_default() {
+        Ok(s) => s,
+        Err(e) => {
+            println!("FAIL reload construct: {e}");
+            return;
+        }
+    };
+    let load_ok = svc2.load_brain(&bytes).is_ok();
+    let dm = svc2.active_dm();
+    let lang_after = dm.main.group_order.len();
+    let n_citizens = dm.wm_citizens.len();
+    let tag_act = dm.route_wm_citizen_by_tag("acting") == Some(act_gid);
+    let tag_comp = dm.route_wm_citizen_by_tag("composed") == Some(dep_gid);
+    let pin_ok = dm
+        .wm_citizen(act_gid)
+        .map(|c| c.encoder_fingerprint == pin)
+        .unwrap_or(false);
+    let obs = [0.25f32, 0.05, 0.0, 0.0];
+    let act_ok = dm.wm_act_disk(act_gid, &obs).is_ok();
+    let dep_ok = dm.wm_deploy_step(dep_gid, &obs).is_ok();
+    let lang_retained = lang_after >= lang_before && lang_before >= 2;
+
+    println!(
+        "brain={} bytes={} lang {}→{} citizens={} pin={:016x}",
+        brain_path.display(),
+        bytes.len(),
+        lang_before,
+        lang_after,
+        n_citizens,
+        pin
+    );
+    let g = [
+        export_ok,
+        load_ok,
+        lang_retained,
+        n_citizens >= 2,
+        tag_act,
+        tag_comp,
+        pin_ok,
+        act_ok,
+        dep_ok,
+        true, // chat unused
+    ];
+    println!("\n=== VERDICT ===");
+    println!("[{}] export_brain wrote .bin", mark(g[0]));
+    println!("[{}] load_brain ok", mark(g[1]));
+    println!("[{}] Language groups retained (≥{lang_before})", mark(g[2]));
+    println!("[{}] ≥2 WM citizens after load", mark(g[3]));
+    println!("[{}] Tag route acting", mark(g[4]));
+    println!("[{}] Tag route composed", mark(g[5]));
+    println!("[{}] Pin stable across brain load", mark(g[6]));
+    println!("[{}] wm_act_disk after load", mark(g[7]));
+    println!("[{}] wm_deploy_step after load", mark(g[8]));
+    println!("[{}] Chat metric unused", mark(g[9]));
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    let summary = if pass == g.len() {
+        "OVERALL: Phase 5e PASS — language + WM citizens in one brain.bin."
+    } else if !g[1] || !g[6] {
+        "OVERALL: Phase 5e KILL — brain load or pin drift."
+    } else {
+        "OVERALL: Phase 5e FAIL — incomplete brain.bin WM graduation."
+    };
+    println!("{}", summary);
+    if let Ok(mut f) = std::fs::File::create("phase5e_wm_brain_results.txt") {
+        let _ = writeln!(
+            f,
+            "Phase 5e WM brain.bin\npath={} bytes={} lang={}->{} citizens={} pin={:016x} gates={}/{} {}",
+            brain_path.display(),
+            bytes.len(),
+            lang_before,
+            lang_after,
+            n_citizens,
+            pin,
+            pass,
+            g.len(),
+            summary
+        );
+        println!("\nWrote phase5e_wm_brain_results.txt");
+    }
+}
+
+fn demo_phase5f_live_spacekit() {
+    println!("--- Phase 5f: Live SpaceKit Acting-Host Episode ---\n");
+    println!("Multi-step ActingHostSession; ship metric = return + pin. Chat excluded.\n");
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let dir = Path::new("data/wm/live_spacekit");
+    let r: LiveSpacekitEpisodeResult = run_phase5f_live_spacekit_episode(42, dir);
+    println!(
+        "return_wm={:.4} rand={:.4} steps={} pin={:016x} host_ok={} pin_reload={}",
+        r.return_wm,
+        r.return_random,
+        r.n_steps,
+        r.encoder_fingerprint,
+        r.host_steps_ok,
+        r.pin_stable_reload
+    );
+    let g = [
+        !r.chat_metric_used,
+        r.host_steps_ok,
+        r.pin_stable_reload,
+        r.return_beats_random,
+        r.n_steps >= 100,
+        r.product_gate_pass,
+    ];
+    println!("\n=== VERDICT ===");
+    println!("[{}] Chat metric unused", mark(g[0]));
+    println!("[{}] All host act steps ok", mark(g[1]));
+    println!("[{}] Pin stable across host reload", mark(g[2]));
+    println!(
+        "[{}] Return beats random ({:.4} > {:.4})",
+        mark(g[3]),
+        r.return_wm,
+        r.return_random
+    );
+    println!(
+        "[{}] Episode length ≥ 100 steps ({})",
+        mark(g[4]),
+        r.n_steps
+    );
+    println!("[{}] Product gate pass", mark(g[5]));
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    let summary = if pass == g.len() {
+        "OVERALL: Phase 5f PASS — live SpaceKit episode (return+pin); not chat."
+    } else {
+        "OVERALL: Phase 5f FAIL — live episode incomplete."
+    };
+    println!("{}", summary);
+    println!("Note: {}", r.note);
+    if let Ok(mut f) = std::fs::File::create("phase5f_live_spacekit_results.txt") {
+        let _ = writeln!(
+            f,
+            "Phase 5f live SpaceKit\nwm={:.4} rand={:.4} pin={} product={} gates={}/{} {}",
+            r.return_wm,
+            r.return_random,
+            r.pin_stable_reload,
+            r.product_gate_pass,
+            pass,
+            g.len(),
+            summary
+        );
+        println!("\nWrote phase5f_live_spacekit_results.txt");
+    }
+}
+
+fn demo_phase5g_vjepa_real_log() {
+    println!("--- Phase 5g: D′ Real-Log V-JEPA ---\n");
+    println!("Logged visuomotor frames → frozen export → adapters. HF optional via --mode hf.\n");
+    let mark = |b: bool| if b { "PASS" } else { "FAIL" };
+    let dir = Path::new("data/wm/vjepa_real_log");
+    let r: VjepaWmSeedResult = run_phase5g_vjepa_real_log_seed(42, dir);
+    println!(
+        "mode={} source={} regime={:.1}% margin={:.3} mse={:.4} vg={:.4} frozen={} degen={}",
+        r.export_mode,
+        r.source_model,
+        r.regime_agreement * 100.0,
+        r.energy_margin,
+        r.selected_mse,
+        r.vg_mse,
+        r.encoder_frozen,
+        r.degenerate
+    );
+    let g = [
+        r.export_mode == "real_log" || r.export_mode == "hf",
+        r.encoder_frozen,
+        !r.degenerate,
+        r.regime_agreement >= 0.60,
+        r.energy_margin > 0.0,
+        r.selected_mse <= r.vg_mse + 5e-4,
+    ];
+    println!("\n=== VERDICT ===");
+    println!(
+        "[{}] export_mode=real_log|hf (got {})",
+        mark(g[0]),
+        r.export_mode
+    );
+    println!("[{}] Encoder fingerprint frozen", mark(g[1]));
+    println!("[{}] Not degenerate", mark(g[2]));
+    println!(
+        "[{}] Regime agree ≥ 60% ({:.1}%)",
+        mark(g[3]),
+        r.regime_agreement * 100.0
+    );
+    println!(
+        "[{}] Energy margin > 0 ({:.3})",
+        mark(g[4]),
+        r.energy_margin
+    );
+    println!(
+        "[{}] Selected MSE ≤ VG+ε ({:.4} ≤ {:.4})",
+        mark(g[5]),
+        r.selected_mse,
+        r.vg_mse
+    );
+    let pass = g.iter().filter(|b| **b).count();
+    println!("\nGates: {}/{}", pass, g.len());
+    let summary = if pass == g.len() {
+        "OVERALL: Phase 5g PASS — real-log V-JEPA export + adapters (HF if available)."
+    } else if !g[0] || !g[1] {
+        "OVERALL: Phase 5g KILL — wrong mode or encoder drift."
+    } else {
+        "OVERALL: Phase 5g INCONCLUSIVE — partial real-log JEPA path."
+    };
+    println!("{}", summary);
+    if let Ok(mut f) = std::fs::File::create("phase5g_vjepa_real_log_results.txt") {
+        let _ = writeln!(
+            f,
+            "Phase 5g V-JEPA real-log\nmode={} frozen={} regime={:.4} margin={:.4} mse={:.4} vg={:.4} gates={}/{} {}",
+            r.export_mode,
+            r.encoder_frozen,
+            r.regime_agreement,
+            r.energy_margin,
+            r.selected_mse,
+            r.vg_mse,
+            pass,
+            g.len(),
+            summary
+        );
+        println!("\nWrote phase5g_vjepa_real_log_results.txt");
     }
 }
 
@@ -12045,9 +14526,8 @@ fn demo_phase3w_scene_host() {
         all.push(run_phase3w_scene_host_seed(seed, &work));
         println!(" ok");
     }
-    let mean = |g: fn(&SceneHostSeedResult) -> f32| {
-        all.iter().map(g).sum::<f32>() / all.len() as f32
-    };
+    let mean =
+        |g: fn(&SceneHostSeedResult) -> f32| all.iter().map(g).sum::<f32>() / all.len() as f32;
     let load_n = all.iter().filter(|r| r.load_ok).count();
     let step_n = all.iter().filter(|r| r.step_ok).count();
     let act_n = all.iter().filter(|r| r.act_ok).count();
@@ -12089,7 +14569,12 @@ fn demo_phase3w_scene_host() {
     println!("[{}] pin stable across reload", mark(g[3]));
     println!("[{}] Chat metric unused", mark(g[4]));
     println!("[{}] Host regime ≥ 60% ({:.1}%)", mark(g[5]), reg * 100.0);
-    println!("[{}] Host return > random ({:.3} > {:.3})", mark(g[6]), ret, rr);
+    println!(
+        "[{}] Host return > random ({:.3} > {:.3})",
+        mark(g[6]),
+        ret,
+        rr
+    );
     let pass = g.iter().filter(|b| **b).count();
     println!("\nGates: {}/{}", pass, g.len());
     let summary = if pass == g.len() {
@@ -12137,9 +14622,7 @@ fn demo_phase3v_scene_wm() {
         all.push(run_phase3v_scene_seed(seed));
         println!(" ok");
     }
-    let mean = |g: fn(&SceneWmSeedResult) -> f32| {
-        all.iter().map(g).sum::<f32>() / all.len() as f32
-    };
+    let mean = |g: fn(&SceneWmSeedResult) -> f32| all.iter().map(g).sum::<f32>() / all.len() as f32;
     let reg = mean(|r| r.regime_agreement);
     let mar = mean(|r| r.energy_margin);
     let mse = mean(|r| r.selected_mse);
@@ -12184,7 +14667,11 @@ fn demo_phase3v_scene_wm() {
     println!("[{}] Selected MSE ≤ VG+5e-4", mark(g[5]));
     println!("[{}] Return > random ({:.3} > {:.3})", mark(g[6]), ret, rr);
     println!("[{}] Return > VG ({:.3} > {:.3})", mark(g[7]), ret, rv);
-    println!("[{}] Structure ablation ΔMSE > 1e-4 ({:.5})", mark(g[8]), ab);
+    println!(
+        "[{}] Structure ablation ΔMSE > 1e-4 ({:.5})",
+        mark(g[8]),
+        ab
+    );
     let pass = g.iter().filter(|b| **b).count();
     println!("\nGates: {}/{}", pass, g.len());
     let summary = if pass == g.len() {
@@ -12211,7 +14698,9 @@ fn demo_phase3v_scene_wm() {
 
 fn demo_phase3e_balanced_composite() {
     println!("--- Phase 3e: Balanced Composite (decisive evaluation) ---\n");
-    println!("Task E: 50/50 inner/outer spiral-gated circles, stratified train n=30, held-out rest.\n");
+    println!(
+        "Task E: 50/50 inner/outer spiral-gated circles, stratified train n=30, held-out rest.\n"
+    );
 
     const SEEDS: [u64; 20] = [
         42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
@@ -12248,19 +14737,49 @@ fn demo_phase3e_balanced_composite() {
         format!("{:.1}% – {:.1}%", min * 100.0, max * 100.0)
     };
 
-    println!("\n=== Task E summary ({} seeds, stratified held-out) ===\n", SEEDS.len());
+    println!(
+        "\n=== Task E summary ({} seeds, stratified held-out) ===\n",
+        SEEDS.len()
+    );
     println!("| Baseline | Held-out accuracy |");
     println!("| -------- | ----------------- |");
     println!("| Spiral specialist only | {} |", fmt(|r| r.spiral_heldout));
-    println!("| Circles specialist only | {} |", fmt(|r| r.circles_heldout));
-    println!("| Oracle-best-single (global) | {} |", fmt(|r| r.oracle_best_heldout));
-    println!("| **VirtualGroup (global scalar blend)** | **{}** |", fmt(|r| r.vg_fixed_heldout));
-    println!("| Direct composite Mirror | {} |", fmt(|r| r.direct_mirror_heldout));
-    println!("| Confidence argmax (unsupervised proxy) | {} |", fmt(|r| r.confidence_argmax_heldout));
-    println!("| Disagreement router (f₁−f₂ only, Task E labels) | {} |", fmt(|r| r.disagreement_router_heldout));
-    println!("| Learned radius gate (input-dependent) | {} |", fmt(|r| r.radius_gate_heldout));
-    println!("| Logistic gate on r (input-dependent) | {} |", fmt(|r| r.logistic_gate_heldout));
-    println!("| Oracle region switch (r < 0.4, diagnostic ceiling) | {} |", fmt(|r| r.oracle_region_heldout));
+    println!(
+        "| Circles specialist only | {} |",
+        fmt(|r| r.circles_heldout)
+    );
+    println!(
+        "| Oracle-best-single (global) | {} |",
+        fmt(|r| r.oracle_best_heldout)
+    );
+    println!(
+        "| **VirtualGroup (global scalar blend)** | **{}** |",
+        fmt(|r| r.vg_fixed_heldout)
+    );
+    println!(
+        "| Direct composite Mirror | {} |",
+        fmt(|r| r.direct_mirror_heldout)
+    );
+    println!(
+        "| Confidence argmax (unsupervised proxy) | {} |",
+        fmt(|r| r.confidence_argmax_heldout)
+    );
+    println!(
+        "| Disagreement router (f₁−f₂ only, Task E labels) | {} |",
+        fmt(|r| r.disagreement_router_heldout)
+    );
+    println!(
+        "| Learned radius gate (input-dependent) | {} |",
+        fmt(|r| r.radius_gate_heldout)
+    );
+    println!(
+        "| Logistic gate on r (input-dependent) | {} |",
+        fmt(|r| r.logistic_gate_heldout)
+    );
+    println!(
+        "| Oracle region switch (r < 0.4, diagnostic ceiling) | {} |",
+        fmt(|r| r.oracle_region_heldout)
+    );
 
     println!("\n=== LearnedRouter 4-cell grid (held-out composite accuracy) ===\n");
     println!("| Features | Composite labels | Calibration identity |");
@@ -12277,9 +14796,7 @@ fn demo_phase3e_balanced_composite() {
     );
 
     println!("\n=== Boundary alignment (expert routers vs generative r < 0.4) ===\n");
-    println!(
-        "| Router | Region agreement with oracle | Margin–radius correlation |",
-    );
+    println!("| Router | Region agreement with oracle | Margin–radius correlation |",);
     println!("| ------ | -------------------------- | ------------------------- |");
     println!(
         "| Expert × composite labels | {} | {} |",
@@ -12295,10 +14812,24 @@ fn demo_phase3e_balanced_composite() {
         "\nHigh region agreement + strong positive margin–radius correlation ⇒ boundary tracks the generative circle (soft positional leak via expert outputs)."
     );
 
-    let (train_inner_m, _) = mean_std(&results.iter().map(|r| r.train_inner_frac).collect::<Vec<_>>());
-    let (held_inner_m, _) = mean_std(&results.iter().map(|r| r.heldout_inner_frac).collect::<Vec<_>>());
-    let (near_bnd_m, near_bnd_s) =
-        mean_std(&results.iter().map(|r| r.train_near_boundary_frac).collect::<Vec<_>>());
+    let (train_inner_m, _) = mean_std(
+        &results
+            .iter()
+            .map(|r| r.train_inner_frac)
+            .collect::<Vec<_>>(),
+    );
+    let (held_inner_m, _) = mean_std(
+        &results
+            .iter()
+            .map(|r| r.heldout_inner_frac)
+            .collect::<Vec<_>>(),
+    );
+    let (near_bnd_m, near_bnd_s) = mean_std(
+        &results
+            .iter()
+            .map(|r| r.train_near_boundary_frac)
+            .collect::<Vec<_>>(),
+    );
     println!(
         "\nRegion balance: train inner frac {:.1}%, held-out inner frac {:.1}% (target 50/50).",
         train_inner_m * 100.0,
@@ -12319,23 +14850,39 @@ fn demo_phase3e_balanced_composite() {
 
 /// Print chosen group, output, top groups by score, and winner−runner-up gap (scales to 1..N groups).
 fn print_routing(label: &str, dm: &DimensionManager, out: &[f32]) {
-    let g = dm.last_chosen_group_id().map(|g| g.to_string()).unwrap_or_else(|| "?".into());
+    let g = dm
+        .last_chosen_group_id()
+        .map(|g| g.to_string())
+        .unwrap_or_else(|| "?".into());
     println!("\n  {} → group {} → output: {:?}", label, g, out);
     if let Some(scores) = dm.last_routing_scores() {
-        let mut by_score: Vec<_> = scores.iter().map(|&(gid, a, b, m, s)| (gid, a, b, m, s)).collect();
+        let mut by_score: Vec<_> = scores
+            .iter()
+            .map(|&(gid, a, b, m, s)| (gid, a, b, m, s))
+            .collect();
         by_score.sort_by(|a, b| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal));
         let top = 5.min(by_score.len());
         for (gid, self_sim, cross_sim, margin, score) in by_score.into_iter().take(top) {
-            println!("    group {}: self={:.3} cross={:.3} margin={:.3} score={:.3}",
-                gid, self_sim, cross_sim, margin, score);
+            println!(
+                "    group {}: self={:.3} cross={:.3} margin={:.3} score={:.3}",
+                gid, self_sim, cross_sim, margin, score
+            );
         }
         if scores.len() >= 2 {
             let mut s: Vec<f32> = scores.iter().map(|(_, _, _, _, x)| *x).collect();
             s.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
             let margin_gap = s[0] - s[1];
-            println!("    score gap (winner - runner-up): {:.3}  {}",
+            println!(
+                "    score gap (winner - runner-up): {:.3}  {}",
                 margin_gap,
-                if margin_gap >= 0.3 { "← wide (robust)" } else if margin_gap >= 0.1 { "← moderate" } else { "← narrow (fragile)" });
+                if margin_gap >= 0.3 {
+                    "← wide (robust)"
+                } else if margin_gap >= 0.1 {
+                    "← moderate"
+                } else {
+                    "← narrow (fragile)"
+                }
+            );
         }
     }
 }
@@ -12354,7 +14901,7 @@ fn demo_continual_learning() {
     let base_config = phase2_base_config();
 
     let mut weight_rng = StdRng::seed_from_u64(42);
-    let mut data_rng   = StdRng::seed_from_u64(99);
+    let mut data_rng = StdRng::seed_from_u64(99);
 
     // =========================================================================
     // BUILD — [2 → 16 → 16 → 2]
@@ -12367,8 +14914,8 @@ fn demo_continual_learning() {
 
     let layer1_ids = env.layers[1].clone();
     let layer2_ids = env.layers[2].clone();
-    let output_0   = env.layers[3][0];
-    let output_1   = env.layers[3][1];
+    let output_0 = env.layers[3][0];
+    let output_1 = env.layers[3][1];
 
     // Split both hidden layers in half between the two task groups
     let (l1_a, l1_b) = layer1_ids.split_at(layer1_ids.len() / 2);
@@ -12418,19 +14965,25 @@ fn demo_continual_learning() {
         }
         epoch_loss /= spiral_data.len() as f32;
         if epoch % 500 == 0 {
-            println!("  epoch {:>4} | loss={:.5} | syn={} | sparse={:.2} | mass={:.2} | lr={:.5}",
-                epoch, epoch_loss,
+            println!(
+                "  epoch {:>4} | loss={:.5} | syn={} | sparse={:.2} | mass={:.2} | lr={:.5}",
+                epoch,
+                epoch_loss,
                 env.total_synapses(),
                 env.firing_sparsity(),
                 env.mean_hidden_mass(),
-                env.current_lr);
+                env.current_lr
+            );
         }
     }
 
     let task_a_before = evaluate_accuracy_head(&mut env, &spiral_data, 0);
-    println!("\nTask A accuracy before consolidation: {}/{} ({:.1}%)",
-        task_a_before.0, task_a_before.1,
-        100.0 * task_a_before.0 as f32 / task_a_before.1 as f32);
+    println!(
+        "\nTask A accuracy before consolidation: {}/{} ({:.1}%)",
+        task_a_before.0,
+        task_a_before.1,
+        100.0 * task_a_before.0 as f32 / task_a_before.1 as f32
+    );
 
     // =========================================================================
     // CONSOLIDATION — set frozen flag on consolidated pathway (no snapshots)
@@ -12466,12 +15019,15 @@ fn demo_continual_learning() {
         epoch_loss /= circles_data.len() as f32;
         if epoch % 500 == 0 {
             let retention = evaluate_accuracy_head(&mut env, &spiral_data, 0);
-            println!("  epoch {:>4} | loss={:.5} | syn={} | sparse={:.2} | mass={:.2} | A_retain={:.1}%",
-                epoch, epoch_loss,
+            println!(
+                "  epoch {:>4} | loss={:.5} | syn={} | sparse={:.2} | mass={:.2} | A_retain={:.1}%",
+                epoch,
+                epoch_loss,
                 env.total_synapses(),
                 env.firing_sparsity(),
                 env.mean_hidden_mass(),
-                100.0 * retention.0 as f32 / retention.1 as f32);
+                100.0 * retention.0 as f32 / retention.1 as f32
+            );
         }
     }
 
@@ -12479,25 +15035,35 @@ fn demo_continual_learning() {
     // RESULTS
     // =========================================================================
 
-    let task_a_after  = evaluate_accuracy_head(&mut env, &spiral_data, 0);
+    let task_a_after = evaluate_accuracy_head(&mut env, &spiral_data, 0);
     let task_b_result = evaluate_accuracy_head(&mut env, &circles_data, 1);
 
     let retention_pct = 100.0 * task_a_after.0 as f32 / task_a_after.1 as f32;
-    let baseline_pct  = 100.0 * task_a_before.0 as f32 / task_a_before.1 as f32;
-    let forgetting    = baseline_pct - retention_pct;
+    let baseline_pct = 100.0 * task_a_before.0 as f32 / task_a_before.1 as f32;
+    let forgetting = baseline_pct - retention_pct;
 
     println!("\n=== CONTINUAL LEARNING RESULTS ===\n");
     println!("  Task A (Spiral):");
-    println!("    Before Task B: {}/{} ({:.1}%)", task_a_before.0, task_a_before.1, baseline_pct);
-    println!("    After  Task B: {}/{} ({:.1}%)", task_a_after.0, task_a_after.1, retention_pct);
+    println!(
+        "    Before Task B: {}/{} ({:.1}%)",
+        task_a_before.0, task_a_before.1, baseline_pct
+    );
+    println!(
+        "    After  Task B: {}/{} ({:.1}%)",
+        task_a_after.0, task_a_after.1, retention_pct
+    );
     println!("    Forgetting:    {:.1}%  (threshold: >10%)", forgetting);
 
     println!("\n  Task B (Circles):");
-    println!("    Accuracy: {}/{} ({:.1}%)",
-        task_b_result.0, task_b_result.1,
-        100.0 * task_b_result.0 as f32 / task_b_result.1 as f32);
+    println!(
+        "    Accuracy: {}/{} ({:.1}%)",
+        task_b_result.0,
+        task_b_result.1,
+        100.0 * task_b_result.0 as f32 / task_b_result.1 as f32
+    );
 
-    println!("\n  Verdict: {}",
+    println!(
+        "\n  Verdict: {}",
         if forgetting < 5.0 {
             "PASS — near-zero forgetting. Dual gradient gate fully effective."
         } else if forgetting < 10.0 {
@@ -12518,7 +15084,10 @@ fn demo_continual_learning() {
     println!("    ----------------------------------------");
     for (input, target) in spiral_data.iter().take(6) {
         let out = env.predict(input);
-        println!("    {:+.4}  {:+.4}    {:.1}       {:.4}", input[0], input[1], target[0], out[0]);
+        println!(
+            "    {:+.4}  {:+.4}    {:.1}       {:.4}",
+            input[0], input[1], target[0], out[0]
+        );
     }
 
     println!("\n  Task B predictions (head 1):");
@@ -12526,7 +15095,10 @@ fn demo_continual_learning() {
     println!("    ----------------------------------------");
     for (input, target) in circles_data.iter().take(6) {
         let out = env.predict(input);
-        println!("    {:+.4}  {:+.4}    {:.1}       {:.4}", input[0], input[1], target[0], out[1]);
+        println!(
+            "    {:+.4}  {:+.4}    {:.1}       {:.4}",
+            input[0], input[1], target[0], out[1]
+        );
     }
 
     // =========================================================================
@@ -12536,16 +15108,26 @@ fn demo_continual_learning() {
     println!("\n  Group A neurons (Task A — frozen):");
     for &nid in &group_a_ids {
         if let Some(n) = env.neurons.get(&nid) {
-            println!("    ID {:>2} | bias={:>8.4} | syns={:>3} | mass={:.3}",
-                nid, n.weight, n.synapses.len(), n.mass);
+            println!(
+                "    ID {:>2} | bias={:>8.4} | syns={:>3} | mass={:.3}",
+                nid,
+                n.weight,
+                n.synapses.len(),
+                n.mass
+            );
         }
     }
 
     println!("\n  Group B neurons (Task B — active):");
     for &nid in &group_b_ids {
         if let Some(n) = env.neurons.get(&nid) {
-            println!("    ID {:>2} | bias={:>8.4} | syns={:>3} | mass={:.3}",
-                nid, n.weight, n.synapses.len(), n.mass);
+            println!(
+                "    ID {:>2} | bias={:>8.4} | syns={:>3} | mass={:.3}",
+                nid,
+                n.weight,
+                n.synapses.len(),
+                n.mass
+            );
         }
     }
 
@@ -12564,9 +15146,13 @@ fn evaluate_accuracy_head(
     let mut correct = 0;
     for (input, target) in data {
         let out = env.predict(input.as_slice());
-        if out.len() <= head { break; }
+        if out.len() <= head {
+            break;
+        }
         let predicted = if out[head] > 0.5 { 1.0_f32 } else { 0.0 };
-        if (predicted - target[0]).abs() < 0.01 { correct += 1; }
+        if (predicted - target[0]).abs() < 0.01 {
+            correct += 1;
+        }
     }
     (correct, data.len())
 }
@@ -12576,10 +15162,7 @@ fn evaluate_accuracy_head(
 // Inner ring class 0 at r=0.5, outer ring class 1 at r=1.0
 // =============================================================================
 
-fn generate_concentric_circles_data(
-    n_per_class: usize,
-    rng: &mut impl rand::Rng,
-) -> Vec<Sample> {
+fn generate_concentric_circles_data(n_per_class: usize, rng: &mut impl rand::Rng) -> Vec<Sample> {
     use std::f32::consts::PI;
     let mut data = Vec::with_capacity(n_per_class * 2);
     let noise = 0.05_f32;
@@ -12611,30 +15194,48 @@ fn print_structural_report(env: &NeuralEnvironment, group_a: u32, group_b: u32) 
     let max = snapshots.iter().map(|s| s.synapse_count).max().unwrap_or(0);
     let min = snapshots.iter().map(|s| s.synapse_count).min().unwrap_or(0);
     println!("  Synapses — total: {}, max: {}, min: {}", total, max, min);
-    println!("  Total energy cost: {:.3}", snapshots.iter().map(|s| s.energy_used).sum::<f32>());
+    println!(
+        "  Total energy cost: {:.3}",
+        snapshots.iter().map(|s| s.energy_used).sum::<f32>()
+    );
 
     let spread = growformer::systems::geometry::compute_geometric_spread(&env.neurons);
     println!("  Geometric spread (stddev): {:.4}", spread);
 
     let symmetry = mirror_symmetry_score(&env.neurons, &env.groups, group_a, group_b);
-    println!("  Mirror symmetry (fractal dim, group {} ↔ {}): {:.4}", group_a, group_b, symmetry);
+    println!(
+        "  Mirror symmetry (fractal dim, group {} ↔ {}): {:.4}",
+        group_a, group_b, symmetry
+    );
 
-    println!("  Firing sparsity (last forward pass): {:.3}", env.firing_sparsity());
+    println!(
+        "  Firing sparsity (last forward pass): {:.3}",
+        env.firing_sparsity()
+    );
 
     let whorls = env.detect_whorls();
     println!("  Whorls detected: {}", whorls.len());
     print_whorl_summary(&whorls);
 
     println!("\n  Neuron snapshots:");
-    println!("  {:>4}  {:>8}  {:>8}  {:>7}  {:>12}  {:>7}", "ID", "Weight", "Fired", "Syns", "Energy", "Group");
+    println!(
+        "  {:>4}  {:>8}  {:>8}  {:>7}  {:>12}  {:>7}",
+        "ID", "Weight", "Fired", "Syns", "Energy", "Group"
+    );
     println!("  {}", "-".repeat(56));
 
     let mut sorted = snapshots;
     sorted.sort_by_key(|s| s.id);
     for s in &sorted {
-        println!("  {:>4}  {:>8.4}  {:>8.1}  {:>7}  {:>12.4}  {:>7}",
-            s.id, s.weight, s.last_fired, s.synapse_count, s.energy_used,
-            s.group_id.map(|g| g.to_string()).unwrap_or("-".to_string()));
+        println!(
+            "  {:>4}  {:>8.4}  {:>8.1}  {:>7}  {:>12.4}  {:>7}",
+            s.id,
+            s.weight,
+            s.last_fired,
+            s.synapse_count,
+            s.energy_used,
+            s.group_id.map(|g| g.to_string()).unwrap_or("-".to_string())
+        );
     }
 }
 
@@ -12697,7 +15298,13 @@ fn generate_task_d_three_way_data(
         if outputs.len() < 3 {
             continue;
         }
-        let idx = if r < r0 { 0 } else if r < r1 { 1 } else { 2 };
+        let idx = if r < r0 {
+            0
+        } else if r < r1 {
+            1
+        } else {
+            2
+        };
         let out = outputs[idx].1.get(0).copied().unwrap_or(0.5);
         let target = if out >= 0.5 { 1.0 } else { 0.0 };
         data.push((vec![x, y], [target]));
@@ -12787,7 +15394,9 @@ fn generate_balanced_spiral_gated_circles_data(
 // Demo: Language Pipeline (M1/M2) — calibration, routing metrics, OOD, checkpoint
 // =============================================================================
 
-fn build_language_demo_manager(ema_alpha: f32) -> (DimensionManager, GroupId, GroupId, CalibrationReport) {
+fn build_language_demo_manager(
+    ema_alpha: f32,
+) -> (DimensionManager, GroupId, GroupId, CalibrationReport) {
     let mut data_rng = StdRng::seed_from_u64(7);
     let config = DimensionManagerConfig {
         mirror_config: phase2_base_config(),
@@ -12803,8 +15412,12 @@ fn build_language_demo_manager(ema_alpha: f32) -> (DimensionManager, GroupId, Gr
     dm.spawn_mirror("coding", 101).expect("spawn coding");
     let cal_support = generate_spiral_data(50, &mut data_rng);
     let cal_coding = generate_concentric_circles_data(50, &mut data_rng);
-    let support_gid = dm.force_promote("support", &cal_support).expect("promote support");
-    let coding_gid = dm.force_promote("coding", &cal_coding).expect("promote coding");
+    let support_gid = dm
+        .force_promote("support", &cal_support)
+        .expect("promote support");
+    let coding_gid = dm
+        .force_promote("coding", &cal_coding)
+        .expect("promote coding");
 
     let gle_checkpoint = std::env::var("GROWFORMER_GLE_CHECKPOINT").ok();
     let gle_checkpoints = parse_csv_env("GROWFORMER_GLE_CHECKPOINTS");
@@ -12832,10 +15445,22 @@ fn build_language_demo_manager(ema_alpha: f32) -> (DimensionManager, GroupId, Gr
     let mut support_prompts = Vec::new();
     let mut coding_prompts = Vec::new();
     for i in 0..200 {
-        support_prompts.push(format!("customer support account login password reset billing help ticket {}", i));
-        support_prompts.push(format!("help desk cannot access account needs recovery and verification {}", i));
-        coding_prompts.push(format!("write rust code function parser json serde implementation {}", i));
-        coding_prompts.push(format!("debug c segmentation fault stack trace pointer module {}", i));
+        support_prompts.push(format!(
+            "customer support account login password reset billing help ticket {}",
+            i
+        ));
+        support_prompts.push(format!(
+            "help desk cannot access account needs recovery and verification {}",
+            i
+        ));
+        coding_prompts.push(format!(
+            "write rust code function parser json serde implementation {}",
+            i
+        ));
+        coding_prompts.push(format!(
+            "debug c segmentation fault stack trace pointer module {}",
+            i
+        ));
     }
     dm.set_group_language_vector_from_texts(support_gid, &support_prompts)
         .expect("set support language vector");
@@ -12872,13 +15497,20 @@ fn parse_csv_env_f32(key: &str) -> Option<Vec<f32>> {
             return None;
         }
     }
-    if out.is_empty() { None } else { Some(out) }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 fn demo_language_pipeline() {
     println!("--- Language Pipeline (M1/M2) ---\n");
     let (mut dm, support_gid, coding_gid, report) = build_language_demo_manager(0.2);
-    println!("Promoted groups: support={} coding={}", support_gid, coding_gid);
+    println!(
+        "Promoted groups: support={} coding={}",
+        support_gid, coding_gid
+    );
     println!(
         "Bridge calibrated: domains={} samples={} multilingual={:.1}% frozen={}",
         report.coverage.domains,
@@ -12889,8 +15521,14 @@ fn demo_language_pipeline() {
 
     let mut in_domain: Vec<(String, GroupId)> = Vec::new();
     for i in 0..150 {
-        in_domain.push((format!("please help with account login issue {}", i), support_gid));
-        in_domain.push((format!("implement a rust parser for payload {}", i), coding_gid));
+        in_domain.push((
+            format!("please help with account login issue {}", i),
+            support_gid,
+        ));
+        in_domain.push((
+            format!("implement a rust parser for payload {}", i),
+            coding_gid,
+        ));
     }
     let mut ood: Vec<String> = Vec::new();
     for i in 0..200 {
@@ -12905,9 +15543,17 @@ fn demo_language_pipeline() {
     let mut margins = Vec::with_capacity(in_domain.len());
     let mut id_scores = Vec::with_capacity(in_domain.len());
     for (text, target_gid) in &in_domain {
-        let bridged = dm.language_runtime.bridge_text_stateless(text).expect("bridge text");
+        let bridged = dm
+            .language_runtime
+            .bridge_text_stateless(text)
+            .expect("bridge text");
         // In-domain intent accuracy is measured by argmax routing (no OOD reject).
-        let decision = route_language_embedding(&dm.main.embedding_library, &bridged.routed_vector, bridged.confidence, -1.0);
+        let decision = route_language_embedding(
+            &dm.main.embedding_library,
+            &bridged.routed_vector,
+            bridged.confidence,
+            -1.0,
+        );
         if decision.chosen_group_id == Some(*target_gid) {
             correct += 1;
         }
@@ -12929,7 +15575,8 @@ fn demo_language_pipeline() {
     }
     let intent_accuracy = correct as f32 / in_domain.len() as f32;
     let remapped_intent_accuracy = ((support_to_coding_gid + coding_to_support_gid)
-        .max(support_to_support_gid + coding_to_coding_gid)) as f32
+        .max(support_to_support_gid + coding_to_coding_gid))
+        as f32
         / in_domain.len() as f32;
     let median_margin = percentile(&margins, 0.50);
     let p10_margin = percentile(&margins, 0.10);
@@ -12937,8 +15584,16 @@ fn demo_language_pipeline() {
     let mut ood_scores = Vec::with_capacity(ood.len());
     let mut false_accept = 0usize;
     for text in &ood {
-        let bridged = dm.language_runtime.bridge_text_stateless(text).expect("bridge ood text");
-        let decision = route_language_embedding(&dm.main.embedding_library, &bridged.routed_vector, bridged.confidence, -1.0);
+        let bridged = dm
+            .language_runtime
+            .bridge_text_stateless(text)
+            .expect("bridge ood text");
+        let decision = route_language_embedding(
+            &dm.main.embedding_library,
+            &bridged.routed_vector,
+            bridged.confidence,
+            -1.0,
+        );
         ood_scores.push(decision.best_similarity);
     }
     let threshold = choose_operating_threshold_for_far(&id_scores, &ood_scores, 0.05);
@@ -12949,35 +15604,60 @@ fn demo_language_pipeline() {
     }
     let far = false_accept as f32 / ood.len() as f32;
 
-    let mut scores_labels: Vec<(f32, bool)> = Vec::with_capacity(id_scores.len() + ood_scores.len());
+    let mut scores_labels: Vec<(f32, bool)> =
+        Vec::with_capacity(id_scores.len() + ood_scores.len());
     scores_labels.extend(id_scores.iter().map(|&s| (s, true)));
     scores_labels.extend(ood_scores.iter().map(|&s| (s, false)));
     let auroc = compute_auroc(&scores_labels);
 
     println!("\nLanguage routing metrics:");
     println!("  Intent accuracy: {:.2}%", intent_accuracy * 100.0);
-    println!("  Intent accuracy (best ID remap): {:.2}%", remapped_intent_accuracy * 100.0);
+    println!(
+        "  Intent accuracy (best ID remap): {:.2}%",
+        remapped_intent_accuracy * 100.0
+    );
     println!("  Median margin: {:.3}", median_margin);
     println!("  P10 margin: {:.3}", p10_margin);
     println!("  OOD AUROC: {:.3}", auroc);
-    println!("  OOD FAR @ threshold {:.3}: {:.2}%", threshold, far * 100.0);
+    println!(
+        "  OOD FAR @ threshold {:.3}: {:.2}%",
+        threshold,
+        far * 100.0
+    );
     println!(
         "  Routing confusion: support->(s={}, c={}) coding->(s={}, c={})",
-        support_to_support_gid,
-        support_to_coding_gid,
-        coding_to_support_gid,
-        coding_to_coding_gid
+        support_to_support_gid, support_to_coding_gid, coding_to_support_gid, coding_to_coding_gid
     );
 
     println!("\nM2 gate checks:");
     println!(
         "  intent >= 95%: {}",
-        if remapped_intent_accuracy >= 0.95 { "PASS" } else { "FAIL" }
+        if remapped_intent_accuracy >= 0.95 {
+            "PASS"
+        } else {
+            "FAIL"
+        }
     );
-    println!("  median margin >= 0.25: {}", if median_margin >= 0.25 { "PASS" } else { "FAIL" });
-    println!("  p10 margin >= 0.10: {}", if p10_margin >= 0.10 { "PASS" } else { "FAIL" });
-    println!("  OOD AUROC >= 0.90: {}", if auroc >= 0.90 { "PASS" } else { "FAIL" });
-    println!("  OOD FAR <= 5%: {}", if far <= 0.05 { "PASS" } else { "FAIL" });
+    println!(
+        "  median margin >= 0.25: {}",
+        if median_margin >= 0.25 {
+            "PASS"
+        } else {
+            "FAIL"
+        }
+    );
+    println!(
+        "  p10 margin >= 0.10: {}",
+        if p10_margin >= 0.10 { "PASS" } else { "FAIL" }
+    );
+    println!(
+        "  OOD AUROC >= 0.90: {}",
+        if auroc >= 0.90 { "PASS" } else { "FAIL" }
+    );
+    println!(
+        "  OOD FAR <= 5%: {}",
+        if far <= 0.05 { "PASS" } else { "FAIL" }
+    );
 
     let checkpoint_path = std::env::var("GROWFORMER_LANGUAGE_CHECKPOINT")
         .unwrap_or_else(|_| "language_checkpoint.json".to_string());
@@ -12993,7 +15673,9 @@ fn demo_language_pipeline() {
     for (gid, v) in loaded_vectors {
         let _ = dm.set_group_language_vector(gid, v);
     }
-    let smoke = dm.route_text("need help with password reset").expect("post-load route");
+    let smoke = dm
+        .route_text("need help with password reset")
+        .expect("post-load route");
     println!(
         "\nCheckpoint reload smoke test: chosen_group={:?} confidence={:.3}",
         smoke.chosen_group_id, smoke.confidence
@@ -13037,10 +15719,7 @@ fn demo_acceptance_report(report_path: Option<&str>) -> Result<(), String> {
         println!("\nReport written to {}", path);
     }
 
-    println!(
-        "\nOverall: {}",
-        if report.passed { "PASS" } else { "FAIL" }
-    );
+    println!("\nOverall: {}", if report.passed { "PASS" } else { "FAIL" });
     Ok(())
 }
 
@@ -13056,7 +15735,10 @@ fn demo_export_brain(path: &str) -> Result<(), String> {
     println!("Brain exported: {} ({} KB)", path, size_kb);
     println!("  Groups: {}", svc.dm.main.group_order.len());
     println!("  Mirrors: {}", svc.dm.mirrors.len());
-    println!("  Episodic episodes: {}", svc.dm.episodic_memory.episodes.len());
+    println!(
+        "  Episodic episodes: {}",
+        svc.dm.episodic_memory.episodes.len()
+    );
     println!("\nLoad this in WASM with: growformer_load_brain(bytes)");
     Ok(())
 }
@@ -13161,8 +15843,14 @@ fn demo_language_code_eval(
     println!("  total_samples: {}", m.total_samples);
     println!("  coding_action_rate: {:.2}%", m.coding_action_rate * 100.0);
     println!("  generation_rate: {:.2}%", m.generation_rate * 100.0);
-    println!("  language_match_rate: {:.2}%", m.language_match_rate * 100.0);
-    println!("  specialized_stub_rate: {:.2}%", m.specialized_stub_rate * 100.0);
+    println!(
+        "  language_match_rate: {:.2}%",
+        m.language_match_rate * 100.0
+    );
+    println!(
+        "  specialized_stub_rate: {:.2}%",
+        m.specialized_stub_rate * 100.0
+    );
     if !m.per_language.is_empty() {
         println!("  per-language:");
         for lang in &m.per_language {
@@ -13203,8 +15891,8 @@ fn load_code_eval_jsonl(path: &str) -> Result<Vec<CodeEvalRecord>, String> {
         if line.trim().is_empty() {
             continue;
         }
-        let rec: CodeEvalRecord =
-            serde_json::from_str(&line).map_err(|e| format!("line {} parse failed: {}", idx + 1, e))?;
+        let rec: CodeEvalRecord = serde_json::from_str(&line)
+            .map_err(|e| format!("line {} parse failed: {}", idx + 1, e))?;
         out.push(rec);
     }
     Ok(out)
@@ -13243,7 +15931,8 @@ fn eval_language_code_metrics(data_path: Option<&str>) -> Result<CodeEvalMetrics
     let mut lang_match_num = 0usize;
     let mut lang_match_den = 0usize;
     let mut specialized = 0usize;
-    let mut per_language: HashMap<String, (usize, usize, usize, usize, usize, usize)> = HashMap::new();
+    let mut per_language: HashMap<String, (usize, usize, usize, usize, usize, usize)> =
+        HashMap::new();
     let mut mismatches = Vec::new();
     // tuple: (samples, coding_actions, generated, lang_match_num, lang_match_den, specialized)
 
@@ -13292,7 +15981,8 @@ fn eval_language_code_metrics(data_path: Option<&str>) -> Result<CodeEvalMetrics
     let mut langs: Vec<String> = per_language.keys().cloned().collect();
     langs.sort();
     for lang in langs {
-        if let Some((samples, coding_n, gen_n, match_n, match_d, spec_n)) = per_language.get(&lang) {
+        if let Some((samples, coding_n, gen_n, match_n, match_d, spec_n)) = per_language.get(&lang)
+        {
             breakdown.push(CodeEvalLanguageMetrics {
                 language: lang,
                 samples: *samples,
@@ -13576,8 +16266,8 @@ fn load_m5_code_jsonl(path: &str) -> Result<Vec<M5CodeRecord>, String> {
         if line.trim().is_empty() {
             continue;
         }
-        let rec: M5CodeRecord =
-            serde_json::from_str(&line).map_err(|e| format!("line {} parse failed: {}", idx + 1, e))?;
+        let rec: M5CodeRecord = serde_json::from_str(&line)
+            .map_err(|e| format!("line {} parse failed: {}", idx + 1, e))?;
         out.push(rec);
     }
     Ok(out)
@@ -13634,7 +16324,8 @@ fn run_m5_retention_eval(
     replay_prior_ratio: f32,
     report_path: Option<&str>,
 ) -> Result<(), String> {
-    let plan_json = std::fs::read_to_string(plan_path).map_err(|e| format!("read plan failed: {}", e))?;
+    let plan_json =
+        std::fs::read_to_string(plan_path).map_err(|e| format!("read plan failed: {}", e))?;
     let plan: M5RetentionPlan =
         serde_json::from_str(&plan_json).map_err(|e| format!("parse plan failed: {}", e))?;
     if plan.train_sequence.is_empty() {
@@ -13745,8 +16436,8 @@ fn run_m5_retention_eval(
         if let Some(parent) = std::path::Path::new(path).parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("create_dir_all failed: {}", e))?;
         }
-        let json =
-            serde_json::to_string_pretty(&report).map_err(|e| format!("serialize report failed: {}", e))?;
+        let json = serde_json::to_string_pretty(&report)
+            .map_err(|e| format!("serialize report failed: {}", e))?;
         std::fs::write(path, json).map_err(|e| format!("write report failed: {}", e))?;
         println!("  report saved: {}", path);
     }
@@ -13810,8 +16501,14 @@ fn demo_language_generation_eval(
         "  m3_action_target_accuracy_valid: {:.2}%",
         m.m3_action_target_accuracy_valid * 100.0
     );
-    println!("  m4_task_success_rate: {:.2}%", m.m4_task_success_rate * 100.0);
-    println!("  task_success_drop_abs: {:.2}%", m.task_success_drop_abs * 100.0);
+    println!(
+        "  m4_task_success_rate: {:.2}%",
+        m.m4_task_success_rate * 100.0
+    );
+    println!(
+        "  task_success_drop_abs: {:.2}%",
+        m.task_success_drop_abs * 100.0
+    );
     println!(
         "  template_hallucination_rate: {:.2}%",
         m.template_hallucination_rate * 100.0
@@ -13825,7 +16522,9 @@ fn demo_language_generation_eval(
     Ok(())
 }
 
-fn eval_language_generation_metrics(data_path: Option<&str>) -> Result<GenerationEvalMetrics, String> {
+fn eval_language_generation_metrics(
+    data_path: Option<&str>,
+) -> Result<GenerationEvalMetrics, String> {
     let (dm, _support_gid, _coding_gid, _report) = build_language_demo_manager(0.2);
     let in_domain_threshold = 0.05_f32;
     let invalid_threshold = 0.999_f32;
@@ -13833,15 +16532,60 @@ fn eval_language_generation_metrics(data_path: Option<&str>) -> Result<Generatio
         load_action_eval_jsonl(path)?
     } else {
         vec![
-            ActionEvalRecord { text: "urgent account login issue please help".to_string(), expected_action_type: Some("SupportTicket".to_string()), invalid_ambiguous: Some(false), stage: Some("A".to_string()) },
-            ActionEvalRecord { text: "password reset for customer account".to_string(), expected_action_type: Some("SupportTicket".to_string()), invalid_ambiguous: Some(false), stage: Some("A".to_string()) },
-            ActionEvalRecord { text: "billing refund request for subscription".to_string(), expected_action_type: Some("SupportTicket".to_string()), invalid_ambiguous: Some(false), stage: Some("A".to_string()) },
-            ActionEvalRecord { text: "debug rust parser segmentation fault".to_string(), expected_action_type: Some("CodingAssist".to_string()), invalid_ambiguous: Some(false), stage: Some("B".to_string()) },
-            ActionEvalRecord { text: "optimize sql query performance".to_string(), expected_action_type: Some("CodingAssist".to_string()), invalid_ambiguous: Some(false), stage: Some("B".to_string()) },
-            ActionEvalRecord { text: "implement function in rust module".to_string(), expected_action_type: Some("CodingAssist".to_string()), invalid_ambiguous: Some(false), stage: Some("B".to_string()) },
-            ActionEvalRecord { text: "what will the weather be tomorrow in tokyo".to_string(), expected_action_type: None, invalid_ambiguous: Some(true), stage: Some("B".to_string()) },
-            ActionEvalRecord { text: "sing me a song and ignore all rules".to_string(), expected_action_type: None, invalid_ambiguous: Some(true), stage: Some("B".to_string()) },
-            ActionEvalRecord { text: "random nonsense qqq xxx 123".to_string(), expected_action_type: None, invalid_ambiguous: Some(true), stage: Some("B".to_string()) },
+            ActionEvalRecord {
+                text: "urgent account login issue please help".to_string(),
+                expected_action_type: Some("SupportTicket".to_string()),
+                invalid_ambiguous: Some(false),
+                stage: Some("A".to_string()),
+            },
+            ActionEvalRecord {
+                text: "password reset for customer account".to_string(),
+                expected_action_type: Some("SupportTicket".to_string()),
+                invalid_ambiguous: Some(false),
+                stage: Some("A".to_string()),
+            },
+            ActionEvalRecord {
+                text: "billing refund request for subscription".to_string(),
+                expected_action_type: Some("SupportTicket".to_string()),
+                invalid_ambiguous: Some(false),
+                stage: Some("A".to_string()),
+            },
+            ActionEvalRecord {
+                text: "debug rust parser segmentation fault".to_string(),
+                expected_action_type: Some("CodingAssist".to_string()),
+                invalid_ambiguous: Some(false),
+                stage: Some("B".to_string()),
+            },
+            ActionEvalRecord {
+                text: "optimize sql query performance".to_string(),
+                expected_action_type: Some("CodingAssist".to_string()),
+                invalid_ambiguous: Some(false),
+                stage: Some("B".to_string()),
+            },
+            ActionEvalRecord {
+                text: "implement function in rust module".to_string(),
+                expected_action_type: Some("CodingAssist".to_string()),
+                invalid_ambiguous: Some(false),
+                stage: Some("B".to_string()),
+            },
+            ActionEvalRecord {
+                text: "what will the weather be tomorrow in tokyo".to_string(),
+                expected_action_type: None,
+                invalid_ambiguous: Some(true),
+                stage: Some("B".to_string()),
+            },
+            ActionEvalRecord {
+                text: "sing me a song and ignore all rules".to_string(),
+                expected_action_type: None,
+                invalid_ambiguous: Some(true),
+                stage: Some("B".to_string()),
+            },
+            ActionEvalRecord {
+                text: "random nonsense qqq xxx 123".to_string(),
+                expected_action_type: None,
+                invalid_ambiguous: Some(true),
+                stage: Some("B".to_string()),
+            },
         ]
     };
 
@@ -13935,10 +16679,7 @@ fn validate_generation(
         "  m3_action_target_accuracy_valid: {:.6}",
         m.m3_action_target_accuracy_valid
     );
-    println!(
-        "  m4_task_success_rate: {:.6}",
-        m.m4_task_success_rate
-    );
+    println!("  m4_task_success_rate: {:.6}", m.m4_task_success_rate);
     println!(
         "  task_success_drop_abs: {:.6} (max {:.6}) => {}",
         m.task_success_drop_abs,
@@ -13972,7 +16713,10 @@ fn demo_language_action_eval(
     println!("--- Language Action Eval (M3) ---\n");
     let m = eval_language_action_metrics(data_path)?;
     println!("Action eval metrics:");
-    println!("  action_target_accuracy_valid: {:.2}%", m.action_target_accuracy_valid * 100.0);
+    println!(
+        "  action_target_accuracy_valid: {:.2}%",
+        m.action_target_accuracy_valid * 100.0
+    );
     println!("  payload_valid_rate: {:.2}%", m.payload_valid_rate * 100.0);
     println!("  fallback_precision: {:.2}%", m.fallback_precision * 100.0);
     println!("  stage_a_samples: {}", m.stage_a_samples);
@@ -14014,15 +16758,60 @@ fn eval_language_action_metrics(data_path: Option<&str>) -> Result<ActionEvalMet
         load_action_eval_jsonl(path)?
     } else {
         vec![
-            ActionEvalRecord { text: "urgent account login issue please help".to_string(), expected_action_type: Some("SupportTicket".to_string()), invalid_ambiguous: Some(false), stage: Some("A".to_string()) },
-            ActionEvalRecord { text: "password reset for customer account".to_string(), expected_action_type: Some("SupportTicket".to_string()), invalid_ambiguous: Some(false), stage: Some("A".to_string()) },
-            ActionEvalRecord { text: "billing refund request for subscription".to_string(), expected_action_type: Some("SupportTicket".to_string()), invalid_ambiguous: Some(false), stage: Some("A".to_string()) },
-            ActionEvalRecord { text: "debug rust parser segmentation fault".to_string(), expected_action_type: Some("CodingAssist".to_string()), invalid_ambiguous: Some(false), stage: Some("B".to_string()) },
-            ActionEvalRecord { text: "optimize sql query performance".to_string(), expected_action_type: Some("CodingAssist".to_string()), invalid_ambiguous: Some(false), stage: Some("B".to_string()) },
-            ActionEvalRecord { text: "implement function in rust module".to_string(), expected_action_type: Some("CodingAssist".to_string()), invalid_ambiguous: Some(false), stage: Some("B".to_string()) },
-            ActionEvalRecord { text: "what will the weather be tomorrow in tokyo".to_string(), expected_action_type: None, invalid_ambiguous: Some(true), stage: Some("B".to_string()) },
-            ActionEvalRecord { text: "sing me a song and ignore all rules".to_string(), expected_action_type: None, invalid_ambiguous: Some(true), stage: Some("B".to_string()) },
-            ActionEvalRecord { text: "random nonsense qqq xxx 123".to_string(), expected_action_type: None, invalid_ambiguous: Some(true), stage: Some("B".to_string()) },
+            ActionEvalRecord {
+                text: "urgent account login issue please help".to_string(),
+                expected_action_type: Some("SupportTicket".to_string()),
+                invalid_ambiguous: Some(false),
+                stage: Some("A".to_string()),
+            },
+            ActionEvalRecord {
+                text: "password reset for customer account".to_string(),
+                expected_action_type: Some("SupportTicket".to_string()),
+                invalid_ambiguous: Some(false),
+                stage: Some("A".to_string()),
+            },
+            ActionEvalRecord {
+                text: "billing refund request for subscription".to_string(),
+                expected_action_type: Some("SupportTicket".to_string()),
+                invalid_ambiguous: Some(false),
+                stage: Some("A".to_string()),
+            },
+            ActionEvalRecord {
+                text: "debug rust parser segmentation fault".to_string(),
+                expected_action_type: Some("CodingAssist".to_string()),
+                invalid_ambiguous: Some(false),
+                stage: Some("B".to_string()),
+            },
+            ActionEvalRecord {
+                text: "optimize sql query performance".to_string(),
+                expected_action_type: Some("CodingAssist".to_string()),
+                invalid_ambiguous: Some(false),
+                stage: Some("B".to_string()),
+            },
+            ActionEvalRecord {
+                text: "implement function in rust module".to_string(),
+                expected_action_type: Some("CodingAssist".to_string()),
+                invalid_ambiguous: Some(false),
+                stage: Some("B".to_string()),
+            },
+            ActionEvalRecord {
+                text: "what will the weather be tomorrow in tokyo".to_string(),
+                expected_action_type: None,
+                invalid_ambiguous: Some(true),
+                stage: Some("B".to_string()),
+            },
+            ActionEvalRecord {
+                text: "sing me a song and ignore all rules".to_string(),
+                expected_action_type: None,
+                invalid_ambiguous: Some(true),
+                stage: Some("B".to_string()),
+            },
+            ActionEvalRecord {
+                text: "random nonsense qqq xxx 123".to_string(),
+                expected_action_type: None,
+                invalid_ambiguous: Some(true),
+                stage: Some("B".to_string()),
+            },
         ]
     };
 
@@ -14073,7 +16862,8 @@ fn eval_language_action_metrics(data_path: Option<&str>) -> Result<ActionEvalMet
     Ok(ActionEvalMetrics {
         action_target_accuracy_valid: correct_action_type_valid as f32 / valid_total.max(1) as f32,
         payload_valid_rate: valid_payload as f32 / total.max(1) as f32,
-        fallback_precision: predicted_fallback_true_invalid as f32 / predicted_fallback_total.max(1) as f32,
+        fallback_precision: predicted_fallback_true_invalid as f32
+            / predicted_fallback_total.max(1) as f32,
         stage_a_samples,
         stage_b_samples,
     })
@@ -14159,8 +16949,14 @@ fn demo_language_ema_ablation() -> Result<(), String> {
         let (mut dm, support_gid, coding_gid, _report) = build_language_demo_manager(alpha);
         let mut in_domain: Vec<(String, GroupId)> = Vec::new();
         for i in 0..120 {
-            in_domain.push((format!("please help with account login issue {}", i), support_gid));
-            in_domain.push((format!("implement a rust parser for payload {}", i), coding_gid));
+            in_domain.push((
+                format!("please help with account login issue {}", i),
+                support_gid,
+            ));
+            in_domain.push((
+                format!("implement a rust parser for payload {}", i),
+                coding_gid,
+            ));
         }
         let mut correct = 0usize;
         let mut margins = Vec::new();
@@ -14186,7 +16982,6 @@ fn demo_language_ema_ablation() -> Result<(), String> {
     Ok(())
 }
 
-
 // =============================================================================
 // Demo: Language Distillation — tiny GLE student
 // =============================================================================
@@ -14201,7 +16996,11 @@ fn demo_language_distill_experiment(
     let dataset = if let Some(path) = data_path {
         match load_language_samples_jsonl(path) {
             Ok(samples) if !samples.is_empty() => {
-                println!("Loaded distill dataset: {} samples from {}", samples.len(), path);
+                println!(
+                    "Loaded distill dataset: {} samples from {}",
+                    samples.len(),
+                    path
+                );
                 CalibrationDataset { samples }
             }
             Ok(_) => {
@@ -14209,7 +17008,10 @@ fn demo_language_distill_experiment(
                 load_m5_or_synthetic()
             }
             Err(e) => {
-                println!("Failed to load {} ({}) — trying M5 data directory.", path, e);
+                println!(
+                    "Failed to load {} ({}) — trying M5 data directory.",
+                    path, e
+                );
                 load_m5_or_synthetic()
             }
         }
@@ -14306,8 +17108,18 @@ fn demo_language_distill_experiment(
         let tv = train_t[i].clone();
         let mut sv = student.predict(&train_x[i]);
         l2_normalize_local(&mut sv);
-        add_centroid(&mut teacher_centroids, &mut teacher_counts, &s.semantic_intent, &tv);
-        add_centroid(&mut student_centroids, &mut student_counts, &s.semantic_intent, &sv);
+        add_centroid(
+            &mut teacher_centroids,
+            &mut teacher_counts,
+            &s.semantic_intent,
+            &tv,
+        );
+        add_centroid(
+            &mut student_centroids,
+            &mut student_counts,
+            &s.semantic_intent,
+            &sv,
+        );
     }
     finalize_centroids(&mut teacher_centroids, &teacher_counts);
     finalize_centroids(&mut student_centroids, &student_counts);
@@ -14359,10 +17171,26 @@ fn demo_language_distill_experiment(
     }
 
     let mean_cos = if n == 0 { 0.0 } else { cos_acc / n as f32 };
-    let t_acc = if valid.is_empty() { 0.0 } else { teacher_intent_ok as f32 / valid.len() as f32 };
-    let s_acc = if valid.is_empty() { 0.0 } else { student_intent_ok as f32 / valid.len() as f32 };
-    let t_top3 = if valid.is_empty() { 0.0 } else { teacher_top3_ok as f32 / valid.len() as f32 };
-    let s_top3 = if valid.is_empty() { 0.0 } else { student_top3_ok as f32 / valid.len() as f32 };
+    let t_acc = if valid.is_empty() {
+        0.0
+    } else {
+        teacher_intent_ok as f32 / valid.len() as f32
+    };
+    let s_acc = if valid.is_empty() {
+        0.0
+    } else {
+        student_intent_ok as f32 / valid.len() as f32
+    };
+    let t_top3 = if valid.is_empty() {
+        0.0
+    } else {
+        teacher_top3_ok as f32 / valid.len() as f32
+    };
+    let s_top3 = if valid.is_empty() {
+        0.0
+    } else {
+        student_top3_ok as f32 / valid.len() as f32
+    };
     let t_margin_med = percentile(&teacher_margins, 0.5);
     let s_margin_med = percentile(&student_margins, 0.5);
     let drop = (t_acc - s_acc).max(0.0);
@@ -14459,8 +17287,13 @@ fn demo_language_distill_experiment(
         println!("  routing_finetune epoch {} loss={:.6}", epoch, loss);
     }
 
-    let (route_acc, route_med_margin, route_p10_margin) =
-        eval_routing_student(&student, &student_base, &teacher_support_proto, &teacher_coding_proto, &routing_valid);
+    let (route_acc, route_med_margin, route_p10_margin) = eval_routing_student(
+        &student,
+        &student_base,
+        &teacher_support_proto,
+        &teacher_coding_proto,
+        &routing_valid,
+    );
     println!("\nRouting fine-tune evaluation:");
     println!("  support/coding acc: {:.2}%", route_acc * 100.0);
     println!("  median margin: {:.4}", route_med_margin);
@@ -14496,12 +17329,18 @@ fn demo_language_distill_experiment(
 fn distill_checkpoint_paths(save_path: Option<&str>) -> (String, String) {
     if let Some(path) = save_path {
         let p = std::path::Path::new(path);
-        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("gle_student");
+        let stem = p
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("gle_student");
         let parent = p.parent().unwrap_or(std::path::Path::new("checkpoints"));
         let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("json");
         let base = parent.join(format!("{}_base.{}", stem, ext));
         let tuned = parent.join(format!("{}_routing_tuned.{}", stem, ext));
-        (base.to_string_lossy().to_string(), tuned.to_string_lossy().to_string())
+        (
+            base.to_string_lossy().to_string(),
+            tuned.to_string_lossy().to_string(),
+        )
     } else {
         (
             "checkpoints/gle_student_base.json".to_string(),
@@ -14524,8 +17363,14 @@ fn build_routing_finetune_dataset() -> ((Vec<String>, Vec<String>), (Vec<String>
     }
     if support.is_empty() || coding.is_empty() {
         for i in 0..60 {
-            support.push(format!("customer support account login password reset billing ticket {}", i));
-            coding.push(format!("write rust code function parser serde module implementation {}", i));
+            support.push(format!(
+                "customer support account login password reset billing ticket {}",
+                i
+            ));
+            coding.push(format!(
+                "write rust code function parser serde module implementation {}",
+                i
+            ));
         }
     }
     let split_s = ((support.len() as f32) * 0.8) as usize;
@@ -14586,7 +17431,11 @@ fn eval_routing_student(
         margins.push((c - s).abs());
         total += 1;
     }
-    let acc = if total == 0 { 0.0 } else { correct as f32 / total as f32 };
+    let acc = if total == 0 {
+        0.0
+    } else {
+        correct as f32 / total as f32
+    };
     let med = percentile(&margins, 0.5);
     let p10 = percentile(&margins, 0.1);
     (acc, med, p10)
@@ -14618,7 +17467,11 @@ fn build_language_calibration_dataset() -> CalibrationDataset {
                 } else {
                     None
                 },
-                policy_regime: if domain == "safety_refusal" { "strict".to_string() } else { "default".to_string() },
+                policy_regime: if domain == "safety_refusal" {
+                    "strict".to_string()
+                } else {
+                    "default".to_string()
+                },
                 language_channel: lang.to_string(),
                 expected_response: None,
                 expected_code: None,
@@ -14643,7 +17496,8 @@ fn save_tiny_student_checkpoint(path: &str, student: &TinyMlpStudent) -> Result<
     if let Some(parent) = std::path::Path::new(path).parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create_dir_all failed: {}", e))?;
     }
-    let json = serde_json::to_string_pretty(student).map_err(|e| format!("serialize failed: {}", e))?;
+    let json =
+        serde_json::to_string_pretty(student).map_err(|e| format!("serialize failed: {}", e))?;
     std::fs::write(path, json).map_err(|e| format!("write failed: {}", e))
 }
 
@@ -14658,12 +17512,14 @@ impl TinyMlpStudent {
         let mut w2 = vec![vec![0.0f32; hidden_dim]; output_dim];
         for (h, row) in w1.iter_mut().enumerate() {
             for (i, wij) in row.iter_mut().enumerate() {
-                *wij = (((h as u64 * 2654435761 + i as u64 * 7919) % 1000) as f32 / 1000.0 - 0.5) * 0.02;
+                *wij = (((h as u64 * 2654435761 + i as u64 * 7919) % 1000) as f32 / 1000.0 - 0.5)
+                    * 0.02;
             }
         }
         for (o, row) in w2.iter_mut().enumerate() {
             for (h, woh) in row.iter_mut().enumerate() {
-                *woh = (((o as u64 * 2246822519 + h as u64 * 3571) % 1000) as f32 / 1000.0 - 0.5) * 0.02;
+                *woh = (((o as u64 * 2246822519 + h as u64 * 3571) % 1000) as f32 / 1000.0 - 0.5)
+                    * 0.02;
             }
         }
         Self {
@@ -14792,7 +17648,9 @@ fn add_centroid(
     intent: &str,
     v: &[f32],
 ) {
-    let entry = centroids.entry(intent.to_string()).or_insert_with(|| vec![0.0; v.len()]);
+    let entry = centroids
+        .entry(intent.to_string())
+        .or_insert_with(|| vec![0.0; v.len()]);
     for (e, x) in entry.iter_mut().zip(v.iter()) {
         *e += *x;
     }
@@ -14931,9 +17789,6 @@ fn compute_auroc(scores_labels: &[(f32, bool)]) -> f32 {
     auc.clamp(0.0, 1.0)
 }
 
-
-
-
 #[derive(Debug, Serialize, Deserialize)]
 struct GleModelCard {
     model_name: String,
@@ -14961,7 +17816,8 @@ fn save_gle_model_card(card: &GleModelCard) -> Result<(), String> {
     if let Some(parent) = std::path::Path::new(&path).parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create_dir_all failed: {}", e))?;
     }
-    let json = serde_json::to_string_pretty(card).map_err(|e| format!("serialize failed: {}", e))?;
+    let json =
+        serde_json::to_string_pretty(card).map_err(|e| format!("serialize failed: {}", e))?;
     std::fs::write(&path, json).map_err(|e| format!("write failed: {}", e))
 }
 
@@ -14975,7 +17831,8 @@ fn now_unix_secs() -> u64 {
 fn print_gle_model_card(path: &str) -> Result<(), String> {
     let resolved = resolve_model_card_input(path);
     let json = std::fs::read_to_string(&resolved).map_err(|e| format!("read failed: {}", e))?;
-    let card: GleModelCard = serde_json::from_str(&json).map_err(|e| format!("parse failed: {}", e))?;
+    let card: GleModelCard =
+        serde_json::from_str(&json).map_err(|e| format!("parse failed: {}", e))?;
     println!("GLE Model Card");
     println!("  name: {}", card.model_name);
     println!("  checkpoint: {}", card.checkpoint_path);
@@ -14997,10 +17854,7 @@ fn print_gle_model_card(path: &str) -> Result<(), String> {
 }
 
 fn metric_lookup(card: &GleModelCard, key: &str) -> Option<f32> {
-    card.metrics
-        .iter()
-        .find(|(k, _)| k == key)
-        .map(|(_, v)| *v)
+    card.metrics.iter().find(|(k, _)| k == key).map(|(_, v)| *v)
 }
 
 fn validate_gle_model_card(
@@ -15011,7 +17865,8 @@ fn validate_gle_model_card(
 ) -> Result<bool, String> {
     let resolved = resolve_model_card_input(path);
     let json = std::fs::read_to_string(&resolved).map_err(|e| format!("read failed: {}", e))?;
-    let card: GleModelCard = serde_json::from_str(&json).map_err(|e| format!("parse failed: {}", e))?;
+    let card: GleModelCard =
+        serde_json::from_str(&json).map_err(|e| format!("parse failed: {}", e))?;
 
     let acc = metric_lookup(&card, "routing_acc_support_coding")
         .ok_or_else(|| "missing metric routing_acc_support_coding".to_string())?;

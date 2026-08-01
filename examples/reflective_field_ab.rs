@@ -124,8 +124,13 @@ const GOAL_TOPIC_CANDIDATES: &[&str] = &[
 /// Returns (probe@cold, script responses, probe@warm).
 fn run_arm(rt: &mut Runtime, label: &str) -> (String, Vec<String>, String) {
     // Same mild baseline state in both arms so the only variable is the policy.
-    let state = DriveState { hunger: 0.4, energy: 0.7, social: 0.5 };
-    rt.set_agent_state_from_json(&state_json(&state)).expect("set agent state");
+    let state = DriveState {
+        hunger: 0.4,
+        energy: 0.7,
+        social: 0.5,
+    };
+    rt.set_agent_state_from_json(&state_json(&state))
+        .expect("set agent state");
     rt.reset_conversation();
 
     println!("\n========== arm: {} ==========", label);
@@ -136,13 +141,21 @@ fn run_arm(rt: &mut Runtime, label: &str) -> (String, Vec<String>, String) {
     let mut script_out = Vec::new();
     for p in SCRIPT {
         let resp = rt.converse(p).expect("converse").text;
-        let flag = if looks_garbled(&resp) { "  <GARBLE>" } else { "" };
+        let flag = if looks_garbled(&resp) {
+            "  <GARBLE>"
+        } else {
+            ""
+        };
         println!("    [{}] {}{}", p, resp, flag);
         script_out.push(resp);
     }
 
     let warm = rt.converse(PROBE).expect("converse").text;
-    let warm_flag = if cold != warm { "  <CONTEXT-SHIFT>" } else { "  <no shift>" };
+    let warm_flag = if cold != warm {
+        "  <CONTEXT-SHIFT>"
+    } else {
+        "  <no shift>"
+    };
     println!("  probe@warm : {}{}", warm, warm_flag);
 
     (cold, script_out, warm)
@@ -208,7 +221,10 @@ fn main() {
         .or_else(|| topics.first().map(|s| s.as_str()))
         .expect("at least one topic available");
     rt.set_goal(Some(goal_topic), 0.6).expect("set goal");
-    println!("\n[goal-attractor target topic: \"{}\" pull=0.60]", goal_topic);
+    println!(
+        "\n[goal-attractor target topic: \"{}\" pull=0.60]",
+        goal_topic
+    );
     let (goal_cold, goal_script, goal_warm) =
         run_arm(&mut rt, &format!("reflective ON + goal({})", goal_topic));
     rt.set_goal(None, 0.0).expect("clear goal");

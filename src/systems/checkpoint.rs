@@ -7,17 +7,17 @@
 // MnistCheckpoint — Save Main (five frozen groups) + baseline accs for retention eval.
 // =============================================================================
 
-use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
-use crate::types::{NeuronId, GroupId};
+use crate::dimension::LanguageRuntime;
+use crate::dimension::MainDimension;
 use crate::neuron::Neuron;
 use crate::types::NeuronGroup;
-use crate::dimension::MainDimension;
-use crate::dimension::LanguageRuntime;
+use crate::types::{GroupId, NeuronId};
 #[cfg(not(target_arch = "wasm32"))]
 use rand::rngs::StdRng;
 #[cfg(not(target_arch = "wasm32"))]
 use rand::SeedableRng;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // =============================================================================
 // Checkpoint struct — env state + metadata (frozen flags live on neurons/synapses)
@@ -67,10 +67,10 @@ pub fn save_phase2_checkpoint(
     path: &str,
 ) {
     let checkpoint = Phase2Checkpoint {
-        neurons:   env.neurons.clone(),
-        groups:    env.groups.clone(),
-        layers:    env.layers.clone(),
-        layer_of:  env.layer_of.clone(),
+        neurons: env.neurons.clone(),
+        groups: env.groups.clone(),
+        layers: env.layers.clone(),
+        layer_of: env.layer_of.clone(),
         current_lr: env.current_lr,
         group_a_ids: group_a_ids.to_vec(),
         group_b_ids: group_b_ids.to_vec(),
@@ -86,17 +86,18 @@ pub fn save_phase2_checkpoint(
         trained_epochs,
     };
 
-    let json = serde_json::to_string_pretty(&checkpoint)
-        .expect("Checkpoint serialization failed");
+    let json = serde_json::to_string_pretty(&checkpoint).expect("Checkpoint serialization failed");
 
-    std::fs::write(path, &json)
-        .expect(&format!("Failed to write checkpoint to {}", path));
+    std::fs::write(path, &json).expect(&format!("Failed to write checkpoint to {}", path));
 
     let size_kb = json.len() / 1024;
     println!("  Checkpoint saved: {} ({} KB)", path, size_kb);
-    println!("  Task A: {}/{} ({:.1}%)",
-        task_a_correct, task_a_total,
-        100.0 * task_a_correct as f32 / task_a_total as f32);
+    println!(
+        "  Task A: {}/{} ({:.1}%)",
+        task_a_correct,
+        task_a_total,
+        100.0 * task_a_correct as f32 / task_a_total as f32
+    );
 }
 
 // =============================================================================
@@ -117,8 +118,10 @@ pub fn load_phase2_checkpoint(
     NeuronId,
     u64,
 ) {
-    let json = std::fs::read_to_string(path)
-        .expect(&format!("Checkpoint not found: {}\nRun with 'train-a' first.", path));
+    let json = std::fs::read_to_string(path).expect(&format!(
+        "Checkpoint not found: {}\nRun with 'train-a' first.",
+        path
+    ));
 
     let ckpt: Phase2Checkpoint = serde_json::from_str(&json)
         .expect("Checkpoint deserialization failed — file may be corrupted");
@@ -128,20 +131,23 @@ pub fn load_phase2_checkpoint(
     let mut rng = StdRng::seed_from_u64(ckpt.seed);
     env.build_layers(&layer_sizes, &mut rng);
 
-    env.neurons    = ckpt.neurons;
-    env.groups     = ckpt.groups;
-    env.layers     = ckpt.layers;
-    env.layer_of   = ckpt.layer_of;
+    env.neurons = ckpt.neurons;
+    env.groups = ckpt.groups;
+    env.layers = ckpt.layers;
+    env.layer_of = ckpt.layer_of;
     env.current_lr = ckpt.current_lr;
 
     env.sync_input_output_ids_from_layers();
     env.sync_next_neuron_id_from_neurons();
 
     println!("Checkpoint loaded: {}", path);
-    println!("  Task A was: {}/{} ({:.1}%) after {} epochs",
-        ckpt.task_a_correct, ckpt.task_a_total,
+    println!(
+        "  Task A was: {}/{} ({:.1}%) after {} epochs",
+        ckpt.task_a_correct,
+        ckpt.task_a_total,
         100.0 * ckpt.task_a_accuracy,
-        ckpt.trained_epochs);
+        ckpt.trained_epochs
+    );
     println!("  Skipping Task A training — proceeding directly to Task B.\n");
 
     (
@@ -180,15 +186,22 @@ pub fn save_mnist_checkpoint(
         group_order: group_order.to_vec(),
         baseline_accs: baseline_accs.to_vec(),
     };
-    let json = serde_json::to_string_pretty(&checkpoint).expect("MnistCheckpoint serialization failed");
+    let json =
+        serde_json::to_string_pretty(&checkpoint).expect("MnistCheckpoint serialization failed");
     std::fs::write(path, &json).unwrap_or_else(|e| panic!("Failed to write {}: {}", path, e));
     println!("  Checkpoint saved: {} ({} KB)", path, json.len() / 1024);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_mnist_checkpoint(path: &str) -> (MainDimension, Vec<GroupId>, Vec<f32>) {
-    let json = std::fs::read_to_string(path).unwrap_or_else(|_| panic!("Checkpoint not found: {}\nRun --mnist first and complete all 5 tasks.", path));
-    let ckpt: MnistCheckpoint = serde_json::from_str(&json).expect("MnistCheckpoint deserialization failed");
+    let json = std::fs::read_to_string(path).unwrap_or_else(|_| {
+        panic!(
+            "Checkpoint not found: {}\nRun --mnist first and complete all 5 tasks.",
+            path
+        )
+    });
+    let ckpt: MnistCheckpoint =
+        serde_json::from_str(&json).expect("MnistCheckpoint deserialization failed");
     (ckpt.main, ckpt.group_order, ckpt.baseline_accs)
 }
 
@@ -212,15 +225,22 @@ pub fn save_language_checkpoint(
         runtime: runtime.clone(),
         group_language_vectors: group_language_vectors.clone(),
     };
-    let json = serde_json::to_string_pretty(&checkpoint).expect("LanguageCheckpoint serialization failed");
+    let json =
+        serde_json::to_string_pretty(&checkpoint).expect("LanguageCheckpoint serialization failed");
     std::fs::write(path, &json).unwrap_or_else(|e| panic!("Failed to write {}: {}", path, e));
-    println!("  Language checkpoint saved: {} ({} KB)", path, json.len() / 1024);
+    println!(
+        "  Language checkpoint saved: {} ({} KB)",
+        path,
+        json.len() / 1024
+    );
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_language_checkpoint(path: &str) -> (LanguageRuntime, HashMap<GroupId, Vec<f32>>) {
-    let json = std::fs::read_to_string(path).unwrap_or_else(|_| panic!("Language checkpoint not found: {}", path));
-    let ckpt: LanguageCheckpoint = serde_json::from_str(&json).expect("LanguageCheckpoint deserialization failed");
+    let json = std::fs::read_to_string(path)
+        .unwrap_or_else(|_| panic!("Language checkpoint not found: {}", path));
+    let ckpt: LanguageCheckpoint =
+        serde_json::from_str(&json).expect("LanguageCheckpoint deserialization failed");
     (ckpt.runtime, ckpt.group_language_vectors)
 }
 
@@ -228,7 +248,9 @@ pub fn serialize_checkpoint_to_bytes<T: Serialize>(val: &T) -> Result<Vec<u8>, S
     serde_json::to_vec(val).map_err(|e| format!("serialize failed: {}", e))
 }
 
-pub fn deserialize_checkpoint_from_bytes<T: for<'de> Deserialize<'de>>(data: &[u8]) -> Result<T, String> {
+pub fn deserialize_checkpoint_from_bytes<T: for<'de> Deserialize<'de>>(
+    data: &[u8],
+) -> Result<T, String> {
     serde_json::from_slice(data).map_err(|e| format!("deserialize failed: {}", e))
 }
 
@@ -241,7 +263,7 @@ pub fn deserialize_checkpoint_from_bytes<T: for<'de> Deserialize<'de>>(data: &[u
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
-    use crate::types::{Vec3, EnvironmentConfig, Synapse};
+    use crate::types::{EnvironmentConfig, Synapse, Vec3};
 
     fn make_test_neuron(id: NeuronId, weight: f32, frozen: bool, synapses: Vec<Synapse>) -> Neuron {
         let config = EnvironmentConfig::default();
@@ -255,20 +277,45 @@ mod tests {
     #[test]
     fn test_neurons_map_json_roundtrip() {
         let mut neurons: HashMap<NeuronId, Neuron> = HashMap::new();
-        neurons.insert(0, make_test_neuron(0, -0.5, true, vec![
-            Synapse { target: 1, strength: 0.3, frozen: true, ..Synapse::new(1, 0.3) },
-        ]));
-        neurons.insert(1, make_test_neuron(1, 0.2, false, vec![
-            Synapse { target: 2, strength: -0.1, frozen: false, ..Synapse::new(2, -0.1) },
-        ]));
+        neurons.insert(
+            0,
+            make_test_neuron(
+                0,
+                -0.5,
+                true,
+                vec![Synapse {
+                    target: 1,
+                    strength: 0.3,
+                    frozen: true,
+                    ..Synapse::new(1, 0.3)
+                }],
+            ),
+        );
+        neurons.insert(
+            1,
+            make_test_neuron(
+                1,
+                0.2,
+                false,
+                vec![Synapse {
+                    target: 2,
+                    strength: -0.1,
+                    frozen: false,
+                    ..Synapse::new(2, -0.1)
+                }],
+            ),
+        );
         neurons.insert(2, make_test_neuron(2, 0.0, true, vec![]));
 
         let json = serde_json::to_string(&neurons).expect("serialize neurons map");
-        let restored: HashMap<NeuronId, Neuron> = serde_json::from_str(&json).expect("deserialize neurons map");
+        let restored: HashMap<NeuronId, Neuron> =
+            serde_json::from_str(&json).expect("deserialize neurons map");
 
         assert_eq!(restored.len(), neurons.len(), "key count must match");
         for (id, orig) in &neurons {
-            let r = restored.get(id).expect("every original key must be present after round-trip");
+            let r = restored
+                .get(id)
+                .expect("every original key must be present after round-trip");
             assert_eq!(r.id, orig.id, "neuron id");
             assert_eq!(r.weight, orig.weight, "neuron weight");
             assert_eq!(r.frozen, orig.frozen, "neuron frozen");
@@ -299,7 +346,9 @@ mod tests {
             neurons: neurons.clone(),
             groups: HashMap::new(),
             layers: vec![vec![0, 1], vec![2, 3], vec![4]],
-            layer_of: [(0, 0), (1, 0), (2, 1), (3, 1), (4, 2)].into_iter().collect(),
+            layer_of: [(0, 0), (1, 0), (2, 1), (3, 1), (4, 2)]
+                .into_iter()
+                .collect(),
             current_lr: 0.01,
             group_a_ids: vec![0, 2],
             group_b_ids: vec![1, 3],
@@ -320,7 +369,10 @@ mod tests {
 
         assert_eq!(loaded.neurons.len(), checkpoint.neurons.len());
         for (id, orig) in &checkpoint.neurons {
-            let r = loaded.neurons.get(id).expect("key present after round-trip");
+            let r = loaded
+                .neurons
+                .get(id)
+                .expect("key present after round-trip");
             assert_eq!(r.id, orig.id);
             assert_eq!(r.weight, orig.weight);
             assert_eq!(r.frozen, orig.frozen);
@@ -332,11 +384,11 @@ mod tests {
     /// Uses a temp file so it works on any system without polluting the repo.
     #[test]
     fn test_mnist_checkpoint_write_and_load() {
-        use crate::dimension::MainDimension;
         use crate::dimension::embedding::GroupEmbedding;
+        use crate::dimension::MainDimension;
         use crate::environment::NeuralEnvironment;
-        use rand::SeedableRng;
         use rand::rngs::StdRng;
+        use rand::SeedableRng;
         use std::fs;
 
         let config = EnvironmentConfig::default();
@@ -373,7 +425,11 @@ mod tests {
 
         assert!(path.exists(), "checkpoint file must exist after save");
         let meta = fs::metadata(path_str).expect("metadata");
-        assert!(meta.len() > 100, "checkpoint file must be non-trivial ({} bytes)", meta.len());
+        assert!(
+            meta.len() > 100,
+            "checkpoint file must be non-trivial ({} bytes)",
+            meta.len()
+        );
 
         let (loaded_main, loaded_order, loaded_accs) = load_mnist_checkpoint(path_str);
 
@@ -403,9 +459,15 @@ mod tests {
         assert!(path.exists(), "language checkpoint must exist");
 
         let (loaded_runtime, loaded_vectors) = load_language_checkpoint(path_str);
-        assert_eq!(loaded_runtime.config.bridge_output_dim, runtime.config.bridge_output_dim);
+        assert_eq!(
+            loaded_runtime.config.bridge_output_dim,
+            runtime.config.bridge_output_dim
+        );
         assert_eq!(loaded_vectors.len(), vectors.len());
-        assert_eq!(loaded_vectors.get(&0).map(|v| v.len()), Some(DEFAULT_BRIDGE_DIM));
+        assert_eq!(
+            loaded_vectors.get(&0).map(|v| v.len()),
+            Some(DEFAULT_BRIDGE_DIM)
+        );
 
         fs::remove_file(path_str).ok();
     }

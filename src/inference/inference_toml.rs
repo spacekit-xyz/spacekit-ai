@@ -81,11 +81,10 @@ struct CliTomlPaths {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-static CLI_TOML_PATHS: std::sync::RwLock<CliTomlPaths> =
-    std::sync::RwLock::new(CliTomlPaths {
-        primary: None,
-        defaults: None,
-    });
+static CLI_TOML_PATHS: std::sync::RwLock<CliTomlPaths> = std::sync::RwLock::new(CliTomlPaths {
+    primary: None,
+    defaults: None,
+});
 
 /// Register inference TOML paths from the growformer CLI or host (call before any inference load).
 /// Passing `None` for both is a no-op (keeps search/env behavior).
@@ -182,11 +181,21 @@ pub struct GenerationConfig {
     pub basal_ganglia: bool,
 }
 
-fn default_generation_temperature() -> f32 { 0.85 }
-fn default_generation_top_k() -> usize { 4 }
-fn default_repetition_penalty() -> f32 { 1.08 }
-fn default_max_tokens() -> usize { 90 }
-fn default_stochastic_retrieval() -> bool { true }
+fn default_generation_temperature() -> f32 {
+    0.85
+}
+fn default_generation_top_k() -> usize {
+    4
+}
+fn default_repetition_penalty() -> f32 {
+    1.08
+}
+fn default_max_tokens() -> usize {
+    90
+}
+fn default_stochastic_retrieval() -> bool {
+    true
+}
 
 impl Default for GenerationConfig {
     fn default() -> Self {
@@ -232,8 +241,12 @@ pub struct ResponseShapingConfig {
     pub required_signal_patterns: Vec<String>,
 }
 
-fn default_min_response_chars() -> usize { 60 }
-fn default_max_response_chars() -> usize { 320 }
+fn default_min_response_chars() -> usize {
+    60
+}
+fn default_max_response_chars() -> usize {
+    320
+}
 
 impl Default for ResponseShapingConfig {
     fn default() -> Self {
@@ -265,8 +278,12 @@ pub struct ValidationConfig {
     pub fallback_strategy: String,
 }
 
-fn default_max_retries() -> u8 { 2 }
-fn default_retry_temperature_decay() -> f32 { 0.15 }
+fn default_max_retries() -> u8 {
+    2
+}
+fn default_retry_temperature_decay() -> f32 {
+    0.15
+}
 
 impl Default for ValidationConfig {
     fn default() -> Self {
@@ -678,9 +695,7 @@ impl FragmentComposeConfig {
     }
 
     pub fn should_use_opener(&self, intent: &str) -> bool {
-        self.effective_opener_intents()
-            .iter()
-            .any(|i| i == intent)
+        self.effective_opener_intents().iter().any(|i| i == intent)
     }
 
     /// Compose template for an intent, if configured.
@@ -697,8 +712,7 @@ impl FragmentComposeConfig {
     ) -> Option<(Vec<String>, usize, bool)> {
         if let Some(act_t) = self.act_templates.iter().find(|t| {
             t.act.eq_ignore_ascii_case(speech_act)
-                && (t.when_intents.is_empty()
-                    || t.when_intents.iter().any(|i| i == intent))
+                && (t.when_intents.is_empty() || t.when_intents.iter().any(|i| i == intent))
         }) {
             return Some((
                 act_t.body_slots.clone(),
@@ -744,12 +758,24 @@ impl FragmentComposeConfig {
         let lower = text.to_ascii_lowercase();
         // Fixed priority so mealtime/grounding win over generic empathic/action.
         const PRIORITY: &[&str] = &[
-            "mealtime", "preference", "lore", "stance", "grounding", "gratitude", "bonding", "refusal",
-            "offer", "empathic", "action",
+            "mealtime",
+            "preference",
+            "lore",
+            "stance",
+            "grounding",
+            "gratitude",
+            "bonding",
+            "refusal",
+            "offer",
+            "empathic",
+            "action",
         ];
         for slot in PRIORITY {
             if let Some(keywords) = self.decompose.body_slot_keywords.get(*slot) {
-                if keywords.iter().any(|kw| lower.contains(&kw.to_ascii_lowercase())) {
+                if keywords
+                    .iter()
+                    .any(|kw| lower.contains(&kw.to_ascii_lowercase()))
+                {
                     return Some(slot.to_string());
                 }
             }
@@ -787,11 +813,13 @@ impl FragmentComposeConfig {
     ) -> bool {
         match rule.r#match.as_str() {
             "greeting" => self.matches_greeting(lower, original),
-            "contains_any" => rule.patterns.iter().any(|p| lower.contains(&p.to_ascii_lowercase())),
+            "contains_any" => rule
+                .patterns
+                .iter()
+                .any(|p| lower.contains(&p.to_ascii_lowercase())),
             "starts_with_any" => rule.patterns.iter().any(|p| {
                 let pat = p.to_ascii_lowercase();
-                lower.starts_with(&pat)
-                    && rule.max_len.map(|m| lower.len() < m).unwrap_or(true)
+                lower.starts_with(&pat) && rule.max_len.map(|m| lower.len() < m).unwrap_or(true)
             }),
             "agent_name_greeting" => self.matches_agent_name_greeting(lower, agent_name),
             "fallback" => true,
@@ -815,7 +843,9 @@ impl FragmentComposeConfig {
         {
             return false;
         }
-        let trimmed = lower.trim().trim_end_matches(|c: char| c.is_ascii_punctuation());
+        let trimmed = lower
+            .trim()
+            .trim_end_matches(|c: char| c.is_ascii_punctuation());
         let matched = self.greeting_exact.iter().any(|p| {
             let p = p.to_ascii_lowercase();
             trimmed == p || trimmed.starts_with(&format!("{p} "))
@@ -847,9 +877,23 @@ impl FragmentComposeConfig {
         }
         // "Have a tuna roll, Luna" is feeding, not a greeting.
         const NOT_GREETING: &[&str] = &[
-            "tuna", "salmon", "sushi", "treat", "roll", "bowl", "food", "feed",
-            "play", "fancy feast", "kibble", "hungry",
-            "how old", "your age", "where were you", "favorite", "favourite",
+            "tuna",
+            "salmon",
+            "sushi",
+            "treat",
+            "roll",
+            "bowl",
+            "food",
+            "feed",
+            "play",
+            "fancy feast",
+            "kibble",
+            "hungry",
+            "how old",
+            "your age",
+            "where were you",
+            "favorite",
+            "favourite",
         ];
         if NOT_GREETING.iter().any(|k| lower.contains(k)) {
             return false;
@@ -894,8 +938,8 @@ impl FragmentComposeConfig {
 
     /// Parse `[fragment_compose]` from a full inference TOML document string.
     pub fn load_from_inference_toml_str(toml_str: &str) -> Result<Self, String> {
-        let doc: InferenceTomlDocument = toml::from_str(toml_str)
-            .map_err(|e| format!("parse inference TOML: {e}"))?;
+        let doc: InferenceTomlDocument =
+            toml::from_str(toml_str).map_err(|e| format!("parse inference TOML: {e}"))?;
         if doc.fragment_compose.vocalizations.is_empty() {
             return Err(
                 "fragment_compose.vocalizations is empty — add vocal tokens to inference TOML"
@@ -906,7 +950,11 @@ impl FragmentComposeConfig {
     }
 
     /// First matching non-`fallback` intent rule for a user prompt, if any.
-    pub fn prompt_intent_override(&self, text: &str, agent_name: &str) -> Option<FragmentIntentHint> {
+    pub fn prompt_intent_override(
+        &self,
+        text: &str,
+        agent_name: &str,
+    ) -> Option<FragmentIntentHint> {
         let lower = text.to_ascii_lowercase();
         for rule in &self.intent_rules {
             if rule.r#match == "fallback" {
@@ -943,7 +991,11 @@ impl FragmentComposeConfig {
 
     /// Trailing coda slot: bare vocalization or vocal + allowed modifier only.
     pub fn is_pure_vocal_coda(&self, text: &str) -> bool {
-        let trimmed = text.trim().trim_end_matches('.').trim().to_ascii_lowercase();
+        let trimmed = text
+            .trim()
+            .trim_end_matches('.')
+            .trim()
+            .to_ascii_lowercase();
         if trimmed.is_empty() {
             return false;
         }
@@ -976,8 +1028,7 @@ impl FragmentComposeConfig {
         }
         let lower = text.to_ascii_lowercase();
         let d = &self.decompose;
-        if d
-            .drive_override_keywords
+        if d.drive_override_keywords
             .iter()
             .any(|k| lower.contains(&k.to_ascii_lowercase()))
         {
@@ -1386,8 +1437,7 @@ impl InferenceRulesSection {
         if s.sarcasm_and.is_empty() {
             s.sarcasm_and = defaults.sarcasm_and.clone();
         } else if !defaults.sarcasm_and.is_empty() {
-            s.sarcasm_and
-                .extend(defaults.sarcasm_and.iter().cloned());
+            s.sarcasm_and.extend(defaults.sarcasm_and.iter().cloned());
         }
         if s.positive_anchor_tokens.is_empty() {
             s.positive_anchor_tokens = defaults.positive_anchor_tokens.clone();
@@ -1478,7 +1528,8 @@ impl InferenceRulesSection {
             s.mixed_silver_lining_good_phrases = defaults.mixed_silver_lining_good_phrases.clone();
         }
         if s.mixed_fraud_relief_anchor_phrases.is_empty() {
-            s.mixed_fraud_relief_anchor_phrases = defaults.mixed_fraud_relief_anchor_phrases.clone();
+            s.mixed_fraud_relief_anchor_phrases =
+                defaults.mixed_fraud_relief_anchor_phrases.clone();
         }
         if s.mixed_fraud_relief_trigger_any.is_empty() {
             s.mixed_fraud_relief_trigger_any = defaults.mixed_fraud_relief_trigger_any.clone();
@@ -1490,37 +1541,47 @@ impl InferenceRulesSection {
             s.mixed_implicit_unusual_token = defaults.mixed_implicit_unusual_token.clone();
         }
         if s.mixed_implicit_unusual_context_any.is_empty() {
-            s.mixed_implicit_unusual_context_any = defaults.mixed_implicit_unusual_context_any.clone();
+            s.mixed_implicit_unusual_context_any =
+                defaults.mixed_implicit_unusual_context_any.clone();
         }
         if s.mixed_implicit_unusual_exclude_any.is_empty() {
-            s.mixed_implicit_unusual_exclude_any = defaults.mixed_implicit_unusual_exclude_any.clone();
+            s.mixed_implicit_unusual_exclude_any =
+                defaults.mixed_implicit_unusual_exclude_any.clone();
         }
         if s.mixed_positive_outcome_phrases.is_empty() {
             s.mixed_positive_outcome_phrases = defaults.mixed_positive_outcome_phrases.clone();
         }
         if s.mixed_skepticism_friction_phrases.is_empty() {
-            s.mixed_skepticism_friction_phrases = defaults.mixed_skepticism_friction_phrases.clone();
+            s.mixed_skepticism_friction_phrases =
+                defaults.mixed_skepticism_friction_phrases.clone();
         }
         if s.mixed_operational_decline_phrases.is_empty() {
-            s.mixed_operational_decline_phrases = defaults.mixed_operational_decline_phrases.clone();
+            s.mixed_operational_decline_phrases =
+                defaults.mixed_operational_decline_phrases.clone();
         }
         if s.mixed_operational_approve_phrases.is_empty() {
-            s.mixed_operational_approve_phrases = defaults.mixed_operational_approve_phrases.clone();
+            s.mixed_operational_approve_phrases =
+                defaults.mixed_operational_approve_phrases.clone();
         }
         if s.ambiguous_lukewarm_okay_primary_phrases.is_empty() {
-            s.ambiguous_lukewarm_okay_primary_phrases = defaults.ambiguous_lukewarm_okay_primary_phrases.clone();
+            s.ambiguous_lukewarm_okay_primary_phrases =
+                defaults.ambiguous_lukewarm_okay_primary_phrases.clone();
         }
         if s.ambiguous_lukewarm_okay_supplement_phrases.is_empty() {
-            s.ambiguous_lukewarm_okay_supplement_phrases = defaults.ambiguous_lukewarm_okay_supplement_phrases.clone();
+            s.ambiguous_lukewarm_okay_supplement_phrases =
+                defaults.ambiguous_lukewarm_okay_supplement_phrases.clone();
         }
         if s.ambiguous_fine_meh_primary_phrases.is_empty() {
-            s.ambiguous_fine_meh_primary_phrases = defaults.ambiguous_fine_meh_primary_phrases.clone();
+            s.ambiguous_fine_meh_primary_phrases =
+                defaults.ambiguous_fine_meh_primary_phrases.clone();
         }
         if s.ambiguous_fine_meh_supplement_phrases.is_empty() {
-            s.ambiguous_fine_meh_supplement_phrases = defaults.ambiguous_fine_meh_supplement_phrases.clone();
+            s.ambiguous_fine_meh_supplement_phrases =
+                defaults.ambiguous_fine_meh_supplement_phrases.clone();
         }
         if s.ambiguous_neutral_conjunction_groups.is_empty() {
-            s.ambiguous_neutral_conjunction_groups = defaults.ambiguous_neutral_conjunction_groups.clone();
+            s.ambiguous_neutral_conjunction_groups =
+                defaults.ambiguous_neutral_conjunction_groups.clone();
         }
         if s.anchor_positive_gloss.is_empty() {
             s.anchor_positive_gloss = defaults.anchor_positive_gloss.clone();
@@ -1650,7 +1711,10 @@ impl InferenceRulesRuntime {
 }
 
 fn cnf_groups_match(haystack: &str, groups: &[Vec<String>]) -> bool {
-    !groups.is_empty() && groups.iter().all(|or_alts| or_alts.iter().any(|p| haystack.contains(p)))
+    !groups.is_empty()
+        && groups
+            .iter()
+            .all(|or_alts| or_alts.iter().any(|p| haystack.contains(p)))
 }
 
 /// Any single OR-group match (used for lattice misfire `intent_exclude`).
@@ -1731,11 +1795,20 @@ fn ac_or_vec_contains(ac: &Option<AhoCorasick>, phrases: &[String], lower: &str)
 /// - Dateline stubs: "headlines at", "update at", "briefing at"
 /// - Location-only: "new york", "london", "tokyo" without an evaluative word
 fn is_bare_metadata(lower: &str) -> bool {
-    const TIME_SUFFIXES: &[&str] = &["am", "pm", "gmt", "est", "pst", "cst", "utc", "et", "pt", "ct"];
+    const TIME_SUFFIXES: &[&str] = &[
+        "am", "pm", "gmt", "est", "pst", "cst", "utc", "et", "pt", "ct",
+    ];
     const DATELINE_MARKERS: &[&str] = &[
-        "headlines at", "headline at", "update at", "briefing at",
-        "summary at", "roundup at", "wrap at", "recap at",
-        "headlines from", "news at",
+        "headlines at",
+        "headline at",
+        "update at",
+        "briefing at",
+        "summary at",
+        "roundup at",
+        "wrap at",
+        "recap at",
+        "headlines from",
+        "news at",
     ];
     for m in DATELINE_MARKERS {
         if lower.contains(m) {
@@ -1745,10 +1818,12 @@ fn is_bare_metadata(lower: &str) -> bool {
     let has_time_token = lower.split_whitespace().any(|tok| {
         let t = tok.trim_end_matches(|c: char| c == ',' || c == '.');
         TIME_SUFFIXES.iter().any(|sfx| {
-            t.ends_with(sfx) && t.len() > sfx.len() && t[..t.len() - sfx.len()]
-                .chars()
-                .last()
-                .map_or(false, |c| c.is_ascii_digit() || c == ':')
+            t.ends_with(sfx)
+                && t.len() > sfx.len()
+                && t[..t.len() - sfx.len()]
+                    .chars()
+                    .last()
+                    .map_or(false, |c| c.is_ascii_digit() || c == ':')
         })
     });
     if has_time_token {
@@ -1764,16 +1839,21 @@ fn is_bare_metadata(lower: &str) -> bool {
 }
 
 const NEGATION_TOKENS: &[&str] = &[
-    "not", "no", "never", "neither", "nor", "without",
-    "hardly", "barely", "scarcely", "none",
+    "not", "no", "never", "neither", "nor", "without", "hardly", "barely", "scarcely", "none",
 ];
 
 /// Compound negation prefixes that extend the negation scope through an
 /// entire subordinate clause: "not because it makes me happy" negates
 /// "happy" even though "not" is 5+ tokens away.
 const COMPOUND_NEGATION_PREFIXES: &[&str] = &[
-    "not because", "not that", "not for", "not since",
-    "not as", "not when", "not while", "not after",
+    "not because",
+    "not that",
+    "not for",
+    "not since",
+    "not as",
+    "not when",
+    "not while",
+    "not after",
 ];
 
 /// Returns `true` when the word at `match_byte_start` in `lower` sits inside
@@ -1817,7 +1897,7 @@ fn pr_wire_prefix_rule_matches(t: &str, rule: &PrWireNeutralPrefixRule) -> bool 
     if rule
         .exclude_prefixes
         .iter()
-        .any(|e:&String| t.starts_with(e.as_str()))
+        .any(|e: &String| t.starts_with(e.as_str()))
     {
         return false;
     }
@@ -1825,7 +1905,7 @@ fn pr_wire_prefix_rule_matches(t: &str, rule: &PrWireNeutralPrefixRule) -> bool 
         && !rule
             .require_any
             .iter()
-            .any(|s:&String| t.contains(s.as_str()))
+            .any(|s: &String| t.contains(s.as_str()))
     {
         return false;
     }
@@ -1840,10 +1920,7 @@ impl LatticeMisfireRule {
                 .iter()
                 .any(|p| response_lower.contains(p.as_str()));
         let cnf_hit = cnf_groups_match(response_lower, &self.response);
-        match (
-            self.response_any.is_empty(),
-            self.response.is_empty(),
-        ) {
+        match (self.response_any.is_empty(), self.response.is_empty()) {
             (true, true) => false,
             (false, true) => any_hit,
             (true, false) => cnf_hit,
@@ -1871,19 +1948,23 @@ impl InferenceRulesRuntime {
         let sarcasm_simple_ac = ac_from_strings(&s.sarcasm_simple);
         let ambiguous_disappointment_ac = ac_from_strings(&s.ambiguous_disappointment_phrases);
         let ambiguous_neutral_hedge_ac = ac_from_strings(&s.ambiguous_neutral_hedge_phrases);
-        let ambiguous_lukewarm_okay_primary_ac = ac_from_strings(&s.ambiguous_lukewarm_okay_primary_phrases);
+        let ambiguous_lukewarm_okay_primary_ac =
+            ac_from_strings(&s.ambiguous_lukewarm_okay_primary_phrases);
         let ambiguous_lukewarm_okay_supplement_ac =
             ac_from_strings(&s.ambiguous_lukewarm_okay_supplement_phrases);
         let ambiguous_fine_meh_primary_ac = ac_from_strings(&s.ambiguous_fine_meh_primary_phrases);
-        let ambiguous_fine_meh_supplement_ac = ac_from_strings(&s.ambiguous_fine_meh_supplement_phrases);
+        let ambiguous_fine_meh_supplement_ac =
+            ac_from_strings(&s.ambiguous_fine_meh_supplement_phrases);
         let like_intensity_exception_ac = ac_from_strings(&s.like_intensity_exception_phrases);
         let mixed_silver_lining_bad_ac = ac_from_strings(&s.mixed_silver_lining_bad_phrases);
         let mixed_silver_lining_good_ac = ac_from_strings(&s.mixed_silver_lining_good_phrases);
         let mixed_fraud_relief_anchor_ac = ac_from_strings(&s.mixed_fraud_relief_anchor_phrases);
         let mixed_fraud_relief_trigger_ac = ac_from_strings(&s.mixed_fraud_relief_trigger_any);
         let mixed_implicit_followon_ac = ac_from_strings(&s.mixed_implicit_followon_phrases);
-        let mixed_implicit_unusual_context_ac = ac_from_strings(&s.mixed_implicit_unusual_context_any);
-        let mixed_implicit_unusual_exclude_ac = ac_from_strings(&s.mixed_implicit_unusual_exclude_any);
+        let mixed_implicit_unusual_context_ac =
+            ac_from_strings(&s.mixed_implicit_unusual_context_any);
+        let mixed_implicit_unusual_exclude_ac =
+            ac_from_strings(&s.mixed_implicit_unusual_exclude_any);
         let mixed_positive_outcome_ac = ac_from_strings(&s.mixed_positive_outcome_phrases);
         let mixed_skepticism_friction_ac = ac_from_strings(&s.mixed_skepticism_friction_phrases);
         let mixed_operational_approve_ac = ac_from_strings(&s.mixed_operational_approve_phrases);
@@ -1951,7 +2032,8 @@ impl InferenceRulesRuntime {
             mixed_operational_approve_ac,
             ambiguous_lukewarm_okay_primary_phrases: s.ambiguous_lukewarm_okay_primary_phrases,
             ambiguous_lukewarm_okay_primary_ac,
-            ambiguous_lukewarm_okay_supplement_phrases: s.ambiguous_lukewarm_okay_supplement_phrases,
+            ambiguous_lukewarm_okay_supplement_phrases: s
+                .ambiguous_lukewarm_okay_supplement_phrases,
             ambiguous_lukewarm_okay_supplement_ac,
             ambiguous_fine_meh_primary_phrases: s.ambiguous_fine_meh_primary_phrases,
             ambiguous_fine_meh_primary_ac,
@@ -2012,12 +2094,15 @@ impl InferenceRulesRuntime {
     }
 
     /// Open-finance / inclusion headline: redirect to sentiment lattice + knowledge-floor bypass.
-    pub fn sentiment_inclusion_open_finance_headline_positive_raw(&self, intent_text: &str) -> bool {
+    pub fn sentiment_inclusion_open_finance_headline_positive_raw(
+        &self,
+        intent_text: &str,
+    ) -> bool {
         let lower = Self::normalize_rules_text(intent_text);
         let l = lower.as_str();
-        self.headline_lexical_topic.iter().any(|r| {
-            r.inclusion_redirect && self.headline_rule_matches(r, l)
-        })
+        self.headline_lexical_topic
+            .iter()
+            .any(|r| r.inclusion_redirect && self.headline_rule_matches(r, l))
     }
 
     /// Headlines where low retrieval confidence should not force an honest decline (short, high-signal pack).
@@ -2189,7 +2274,9 @@ impl InferenceRulesRuntime {
         }
 
         // Praise / relief in one sentence, hedged skepticism in the next (no "but").
-        if self.has_mixed_positive_outcome_cue(lower) && self.has_mixed_implicit_followon_skeptic(lower) {
+        if self.has_mixed_positive_outcome_cue(lower)
+            && self.has_mixed_implicit_followon_skeptic(lower)
+        {
             return Some("mixed".to_string());
         }
 
@@ -2423,12 +2510,7 @@ impl InferenceRulesRuntime {
             .filter(|t| !t.is_empty())
             .collect();
         for window in tokens.windows(2) {
-            if window[1] == "like"
-                && self
-                    .like_perception_verbs
-                    .iter()
-                    .any(|v| v == window[0])
-            {
+            if window[1] == "like" && self.like_perception_verbs.iter().any(|v| v == window[0]) {
                 return true;
             }
         }
@@ -2497,12 +2579,20 @@ impl InferenceRulesRuntime {
             .filter(|t| !t.is_empty())
             .collect();
         const STRONG_NEG: &[&str] = &[
-            "awful", "terrible", "horrible", "worst", "nightmare", "disaster",
-            "furious", "livid", "devastated", "destroyed", "drained", "emptied",
+            "awful",
+            "terrible",
+            "horrible",
+            "worst",
+            "nightmare",
+            "disaster",
+            "furious",
+            "livid",
+            "devastated",
+            "destroyed",
+            "drained",
+            "emptied",
         ];
-        const MILD_NEG: &[&str] = &[
-            "bad", "miserable", "depressing", "sucks", "hate", "despise",
-        ];
+        const MILD_NEG: &[&str] = &["bad", "miserable", "depressing", "sucks", "hate", "despise"];
         for &t in &tokens {
             if STRONG_NEG.iter().any(|&s| t == s) {
                 return Some("negative_strong".to_string());
@@ -2513,7 +2603,11 @@ impl InferenceRulesRuntime {
                 return Some("negative_mild".to_string());
             }
         }
-        if self.negative_anchor_tokens.iter().any(|neg| tokens.contains(&neg.as_str())) {
+        if self
+            .negative_anchor_tokens
+            .iter()
+            .any(|neg| tokens.contains(&neg.as_str()))
+        {
             return Some("negative_mild".to_string());
         }
         None
@@ -2530,8 +2624,17 @@ impl InferenceRulesRuntime {
         }
         let trimmed = lower.trim_start();
         const FLOOR_WORDS: &[&str] = &[
-            "furious", "livid", "enraged", "outraged", "devastated", "destroyed",
-            "heartbroken", "appalled", "disgusted", "gutted", "crushed",
+            "furious",
+            "livid",
+            "enraged",
+            "outraged",
+            "devastated",
+            "destroyed",
+            "heartbroken",
+            "appalled",
+            "disgusted",
+            "gutted",
+            "crushed",
         ];
         for &word in FLOOR_WORDS {
             if trimmed.starts_with(word) {
@@ -2558,13 +2661,21 @@ impl InferenceRulesRuntime {
             return None;
         }
         const SCARE_TOKENS: &[&str] = &[
-            "dropped", "fell", "slipped", "dipped", "declined", "plunged", "sank",
-            "tanked", "cratered", "tumbled", "slid",
+            "dropped", "fell", "slipped", "dipped", "declined", "plunged", "sank", "tanked",
+            "cratered", "tumbled", "slid",
         ];
         const HOLD_PHRASES: &[&str] = &[
-            "held", "nothing swept", "didn't break", "didn't move",
-            "level held", "recovered", "came back", "bounced",
-            "stabilized", "stabilised", "no follow-through",
+            "held",
+            "nothing swept",
+            "didn't break",
+            "didn't move",
+            "level held",
+            "recovered",
+            "came back",
+            "bounced",
+            "stabilized",
+            "stabilised",
+            "no follow-through",
         ];
         let has_scare = SCARE_TOKENS.iter().any(|s| lower.contains(s));
         let has_hold = HOLD_PHRASES.iter().any(|h| lower.contains(h));
@@ -2595,20 +2706,41 @@ impl InferenceRulesRuntime {
             .split(|c: char| !c.is_alphanumeric() && c != '\'')
             .filter(|t| !t.is_empty())
             .collect();
-        let has_pos = self.positive_anchor_tokens.iter().any(|t| {
-            tokens.contains(&t.as_str())
-        });
-        let has_neg = self.negative_anchor_tokens.iter().any(|t| {
-            tokens.contains(&t.as_str())
-        });
+        let has_pos = self
+            .positive_anchor_tokens
+            .iter()
+            .any(|t| tokens.contains(&t.as_str()));
+        let has_neg = self
+            .negative_anchor_tokens
+            .iter()
+            .any(|t| tokens.contains(&t.as_str()));
         if has_pos || has_neg {
             return None;
         }
         const EXPERIENTIAL_CUES: &[&str] = &[
-            "spiked", "crashed", "failed", "stuck", "stressed", "destroyed",
-            "furious", "nightmare", "doubled", "tripled", "halted", "expired",
-            "slashed", "rejected", "plunged", "collapsed", "froze", "frozen",
-            "wiped", "drained", "gutted", "priced out", "headcount",
+            "spiked",
+            "crashed",
+            "failed",
+            "stuck",
+            "stressed",
+            "destroyed",
+            "furious",
+            "nightmare",
+            "doubled",
+            "tripled",
+            "halted",
+            "expired",
+            "slashed",
+            "rejected",
+            "plunged",
+            "collapsed",
+            "froze",
+            "frozen",
+            "wiped",
+            "drained",
+            "gutted",
+            "priced out",
+            "headcount",
         ];
         if EXPERIENTIAL_CUES.iter().any(|c| lower.contains(c)) {
             return None;
@@ -2814,13 +2946,23 @@ impl InferenceRulesRuntime {
     /// `sarcastic` untouched.
     pub fn apply_degree_modifiers(&self, lower: &str, key: &str) -> String {
         const INTENSIFIERS: &[&str] = &[
-            "deeply", "profoundly", "utterly", "absolutely", "completely",
-            "thoroughly", "extremely", "incredibly", "exceptionally",
-            "overwhelmingly", "insanely", "seriously", "genuinely",
+            "deeply",
+            "profoundly",
+            "utterly",
+            "absolutely",
+            "completely",
+            "thoroughly",
+            "extremely",
+            "incredibly",
+            "exceptionally",
+            "overwhelmingly",
+            "insanely",
+            "seriously",
+            "genuinely",
         ];
         const DIMINISHERS: &[&str] = &[
-            "slightly", "somewhat", "a bit", "a little", "mildly",
-            "kind of", "kinda", "sort of", "sorta", "fairly",
+            "slightly", "somewhat", "a bit", "a little", "mildly", "kind of", "kinda", "sort of",
+            "sorta", "fairly",
         ];
 
         let has_intensifier = INTENSIFIERS.iter().any(|m| lower.contains(m));
@@ -2910,9 +3052,10 @@ impl InferenceRulesRuntime {
                 &self.ambiguous_lukewarm_okay_supplement_phrases,
                 lower,
             ));
-        let okay_suppose = self.ambiguous_neutral_conjunction_groups.iter().any(|group| {
-            !group.is_empty() && group.iter().all(|p| lower.contains(p.as_str()))
-        });
+        let okay_suppose = self
+            .ambiguous_neutral_conjunction_groups
+            .iter()
+            .any(|group| !group.is_empty() && group.iter().all(|p| lower.contains(p.as_str())));
         let fine_meh = ac_or_vec_contains(
             &self.ambiguous_fine_meh_primary_ac,
             &self.ambiguous_fine_meh_primary_phrases,
@@ -3010,9 +3153,23 @@ impl InferenceRulesRuntime {
     /// gate to confirm that a sarcasm routing actually has praise/harm mismatch.
     pub fn text_has_praise_surface_token(&self, lower: &str) -> bool {
         const PRAISE_SURFACE: &[&str] = &[
-            "love", "great", "amazing", "wonderful", "fantastic", "excellent",
-            "perfect", "beautiful", "incredible", "best", "brilliant", "awesome",
-            "good", "fine", "nice", "superb", "flawless",
+            "love",
+            "great",
+            "amazing",
+            "wonderful",
+            "fantastic",
+            "excellent",
+            "perfect",
+            "beautiful",
+            "incredible",
+            "best",
+            "brilliant",
+            "awesome",
+            "good",
+            "fine",
+            "nice",
+            "superb",
+            "flawless",
         ];
         let tokens: std::collections::HashSet<&str> = lower
             .split(|c: char| !c.is_alphanumeric())
@@ -3252,8 +3409,7 @@ pub fn print_train_inference_disk_summary() {
     if loaded.guardrails.headline_rows_appended > 0 || loaded.guardrails.misfire_rows_appended > 0 {
         println!(
             "  [inference-guardrails] appended from JSONL: +{} headline, +{} misfire",
-            loaded.guardrails.headline_rows_appended,
-            loaded.guardrails.misfire_rows_appended
+            loaded.guardrails.headline_rows_appended, loaded.guardrails.misfire_rows_appended
         );
     }
     for line in &loaded.guardrails.log_lines {
@@ -3268,8 +3424,7 @@ pub fn print_train_inference_disk_summary() {}
 // Native: RwLock so load_brain can replace with brain-embedded rules.
 // ---------------------------------------------------------------------------
 #[cfg(not(target_arch = "wasm32"))]
-static FULL: std::sync::RwLock<Option<Arc<LoadedInferenceToml>>> =
-    std::sync::RwLock::new(None);
+static FULL: std::sync::RwLock<Option<Arc<LoadedInferenceToml>>> = std::sync::RwLock::new(None);
 
 #[cfg(not(target_arch = "wasm32"))]
 fn build_native_default() -> Arc<LoadedInferenceToml> {
@@ -3451,9 +3606,8 @@ pub fn replace_loaded_from_rules_section(
             FULL.read()
                 .ok()
                 .and_then(|g| {
-                    g.as_ref().map(|l| {
-                        (l.fragment_compose.clone(), l.chat_policy.clone())
-                    })
+                    g.as_ref()
+                        .map(|l| (l.fragment_compose.clone(), l.chat_policy.clone()))
                 })
                 .unwrap_or_default()
         }
@@ -3570,15 +3724,9 @@ mod fragment_compose_tests {
     #[test]
     fn vocalization_tail_from_config() {
         let cfg = luna_like_config();
-        assert!(cfg.vocalization_tail_suspicious(
-            "There you are. Mrrp greeting."
-        ));
-        assert!(!cfg.vocalization_tail_suspicious(
-            "Chirp alert. I sit. Mrrp."
-        ));
-        assert!(!cfg.vocalization_tail_suspicious(
-            "Kitchen. Mrrp now."
-        ));
+        assert!(cfg.vocalization_tail_suspicious("There you are. Mrrp greeting."));
+        assert!(!cfg.vocalization_tail_suspicious("Chirp alert. I sit. Mrrp."));
+        assert!(!cfg.vocalization_tail_suspicious("Kitchen. Mrrp now."));
     }
 
     #[test]
@@ -3594,7 +3742,9 @@ mod fragment_compose_tests {
     fn prompt_intent_override_skips_fallback() {
         let cfg = luna_like_config();
         assert!(cfg.prompt_intent_override("want a treat", "Luna").is_some());
-        assert!(cfg.prompt_intent_override("random question", "Luna").is_none());
+        assert!(cfg
+            .prompt_intent_override("random question", "Luna")
+            .is_none());
     }
 
     #[test]
@@ -3610,9 +3760,18 @@ mod fragment_compose_tests {
             },
             ..luna_like_config()
         };
-        assert_eq!(cfg.classify_voice("My stomach has opinions.", "body"), "drive");
-        assert_eq!(cfg.classify_voice("I pounce on the pen.", "body"), "activity");
-        assert_eq!(cfg.classify_voice("I blink slow at you.", "body"), "identity");
+        assert_eq!(
+            cfg.classify_voice("My stomach has opinions.", "body"),
+            "drive"
+        );
+        assert_eq!(
+            cfg.classify_voice("I pounce on the pen.", "body"),
+            "activity"
+        );
+        assert_eq!(
+            cfg.classify_voice("I blink slow at you.", "body"),
+            "identity"
+        );
         assert_eq!(cfg.classify_voice("Trill.", "coda"), "identity");
         assert!(cfg.is_opener("there you are, human"));
     }
@@ -3699,11 +3858,15 @@ mod negation_tests {
             Some("positive_mild")
         );
         let gov = "corporate bitcoin adoption is growing. custody governance hasn't caught up";
-        assert_eq!(rules.sentiment_lexical_topic_key(gov).as_deref(), Some("mixed"));
+        assert_eq!(
+            rules.sentiment_lexical_topic_key(gov).as_deref(),
+            Some("mixed")
+        );
         assert!(rules.sentiment_allow_forced_mixed_topic(gov));
         let bleed_intent =
             "Midnight Network Goes Live as Privacy-Focused Blockchain Moves Into Mainnet Phase";
-        let bleed_resp = "Data Privacy — Tighter filing … compliance burden for retail filers, not a tape read.";
+        let bleed_resp =
+            "Data Privacy — Tighter filing … compliance burden for retail filers, not a tape read.";
         assert!(rules.lattice_response_misfire_hit(bleed_intent, bleed_resp));
         let bank_intent = "Monument and Midnight Bring Tokenised Deposits into UK Retail Banking";
         let bank_resp = "POSITIVE (mild) — Reliability appreciated. Positive sentiment from expectation being met.";
@@ -3716,7 +3879,10 @@ mod negation_tests {
         let doc: InferenceTomlDocument = toml::from_str(raw).expect("fixture TOML");
         let rules = InferenceRulesRuntime::from_section(doc.rules);
         let h = "The sunset was average. Just orange. Not everything has to be Instagram-worthy.";
-        assert_eq!(rules.sentiment_lexical_topic_key(h).as_deref(), Some("neutral"));
+        assert_eq!(
+            rules.sentiment_lexical_topic_key(h).as_deref(),
+            Some("neutral")
+        );
     }
 
     #[test]
@@ -3725,7 +3891,10 @@ mod negation_tests {
         let doc: InferenceTomlDocument = toml::from_str(raw).expect("fixture TOML");
         let rules = InferenceRulesRuntime::from_section(doc.rules);
         let h = "The sunset was average. Just orange. Not everything has to be Instagram-worthy.";
-        assert_eq!(rules.sentiment_lexical_topic_key(h).as_deref(), Some("neutral"));
+        assert_eq!(
+            rules.sentiment_lexical_topic_key(h).as_deref(),
+            Some("neutral")
+        );
     }
 
     /// Default discovery merges core then fintech into empty `[rules]` slots; this mirrors that chain.
@@ -3735,10 +3904,9 @@ mod negation_tests {
             "../../data/sentiment/inference_sentiment_core.toml"
         ))
         .expect("core fixture");
-        let fintech: InferenceTomlDocument = toml::from_str(include_str!(
-            "../../data/fintech/inference_fintech.toml"
-        ))
-        .expect("fintech fixture");
+        let fintech: InferenceTomlDocument =
+            toml::from_str(include_str!("../../data/fintech/inference_fintech.toml"))
+                .expect("fintech fixture");
         let mut acc = InferenceRulesSection::default();
         acc = acc.merge_empty_from(&core.rules);
         assert!(
@@ -3752,7 +3920,8 @@ mod negation_tests {
             "fintech headline rows should append after core headlines"
         );
         let rules = InferenceRulesRuntime::from_section(acc);
-        let sofi = "SoFi Technologies vs. Upstart: Which Fintech Stock Is the Better Long-Term Buy?";
+        let sofi =
+            "SoFi Technologies vs. Upstart: Which Fintech Stock Is the Better Long-Term Buy?";
         assert_eq!(
             rules.sentiment_lexical_topic_key(sofi).as_deref(),
             Some("neutral"),
@@ -3778,7 +3947,10 @@ mod negation_tests {
         let doc: InferenceTomlDocument = toml::from_str(raw).expect("fintech fixture");
         let rules = InferenceRulesRuntime::from_section(doc.rules);
         let h = "Better Fintech Stock for Growth Investors: Nu Holdings vs. SoFi";
-        assert_eq!(rules.sentiment_lexical_topic_key(h).as_deref(), Some("neutral"));
+        assert_eq!(
+            rules.sentiment_lexical_topic_key(h).as_deref(),
+            Some("neutral")
+        );
     }
 
     #[test]
@@ -3787,7 +3959,10 @@ mod negation_tests {
         let doc: InferenceTomlDocument = toml::from_str(raw).expect("fintech fixture");
         let rules = InferenceRulesRuntime::from_section(doc.rules);
         let h = "FCA Sets Out Vision for Open Finance to Empower Consumers and Businesses";
-        assert_eq!(rules.sentiment_lexical_topic_key(h).as_deref(), Some("neutral"));
+        assert_eq!(
+            rules.sentiment_lexical_topic_key(h).as_deref(),
+            Some("neutral")
+        );
     }
 
     #[test]
@@ -3796,7 +3971,10 @@ mod negation_tests {
         let doc: InferenceTomlDocument = toml::from_str(raw).expect("fintech fixture");
         let rules = InferenceRulesRuntime::from_section(doc.rules);
         let h = "Crypto exchange Kraken confirms it has confidentially filed for an IPO";
-        assert_eq!(rules.sentiment_lexical_topic_key(h).as_deref(), Some("neutral"));
+        assert_eq!(
+            rules.sentiment_lexical_topic_key(h).as_deref(),
+            Some("neutral")
+        );
     }
 
     #[test]
@@ -3805,7 +3983,10 @@ mod negation_tests {
         let doc: InferenceTomlDocument = toml::from_str(raw).expect("fintech fixture");
         let rules = InferenceRulesRuntime::from_section(doc.rules);
         let h = "Deutsche Börse Takes $200 Million Stake in Crypto Exchange Kraken";
-        assert_eq!(rules.sentiment_lexical_topic_key(h).as_deref(), Some("neutral"));
+        assert_eq!(
+            rules.sentiment_lexical_topic_key(h).as_deref(),
+            Some("neutral")
+        );
     }
 
     #[test]
@@ -3814,20 +3995,23 @@ mod negation_tests {
         let doc: InferenceTomlDocument = toml::from_str(raw).expect("crypto fixture");
         let rules = InferenceRulesRuntime::from_section(doc.rules);
         let h = "Why XRP Is Gaining Today";
-        assert_eq!(rules.sentiment_lexical_topic_key(h).as_deref(), Some("neutral"));
+        assert_eq!(
+            rules.sentiment_lexical_topic_key(h).as_deref(),
+            Some("neutral")
+        );
     }
 
     #[test]
     fn kitsu_inference_pets_toml_parses_and_detects_asakusa_bleed() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
-            "../../spacekit/spacekit-projects/companions/kitsu/data/inference_pets.toml",
-        );
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../spacekit/spacekit-projects/companions/kitsu/data/inference_pets.toml");
         if !path.is_file() {
             eprintln!("skip kitsu fixture (path missing): {}", path.display());
             return;
         }
         let raw = std::fs::read_to_string(&path).expect("read kitsu inference_pets.toml");
-        let doc: InferenceTomlDocument = toml::from_str(&raw).expect("parse kitsu inference_pets.toml");
+        let doc: InferenceTomlDocument =
+            toml::from_str(&raw).expect("parse kitsu inference_pets.toml");
         assert!(
             doc.rules.lattice_misfire.len() >= 10,
             "expected pet lattice_misfire rows, got {}",
@@ -3875,24 +4059,19 @@ mod negation_tests {
             }],
             ..InferenceRulesSection::default()
         });
-        assert!(rules.lattice_response_misfire_hit(
-            "come here",
-            "School is loud in thy head."
-        ));
-        assert!(!rules.lattice_response_misfire_hit(
-            "school was awful today",
-            "School is loud in thy head."
-        ));
-        assert!(rules.lattice_response_misfire_hit(
-            "who are you?",
-            "Some call me old wyrm."
-        ));
+        assert!(rules.lattice_response_misfire_hit("come here", "School is loud in thy head."));
+        assert!(!rules
+            .lattice_response_misfire_hit("school was awful today", "School is loud in thy head."));
+        assert!(rules.lattice_response_misfire_hit("who are you?", "Some call me old wyrm."));
         assert!(!rules.lattice_response_misfire_hit(
             "what do you like to be called",
             "Some call me old wyrm."
         ));
         let fb = rules.lattice_misfire_fallback_line("I feel sad");
-        assert_eq!(fb.as_ref().map(|(t, _)| t.as_str()), Some("Grounding line."));
+        assert_eq!(
+            fb.as_ref().map(|(t, _)| t.as_str()),
+            Some("Grounding line.")
+        );
         assert_eq!(
             fb.as_ref().map(|(_, id)| id.as_str()),
             Some("grounding_fallback")
@@ -3905,7 +4084,8 @@ mod negation_tests {
         let doc: InferenceTomlDocument = toml::from_str(raw).expect("fintech fixture");
         let rules = InferenceRulesRuntime::from_section(doc.rules);
         let intent = "Crypto Exchange Kraken Prepares for IPO";
-        let bad = "NEGATIVE (strong) — Landmark enforcement penalty signals severe compliance failure";
+        let bad =
+            "NEGATIVE (strong) — Landmark enforcement penalty signals severe compliance failure";
         assert!(rules.lattice_response_misfire_hit(intent, bad));
     }
 
@@ -3959,7 +4139,10 @@ mod negation_tests {
         let doc: InferenceTomlDocument = toml::from_str(raw).expect("fintech fixture");
         let rules = InferenceRulesRuntime::from_section(doc.rules);
         let h = "How A Credit Card Fintech Resurrected Itself By Targeting The Superrich";
-        assert_eq!(rules.sentiment_lexical_topic_key(h).as_deref(), Some("neutral"));
+        assert_eq!(
+            rules.sentiment_lexical_topic_key(h).as_deref(),
+            Some("neutral")
+        );
     }
 
     #[test]
@@ -3994,15 +4177,21 @@ mod negation_tests {
         let doc: InferenceTomlDocument = toml::from_str(raw).expect("fixture TOML");
         let rules = InferenceRulesRuntime::from_section(doc.rules);
         assert_eq!(
-            rules.lexical_polarity_signal("i don't like using google").as_deref(),
+            rules
+                .lexical_polarity_signal("i don't like using google")
+                .as_deref(),
             Some("negative_mild")
         );
         assert_eq!(
-            rules.lexical_polarity_signal("i wouldn't use google").as_deref(),
+            rules
+                .lexical_polarity_signal("i wouldn't use google")
+                .as_deref(),
             Some("negative_mild")
         );
         assert_eq!(
-            rules.lexical_polarity_signal("this blew me away").as_deref(),
+            rules
+                .lexical_polarity_signal("this blew me away")
+                .as_deref(),
             Some("positive_strong")
         );
         assert_eq!(
@@ -4042,11 +4231,17 @@ mod negation_tests {
         let acting = InferenceRulesRuntime::normalize_rules_text(
             "The acting was fine. The script was fine. The direction was fine. Nothing about it was memorable.",
         );
-        assert_eq!(rules.lexical_polarity_signal(&acting).as_deref(), Some("mixed"));
+        assert_eq!(
+            rules.lexical_polarity_signal(&acting).as_deref(),
+            Some("mixed")
+        );
         let zec = InferenceRulesRuntime::normalize_rules_text(
             "ZEC is either misunderstood or obsolete — I can't tell which anymore.",
         );
-        assert_eq!(rules.lexical_polarity_signal(&zec).as_deref(), Some("mixed"));
+        assert_eq!(
+            rules.lexical_polarity_signal(&zec).as_deref(),
+            Some("mixed")
+        );
     }
 
     #[test]
@@ -4080,20 +4275,27 @@ mod negation_tests {
         let doc: InferenceTomlDocument = toml::from_str(raw).expect("fixture TOML");
         let rules = InferenceRulesRuntime::from_section(doc.rules);
         assert_eq!(
-            rules.sentiment_lexical_topic_key("I love the fee transparency").as_deref(),
+            rules
+                .sentiment_lexical_topic_key("I love the fee transparency")
+                .as_deref(),
             Some("positive_strong")
         );
         assert_eq!(
-            rules.sentiment_lexical_topic_key("I enjoy the clear fee breakdown").as_deref(),
+            rules
+                .sentiment_lexical_topic_key("I enjoy the clear fee breakdown")
+                .as_deref(),
             Some("positive_mild")
         );
         assert_eq!(
-            rules.sentiment_lexical_topic_key("I love the fee transparency, but I hate the charges")
+            rules
+                .sentiment_lexical_topic_key("I love the fee transparency, but I hate the charges")
                 .as_deref(),
             Some("mixed")
         );
         assert_eq!(
-            rules.sentiment_lexical_topic_key("My deposit hit early").as_deref(),
+            rules
+                .sentiment_lexical_topic_key("My deposit hit early")
+                .as_deref(),
             Some("positive_mild")
         );
         assert_eq!(
@@ -4103,7 +4305,9 @@ mod negation_tests {
             Some("positive_mild")
         );
         assert_eq!(
-            rules.sentiment_lexical_topic_key("I got paid early").as_deref(),
+            rules
+                .sentiment_lexical_topic_key("I got paid early")
+                .as_deref(),
             Some("positive_mild")
         );
         assert_eq!(
@@ -4125,15 +4329,11 @@ mod negation_tests {
                 .as_deref(),
             Some("mixed")
         );
-        assert!(!rules.sentiment_allow_forced_mixed_topic(
-            "Instant card tokenization is slick"
-        ));
+        assert!(!rules.sentiment_allow_forced_mixed_topic("Instant card tokenization is slick"));
         assert!(rules.sentiment_allow_forced_mixed_topic(
             "Instant card tokenization is slick, but I hate the fraud locks"
         ));
-        assert!(rules.sentiment_allow_forced_mixed_topic(
-            "I love the UI and I hate the fees"
-        ));
+        assert!(rules.sentiment_allow_forced_mixed_topic("I love the UI and I hate the fees"));
         // Contrast + good outcome + skepticism / friction → mixed (before single-pole lexical).
         assert_eq!(
             rules
@@ -4224,9 +4424,7 @@ mod negation_tests {
         );
         assert_eq!(
             rules
-                .sentiment_lexical_topic_key(
-                    "My deposit hit early for once. I'm not used to this."
-                )
+                .sentiment_lexical_topic_key("My deposit hit early for once. I'm not used to this.")
                 .as_deref(),
             Some("cautiously_positive")
         );
@@ -4449,7 +4647,9 @@ mod negation_tests {
             Some("cautiously_negative")
         );
         assert_eq!(
-            rules.sentiment_lexical_topic_key("I really like the new dashboard").as_deref(),
+            rules
+                .sentiment_lexical_topic_key("I really like the new dashboard")
+                .as_deref(),
             Some("positive_mild")
         );
         // Third-party crypto headlines / market copy (no first-person) → neutral or bearish, not consumer templates.
@@ -4552,7 +4752,12 @@ mod objective_fact_rules_tests {
         let rules = InferenceRulesRuntime::from_section(doc.rules);
         let h = "The 'Apple Pay' Moment for Web3: Mixin Integrates Coinbase to Make Fiat-to-Crypto Faster Than a Text Message";
         let result = rules.sentiment_lexical_topic_key(h);
-        assert_eq!(result.as_deref(), Some("positive_mild"), "Apple Pay integration should be positive_mild, got {:?}", result);
+        assert_eq!(
+            result.as_deref(),
+            Some("positive_mild"),
+            "Apple Pay integration should be positive_mild, got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -4565,7 +4770,12 @@ mod objective_fact_rules_tests {
         let rules = InferenceRulesRuntime::from_section(merged_rules);
         let h = "The 'Apple Pay' Moment for Web3: Mixin Integrates Coinbase to Make Fiat-to-Crypto Faster Than a Text Message";
         let result = rules.sentiment_lexical_topic_key(h);
-        assert_eq!(result.as_deref(), Some("positive_mild"), "Apple Pay (merged) should be positive_mild, got {:?}", result);
+        assert_eq!(
+            result.as_deref(),
+            Some("positive_mild"),
+            "Apple Pay (merged) should be positive_mild, got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -4575,7 +4785,12 @@ mod objective_fact_rules_tests {
         let rules = InferenceRulesRuntime::from_section(doc.rules);
         let h = "Wisconsin woman turns $4,400 crypto scam loss into advocacy";
         let result = rules.sentiment_lexical_topic_key(h);
-        assert_eq!(result.as_deref(), Some("mixed"), "scam loss + advocacy should be mixed, got {:?}", result);
+        assert_eq!(
+            result.as_deref(),
+            Some("mixed"),
+            "scam loss + advocacy should be mixed, got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -4583,9 +4798,15 @@ mod objective_fact_rules_tests {
         let raw = include_str!("../../data/crypto/inference_crypto.toml");
         let doc: InferenceTomlDocument = toml::from_str(raw).expect("crypto fixture");
         let rules = InferenceRulesRuntime::from_section(doc.rules);
-        let h = "A Rogue AI Agent Started Mining Crypto, Which Left Scientists Concerned - SlashGear";
+        let h =
+            "A Rogue AI Agent Started Mining Crypto, Which Left Scientists Concerned - SlashGear";
         let result = rules.sentiment_lexical_topic_key(h);
-        assert_eq!(result.as_deref(), Some("negative_mild"), "rogue AI concern should be negative_mild, got {:?}", result);
+        assert_eq!(
+            result.as_deref(),
+            Some("negative_mild"),
+            "rogue AI concern should be negative_mild, got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -4595,7 +4816,12 @@ mod objective_fact_rules_tests {
         let rules = InferenceRulesRuntime::from_section(doc.rules);
         let h = "The $46 Million Government Crypto Theft That Put Billions at Risk";
         let result = rules.sentiment_lexical_topic_key(h);
-        assert_eq!(result.as_deref(), Some("negative_strong"), "systemic theft + billions should be negative_strong, got {:?}", result);
+        assert_eq!(
+            result.as_deref(),
+            Some("negative_strong"),
+            "systemic theft + billions should be negative_strong, got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -4605,7 +4831,12 @@ mod objective_fact_rules_tests {
         let rules = InferenceRulesRuntime::from_section(doc.rules);
         let h = "Crypto hedge fund Split Capital winds down as its founder nabs new gig as an exec at stablecoin startup Plasma | Fortune";
         let result = rules.sentiment_lexical_topic_key(h);
-        assert_eq!(result.as_deref(), Some("mixed"), "winds down + nabs new gig should be mixed, got {:?}", result);
+        assert_eq!(
+            result.as_deref(),
+            Some("mixed"),
+            "winds down + nabs new gig should be mixed, got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -4615,7 +4846,12 @@ mod objective_fact_rules_tests {
         let rules = InferenceRulesRuntime::from_section(doc.rules);
         let h = "US Labor Department Proposes Opening 401(k) Plans to Crypto";
         let result = rules.sentiment_lexical_topic_key(h);
-        assert_eq!(result.as_deref(), Some("positive_mild"), "401k + crypto opening should be positive_mild, got {:?}", result);
+        assert_eq!(
+            result.as_deref(),
+            Some("positive_mild"),
+            "401k + crypto opening should be positive_mild, got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -4625,7 +4861,12 @@ mod objective_fact_rules_tests {
         let rules = InferenceRulesRuntime::from_section(doc.rules);
         let h = "Crypto Executive Misled Investors on Digital Currency, SEC Says";
         let result = rules.sentiment_lexical_topic_key(h);
-        assert_eq!(result.as_deref(), Some("negative_mild"), "misled investors should be negative_mild, got {:?}", result);
+        assert_eq!(
+            result.as_deref(),
+            Some("negative_mild"),
+            "misled investors should be negative_mild, got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -4635,7 +4876,12 @@ mod objective_fact_rules_tests {
         let rules = InferenceRulesRuntime::from_section(doc.rules);
         let h = "Crypto-powered incentive program introduced by Dallas homebuilder";
         let result = rules.sentiment_lexical_topic_key(h);
-        assert_eq!(result.as_deref(), Some("positive_mild"), "incentive program should be positive_mild, got {:?}", result);
+        assert_eq!(
+            result.as_deref(),
+            Some("positive_mild"),
+            "incentive program should be positive_mild, got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -4645,7 +4891,12 @@ mod objective_fact_rules_tests {
         let rules = InferenceRulesRuntime::from_section(doc.rules);
         let h = "Payward's $550M Bitnomial deal aims to lock up U.S. crypto derivatives plumbing";
         let result = rules.sentiment_lexical_topic_key(h);
-        assert_eq!(result.as_deref(), Some("neutral"), "M&A deal should be neutral, got {:?}", result);
+        assert_eq!(
+            result.as_deref(),
+            Some("neutral"),
+            "M&A deal should be neutral, got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -4658,11 +4909,21 @@ mod objective_fact_rules_tests {
         let rules = InferenceRulesRuntime::from_section(merged_rules);
         let h = "Payward's $550M Bitnomial deal aims to lock up U.S. crypto derivatives plumbing";
         let result = rules.sentiment_lexical_topic_key(h);
-        assert_eq!(result.as_deref(), Some("neutral"), "M&A deal (merged, raw) should be neutral, got {:?}", result);
+        assert_eq!(
+            result.as_deref(),
+            Some("neutral"),
+            "M&A deal (merged, raw) should be neutral, got {:?}",
+            result
+        );
         // Intent parser normalizes $550M → money_usd_550000000; verify the rule still fires.
         let h_norm = "payward's money_usd_550000000 bitnomial deal aims to lock up u.s. crypto derivatives plumbing";
         let result_norm = rules.sentiment_lexical_topic_key(h_norm);
-        assert_eq!(result_norm.as_deref(), Some("neutral"), "M&A deal (merged, intent-normalized) should be neutral, got {:?}", result_norm);
+        assert_eq!(
+            result_norm.as_deref(),
+            Some("neutral"),
+            "M&A deal (merged, intent-normalized) should be neutral, got {:?}",
+            result_norm
+        );
     }
 
     #[test]
@@ -4672,7 +4933,12 @@ mod objective_fact_rules_tests {
         let rules = InferenceRulesRuntime::from_section(doc.rules);
         let h = "Russia Introduces Bill To Criminalize Unregistered Crypto Services";
         let result = rules.sentiment_lexical_topic_key(h);
-        assert_eq!(result.as_deref(), Some("neutral"), "legislative bill should be neutral, got {:?}", result);
+        assert_eq!(
+            result.as_deref(),
+            Some("neutral"),
+            "legislative bill should be neutral, got {:?}",
+            result
+        );
     }
 }
 
@@ -4695,7 +4961,9 @@ mod luna_match_smoke {
         );
         // Chance is seeded; at least some seeds must ask back.
         assert!(
-            (0u64..64).any(|s| cfg.turn_taking.should_ask_back("lore_qa", "how old are you?", s)),
+            (0u64..64).any(|s| cfg
+                .turn_taking
+                .should_ask_back("lore_qa", "how old are you?", s)),
             "ask_back_chance should fire for some seeds"
         );
         assert!(

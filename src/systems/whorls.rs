@@ -1,5 +1,5 @@
-use crate::types::*;
 use crate::neuron::Neuron;
+use crate::types::*;
 use std::collections::{HashMap, HashSet};
 
 /// System 5: Whorl Detection
@@ -22,10 +22,7 @@ pub struct WhorlReport {
 
 /// Detect neurons involved in cycles within a spatial radius
 /// Uses DFS to find loops, filtered by spatial proximity
-pub fn detect_whorls(
-    neurons: &HashMap<NeuronId, Neuron>,
-    spatial_radius: f32,
-) -> Vec<WhorlReport> {
+pub fn detect_whorls(neurons: &HashMap<NeuronId, Neuron>, spatial_radius: f32) -> Vec<WhorlReport> {
     let mut reports = Vec::new();
 
     for (&start_id, _start_neuron) in neurons {
@@ -66,7 +63,15 @@ fn find_cycles_from(
     let mut visited = HashSet::new();
     visited.insert(start);
 
-    dfs_cycles(neurons, start, start, max_depth, &mut path, &mut visited, &mut cycles);
+    dfs_cycles(
+        neurons,
+        start,
+        start,
+        max_depth,
+        &mut path,
+        &mut visited,
+        &mut cycles,
+    );
 
     cycles
 }
@@ -98,7 +103,15 @@ fn dfs_cycles(
                 visited.insert(target);
                 path.push(target);
 
-                dfs_cycles(neurons, target, start, depth_remaining - 1, path, visited, cycles);
+                dfs_cycles(
+                    neurons,
+                    target,
+                    start,
+                    depth_remaining - 1,
+                    path,
+                    visited,
+                    cycles,
+                );
 
                 path.pop();
                 visited.remove(&target);

@@ -29,9 +29,7 @@
 //! |B| diagnostic measures inductive consistency: low |B| means the same
 //! geometric rule is being induced from each training example.
 
-use crate::clifford::{
-    Multivector, CL8_DIM, GRADE_OFFSETS,
-};
+use crate::clifford::{Multivector, CL8_DIM, GRADE_OFFSETS};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde::Deserialize;
@@ -96,7 +94,11 @@ struct RawTask {
 fn grid_from_raw(raw: &[Vec<u8>]) -> Grid {
     let height = raw.len();
     let width = if height > 0 { raw[0].len() } else { 0 };
-    Grid { cells: raw.to_vec(), height, width }
+    Grid {
+        cells: raw.to_vec(),
+        height,
+        width,
+    }
 }
 
 pub fn load_arc_tasks(dir: &Path) -> Vec<ArcTask> {
@@ -111,8 +113,14 @@ pub fn load_arc_tasks(dir: &Path) -> Vec<ArcTask> {
 
     for entry in &entries {
         let path = entry.path();
-        if path.extension().map_or(true, |e| e != "json") { continue; }
-        let id = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        if path.extension().map_or(true, |e| e != "json") {
+            continue;
+        }
+        let id = path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let data = match std::fs::read_to_string(&path) {
             Ok(d) => d,
             Err(_) => continue,
@@ -122,14 +130,22 @@ pub fn load_arc_tasks(dir: &Path) -> Vec<ArcTask> {
             Err(_) => continue,
         };
 
-        let train = raw.train.iter().map(|p| ArcExample {
-            input: grid_from_raw(&p.input),
-            output: grid_from_raw(&p.output),
-        }).collect();
-        let test = raw.test.iter().map(|p| ArcExample {
-            input: grid_from_raw(&p.input),
-            output: grid_from_raw(&p.output),
-        }).collect();
+        let train = raw
+            .train
+            .iter()
+            .map(|p| ArcExample {
+                input: grid_from_raw(&p.input),
+                output: grid_from_raw(&p.output),
+            })
+            .collect();
+        let test = raw
+            .test
+            .iter()
+            .map(|p| ArcExample {
+                input: grid_from_raw(&p.input),
+                output: grid_from_raw(&p.output),
+            })
+            .collect();
 
         tasks.push(ArcTask { id, train, test });
     }
@@ -152,10 +168,12 @@ fn color_vector(color: u8) -> Multivector {
         0 => Multivector::zero(),
         c @ 1..=8 => {
             let mut v = [0.0f32; 8];
-            v[0] = 1.0;                        // timelike: color IS present
-            v[(c - 1) as usize] += 0.3;        // spacelike tag for this color
+            v[0] = 1.0; // timelike: color IS present
+            v[(c - 1) as usize] += 0.3; // spacelike tag for this color
             let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-            for x in v.iter_mut() { *x /= norm; }
+            for x in v.iter_mut() {
+                *x /= norm;
+            }
             Multivector::vector(&v)
         }
         9 => {
@@ -164,7 +182,9 @@ fn color_vector(color: u8) -> Multivector {
             v[1] = 0.15;
             v[2] = 0.15;
             let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-            for x in v.iter_mut() { *x /= norm; }
+            for x in v.iter_mut() {
+                *x /= norm;
+            }
             Multivector::vector(&v)
         }
         _ => Multivector::zero(),
@@ -193,13 +213,29 @@ fn color_vector_full(color: u8) -> Multivector {
 }
 
 fn component_dot(a: &Multivector, b: &Multivector) -> f32 {
-    a.components.iter().zip(b.components.iter()).map(|(x, y)| x * y).sum()
+    a.components
+        .iter()
+        .zip(b.components.iter())
+        .map(|(x, y)| x * y)
+        .sum()
 }
 
 /// Cosine similarity of full 256-d Clifford components (linear proxy for rule alignment).
 pub fn multivector_cosine_similarity(a: &Multivector, b: &Multivector) -> f32 {
-    let na: f32 = a.components.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
-    let nb: f32 = b.components.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+    let na: f32 = a
+        .components
+        .iter()
+        .map(|x| x * x)
+        .sum::<f32>()
+        .sqrt()
+        .max(1e-8);
+    let nb: f32 = b
+        .components
+        .iter()
+        .map(|x| x * x)
+        .sum::<f32>()
+        .sqrt()
+        .max(1e-8);
     component_dot(a, b) / (na * nb)
 }
 
@@ -233,7 +269,9 @@ fn decode_color(mv: &Multivector) -> u8 {
 pub fn cell_get(grid: &Grid, r: isize, c: isize) -> u8 {
     if r >= 0 && r < grid.height as isize && c >= 0 && c < grid.width as isize {
         grid.cells[r as usize][c as usize]
-    } else { 0 }
+    } else {
+        0
+    }
 }
 
 // ─── Strategy A: Color rotor ───────────────────────────────────────────────
@@ -249,7 +287,9 @@ fn solve_color_map(task: &ArcTask) -> ([u8; NUM_COLORS], f32) {
     let mut counts = [0u32; NUM_COLORS];
 
     for ex in &task.train {
-        if ex.input.height != ex.output.height || ex.input.width != ex.output.width { continue; }
+        if ex.input.height != ex.output.height || ex.input.width != ex.output.width {
+            continue;
+        }
         for r in 0..ex.input.height {
             for c in 0..ex.input.width {
                 let in_c = ex.input.cells[r][c] as usize;
@@ -262,28 +302,45 @@ fn solve_color_map(task: &ArcTask) -> ([u8; NUM_COLORS], f32) {
 
     let mut color_map = [0u8; NUM_COLORS];
     for c in 0..NUM_COLORS {
-        color_map[c] = if counts[c] > 0 { decode_color(&output_sums[c]) } else { c as u8 };
+        color_map[c] = if counts[c] > 0 {
+            decode_color(&output_sums[c])
+        } else {
+            c as u8
+        };
     }
 
     let (mut correct, mut total) = (0usize, 0usize);
     for ex in &task.train {
-        if ex.input.height != ex.output.height || ex.input.width != ex.output.width { continue; }
+        if ex.input.height != ex.output.height || ex.input.width != ex.output.width {
+            continue;
+        }
         for r in 0..ex.input.height {
             for c in 0..ex.input.width {
-                if color_map[ex.input.cells[r][c] as usize] == ex.output.cells[r][c] { correct += 1; }
+                if color_map[ex.input.cells[r][c] as usize] == ex.output.cells[r][c] {
+                    correct += 1;
+                }
                 total += 1;
             }
         }
     }
 
-    (color_map, if total > 0 { correct as f32 / total as f32 } else { 0.0 })
+    (
+        color_map,
+        if total > 0 {
+            correct as f32 / total as f32
+        } else {
+            0.0
+        },
+    )
 }
 
 fn apply_color_map(grid: &Grid, color_map: &[u8; NUM_COLORS]) -> Grid {
     Grid {
-        cells: grid.cells.iter().map(|row|
-            row.iter().map(|&c| color_map[c as usize]).collect()
-        ).collect(),
+        cells: grid
+            .cells
+            .iter()
+            .map(|row| row.iter().map(|&c| color_map[c as usize]).collect())
+            .collect(),
         height: grid.height,
         width: grid.width,
     }
@@ -312,9 +369,14 @@ fn cell_feature(grid: &Grid, r: usize, c: usize) -> Multivector {
     }
 
     const OFFSETS: [(isize, isize); 8] = [
-        (-1, -1), (-1, 0), (-1, 1),
-        (0, -1),           (0, 1),
-        (1, -1),  (1, 0),  (1, 1),
+        (-1, -1),
+        (-1, 0),
+        (-1, 1),
+        (0, -1),
+        (0, 1),
+        (1, -1),
+        (1, 0),
+        (1, 1),
     ];
 
     for (i, &(dr, dc)) in OFFSETS.iter().enumerate() {
@@ -345,8 +407,11 @@ fn classify_centroid(centroids: &[Multivector], feat: &Multivector) -> u8 {
 }
 
 fn solve_cell_centroid(task: &ArcTask) -> Option<(Vec<Multivector>, f32)> {
-    if !task.train.iter().all(|ex|
-        ex.input.height == ex.output.height && ex.input.width == ex.output.width) {
+    if !task
+        .train
+        .iter()
+        .all(|ex| ex.input.height == ex.output.height && ex.input.width == ex.output.width)
+    {
         return None;
     }
 
@@ -364,9 +429,15 @@ fn solve_cell_centroid(task: &ArcTask) -> Option<(Vec<Multivector>, f32)> {
         }
     }
 
-    let centroids: Vec<Multivector> = sums.iter().zip(counts.iter())
+    let centroids: Vec<Multivector> = sums
+        .iter()
+        .zip(counts.iter())
         .map(|(sum, &count)| {
-            if count > 0 { sum.scale(1.0 / count as f32) } else { Multivector::zero() }
+            if count > 0 {
+                sum.scale(1.0 / count as f32)
+            } else {
+                Multivector::zero()
+            }
         })
         .collect();
 
@@ -375,13 +446,22 @@ fn solve_cell_centroid(task: &ArcTask) -> Option<(Vec<Multivector>, f32)> {
         for r in 0..ex.input.height {
             for c in 0..ex.input.width {
                 let feat = cell_feature(&ex.input, r, c);
-                if classify_centroid(&centroids, &feat) == ex.output.cells[r][c] { correct += 1; }
+                if classify_centroid(&centroids, &feat) == ex.output.cells[r][c] {
+                    correct += 1;
+                }
                 total += 1;
             }
         }
     }
 
-    Some((centroids, if total > 0 { correct as f32 / total as f32 } else { 0.0 }))
+    Some((
+        centroids,
+        if total > 0 {
+            correct as f32 / total as f32
+        } else {
+            0.0
+        },
+    ))
 }
 
 fn apply_cell_centroid(centroids: &[Multivector], grid: &Grid) -> Grid {
@@ -392,7 +472,11 @@ fn apply_cell_centroid(centroids: &[Multivector], grid: &Grid) -> Grid {
             cells[r][c] = classify_centroid(centroids, &feat);
         }
     }
-    Grid { cells, height: grid.height, width: grid.width }
+    Grid {
+        cells,
+        height: grid.height,
+        width: grid.width,
+    }
 }
 
 // ─── Strategy C: Adjacency Clifford score (same-size only) ─────────────────
@@ -461,7 +545,9 @@ pub fn task_color_palette(task: &ArcTask) -> Vec<u8> {
             }
         }
     }
-    let mut p: Vec<u8> = (0..NUM_COLORS as u8).filter(|&c| seen[c as usize]).collect();
+    let mut p: Vec<u8> = (0..NUM_COLORS as u8)
+        .filter(|&c| seen[c as usize])
+        .collect();
     if p.is_empty() {
         p.extend(0..NUM_COLORS as u8);
     }
@@ -479,9 +565,9 @@ fn palette_state_count(k: usize, n_cells: usize) -> Option<u128> {
 }
 
 fn build_adj_centroids(task: &ArcTask, h: usize, w: usize) -> Option<Vec<Multivector>> {
-    if !task.train.iter().all(|ex|
-        ex.input.height == h && ex.input.width == w
-            && ex.output.height == h && ex.output.width == w) {
+    if !task.train.iter().all(|ex| {
+        ex.input.height == h && ex.input.width == w && ex.output.height == h && ex.output.width == w
+    }) {
         return None;
     }
     let edges = grid_edges(h, w);
@@ -558,7 +644,11 @@ fn flat_to_grid(flat: &[u8], h: usize, w: usize) -> Grid {
             cells[r][c] = flat[r * w + c];
         }
     }
-    Grid { cells, height: h, width: w }
+    Grid {
+        cells,
+        height: h,
+        width: w,
+    }
 }
 
 fn adjacency_search_best(
@@ -615,7 +705,9 @@ fn adjacency_search_best(
 }
 
 fn task_rng_seed(task: &ArcTask) -> u64 {
-    task.id.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))
+    task.id
+        .bytes()
+        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))
 }
 
 fn solve_adjacency_train_acc(task: &ArcTask, h: usize, w: usize, centroids: &[Multivector]) -> f32 {
@@ -629,18 +721,15 @@ fn solve_adjacency_train_acc(task: &ArcTask, h: usize, w: usize, centroids: &[Mu
     let k = palette.len().max(1);
     let states = palette_state_count(k, n);
     let use_exhaustive = states.map_or(false, |p| p > 0 && p <= MAX_EXHAUSTIVE_ASSIGNMENTS);
-    let samples = if use_exhaustive { 0 } else { ADJ_SEARCH_SAMPLES_TRAIN };
+    let samples = if use_exhaustive {
+        0
+    } else {
+        ADJ_SEARCH_SAMPLES_TRAIN
+    };
 
     let (mut correct, mut total) = (0usize, 0usize);
     for ex in &task.train {
-        let pred = adjacency_search_best(
-            &ex.input,
-            centroids,
-            &edges,
-            &palette,
-            samples,
-            &mut rng,
-        );
+        let pred = adjacency_search_best(&ex.input, centroids, &edges, &palette, samples, &mut rng);
         let (c, t) = grid_matches(&pred, &ex.output);
         correct += c;
         total += t;
@@ -669,7 +758,9 @@ fn chebyshev_border_dist(r: usize, c: usize, h: usize, w: usize) -> usize {
 fn detect_concentric_rings(grid: &Grid) -> Option<Vec<u8>> {
     let h = grid.height;
     let w = grid.width;
-    if h == 0 || w == 0 { return None; }
+    if h == 0 || w == 0 {
+        return None;
+    }
     let max_depth = chebyshev_border_dist(h / 2, w / 2, h, w);
 
     let mut ring_colors: Vec<Option<u8>> = vec![None; max_depth + 1];
@@ -696,10 +787,18 @@ fn apply_ring_reversal(grid: &Grid, reversed_colors: &[u8]) -> Grid {
     for r in 0..h {
         for c in 0..w {
             let d = chebyshev_border_dist(r, c, h, w);
-            cells[r][c] = if d < reversed_colors.len() { reversed_colors[d] } else { 0 };
+            cells[r][c] = if d < reversed_colors.len() {
+                reversed_colors[d]
+            } else {
+                0
+            };
         }
     }
-    Grid { cells, height: h, width: w }
+    Grid {
+        cells,
+        height: h,
+        width: w,
+    }
 }
 
 fn solve_ring_reversal(task: &ArcTask) -> Option<f32> {
@@ -709,10 +808,14 @@ fn solve_ring_reversal(task: &ArcTask) -> Option<f32> {
         }
         let in_rings = detect_concentric_rings(&ex.input)?;
         let out_rings = detect_concentric_rings(&ex.output)?;
-        if in_rings.len() != out_rings.len() { return None; }
+        if in_rings.len() != out_rings.len() {
+            return None;
+        }
         let n = in_rings.len();
         for d in 0..n {
-            if in_rings[d] != out_rings[n - 1 - d] { return None; }
+            if in_rings[d] != out_rings[n - 1 - d] {
+                return None;
+            }
         }
     }
 
@@ -721,13 +824,19 @@ fn solve_ring_reversal(task: &ArcTask) -> Option<f32> {
         let in_rings = detect_concentric_rings(&ex.input).unwrap();
         let n = in_rings.len();
         let mut reversed = vec![0u8; n];
-        for d in 0..n { reversed[d] = in_rings[n - 1 - d]; }
+        for d in 0..n {
+            reversed[d] = in_rings[n - 1 - d];
+        }
         let pred = apply_ring_reversal(&ex.input, &reversed);
         let (c, t) = grid_matches(&pred, &ex.output);
         correct += c;
         total += t;
     }
-    Some(if total > 0 { correct as f32 / total as f32 } else { 0.0 })
+    Some(if total > 0 {
+        correct as f32 / total as f32
+    } else {
+        0.0
+    })
 }
 
 fn apply_ring_reversal_to_test(grid: &Grid) -> Grid {
@@ -737,7 +846,9 @@ fn apply_ring_reversal_to_test(grid: &Grid) -> Grid {
     };
     let n = rings.len();
     let mut reversed = vec![0u8; n];
-    for d in 0..n { reversed[d] = rings[n - 1 - d]; }
+    for d in 0..n {
+        reversed[d] = rings[n - 1 - d];
+    }
     apply_ring_reversal(grid, &reversed)
 }
 
@@ -748,11 +859,15 @@ fn apply_ring_reversal_to_test(grid: &Grid) -> Grid {
 // by learning a depth→color map from training examples.
 
 fn is_uniform_grid(grid: &Grid) -> Option<u8> {
-    if grid.height == 0 || grid.width == 0 { return None; }
+    if grid.height == 0 || grid.width == 0 {
+        return None;
+    }
     let c0 = grid.cells[0][0];
     for row in &grid.cells {
         for &c in row {
-            if c != c0 { return None; }
+            if c != c0 {
+                return None;
+            }
         }
     }
     Some(c0)
@@ -761,7 +876,9 @@ fn is_uniform_grid(grid: &Grid) -> Option<u8> {
 fn learn_depth_color_map(task: &ArcTask) -> Option<(u8, Vec<(usize, u8)>)> {
     let uniform_color = is_uniform_grid(&task.train[0].input)?;
     for ex in &task.train {
-        if is_uniform_grid(&ex.input) != Some(uniform_color) { return None; }
+        if is_uniform_grid(&ex.input) != Some(uniform_color) {
+            return None;
+        }
         if ex.input.height != ex.output.height || ex.input.width != ex.output.width {
             return None;
         }
@@ -782,7 +899,9 @@ fn learn_depth_color_map(task: &ArcTask) -> Option<(u8, Vec<(usize, u8)>)> {
                 let relative_d = if max_d > 0 { d } else { 0 };
 
                 if let Some(entry) = depth_map.iter().find(|&&(dd, _)| dd == relative_d) {
-                    if entry.1 != out_c { return None; }
+                    if entry.1 != out_c {
+                        return None;
+                    }
                 } else {
                     depth_map.push((relative_d, out_c));
                 }
@@ -793,7 +912,9 @@ fn learn_depth_color_map(task: &ArcTask) -> Option<(u8, Vec<(usize, u8)>)> {
     depth_map.sort_by_key(|&(d, _)| d);
     depth_map.dedup();
 
-    if depth_map.len() < 2 { return None; }
+    if depth_map.len() < 2 {
+        return None;
+    }
 
     let period = depth_map.len();
     let (mut correct, mut total) = (0usize, 0usize);
@@ -805,7 +926,9 @@ fn learn_depth_color_map(task: &ArcTask) -> Option<(u8, Vec<(usize, u8)>)> {
                 let d = chebyshev_border_dist(r, c, h, w);
                 let idx = d % period;
                 let pred_c = depth_map.get(idx).map(|&(_, c)| c).unwrap_or(uniform_color);
-                if pred_c == ex.output.cells[r][c] { correct += 1; }
+                if pred_c == ex.output.cells[r][c] {
+                    correct += 1;
+                }
                 total += 1;
             }
         }
@@ -827,10 +950,17 @@ fn apply_depth_color_map(grid: &Grid, depth_map: &[(usize, u8)], default_color: 
         for c in 0..w {
             let d = chebyshev_border_dist(r, c, h, w);
             let idx = d % period;
-            cells[r][c] = depth_map.get(idx).map(|&(_, col)| col).unwrap_or(default_color);
+            cells[r][c] = depth_map
+                .get(idx)
+                .map(|&(_, col)| col)
+                .unwrap_or(default_color);
         }
     }
-    Grid { cells, height: h, width: w }
+    Grid {
+        cells,
+        height: h,
+        width: w,
+    }
 }
 
 // ─── Strategy F: Ring color cycle ──────────────────────────────────────────
@@ -846,15 +976,22 @@ fn solve_ring_color_cycle(task: &ArcTask) -> Option<f32> {
         }
         let in_rings = detect_concentric_rings(&ex.input)?;
         let out_rings = detect_concentric_rings(&ex.output)?;
-        if in_rings.len() != out_rings.len() { return None; }
+        if in_rings.len() != out_rings.len() {
+            return None;
+        }
 
         let mut seen = [false; NUM_COLORS];
         let mut unique: Vec<u8> = Vec::new();
         for &c in &in_rings {
-            if !seen[c as usize] { seen[c as usize] = true; unique.push(c); }
+            if !seen[c as usize] {
+                seen[c as usize] = true;
+                unique.push(c);
+            }
         }
         let k = unique.len();
-        if k < 2 { return None; }
+        if k < 2 {
+            return None;
+        }
 
         let mut perm = [0u8; NUM_COLORS];
         for (i, &c) in unique.iter().enumerate() {
@@ -862,7 +999,9 @@ fn solve_ring_color_cycle(task: &ArcTask) -> Option<f32> {
         }
 
         for (&ic, &oc) in in_rings.iter().zip(out_rings.iter()) {
-            if perm[ic as usize] != oc { return None; }
+            if perm[ic as usize] != oc {
+                return None;
+            }
         }
     }
 
@@ -876,7 +1015,11 @@ fn solve_ring_color_cycle(task: &ArcTask) -> Option<f32> {
             return None;
         }
     }
-    Some(if total > 0 { correct as f32 / total as f32 } else { 0.0 })
+    Some(if total > 0 {
+        correct as f32 / total as f32
+    } else {
+        0.0
+    })
 }
 
 fn apply_ring_color_cycle(grid: &Grid) -> Option<Grid> {
@@ -884,10 +1027,15 @@ fn apply_ring_color_cycle(grid: &Grid) -> Option<Grid> {
     let mut seen = [false; NUM_COLORS];
     let mut unique: Vec<u8> = Vec::new();
     for &c in &rings {
-        if !seen[c as usize] { seen[c as usize] = true; unique.push(c); }
+        if !seen[c as usize] {
+            seen[c as usize] = true;
+            unique.push(c);
+        }
     }
     let k = unique.len();
-    if k < 2 { return None; }
+    if k < 2 {
+        return None;
+    }
 
     let mut perm = [0u8; NUM_COLORS];
     for (i, &c) in unique.iter().enumerate() {
@@ -902,7 +1050,11 @@ fn apply_ring_color_cycle(grid: &Grid) -> Option<Grid> {
             cells[r][c] = perm[grid.cells[r][c] as usize];
         }
     }
-    Some(Grid { cells, height: h, width: w })
+    Some(Grid {
+        cells,
+        height: h,
+        width: w,
+    })
 }
 
 // ─── Strategy G: Diagonal X from special cell ──────────────────────────────
@@ -913,16 +1065,22 @@ fn apply_ring_color_cycle(grid: &Grid) -> Option<Grid> {
 fn find_special_cell(grid: &Grid) -> Option<(u8, usize, usize, u8)> {
     let h = grid.height;
     let w = grid.width;
-    if h == 0 || w == 0 { return None; }
+    if h == 0 || w == 0 {
+        return None;
+    }
 
     let mut counts = [0u32; NUM_COLORS];
     for row in &grid.cells {
-        for &c in row { counts[c as usize] += 1; }
+        for &c in row {
+            counts[c as usize] += 1;
+        }
     }
 
     let total = (h * w) as u32;
     let bg = counts.iter().enumerate().max_by_key(|&(_, &cnt)| cnt)?.0 as u8;
-    if counts[bg as usize] != total - 1 { return None; }
+    if counts[bg as usize] != total - 1 {
+        return None;
+    }
 
     for r in 0..h {
         for c in 0..w {
@@ -945,8 +1103,14 @@ fn solve_diagonal_x(task: &ArcTask) -> Option<f32> {
             for c in 0..ex.output.width {
                 let on_diag = (r as isize - sr as isize).unsigned_abs()
                     == (c as isize - sc as isize).unsigned_abs();
-                let expected = if on_diag { special } else { ex.input.cells[r][c] };
-                if ex.output.cells[r][c] != expected { return None; }
+                let expected = if on_diag {
+                    special
+                } else {
+                    ex.input.cells[r][c]
+                };
+                if ex.output.cells[r][c] != expected {
+                    return None;
+                }
             }
         }
     }
@@ -958,7 +1122,11 @@ fn solve_diagonal_x(task: &ArcTask) -> Option<f32> {
         correct += c;
         total += t;
     }
-    Some(if total > 0 { correct as f32 / total as f32 } else { 0.0 })
+    Some(if total > 0 {
+        correct as f32 / total as f32
+    } else {
+        0.0
+    })
 }
 
 fn apply_diagonal_x(grid: &Grid) -> Option<Grid> {
@@ -975,7 +1143,11 @@ fn apply_diagonal_x(grid: &Grid) -> Option<Grid> {
             }
         }
     }
-    Some(Grid { cells, height: h, width: w })
+    Some(Grid {
+        cells,
+        height: h,
+        width: w,
+    })
 }
 
 // ─── Strategy H: Clockwise spiral fill ─────────────────────────────────────
@@ -996,19 +1168,33 @@ fn spiral_fill(h: usize, w: usize, color_a: u8, color_b: u8) -> Grid {
         let left = ring;
         let bottom = if h > ring { h - 1 - ring } else { break };
         let right = if w > ring { w - 1 - ring } else { break };
-        if top > bottom || left > right { break; }
+        if top > bottom || left > right {
+            break;
+        }
 
         let mut path: Vec<(usize, usize)> = Vec::new();
 
         if top == bottom {
-            for c in left..=right { path.push((top, c)); }
+            for c in left..=right {
+                path.push((top, c));
+            }
         } else if left == right {
-            for r in top..=bottom { path.push((r, left)); }
+            for r in top..=bottom {
+                path.push((r, left));
+            }
         } else {
-            for c in left..=right { path.push((top, c)); }
-            for r in (top + 1)..=bottom { path.push((r, right)); }
-            for c in (left..right).rev() { path.push((bottom, c)); }
-            for r in ((top + 1)..bottom).rev() { path.push((r, left)); }
+            for c in left..=right {
+                path.push((top, c));
+            }
+            for r in (top + 1)..=bottom {
+                path.push((r, right));
+            }
+            for c in (left..right).rev() {
+                path.push((bottom, c));
+            }
+            for r in ((top + 1)..bottom).rev() {
+                path.push((r, left));
+            }
         }
 
         let n = path.len();
@@ -1016,20 +1202,30 @@ fn spiral_fill(h: usize, w: usize, color_a: u8, color_b: u8) -> Grid {
         let suppress = is_last && n <= 4 && max_rings % 2 == 1;
 
         for (i, &(r, c)) in path.iter().enumerate() {
-            cells[r][c] = if n == 1 || suppress || i < n - 1 { cur } else { alt };
+            cells[r][c] = if n == 1 || suppress || i < n - 1 {
+                cur
+            } else {
+                alt
+            };
         }
 
         std::mem::swap(&mut cur, &mut alt);
         ring += 1;
     }
 
-    Grid { cells, height: h, width: w }
+    Grid {
+        cells,
+        height: h,
+        width: w,
+    }
 }
 
 fn detect_spiral_fill(task: &ArcTask) -> Option<(u8, u8)> {
     let input_color = is_uniform_grid(&task.train[0].input)?;
     for ex in &task.train {
-        if is_uniform_grid(&ex.input) != Some(input_color) { return None; }
+        if is_uniform_grid(&ex.input) != Some(input_color) {
+            return None;
+        }
         if ex.input.height != ex.output.height || ex.input.width != ex.output.width {
             return None;
         }
@@ -1041,16 +1237,23 @@ fn detect_spiral_fill(task: &ArcTask) -> Option<(u8, u8)> {
         let mut other = None;
         for row in &first_out.cells {
             for &c in row {
-                if c != color_a { other = Some(c); break; }
+                if c != color_a {
+                    other = Some(c);
+                    break;
+                }
             }
-            if other.is_some() { break; }
+            if other.is_some() {
+                break;
+            }
         }
         other?
     };
 
     for ex in &task.train {
         let pred = spiral_fill(ex.output.height, ex.output.width, color_a, color_b);
-        if !grid_exact_match(&pred, &ex.output) { return None; }
+        if !grid_exact_match(&pred, &ex.output) {
+            return None;
+        }
     }
 
     Some((color_a, color_b))
@@ -1078,9 +1281,15 @@ impl GridObject {
         let c: f32 = self.pixels.iter().map(|&(_, c)| c as f32).sum::<f32>() / n;
         (r, c)
     }
-    fn size(&self) -> usize { self.pixels.len() }
-    pub fn bbox_h(&self) -> usize { self.max_r - self.min_r + 1 }
-    pub fn bbox_w(&self) -> usize { self.max_c - self.min_c + 1 }
+    fn size(&self) -> usize {
+        self.pixels.len()
+    }
+    pub fn bbox_h(&self) -> usize {
+        self.max_r - self.min_r + 1
+    }
+    pub fn bbox_w(&self) -> usize {
+        self.max_c - self.min_c + 1
+    }
 }
 
 pub fn find_objects(grid: &Grid, background: u8) -> Vec<GridObject> {
@@ -1091,7 +1300,9 @@ pub fn find_objects(grid: &Grid, background: u8) -> Vec<GridObject> {
 
     for r in 0..h {
         for c in 0..w {
-            if visited[r][c] || grid.cells[r][c] == background { continue; }
+            if visited[r][c] || grid.cells[r][c] == background {
+                continue;
+            }
             let color = grid.cells[r][c];
             let mut pixels = Vec::new();
             let mut stack = vec![(r, c)];
@@ -1117,7 +1328,14 @@ pub fn find_objects(grid: &Grid, background: u8) -> Vec<GridObject> {
             let min_c = pixels.iter().map(|&(_, c)| c).min().unwrap();
             let max_c = pixels.iter().map(|&(_, c)| c).max().unwrap();
 
-            objects.push(GridObject { color, pixels, min_r, max_r, min_c, max_c });
+            objects.push(GridObject {
+                color,
+                pixels,
+                min_r,
+                max_r,
+                min_c,
+                max_c,
+            });
         }
     }
     objects
@@ -1126,9 +1344,16 @@ pub fn find_objects(grid: &Grid, background: u8) -> Vec<GridObject> {
 pub fn most_common_color(grid: &Grid) -> u8 {
     let mut counts = [0u32; NUM_COLORS];
     for row in &grid.cells {
-        for &c in row { counts[c as usize] += 1; }
+        for &c in row {
+            counts[c as usize] += 1;
+        }
     }
-    counts.iter().enumerate().max_by_key(|&(_, &cnt)| cnt).map(|(i, _)| i as u8).unwrap_or(0)
+    counts
+        .iter()
+        .enumerate()
+        .max_by_key(|&(_, &cnt)| cnt)
+        .map(|(i, _)| i as u8)
+        .unwrap_or(0)
 }
 
 // ─── Strategy J: Object-level encoding and rule extraction ─────────────────
@@ -1142,7 +1367,9 @@ fn encode_object_mv(obj: &GridObject, h: usize, w: usize) -> Multivector {
     let mut mv = Multivector::zero();
     let cv = color_vector_full(obj.color);
     let g1 = GRADE_OFFSETS[1];
-    for i in 0..8 { mv.components[g1 + i] = cv.components[g1 + i]; }
+    for i in 0..8 {
+        mv.components[g1 + i] = cv.components[g1 + i];
+    }
 
     let (cr, cc) = obj.centroid();
     let nr = if h > 1 { cr / (h - 1) as f32 } else { 0.5 };
@@ -1168,7 +1395,9 @@ fn match_objects_by_color<'a>(
         let mut best_j = None;
         let mut best_dist = f32::MAX;
         for (j, out_obj) in out_objs.iter().enumerate() {
-            if used_out[j] || out_obj.color != in_obj.color { continue; }
+            if used_out[j] || out_obj.color != in_obj.color {
+                continue;
+            }
             let (ir, ic) = in_obj.centroid();
             let (or, oc) = out_obj.centroid();
             let dist = (ir - or).powi(2) + (ic - oc).powi(2);
@@ -1186,11 +1415,16 @@ fn match_objects_by_color<'a>(
 }
 
 fn solve_object_positional(task: &ArcTask) -> Option<f32> {
-    if !task.train.iter().all(|ex|
-        ex.input.height == ex.output.height && ex.input.width == ex.output.width) {
+    if !task
+        .train
+        .iter()
+        .all(|ex| ex.input.height == ex.output.height && ex.input.width == ex.output.width)
+    {
         return None;
     }
-    if task.train.is_empty() { return None; }
+    if task.train.is_empty() {
+        return None;
+    }
 
     let bg = most_common_color(&task.train[0].input);
 
@@ -1199,32 +1433,51 @@ fn solve_object_positional(task: &ArcTask) -> Option<f32> {
     for ex in &task.train {
         let in_objs = find_objects(&ex.input, bg);
         let out_objs = find_objects(&ex.output, bg);
-        if in_objs.is_empty() || out_objs.is_empty() { return None; }
+        if in_objs.is_empty() || out_objs.is_empty() {
+            return None;
+        }
 
         let matched = match_objects_by_color(&in_objs, &out_objs);
-        if matched.is_empty() { return None; }
+        if matched.is_empty() {
+            return None;
+        }
 
-        let mut deltas: Vec<(u8, isize, isize)> = matched.iter().map(|(inp, out)| {
-            let (ir, ic) = inp.centroid();
-            let (or, oc) = out.centroid();
-            (inp.color, (or - ir).round() as isize, (oc - ic).round() as isize)
-        }).collect();
+        let mut deltas: Vec<(u8, isize, isize)> = matched
+            .iter()
+            .map(|(inp, out)| {
+                let (ir, ic) = inp.centroid();
+                let (or, oc) = out.centroid();
+                (
+                    inp.color,
+                    (or - ir).round() as isize,
+                    (oc - ic).round() as isize,
+                )
+            })
+            .collect();
         deltas.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
 
         match &consistent_deltas {
             None => consistent_deltas = Some(deltas),
             Some(prev) => {
-                if prev.len() != deltas.len() { return None; }
+                if prev.len() != deltas.len() {
+                    return None;
+                }
                 for (p, d) in prev.iter().zip(deltas.iter()) {
-                    if p != d { return None; }
+                    if p != d {
+                        return None;
+                    }
                 }
             }
         }
     }
 
     let deltas = consistent_deltas?;
-    if deltas.is_empty() { return None; }
-    if deltas.iter().all(|&(_, dr, dc)| dr == 0 && dc == 0) { return None; }
+    if deltas.is_empty() {
+        return None;
+    }
+    if deltas.iter().all(|&(_, dr, dc)| dr == 0 && dc == 0) {
+        return None;
+    }
 
     let (mut correct, mut total) = (0usize, 0usize);
     for ex in &task.train {
@@ -1248,12 +1501,16 @@ fn apply_object_positional(grid: &Grid, bg: u8, deltas: &[(u8, isize, isize)]) -
 
     for row in &grid.cells {
         for (c_idx, &cell) in row.iter().enumerate() {
-            if cell == bg { cells[c_idx / w][c_idx % w] = bg; }
+            if cell == bg {
+                cells[c_idx / w][c_idx % w] = bg;
+            }
         }
     }
     for r in 0..h {
         for c in 0..w {
-            if grid.cells[r][c] == bg { cells[r][c] = bg; }
+            if grid.cells[r][c] == bg {
+                cells[r][c] = bg;
+            }
         }
     }
 
@@ -1275,7 +1532,11 @@ fn apply_object_positional(grid: &Grid, bg: u8, deltas: &[(u8, isize, isize)]) -
         }
     }
 
-    Grid { cells, height: h, width: w }
+    Grid {
+        cells,
+        height: h,
+        width: w,
+    }
 }
 
 // ─── Strategy K: Object color change ───────────────────────────────────────
@@ -1284,11 +1545,16 @@ fn apply_object_positional(grid: &Grid, bg: u8, deltas: &[(u8, isize, isize)]) -
 // learn the color mapping, apply to test.
 
 fn solve_object_color_change(task: &ArcTask) -> Option<f32> {
-    if !task.train.iter().all(|ex|
-        ex.input.height == ex.output.height && ex.input.width == ex.output.width) {
+    if !task
+        .train
+        .iter()
+        .all(|ex| ex.input.height == ex.output.height && ex.input.width == ex.output.width)
+    {
         return None;
     }
-    if task.train.is_empty() { return None; }
+    if task.train.is_empty() {
+        return None;
+    }
 
     let bg = most_common_color(&task.train[0].input);
     let mut color_map = [None::<u8>; NUM_COLORS];
@@ -1347,7 +1613,11 @@ fn apply_object_color_map(grid: &Grid, cmap: &[u8; NUM_COLORS]) -> Grid {
             *cell = cmap[*cell as usize];
         }
     }
-    Grid { cells, height: grid.height, width: grid.width }
+    Grid {
+        cells,
+        height: grid.height,
+        width: grid.width,
+    }
 }
 
 // ─── Strategy M: L-shape diagonal extension ────────────────────────────────
@@ -1357,8 +1627,12 @@ fn apply_object_color_map(grid: &Grid, cmap: &[u8; NUM_COLORS]) -> Grid {
 // away from the elbow, extending to the grid edge.
 
 fn is_l_shape(obj: &GridObject) -> Option<((usize, usize), (isize, isize))> {
-    if obj.pixels.len() != 3 { return None; }
-    if obj.bbox_h() != 2 || obj.bbox_w() != 2 { return None; }
+    if obj.pixels.len() != 3 {
+        return None;
+    }
+    if obj.bbox_h() != 2 || obj.bbox_w() != 2 {
+        return None;
+    }
 
     let corners = [
         (obj.min_r, obj.min_c),
@@ -1376,8 +1650,16 @@ fn is_l_shape(obj: &GridObject) -> Option<((usize, usize), (isize, isize))> {
     }
     let (mr, mc) = missing?;
 
-    let elbow_r = if mr == obj.min_r { obj.max_r } else { obj.min_r };
-    let elbow_c = if mc == obj.min_c { obj.max_c } else { obj.min_c };
+    let elbow_r = if mr == obj.min_r {
+        obj.max_r
+    } else {
+        obj.min_r
+    };
+    let elbow_c = if mc == obj.min_c {
+        obj.max_c
+    } else {
+        obj.min_c
+    };
     let dr = mr as isize - elbow_r as isize;
     let dc = mc as isize - elbow_c as isize;
 
@@ -1385,11 +1667,16 @@ fn is_l_shape(obj: &GridObject) -> Option<((usize, usize), (isize, isize))> {
 }
 
 fn solve_l_diagonal(task: &ArcTask) -> Option<f32> {
-    if !task.train.iter().all(|ex|
-        ex.input.height == ex.output.height && ex.input.width == ex.output.width) {
+    if !task
+        .train
+        .iter()
+        .all(|ex| ex.input.height == ex.output.height && ex.input.width == ex.output.width)
+    {
         return None;
     }
-    if task.train.is_empty() { return None; }
+    if task.train.is_empty() {
+        return None;
+    }
 
     let (mut correct, mut total) = (0usize, 0usize);
     for ex in &task.train {
@@ -1398,14 +1685,22 @@ fn solve_l_diagonal(task: &ArcTask) -> Option<f32> {
         correct += c;
         total += t;
     }
-    if total > 0 && correct == total { Some(1.0) } else { None }
+    if total > 0 && correct == total {
+        Some(1.0)
+    } else {
+        None
+    }
 }
 
 fn apply_l_diagonal(grid: &Grid) -> Option<Grid> {
     let bg = most_common_color(grid);
     let objects = find_objects(grid, bg);
-    if objects.is_empty() { return None; }
-    if !objects.iter().all(|o| is_l_shape(o).is_some()) { return None; }
+    if objects.is_empty() {
+        return None;
+    }
+    if !objects.iter().all(|o| is_l_shape(o).is_some()) {
+        return None;
+    }
 
     let h = grid.height;
     let w = grid.width;
@@ -1423,7 +1718,11 @@ fn apply_l_diagonal(grid: &Grid) -> Option<Grid> {
         }
     }
 
-    Some(Grid { cells, height: h, width: w })
+    Some(Grid {
+        cells,
+        height: h,
+        width: w,
+    })
 }
 
 // ─── Strategy N: Subgrid extraction (diff-dim) ─────────────────────────────
@@ -1436,15 +1735,19 @@ pub fn extract_subgrid(grid: &Grid, r0: usize, c0: usize, h: usize, w: usize) ->
     let cells: Vec<Vec<u8>> = (0..h)
         .map(|r| (0..w).map(|c| grid.cells[r0 + r][c0 + c]).collect())
         .collect();
-    Grid { cells, height: h, width: w }
+    Grid {
+        cells,
+        height: h,
+        width: w,
+    }
 }
 
-fn find_matching_subgrids(
-    input: &Grid, output: &Grid,
-) -> Vec<(usize, usize)> {
+fn find_matching_subgrids(input: &Grid, output: &Grid) -> Vec<(usize, usize)> {
     let oh = output.height;
     let ow = output.width;
-    if oh > input.height || ow > input.width { return vec![]; }
+    if oh > input.height || ow > input.width {
+        return vec![];
+    }
 
     let mut matches = Vec::new();
     for r0 in 0..=(input.height - oh) {
@@ -1460,21 +1763,31 @@ fn find_matching_subgrids(
 
 /// Try fixed-offset extraction: same (r,c) offset across all training examples.
 fn solve_subgrid_fixed_offset(task: &ArcTask) -> Option<(usize, usize, usize, usize)> {
-    if task.train.is_empty() { return None; }
+    if task.train.is_empty() {
+        return None;
+    }
 
     let oh = task.train[0].output.height;
     let ow = task.train[0].output.width;
-    if !task.train.iter().all(|ex|
-        ex.output.height == oh && ex.output.width == ow
-        && ex.output.height <= ex.input.height && ex.output.width <= ex.input.width
-    ) { return None; }
+    if !task.train.iter().all(|ex| {
+        ex.output.height == oh
+            && ex.output.width == ow
+            && ex.output.height <= ex.input.height
+            && ex.output.width <= ex.input.width
+    }) {
+        return None;
+    }
 
     let first_matches = find_matching_subgrids(&task.train[0].input, &task.train[0].output);
-    if first_matches.is_empty() { return None; }
+    if first_matches.is_empty() {
+        return None;
+    }
 
     for &(r0, c0) in &first_matches {
         let all_match = task.train[1..].iter().all(|ex| {
-            if r0 + oh > ex.input.height || c0 + ow > ex.input.width { return false; }
+            if r0 + oh > ex.input.height || c0 + ow > ex.input.width {
+                return false;
+            }
             let sub = extract_subgrid(&ex.input, r0, c0, oh, ow);
             grid_exact_match(&sub, &ex.output)
         });
@@ -1487,7 +1800,9 @@ fn solve_subgrid_fixed_offset(task: &ArcTask) -> Option<(usize, usize, usize, us
 
 /// Try object-bounding-box extraction: output = bbox of a specific colored region.
 fn solve_subgrid_object_bbox(task: &ArcTask) -> Option<u8> {
-    if task.train.is_empty() { return None; }
+    if task.train.is_empty() {
+        return None;
+    }
     let bg = most_common_color(&task.train[0].input);
 
     let mut consistent_color: Option<u8> = None;
@@ -1499,7 +1814,9 @@ fn solve_subgrid_object_bbox(task: &ArcTask) -> Option<u8> {
 
         let mut found_color = None;
         for obj in &objects {
-            if obj.bbox_h() != oh || obj.bbox_w() != ow { continue; }
+            if obj.bbox_h() != oh || obj.bbox_w() != ow {
+                continue;
+            }
             let sub = extract_subgrid(&ex.input, obj.min_r, obj.min_c, oh, ow);
             if grid_exact_match(&sub, &ex.output) {
                 found_color = Some(obj.color);
@@ -1518,15 +1835,21 @@ fn solve_subgrid_object_bbox(task: &ArcTask) -> Option<u8> {
 
 /// Extract the bounding box of all non-background content.
 fn solve_subgrid_content_bbox(task: &ArcTask) -> Option<()> {
-    if task.train.is_empty() { return None; }
+    if task.train.is_empty() {
+        return None;
+    }
 
     for ex in &task.train {
         let bg = most_common_color(&ex.input);
         let bbox = content_bbox(&ex.input, bg)?;
         let (r0, c0, bh, bw) = bbox;
-        if bh != ex.output.height || bw != ex.output.width { return None; }
+        if bh != ex.output.height || bw != ex.output.width {
+            return None;
+        }
         let sub = extract_subgrid(&ex.input, r0, c0, bh, bw);
-        if !grid_exact_match(&sub, &ex.output) { return None; }
+        if !grid_exact_match(&sub, &ex.output) {
+            return None;
+        }
     }
     Some(())
 }
@@ -1548,27 +1871,35 @@ pub fn content_bbox(grid: &Grid, bg: u8) -> Option<(usize, usize, usize, usize)>
             }
         }
     }
-    if !found { return None; }
+    if !found {
+        return None;
+    }
     Some((min_r, min_c, max_r - min_r + 1, max_c - min_c + 1))
 }
 
 /// Unique-subgrid extraction: output is the only subgrid of its dimensions
 /// that exists exactly once in the input. Validated on training, applied to test.
 fn solve_subgrid_unique(task: &ArcTask) -> Option<()> {
-    if task.train.is_empty() { return None; }
+    if task.train.is_empty() {
+        return None;
+    }
     for ex in &task.train {
         if ex.output.height > ex.input.height || ex.output.width > ex.input.width {
             return None;
         }
         let matches = find_matching_subgrids(&ex.input, &ex.output);
-        if matches.len() != 1 { return None; }
+        if matches.len() != 1 {
+            return None;
+        }
     }
     Some(())
 }
 
 /// Extract the bounding box of the MINORITY color (non-background, non-dominant).
 fn solve_subgrid_minority_bbox(task: &ArcTask) -> Option<u8> {
-    if task.train.is_empty() { return None; }
+    if task.train.is_empty() {
+        return None;
+    }
 
     let mut consistent_color: Option<u8> = None;
 
@@ -1577,19 +1908,24 @@ fn solve_subgrid_minority_bbox(task: &ArcTask) -> Option<u8> {
         let mut color_counts = [0u32; NUM_COLORS];
         for row in &ex.input.cells {
             for &c in row {
-                if c != bg { color_counts[c as usize] += 1; }
+                if c != bg {
+                    color_counts[c as usize] += 1;
+                }
             }
         }
-        let minority = color_counts.iter().enumerate()
+        let minority = color_counts
+            .iter()
+            .enumerate()
             .filter(|&(i, &cnt)| cnt > 0 && i != bg as usize)
             .min_by_key(|&(_, &cnt)| cnt)
             .map(|(i, _)| i as u8)?;
 
         let objects = find_objects(&ex.input, bg);
-        let target_objs: Vec<&GridObject> = objects.iter()
-            .filter(|o| o.color == minority)
-            .collect();
-        if target_objs.is_empty() { return None; }
+        let target_objs: Vec<&GridObject> =
+            objects.iter().filter(|o| o.color == minority).collect();
+        if target_objs.is_empty() {
+            return None;
+        }
 
         let min_r = target_objs.iter().map(|o| o.min_r).min().unwrap();
         let max_r = target_objs.iter().map(|o| o.max_r).max().unwrap();
@@ -1598,9 +1934,13 @@ fn solve_subgrid_minority_bbox(task: &ArcTask) -> Option<u8> {
         let bh = max_r - min_r + 1;
         let bw = max_c - min_c + 1;
 
-        if bh != ex.output.height || bw != ex.output.width { return None; }
+        if bh != ex.output.height || bw != ex.output.width {
+            return None;
+        }
         let sub = extract_subgrid(&ex.input, min_r, min_c, bh, bw);
-        if !grid_exact_match(&sub, &ex.output) { return None; }
+        if !grid_exact_match(&sub, &ex.output) {
+            return None;
+        }
 
         match consistent_color {
             None => consistent_color = Some(minority),
@@ -1617,7 +1957,9 @@ fn solve_subgrid_minority_bbox(task: &ArcTask) -> Option<u8> {
 // if the output is the input tiled repeatedly.
 
 fn solve_tiling(task: &ArcTask) -> Option<(usize, usize)> {
-    if task.train.is_empty() { return None; }
+    if task.train.is_empty() {
+        return None;
+    }
 
     let mut tile_dims: Option<(usize, usize)> = None;
 
@@ -1627,15 +1969,23 @@ fn solve_tiling(task: &ArcTask) -> Option<(usize, usize)> {
         let oh = ex.output.height;
         let ow = ex.output.width;
 
-        if oh < ih || ow < iw { return None; }
-        if oh % ih != 0 || ow % iw != 0 { return None; }
+        if oh < ih || ow < iw {
+            return None;
+        }
+        if oh % ih != 0 || ow % iw != 0 {
+            return None;
+        }
 
         let tr = oh / ih;
         let tc = ow / iw;
-        if tr < 1 || tc < 1 { return None; }
+        if tr < 1 || tc < 1 {
+            return None;
+        }
 
         let pred = tile_grid(&ex.input, tr, tc);
-        if !grid_exact_match(&pred, &ex.output) { return None; }
+        if !grid_exact_match(&pred, &ex.output) {
+            return None;
+        }
 
         match tile_dims {
             None => tile_dims = Some((tr, tc)),
@@ -1654,7 +2004,11 @@ pub fn tile_grid(grid: &Grid, tile_r: usize, tile_c: usize) -> Grid {
     let cells: Vec<Vec<u8>> = (0..oh)
         .map(|r| (0..ow).map(|c| grid.cells[r % ih][c % iw]).collect())
         .collect();
-    Grid { cells, height: oh, width: ow }
+    Grid {
+        cells,
+        height: oh,
+        width: ow,
+    }
 }
 
 // ─── Strategy S: Canvas embedding (diff-dim, output contains input) ────────
@@ -1663,7 +2017,9 @@ pub fn tile_grid(grid: &Grid, tile_r: usize, tile_c: usize) -> Grid {
 // remaining cells filled by a fixed background color.
 
 fn solve_canvas(task: &ArcTask) -> Option<(isize, isize, u8)> {
-    if task.train.is_empty() { return None; }
+    if task.train.is_empty() {
+        return None;
+    }
 
     let mut consistent: Option<(isize, isize, u8)> = None;
 
@@ -1672,7 +2028,9 @@ fn solve_canvas(task: &ArcTask) -> Option<(isize, isize, u8)> {
         let iw = ex.input.width;
         let oh = ex.output.height;
         let ow = ex.output.width;
-        if oh < ih || ow < iw { return None; }
+        if oh < ih || ow < iw {
+            return None;
+        }
 
         let mut found = None;
         'search: for r0 in 0..=(oh - ih) {
@@ -1685,7 +2043,9 @@ fn solve_canvas(task: &ArcTask) -> Option<(isize, isize, u8)> {
                             break;
                         }
                     }
-                    if !ok { break; }
+                    if !ok {
+                        break;
+                    }
                 }
                 if ok {
                     found = Some((r0 as isize, c0 as isize));
@@ -1698,8 +2058,10 @@ fn solve_canvas(task: &ArcTask) -> Option<(isize, isize, u8)> {
         let mut bg_color = None;
         for r in 0..oh {
             for c in 0..ow {
-                let in_region = r >= r0 as usize && r < r0 as usize + ih
-                    && c >= c0 as usize && c < c0 as usize + iw;
+                let in_region = r >= r0 as usize
+                    && r < r0 as usize + ih
+                    && c >= c0 as usize
+                    && c < c0 as usize + iw;
                 if !in_region {
                     let v = ex.output.cells[r][c];
                     match bg_color {
@@ -1732,7 +2094,11 @@ fn apply_canvas(grid: &Grid, r0: isize, c0: isize, oh: usize, ow: usize, bg: u8)
             }
         }
     }
-    Grid { cells, height: oh, width: ow }
+    Grid {
+        cells,
+        height: oh,
+        width: ow,
+    }
 }
 
 // ─── Strategy T: Downscale (diff-dim, input shrinks by integer factor) ─────
@@ -1741,7 +2107,9 @@ fn apply_canvas(grid: &Grid, r0: isize, c0: isize, oh: usize, ow: usize, bg: u8)
 // aggregation methods: majority vote, non-background winner.
 
 fn solve_downscale(task: &ArcTask) -> Option<(usize, usize, u8)> {
-    if task.train.is_empty() { return None; }
+    if task.train.is_empty() {
+        return None;
+    }
 
     for method in 0u8..3 {
         let mut consistent_factor: Option<(usize, usize)> = None;
@@ -1753,21 +2121,36 @@ fn solve_downscale(task: &ArcTask) -> Option<(usize, usize, u8)> {
             let oh = ex.output.height;
             let ow = ex.output.width;
 
-            if oh > ih || ow > iw { all_ok = false; break; }
-            if ih % oh != 0 || iw % ow != 0 { all_ok = false; break; }
+            if oh > ih || ow > iw {
+                all_ok = false;
+                break;
+            }
+            if ih % oh != 0 || iw % ow != 0 {
+                all_ok = false;
+                break;
+            }
 
             let sr = ih / oh;
             let sc = iw / ow;
-            if sr < 2 || sc < 2 { all_ok = false; break; }
+            if sr < 2 || sc < 2 {
+                all_ok = false;
+                break;
+            }
 
             match consistent_factor {
                 None => consistent_factor = Some((sr, sc)),
-                Some((pr, pc)) if pr != sr || pc != sc => { all_ok = false; break; }
+                Some((pr, pc)) if pr != sr || pc != sc => {
+                    all_ok = false;
+                    break;
+                }
                 _ => {}
             }
 
             let pred = downscale_grid(&ex.input, sr, sc, method);
-            if !grid_exact_match(&pred, &ex.output) { all_ok = false; break; }
+            if !grid_exact_match(&pred, &ex.output) {
+                all_ok = false;
+                break;
+            }
         }
 
         if all_ok {
@@ -1795,32 +2178,49 @@ pub fn downscale_grid(grid: &Grid, sr: usize, sc: usize, method: u8) -> Grid {
             cells[r][c] = match method {
                 0 => {
                     // Majority vote
-                    counts.iter().enumerate()
+                    counts
+                        .iter()
+                        .enumerate()
                         .max_by_key(|&(_, &cnt)| cnt)
-                        .map(|(i, _)| i as u8).unwrap_or(0)
+                        .map(|(i, _)| i as u8)
+                        .unwrap_or(0)
                 }
                 1 => {
                     // Non-background winner (most common non-bg, or bg if all bg)
-                    let non_bg: Vec<(usize, u32)> = counts.iter().enumerate()
+                    let non_bg: Vec<(usize, u32)> = counts
+                        .iter()
+                        .enumerate()
                         .filter(|&(i, &cnt)| cnt > 0 && i != bg as usize)
                         .map(|(i, &cnt)| (i, cnt))
                         .collect();
-                    if non_bg.is_empty() { bg }
-                    else { non_bg.iter().max_by_key(|&&(_, cnt)| cnt).unwrap().0 as u8 }
+                    if non_bg.is_empty() {
+                        bg
+                    } else {
+                        non_bg.iter().max_by_key(|&&(_, cnt)| cnt).unwrap().0 as u8
+                    }
                 }
                 _ => {
                     // Minority non-bg (least common non-bg, or bg if all bg)
-                    let non_bg: Vec<(usize, u32)> = counts.iter().enumerate()
+                    let non_bg: Vec<(usize, u32)> = counts
+                        .iter()
+                        .enumerate()
                         .filter(|&(i, &cnt)| cnt > 0 && i != bg as usize)
                         .map(|(i, &cnt)| (i, cnt))
                         .collect();
-                    if non_bg.is_empty() { bg }
-                    else { non_bg.iter().min_by_key(|&&(_, cnt)| cnt).unwrap().0 as u8 }
+                    if non_bg.is_empty() {
+                        bg
+                    } else {
+                        non_bg.iter().min_by_key(|&&(_, cnt)| cnt).unwrap().0 as u8
+                    }
                 }
             };
         }
     }
-    Grid { cells, height: oh, width: ow }
+    Grid {
+        cells,
+        height: oh,
+        width: ow,
+    }
 }
 
 // ─── Strategy U: Mirror tiling (diff-dim) ──────────────────────────────────
@@ -1831,7 +2231,9 @@ pub fn downscale_grid(grid: &Grid, sr: usize, sc: usize, method: u8) -> Grid {
 //   mode 2: vertical concat (T=inp, B=vflip)
 
 fn solve_mirror_tile(task: &ArcTask) -> Option<u8> {
-    if task.train.is_empty() { return None; }
+    if task.train.is_empty() {
+        return None;
+    }
 
     for mode in 0u8..4 {
         let all_ok = task.train.iter().all(|ex| {
@@ -1841,7 +2243,9 @@ fn solve_mirror_tile(task: &ArcTask) -> Option<u8> {
                 None => false,
             }
         });
-        if all_ok { return Some(mode); }
+        if all_ok {
+            return Some(mode);
+        }
     }
     None
 }
@@ -1854,56 +2258,96 @@ pub fn apply_mirror_tile(grid: &Grid, mode: u8) -> Option<Grid> {
         0 => {
             let oh = ih * 2;
             let ow = iw * 2;
-            let cells: Vec<Vec<u8>> = (0..oh).map(|r| {
-                (0..ow).map(|c| {
-                    let sr = if r < ih { r } else { oh - 1 - r };
-                    let sc = if c < iw { c } else { ow - 1 - c };
-                    grid.cells[sr][sc]
-                }).collect()
-            }).collect();
-            Some(Grid { cells, height: oh, width: ow })
+            let cells: Vec<Vec<u8>> = (0..oh)
+                .map(|r| {
+                    (0..ow)
+                        .map(|c| {
+                            let sr = if r < ih { r } else { oh - 1 - r };
+                            let sc = if c < iw { c } else { ow - 1 - c };
+                            grid.cells[sr][sc]
+                        })
+                        .collect()
+                })
+                .collect();
+            Some(Grid {
+                cells,
+                height: oh,
+                width: ow,
+            })
         }
         1 => {
             let ow = iw * 2;
-            let cells: Vec<Vec<u8>> = (0..ih).map(|r| {
-                (0..ow).map(|c| {
-                    if c < iw { grid.cells[r][c] }
-                    else { grid.cells[r][ow - 1 - c] }
-                }).collect()
-            }).collect();
-            Some(Grid { cells, height: ih, width: ow })
+            let cells: Vec<Vec<u8>> = (0..ih)
+                .map(|r| {
+                    (0..ow)
+                        .map(|c| {
+                            if c < iw {
+                                grid.cells[r][c]
+                            } else {
+                                grid.cells[r][ow - 1 - c]
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            Some(Grid {
+                cells,
+                height: ih,
+                width: ow,
+            })
         }
         2 => {
             let oh = ih * 2;
-            let cells: Vec<Vec<u8>> = (0..oh).map(|r| {
-                (0..iw).map(|c| {
-                    if r < ih { grid.cells[r][c] }
-                    else { grid.cells[oh - 1 - r][c] }
-                }).collect()
-            }).collect();
-            Some(Grid { cells, height: oh, width: iw })
+            let cells: Vec<Vec<u8>> = (0..oh)
+                .map(|r| {
+                    (0..iw)
+                        .map(|c| {
+                            if r < ih {
+                                grid.cells[r][c]
+                            } else {
+                                grid.cells[oh - 1 - r][c]
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            Some(Grid {
+                cells,
+                height: oh,
+                width: iw,
+            })
         }
         3 => {
             // Rot90 quadrant: TL=inp, TR=rot90_cw, BL=rot90_ccw, BR=rot180
-            if ih != iw { return None; }
+            if ih != iw {
+                return None;
+            }
             let n = ih;
             let oh = n * 2;
             let ow = n * 2;
-            let cells: Vec<Vec<u8>> = (0..oh).map(|r| {
-                (0..ow).map(|c| {
-                    let qr = r / n;
-                    let qc = c / n;
-                    let lr = r % n;
-                    let lc = c % n;
-                    match (qr, qc) {
-                        (0, 0) => grid.cells[lr][lc],
-                        (0, 1) => grid.cells[n - 1 - lc][lr],   // rot90_cw
-                        (1, 0) => grid.cells[lc][n - 1 - lr],   // rot90_ccw
-                        _      => grid.cells[n - 1 - lr][n - 1 - lc], // rot180
-                    }
-                }).collect()
-            }).collect();
-            Some(Grid { cells, height: oh, width: ow })
+            let cells: Vec<Vec<u8>> = (0..oh)
+                .map(|r| {
+                    (0..ow)
+                        .map(|c| {
+                            let qr = r / n;
+                            let qc = c / n;
+                            let lr = r % n;
+                            let lc = c % n;
+                            match (qr, qc) {
+                                (0, 0) => grid.cells[lr][lc],
+                                (0, 1) => grid.cells[n - 1 - lc][lr], // rot90_cw
+                                (1, 0) => grid.cells[lc][n - 1 - lr], // rot90_ccw
+                                _ => grid.cells[n - 1 - lr][n - 1 - lc], // rot180
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            Some(Grid {
+                cells,
+                height: oh,
+                width: ow,
+            })
         }
         _ => None,
     }
@@ -1919,7 +2363,9 @@ pub fn apply_mirror_tile(grid: &Grid, mode: u8) -> Option<Grid> {
 /// Returns true if all training examples are valid pixel-scale transforms.
 /// Also returns whether the factor is fixed (same across examples) for apply logic.
 fn solve_scale(task: &ArcTask) -> Option<(usize, usize)> {
-    if task.train.is_empty() { return None; }
+    if task.train.is_empty() {
+        return None;
+    }
 
     let mut fixed_scale: Option<(usize, usize)> = None;
     let mut all_same = true;
@@ -1930,15 +2376,23 @@ fn solve_scale(task: &ArcTask) -> Option<(usize, usize)> {
         let oh = ex.output.height;
         let ow = ex.output.width;
 
-        if oh < ih || ow < iw { return None; }
-        if oh % ih != 0 || ow % iw != 0 { return None; }
+        if oh < ih || ow < iw {
+            return None;
+        }
+        if oh % ih != 0 || ow % iw != 0 {
+            return None;
+        }
 
         let sr = oh / ih;
         let sc = ow / iw;
-        if sr < 2 && sc < 2 { return None; }
+        if sr < 2 && sc < 2 {
+            return None;
+        }
 
         let pred = scale_grid(&ex.input, sr, sc);
-        if !grid_exact_match(&pred, &ex.output) { return None; }
+        if !grid_exact_match(&pred, &ex.output) {
+            return None;
+        }
 
         match fixed_scale {
             None => fixed_scale = Some((sr, sc)),
@@ -1948,7 +2402,11 @@ fn solve_scale(task: &ArcTask) -> Option<(usize, usize)> {
     }
 
     // Return (0, 0) as sentinel for "variable scale — derive from output dims"
-    if all_same { fixed_scale } else { Some((0, 0)) }
+    if all_same {
+        fixed_scale
+    } else {
+        Some((0, 0))
+    }
 }
 
 pub fn scale_grid(grid: &Grid, sr: usize, sc: usize) -> Grid {
@@ -1957,7 +2415,11 @@ pub fn scale_grid(grid: &Grid, sr: usize, sc: usize) -> Grid {
     let cells: Vec<Vec<u8>> = (0..oh)
         .map(|r| (0..ow).map(|c| grid.cells[r / sr][c / sc]).collect())
         .collect();
-    Grid { cells, height: oh, width: ow }
+    Grid {
+        cells,
+        height: oh,
+        width: ow,
+    }
 }
 
 // ─── Strategy Q2: Fractal tile (self-referencing) ───────────────────────────
@@ -1967,13 +2429,17 @@ pub fn scale_grid(grid: &Grid, sr: usize, sc: usize) -> Grid {
 // otherwise fill that tile with bg. Requires oh = ih*ih, ow = iw*iw.
 
 fn solve_fractal_tile(task: &ArcTask) -> bool {
-    if task.train.is_empty() { return false; }
+    if task.train.is_empty() {
+        return false;
+    }
     task.train.iter().all(|ex| {
         let ih = ex.input.height;
         let iw = ex.input.width;
         let oh = ex.output.height;
         let ow = ex.output.width;
-        if oh != ih * ih || ow != iw * iw { return false; }
+        if oh != ih * ih || ow != iw * iw {
+            return false;
+        }
         let bg = 0u8;
         for tr in 0..ih {
             for tc in 0..iw {
@@ -2013,7 +2479,11 @@ pub fn apply_fractal_tile(grid: &Grid) -> Grid {
             }
         }
     }
-    Grid { cells, height: oh, width: ow }
+    Grid {
+        cells,
+        height: oh,
+        width: ow,
+    }
 }
 
 // ─── Strategy Q: Gravity — objects fall toward a wall ──────────────────────
@@ -2022,9 +2492,14 @@ pub fn apply_fractal_tile(grid: &Grid) -> Grid {
 // until blocked by the grid edge or another non-background cell.
 
 fn solve_gravity(task: &ArcTask) -> Option<u8> {
-    if task.train.is_empty() { return None; }
-    if !task.train.iter().all(|ex|
-        ex.input.height == ex.output.height && ex.input.width == ex.output.width) {
+    if task.train.is_empty() {
+        return None;
+    }
+    if !task
+        .train
+        .iter()
+        .all(|ex| ex.input.height == ex.output.height && ex.input.width == ex.output.width)
+    {
         return None;
     }
 
@@ -2033,7 +2508,9 @@ fn solve_gravity(task: &ArcTask) -> Option<u8> {
             let pred = apply_gravity(&ex.input, dir);
             grid_exact_match(&pred, &ex.output)
         });
-        if all_match { return Some(dir); }
+        if all_match {
+            return Some(dir);
+        }
     }
     None
 }
@@ -2045,7 +2522,8 @@ pub fn apply_gravity(grid: &Grid, dir: u8) -> Grid {
     let mut cells = vec![vec![bg; w]; h];
 
     match dir {
-        0 => { // down
+        0 => {
+            // down
             for c in 0..w {
                 let mut write = h;
                 for r in (0..h).rev() {
@@ -2056,7 +2534,8 @@ pub fn apply_gravity(grid: &Grid, dir: u8) -> Grid {
                 }
             }
         }
-        1 => { // up
+        1 => {
+            // up
             for c in 0..w {
                 let mut write = 0;
                 for r in 0..h {
@@ -2067,7 +2546,8 @@ pub fn apply_gravity(grid: &Grid, dir: u8) -> Grid {
                 }
             }
         }
-        2 => { // right
+        2 => {
+            // right
             for r in 0..h {
                 let mut write = w;
                 for c in (0..w).rev() {
@@ -2078,7 +2558,8 @@ pub fn apply_gravity(grid: &Grid, dir: u8) -> Grid {
                 }
             }
         }
-        3 => { // left
+        3 => {
+            // left
             for r in 0..h {
                 let mut write = 0;
                 for c in 0..w {
@@ -2092,7 +2573,11 @@ pub fn apply_gravity(grid: &Grid, dir: u8) -> Grid {
         _ => return grid.clone(),
     }
 
-    Grid { cells, height: h, width: w }
+    Grid {
+        cells,
+        height: h,
+        width: w,
+    }
 }
 
 // ─── Strategy R: Symmetry completion ───────────────────────────────────────
@@ -2101,9 +2586,14 @@ pub fn apply_gravity(grid: &Grid, dir: u8) -> Grid {
 // completed to be symmetric along that axis.
 
 fn solve_symmetry(task: &ArcTask) -> Option<u8> {
-    if task.train.is_empty() { return None; }
-    if !task.train.iter().all(|ex|
-        ex.input.height == ex.output.height && ex.input.width == ex.output.width) {
+    if task.train.is_empty() {
+        return None;
+    }
+    if !task
+        .train
+        .iter()
+        .all(|ex| ex.input.height == ex.output.height && ex.input.width == ex.output.width)
+    {
         return None;
     }
 
@@ -2112,7 +2602,9 @@ fn solve_symmetry(task: &ArcTask) -> Option<u8> {
             let pred = apply_symmetry(&ex.input, axis);
             grid_exact_match(&pred, &ex.output)
         });
-        if all_match { return Some(axis); }
+        if all_match {
+            return Some(axis);
+        }
     }
     None
 }
@@ -2124,7 +2616,8 @@ pub fn apply_symmetry(grid: &Grid, axis: u8) -> Grid {
     let mut cells = grid.cells.clone();
 
     match axis {
-        0 => { // horizontal: mirror top→bottom
+        0 => {
+            // horizontal: mirror top→bottom
             for r in 0..h {
                 for c in 0..w {
                     let mr = h - 1 - r;
@@ -2134,7 +2627,8 @@ pub fn apply_symmetry(grid: &Grid, axis: u8) -> Grid {
                 }
             }
         }
-        1 => { // vertical: mirror left→right
+        1 => {
+            // vertical: mirror left→right
             for r in 0..h {
                 for c in 0..w {
                     let mc = w - 1 - c;
@@ -2144,21 +2638,29 @@ pub fn apply_symmetry(grid: &Grid, axis: u8) -> Grid {
                 }
             }
         }
-        2 => { // both horizontal + vertical
+        2 => {
+            // both horizontal + vertical
             for r in 0..h {
                 for c in 0..w {
                     let mr = h - 1 - r;
                     let mc = w - 1 - c;
                     if cells[r][c] == bg {
-                        if cells[mr][c] != bg { cells[r][c] = cells[mr][c]; }
-                        else if cells[r][mc] != bg { cells[r][c] = cells[r][mc]; }
-                        else if cells[mr][mc] != bg { cells[r][c] = cells[mr][mc]; }
+                        if cells[mr][c] != bg {
+                            cells[r][c] = cells[mr][c];
+                        } else if cells[r][mc] != bg {
+                            cells[r][c] = cells[r][mc];
+                        } else if cells[mr][mc] != bg {
+                            cells[r][c] = cells[mr][mc];
+                        }
                     }
                 }
             }
         }
-        3 => { // diagonal (transpose): mirror across main diagonal
-            if h != w { return grid.clone(); }
+        3 => {
+            // diagonal (transpose): mirror across main diagonal
+            if h != w {
+                return grid.clone();
+            }
             for r in 0..h {
                 for c in 0..w {
                     if cells[r][c] == bg && cells[c][r] != bg {
@@ -2170,7 +2672,11 @@ pub fn apply_symmetry(grid: &Grid, axis: u8) -> Grid {
         _ => {}
     }
 
-    Grid { cells, height: h, width: w }
+    Grid {
+        cells,
+        height: h,
+        width: w,
+    }
 }
 
 // ─── Strategy W: 3×3 neighborhood lookup table ─────────────────────────────
@@ -2182,9 +2688,14 @@ pub fn apply_symmetry(grid: &Grid, axis: u8) -> Grid {
 // the table IS the rule.
 
 fn solve_nbr_lookup(task: &ArcTask) -> Option<std::collections::HashMap<[u8; 9], u8>> {
-    if task.train.is_empty() { return None; }
-    if !task.train.iter().all(|ex|
-        ex.input.height == ex.output.height && ex.input.width == ex.output.width) {
+    if task.train.is_empty() {
+        return None;
+    }
+    if !task
+        .train
+        .iter()
+        .all(|ex| ex.input.height == ex.output.height && ex.input.width == ex.output.width)
+    {
         return None;
     }
 
@@ -2200,7 +2711,9 @@ fn solve_nbr_lookup(task: &ArcTask) -> Option<std::collections::HashMap<[u8; 9],
                 let out_color = ex.output.cells[r][c];
                 match lut.get(&nbr) {
                     Some(&existing) if existing != out_color => return None,
-                    _ => { lut.insert(nbr, out_color); }
+                    _ => {
+                        lut.insert(nbr, out_color);
+                    }
                 }
             }
         }
@@ -2213,7 +2726,9 @@ fn solve_nbr_lookup(task: &ArcTask) -> Option<std::collections::HashMap<[u8; 9],
         for r in 0..h {
             for c in 0..w {
                 let nbr = nbr_key(&test_ex.input, r, c, bg);
-                if !lut.contains_key(&nbr) { return None; }
+                if !lut.contains_key(&nbr) {
+                    return None;
+                }
             }
         }
     }
@@ -2252,7 +2767,11 @@ fn apply_nbr_lookup(grid: &Grid, lut: &std::collections::HashMap<[u8; 9], u8>) -
             }
         }
     }
-    Grid { cells, height: h, width: w }
+    Grid {
+        cells,
+        height: h,
+        width: w,
+    }
 }
 
 // ─── Strategy O: Connect lines ─────────────────────────────────────────────
@@ -2261,9 +2780,14 @@ fn apply_nbr_lookup(grid: &Grid, lut: &std::collections::HashMap<[u8; 9], u8>) -
 // Only connects the nearest pair; stops at different-colored obstacles.
 
 fn solve_connect_lines(task: &ArcTask) -> bool {
-    if task.train.is_empty() { return false; }
-    if !task.train.iter().all(|ex|
-        ex.input.height == ex.output.height && ex.input.width == ex.output.width) {
+    if task.train.is_empty() {
+        return false;
+    }
+    if !task
+        .train
+        .iter()
+        .all(|ex| ex.input.height == ex.output.height && ex.input.width == ex.output.width)
+    {
         return false;
     }
     task.train.iter().all(|ex| {
@@ -2282,13 +2806,20 @@ pub fn apply_connect_lines(grid: &Grid) -> Grid {
     for r in 0..h {
         let mut c = 0;
         while c < w {
-            if grid.cells[r][c] == bg { c += 1; continue; }
+            if grid.cells[r][c] == bg {
+                c += 1;
+                continue;
+            }
             let color = grid.cells[r][c];
             let mut c2 = c + 1;
-            while c2 < w && grid.cells[r][c2] == bg { c2 += 1; }
+            while c2 < w && grid.cells[r][c2] == bg {
+                c2 += 1;
+            }
             if c2 < w && grid.cells[r][c2] == color {
                 for fill_c in (c + 1)..c2 {
-                    if cells[r][fill_c] == bg { cells[r][fill_c] = color; }
+                    if cells[r][fill_c] == bg {
+                        cells[r][fill_c] = color;
+                    }
                 }
             }
             c = c2;
@@ -2299,20 +2830,31 @@ pub fn apply_connect_lines(grid: &Grid) -> Grid {
     for c in 0..w {
         let mut r = 0;
         while r < h {
-            if grid.cells[r][c] == bg { r += 1; continue; }
+            if grid.cells[r][c] == bg {
+                r += 1;
+                continue;
+            }
             let color = grid.cells[r][c];
             let mut r2 = r + 1;
-            while r2 < h && grid.cells[r2][c] == bg { r2 += 1; }
+            while r2 < h && grid.cells[r2][c] == bg {
+                r2 += 1;
+            }
             if r2 < h && grid.cells[r2][c] == color {
                 for fill_r in (r + 1)..r2 {
-                    if cells[fill_r][c] == bg { cells[fill_r][c] = color; }
+                    if cells[fill_r][c] == bg {
+                        cells[fill_r][c] = color;
+                    }
                 }
             }
             r = r2;
         }
     }
 
-    Grid { cells, height: h, width: w }
+    Grid {
+        cells,
+        height: h,
+        width: w,
+    }
 }
 
 // ─── Strategy P2: Enclosed region extraction ────────────────────────────────
@@ -2366,15 +2908,22 @@ pub fn find_enclosed_bbox(grid: &Grid, bg: u8) -> Option<(usize, usize, usize, u
             }
         }
     }
-    if min_r > max_r { return None; }
+    if min_r > max_r {
+        return None;
+    }
     Some((min_r, min_c, max_r - min_r + 1, max_c - min_c + 1))
 }
 
 fn solve_enclosed_region(task: &ArcTask) -> bool {
-    if task.train.is_empty() { return false; }
+    if task.train.is_empty() {
+        return false;
+    }
     // Output must be smaller than input (extraction)
-    if task.train.iter().all(|ex|
-        ex.input.height == ex.output.height && ex.input.width == ex.output.width) {
+    if task
+        .train
+        .iter()
+        .all(|ex| ex.input.height == ex.output.height && ex.input.width == ex.output.width)
+    {
         return false;
     }
 
@@ -2434,7 +2983,9 @@ fn apply_compose_op(grid: &Grid, op: &ComposeOp) -> Option<Grid> {
             let mut g = grid.clone();
             for row in g.cells.iter_mut() {
                 for cell in row.iter_mut() {
-                    if *cell == *a { *cell = *b; }
+                    if *cell == *a {
+                        *cell = *b;
+                    }
                 }
             }
             Some(g)
@@ -2447,12 +2998,16 @@ fn apply_compose_op(grid: &Grid, op: &ComposeOp) -> Option<Grid> {
         ComposeOp::FractalTile => {
             let ih = grid.height;
             let iw = grid.width;
-            if ih * ih > 60 || iw * iw > 60 { return None; }
+            if ih * ih > 60 || iw * iw > 60 {
+                return None;
+            }
             Some(apply_fractal_tile(grid))
         }
         ComposeOp::DiagTile => {
             let n = grid.height;
-            if n != grid.width || n * n > 60 { return None; }
+            if n != grid.width || n * n > 60 {
+                return None;
+            }
             let on = n * n;
             let mut cells = vec![vec![0u8; on]; on];
             for t in 0..n {
@@ -2462,7 +3017,11 @@ fn apply_compose_op(grid: &Grid, op: &ComposeOp) -> Option<Grid> {
                     }
                 }
             }
-            Some(Grid { cells, height: on, width: on })
+            Some(Grid {
+                cells,
+                height: on,
+                width: on,
+            })
         }
         ComposeOp::MirrorTile(mode) => apply_mirror_tile(grid, *mode),
     }
@@ -2477,7 +3036,9 @@ fn compose_output_dims(ih: usize, iw: usize, op: &ComposeOp) -> Option<(usize, u
         ComposeOp::Rot90CW | ComposeOp::Transpose => Some((iw, ih)),
         ComposeOp::FractalTile => Some((ih * ih, iw * iw)),
         ComposeOp::DiagTile => {
-            if ih != iw { return None; }
+            if ih != iw {
+                return None;
+            }
             Some((ih * ih, iw * iw))
         }
         ComposeOp::MirrorTile(mode) => match mode {
@@ -2502,11 +3063,17 @@ fn compose_output_dims(ih: usize, iw: usize, op: &ComposeOp) -> Option<(usize, u
 fn detect_repeating_tile(grid: &Grid, oh: usize, ow: usize) -> Option<Grid> {
     let h = grid.height;
     let w = grid.width;
-    if oh == 0 || ow == 0 || oh > h || ow > w { return None; }
-    if h % oh != 0 || w % ow != 0 { return None; }
+    if oh == 0 || ow == 0 || oh > h || ow > w {
+        return None;
+    }
+    if h % oh != 0 || w % ow != 0 {
+        return None;
+    }
     let tile_rows = h / oh;
     let tile_cols = w / ow;
-    if tile_rows * tile_cols < 2 { return None; }
+    if tile_rows * tile_cols < 2 {
+        return None;
+    }
 
     // Extract all tiles
     let mut tiles: Vec<Vec<Vec<u8>>> = Vec::new();
@@ -2554,13 +3121,18 @@ fn detect_repeating_tile(grid: &Grid, oh: usize, ow: usize) -> Option<Grid> {
             for tile in &tiles {
                 counts[tile[r][c] as usize] += 1;
             }
-            if counts[consensus[r][c] as usize] <= threshold.try_into().unwrap_or(0) && n_tiles > 2 {
+            if counts[consensus[r][c] as usize] <= threshold.try_into().unwrap_or(0) && n_tiles > 2
+            {
                 return None;
             }
         }
     }
 
-    Some(Grid { cells: consensus, height: oh, width: ow })
+    Some(Grid {
+        cells: consensus,
+        height: oh,
+        width: ow,
+    })
 }
 
 /// Detect a "tiling with separator" pattern (f9012d9b style):
@@ -2570,19 +3142,35 @@ fn detect_repeating_tile(grid: &Grid, oh: usize, ow: usize) -> Option<Grid> {
 fn detect_separated_tile(grid: &Grid, oh: usize, ow: usize) -> Option<Grid> {
     let h = grid.height;
     let w = grid.width;
-    if oh == 0 || ow == 0 { return None; }
+    if oh == 0 || ow == 0 {
+        return None;
+    }
 
     // Try stride = oh+1, ow+1 (tile size + 1 separator row/col)
     let stride_r = oh + 1;
     let stride_c = ow + 1;
     // Check how many tiles fit: (stride_r * nr - 1) == h or similar
-    let nr = if stride_r > 0 && h + 1 >= stride_r { (h + 1) / stride_r } else { return None; };
-    let nc = if stride_c > 0 && w + 1 >= stride_c { (w + 1) / stride_c } else { return None; };
-    if nr == 0 || nc == 0 { return None; }
+    let nr = if stride_r > 0 && h + 1 >= stride_r {
+        (h + 1) / stride_r
+    } else {
+        return None;
+    };
+    let nc = if stride_c > 0 && w + 1 >= stride_c {
+        (w + 1) / stride_c
+    } else {
+        return None;
+    };
+    if nr == 0 || nc == 0 {
+        return None;
+    }
     let expected_h = nr * stride_r - 1;
     let expected_w = nc * stride_c - 1;
-    if expected_h != h || expected_w != w { return None; }
-    if nr * nc < 2 { return None; }
+    if expected_h != h || expected_w != w {
+        return None;
+    }
+    if nr * nc < 2 {
+        return None;
+    }
 
     // Extract tiles
     let mut tiles: Vec<Vec<Vec<u8>>> = Vec::new();
@@ -2628,17 +3216,26 @@ fn detect_separated_tile(grid: &Grid, oh: usize, ow: usize) -> Option<Grid> {
             for tile in &tiles {
                 counts[tile[r][c] as usize] += 1;
             }
-            if counts[consensus[r][c] as usize] <= threshold.try_into().unwrap_or(0) && n_tiles > 2 {
+            if counts[consensus[r][c] as usize] <= threshold.try_into().unwrap_or(0) && n_tiles > 2
+            {
                 return None;
             }
         }
     }
 
-    Some(Grid { cells: consensus, height: oh, width: ow })
+    Some(Grid {
+        cells: consensus,
+        height: oh,
+        width: ow,
+    })
 }
 
 fn solve_repeating_tile(task: &ArcTask) -> Option<()> {
-    if !task.train.iter().all(|ex| ex.output.height > 0 && ex.output.width > 0) {
+    if !task
+        .train
+        .iter()
+        .all(|ex| ex.output.height > 0 && ex.output.width > 0)
+    {
         return None;
     }
     for ex in &task.train {
@@ -2657,7 +3254,11 @@ fn solve_repeating_tile(task: &ArcTask) -> Option<()> {
 fn apply_repeating_tile(input: &Grid, oh: usize, ow: usize) -> Grid {
     detect_repeating_tile(input, oh, ow)
         .or_else(|| detect_separated_tile(input, oh, ow))
-        .unwrap_or_else(|| Grid { cells: vec![vec![0u8; ow]; oh], height: oh, width: ow })
+        .unwrap_or_else(|| Grid {
+            cells: vec![vec![0u8; ow]; oh],
+            height: oh,
+            width: ow,
+        })
 }
 
 // ─── Strategy: Block-color grid summary ─────────────────────────────────────
@@ -2680,7 +3281,9 @@ fn find_block_color_layout(grid: &Grid) -> Option<(Vec<Vec<u8>>, usize, usize)> 
     // Method 2: color-transition boundaries (90c28cc7 style)
     // Strip outer zero-border to find the content rectangle
     let (cr0, cc0, ch, cw) = content_bbox(grid, bg)?;
-    if ch < 2 || cw < 2 { return None; }
+    if ch < 2 || cw < 2 {
+        return None;
+    }
 
     // Detect row boundaries: where the color in a reference column changes
     let ref_col = cc0;
@@ -2704,7 +3307,9 @@ fn find_block_color_layout(grid: &Grid) -> Option<(Vec<Vec<u8>>, usize, usize)> 
 
     let nr = row_breaks.len() - 1;
     let nc = col_breaks.len() - 1;
-    if nr < 2 || nc < 2 || nr > 30 || nc > 30 { return None; }
+    if nr < 2 || nc < 2 || nr > 30 || nc > 30 {
+        return None;
+    }
 
     let mut result = vec![vec![0u8; nc]; nr];
     for ri in 0..nr {
@@ -2716,7 +3321,9 @@ fn find_block_color_layout(grid: &Grid) -> Option<(Vec<Vec<u8>>, usize, usize)> 
             // All cells in this block should be the same color
             let color = grid.cells[r0][c0];
             let uniform = (r0..r1).all(|r| (c0..c1).all(|c| grid.cells[r][c] == color));
-            if !uniform { return None; }
+            if !uniform {
+                return None;
+            }
             result[ri][ci] = color;
         }
     }
@@ -2740,14 +3347,18 @@ fn find_block_color_by_separators(grid: &Grid, bg: u8) -> Option<(Vec<Vec<u8>>, 
         }
     }
 
-    if sep_rows.is_empty() && sep_cols.is_empty() { return None; }
+    if sep_rows.is_empty() && sep_cols.is_empty() {
+        return None;
+    }
 
     let mut row_bands: Vec<(usize, usize)> = Vec::new();
     let mut r = 0;
     while r < h {
         if !sep_rows.contains(&r) {
             let start = r;
-            while r < h && !sep_rows.contains(&r) { r += 1; }
+            while r < h && !sep_rows.contains(&r) {
+                r += 1;
+            }
             row_bands.push((start, r));
         } else {
             r += 1;
@@ -2758,14 +3369,18 @@ fn find_block_color_by_separators(grid: &Grid, bg: u8) -> Option<(Vec<Vec<u8>>, 
     while c < w {
         if !sep_cols.contains(&c) {
             let start = c;
-            while c < w && !sep_cols.contains(&c) { c += 1; }
+            while c < w && !sep_cols.contains(&c) {
+                c += 1;
+            }
             col_bands.push((start, c));
         } else {
             c += 1;
         }
     }
 
-    if row_bands.len() < 2 || col_bands.len() < 2 { return None; }
+    if row_bands.len() < 2 || col_bands.len() < 2 {
+        return None;
+    }
 
     let nr = row_bands.len();
     let nc = col_bands.len();
@@ -2796,8 +3411,12 @@ fn find_block_color_by_separators(grid: &Grid, bg: u8) -> Option<(Vec<Vec<u8>>, 
 fn solve_block_color_summary(task: &ArcTask) -> Option<()> {
     for ex in &task.train {
         let (summary, nr, nc) = find_block_color_layout(&ex.input)?;
-        if nr != ex.output.height || nc != ex.output.width { return None; }
-        if summary != ex.output.cells { return None; }
+        if nr != ex.output.height || nc != ex.output.width {
+            return None;
+        }
+        if summary != ex.output.cells {
+            return None;
+        }
     }
     Some(())
 }
@@ -2805,10 +3424,18 @@ fn solve_block_color_summary(task: &ArcTask) -> Option<()> {
 fn apply_block_color_summary(input: &Grid, oh: usize, ow: usize) -> Grid {
     if let Some((summary, nr, nc)) = find_block_color_layout(input) {
         if nr == oh && nc == ow {
-            return Grid { cells: summary, height: oh, width: ow };
+            return Grid {
+                cells: summary,
+                height: oh,
+                width: ow,
+            };
         }
     }
-    Grid { cells: vec![vec![0u8; ow]; oh], height: oh, width: ow }
+    Grid {
+        cells: vec![vec![0u8; ow]; oh],
+        height: oh,
+        width: ow,
+    }
 }
 
 // ─── Strategy: Object count → diagonal identity ─────────────────────────────
@@ -2828,7 +3455,9 @@ fn count_blobs(grid: &Grid, color: u8) -> usize {
                 count += 1;
                 let mut stack = vec![(r, c)];
                 while let Some((cr, cc)) = stack.pop() {
-                    if visited[cr][cc] { continue; }
+                    if visited[cr][cc] {
+                        continue;
+                    }
                     visited[cr][cc] = true;
                     for (dr, dc) in [(-1i32, 0), (1, 0), (0, -1), (0, 1)] {
                         let nr = cr as i32 + dr;
@@ -2849,8 +3478,14 @@ fn count_blobs(grid: &Grid, color: u8) -> usize {
 
 fn make_diagonal_grid(n: usize, color: u8) -> Grid {
     let mut cells = vec![vec![0u8; n]; n];
-    for i in 0..n { cells[i][i] = color; }
-    Grid { cells, height: n, width: n }
+    for i in 0..n {
+        cells[i][i] = color;
+    }
+    Grid {
+        cells,
+        height: n,
+        width: n,
+    }
 }
 
 fn solve_object_count_diagonal(task: &ArcTask) -> Option<u8> {
@@ -2859,7 +3494,9 @@ fn solve_object_count_diagonal(task: &ArcTask) -> Option<u8> {
     for ex in &task.train {
         let oh = ex.output.height;
         let ow = ex.output.width;
-        if oh != ow || oh == 0 { return None; }
+        if oh != ow || oh == 0 {
+            return None;
+        }
         // Find the non-zero color on the diagonal
         let mut dc = 0u8;
         for i in 0..oh {
@@ -2867,23 +3504,35 @@ fn solve_object_count_diagonal(task: &ArcTask) -> Option<u8> {
                 dc = ex.output.cells[i][i];
             }
         }
-        if dc == 0 { return None; }
+        if dc == 0 {
+            return None;
+        }
         // Verify it's a clean diagonal
         let expected = make_diagonal_grid(oh, dc);
-        if !grid_exact_match(&expected, &ex.output) { return None; }
+        if !grid_exact_match(&expected, &ex.output) {
+            return None;
+        }
         // Verify blob count matches N
         let n_blobs = count_blobs(&ex.input, dc);
-        if n_blobs != oh { return None; }
+        if n_blobs != oh {
+            return None;
+        }
         match diag_color {
             None => diag_color = Some(dc),
-            Some(prev) => if prev != dc { return None; }
+            Some(prev) => {
+                if prev != dc {
+                    return None;
+                }
+            }
         }
     }
     diag_color
 }
 
 fn solve_compose_ops(task: &ArcTask) -> Option<Vec<ComposeOp>> {
-    if task.train.is_empty() || task.test.is_empty() { return None; }
+    if task.train.is_empty() || task.test.is_empty() {
+        return None;
+    }
 
     let oh = task.train[0].output.height;
     let ow = task.train[0].output.width;
@@ -2903,8 +3552,17 @@ fn solve_compose_ops(task: &ArcTask) -> Option<Vec<ComposeOp>> {
     let mut all_colors = [false; 10];
     let mut out_colors = [false; 10];
     for ex in &task.train {
-        for row in &ex.input.cells { for &v in row { all_colors[v as usize] = true; } }
-        for row in &ex.output.cells { for &v in row { out_colors[v as usize] = true; all_colors[v as usize] = true; } }
+        for row in &ex.input.cells {
+            for &v in row {
+                all_colors[v as usize] = true;
+            }
+        }
+        for row in &ex.output.cells {
+            for &v in row {
+                out_colors[v as usize] = true;
+                all_colors[v as usize] = true;
+            }
+        }
     }
     for a in 0u8..10 {
         for b in 0u8..10 {
@@ -2936,13 +3594,19 @@ fn solve_compose_ops(task: &ArcTask) -> Option<Vec<ComposeOp>> {
             ops.push(ComposeOp::Tile(f, f));
             ops.push(ComposeOp::Scale(f, f));
         }
-        if !added_tile.contains(&(f, 1)) { ops.push(ComposeOp::Tile(f, 1)); }
-        if !added_tile.contains(&(1, f)) { ops.push(ComposeOp::Tile(1, f)); }
+        if !added_tile.contains(&(f, 1)) {
+            ops.push(ComposeOp::Tile(f, 1));
+        }
+        if !added_tile.contains(&(1, f)) {
+            ops.push(ComposeOp::Tile(1, f));
+        }
     }
 
     ops.push(ComposeOp::FractalTile);
     ops.push(ComposeOp::DiagTile);
-    for m in 0u8..4 { ops.push(ComposeOp::MirrorTile(m)); }
+    for m in 0u8..4 {
+        ops.push(ComposeOp::MirrorTile(m));
+    }
 
     // Dedup
     ops.sort_by(|a, b| format!("{:?}", a).cmp(&format!("{:?}", b)));
@@ -2958,7 +3622,8 @@ fn solve_compose_ops(task: &ArcTask) -> Option<Vec<ComposeOp>> {
                     None => return false,
                 }
             }
-            g.height == ex.output.height && g.width == ex.output.width
+            g.height == ex.output.height
+                && g.width == ex.output.width
                 && grid_exact_match(&g, &ex.output)
         })
     };
@@ -2966,7 +3631,9 @@ fn solve_compose_ops(task: &ArcTask) -> Option<Vec<ComposeOp>> {
     // Depth-1
     for op in &ops {
         if let Some((odh, odw)) = compose_output_dims(ih, iw, op) {
-            if odh != oh || odw != ow { continue; }
+            if odh != oh || odw != ow {
+                continue;
+            }
         }
         if validate(&[op]) {
             return Some(vec![op.clone()]);
@@ -2976,14 +3643,22 @@ fn solve_compose_ops(task: &ArcTask) -> Option<Vec<ComposeOp>> {
     // Depth-2: dim-filter to prune impossible pairs
     for op1 in &ops {
         let mid = compose_output_dims(ih, iw, op1);
-        if mid.is_none() { continue; }
+        if mid.is_none() {
+            continue;
+        }
         let (mh, mw) = mid.unwrap();
-        if mh > 60 || mw > 60 { continue; }
+        if mh > 60 || mw > 60 {
+            continue;
+        }
 
         for op2 in &ops {
             if let Some((fh, fw)) = compose_output_dims(mh, mw, op2) {
-                if fh != oh || fw != ow { continue; }
-            } else { continue; }
+                if fh != oh || fw != ow {
+                    continue;
+                }
+            } else {
+                continue;
+            }
 
             if validate(&[op1, op2]) {
                 return Some(vec![op1.clone(), op2.clone()]);
@@ -3000,9 +3675,14 @@ fn solve_compose_ops(task: &ArcTask) -> Option<Vec<ComposeOp>> {
 // Tries 6 transforms and returns the one consistent across all training examples.
 
 fn solve_geometric(task: &ArcTask) -> Option<u8> {
-    if task.train.is_empty() { return None; }
-    if !task.train.iter().all(|ex|
-        ex.input.height == ex.output.height && ex.input.width == ex.output.width) {
+    if task.train.is_empty() {
+        return None;
+    }
+    if !task
+        .train
+        .iter()
+        .all(|ex| ex.input.height == ex.output.height && ex.input.width == ex.output.width)
+    {
         return None;
     }
 
@@ -3011,21 +3691,27 @@ fn solve_geometric(task: &ArcTask) -> Option<u8> {
         let all_match = task.train.iter().all(|ex| {
             let h = ex.input.height;
             let w = ex.input.width;
-            if (tf == 0 || tf == 1 || tf == 5) && h != w { return false; }
-            (0..h).all(|r| (0..w).all(|c| {
-                let (tr, tc) = match tf {
-                    0 => (c, h - 1 - r),       // rot90 cw
-                    1 => (w - 1 - c, r),        // rot90 ccw
-                    2 => (h - 1 - r, w - 1 - c), // rot180
-                    3 => (r, w - 1 - c),        // hflip
-                    4 => (h - 1 - r, c),        // vflip
-                    5 => (c, r),                // transpose
-                    _ => (r, c),
-                };
-                ex.output.cells[tr][tc] == ex.input.cells[r][c]
-            }))
+            if (tf == 0 || tf == 1 || tf == 5) && h != w {
+                return false;
+            }
+            (0..h).all(|r| {
+                (0..w).all(|c| {
+                    let (tr, tc) = match tf {
+                        0 => (c, h - 1 - r),         // rot90 cw
+                        1 => (w - 1 - c, r),         // rot90 ccw
+                        2 => (h - 1 - r, w - 1 - c), // rot180
+                        3 => (r, w - 1 - c),         // hflip
+                        4 => (h - 1 - r, c),         // vflip
+                        5 => (c, r),                 // transpose
+                        _ => (r, c),
+                    };
+                    ex.output.cells[tr][tc] == ex.input.cells[r][c]
+                })
+            })
         });
-        if all_match { return Some(tf); }
+        if all_match {
+            return Some(tf);
+        }
     }
     None
 }
@@ -3052,7 +3738,11 @@ pub fn apply_geometric(grid: &Grid, tf: u8) -> Grid {
             cells[tr][tc] = grid.cells[r][c];
         }
     }
-    Grid { cells, height: oh, width: ow }
+    Grid {
+        cells,
+        height: oh,
+        width: ow,
+    }
 }
 
 // ─── Strategy L: Palette-constrained neighborhood ──────────────────────────
@@ -3062,8 +3752,11 @@ pub fn apply_geometric(grid: &Grid, tf: u8) -> Grid {
 // when tasks use only 2-4 of the 10 possible colors.
 
 fn solve_cell_centroid_palette(task: &ArcTask) -> Option<(Vec<Multivector>, Vec<u8>, f32)> {
-    if !task.train.iter().all(|ex|
-        ex.input.height == ex.output.height && ex.input.width == ex.output.width) {
+    if !task
+        .train
+        .iter()
+        .all(|ex| ex.input.height == ex.output.height && ex.input.width == ex.output.width)
+    {
         return None;
     }
 
@@ -3083,9 +3776,15 @@ fn solve_cell_centroid_palette(task: &ArcTask) -> Option<(Vec<Multivector>, Vec<
         }
     }
 
-    let centroids: Vec<Multivector> = sums.iter().zip(counts.iter())
+    let centroids: Vec<Multivector> = sums
+        .iter()
+        .zip(counts.iter())
         .map(|(sum, &count)| {
-            if count > 0 { sum.scale(1.0 / count as f32) } else { Multivector::zero() }
+            if count > 0 {
+                sum.scale(1.0 / count as f32)
+            } else {
+                Multivector::zero()
+            }
         })
         .collect();
 
@@ -3095,13 +3794,23 @@ fn solve_cell_centroid_palette(task: &ArcTask) -> Option<(Vec<Multivector>, Vec<
             for c in 0..ex.input.width {
                 let feat = cell_feature(&ex.input, r, c);
                 let pred = classify_palette(&centroids, &feat, &palette);
-                if pred == ex.output.cells[r][c] { correct += 1; }
+                if pred == ex.output.cells[r][c] {
+                    correct += 1;
+                }
                 total += 1;
             }
         }
     }
 
-    Some((centroids, palette, if total > 0 { correct as f32 / total as f32 } else { 0.0 }))
+    Some((
+        centroids,
+        palette,
+        if total > 0 {
+            correct as f32 / total as f32
+        } else {
+            0.0
+        },
+    ))
 }
 
 fn classify_palette(centroids: &[Multivector], feat: &Multivector, palette: &[u8]) -> u8 {
@@ -3125,7 +3834,11 @@ fn apply_cell_centroid_palette(centroids: &[Multivector], grid: &Grid, palette: 
             cells[r][c] = classify_palette(centroids, &feat, palette);
         }
     }
-    Grid { cells, height: grid.height, width: grid.width }
+    Grid {
+        cells,
+        height: grid.height,
+        width: grid.width,
+    }
 }
 
 // ─── Strategy M: Grid-separator summarization ──────────────────────────────
@@ -3142,14 +3855,18 @@ fn apply_cell_centroid_palette(centroids: &[Multivector], grid: &Grid, palette: 
 fn detect_grid_separators(grid: &Grid, bg: u8) -> Option<(u8, Vec<usize>, Vec<usize>)> {
     // Try each non-bg color as potential separator
     for sep_c in 0..NUM_COLORS as u8 {
-        if sep_c == bg { continue; }
+        if sep_c == bg {
+            continue;
+        }
         let sep_rows: Vec<usize> = (0..grid.height)
             .filter(|&r| grid.cells[r].iter().all(|&c| c == sep_c))
             .collect();
         let sep_cols: Vec<usize> = (0..grid.width)
             .filter(|&col| (0..grid.height).all(|r| grid.cells[r][col] == sep_c))
             .collect();
-        if sep_rows.is_empty() && sep_cols.is_empty() { continue; }
+        if sep_rows.is_empty() && sep_cols.is_empty() {
+            continue;
+        }
         // Must have at least one row OR col separator
         return Some((sep_c, sep_rows, sep_cols));
     }
@@ -3158,35 +3875,45 @@ fn detect_grid_separators(grid: &Grid, bg: u8) -> Option<(u8, Vec<usize>, Vec<us
 
 /// Given separator rows and cols, extract the rectangular sub-regions between them.
 /// Returns sub-regions as a 2D vec indexed by (region_row, region_col).
-fn extract_meta_regions(grid: &Grid, sep_rows: &[usize], sep_cols: &[usize])
-    -> Option<Vec<Vec<Vec<Vec<u8>>>>>
-{
+fn extract_meta_regions(
+    grid: &Grid,
+    sep_rows: &[usize],
+    sep_cols: &[usize],
+) -> Option<Vec<Vec<Vec<Vec<u8>>>>> {
     // Build row bands: ranges between separators
     let mut row_bands: Vec<(usize, usize)> = Vec::new();
     let mut prev = 0usize;
     for &sr in sep_rows {
-        if sr > prev { row_bands.push((prev, sr)); }
+        if sr > prev {
+            row_bands.push((prev, sr));
+        }
         prev = sr + 1;
     }
-    if prev < grid.height { row_bands.push((prev, grid.height)); }
+    if prev < grid.height {
+        row_bands.push((prev, grid.height));
+    }
 
     let mut col_bands: Vec<(usize, usize)> = Vec::new();
     let mut prev = 0usize;
     for &sc in sep_cols {
-        if sc > prev { col_bands.push((prev, sc)); }
+        if sc > prev {
+            col_bands.push((prev, sc));
+        }
         prev = sc + 1;
     }
-    if prev < grid.width { col_bands.push((prev, grid.width)); }
+    if prev < grid.width {
+        col_bands.push((prev, grid.width));
+    }
 
-    if row_bands.is_empty() || col_bands.is_empty() { return None; }
+    if row_bands.is_empty() || col_bands.is_empty() {
+        return None;
+    }
 
     let mut regions = Vec::new();
     for &(r0, r1) in &row_bands {
         let mut row_regions = Vec::new();
         for &(c0, c1) in &col_bands {
-            let sub: Vec<Vec<u8>> = (r0..r1)
-                .map(|r| grid.cells[r][c0..c1].to_vec())
-                .collect();
+            let sub: Vec<Vec<u8>> = (r0..r1).map(|r| grid.cells[r][c0..c1].to_vec()).collect();
             row_regions.push(sub);
         }
         regions.push(row_regions);
@@ -3199,10 +3926,14 @@ fn extract_meta_regions(grid: &Grid, sep_rows: &[usize], sep_cols: &[usize])
 fn region_features(region: &[Vec<u8>], bg: u8, sep: u8) -> [u32; 12] {
     let mut counts = [0u32; NUM_COLORS];
     for row in region {
-        for &c in row { counts[c as usize] += 1; }
+        for &c in row {
+            counts[c as usize] += 1;
+        }
     }
     counts[bg as usize] = 0;
-    if sep != bg { counts[sep as usize] = 0; }
+    if sep != bg {
+        counts[sep as usize] = 0;
+    }
     let total: u32 = counts.iter().sum();
     let distinct = counts.iter().filter(|&&c| c > 0).count() as u32;
     let mut feat = [0u32; 12];
@@ -3215,23 +3946,50 @@ fn region_features(region: &[Vec<u8>], bg: u8, sep: u8) -> [u32; 12] {
 /// Extract a single scalar feature from the feature vector, used as a lookup key.
 fn region_scalar(feat: &[u32; 12], rule: usize) -> u32 {
     match rule {
-        0 => feat[10],                    // total non-bg count
-        1 => feat[11],                    // distinct non-bg colors
-        2 => {                            // majority non-bg color index
+        0 => feat[10], // total non-bg count
+        1 => feat[11], // distinct non-bg colors
+        2 => {
+            // majority non-bg color index
             let mut best = 0u8;
             let mut best_v = 0u32;
-            for i in 0..10 { if feat[i] > best_v { best_v = feat[i]; best = i as u8; } }
+            for i in 0..10 {
+                if feat[i] > best_v {
+                    best_v = feat[i];
+                    best = i as u8;
+                }
+            }
             best as u32
         }
-        3 => {                            // minority non-bg color index
+        3 => {
+            // minority non-bg color index
             let mut best = 0u8;
             let mut best_v = u32::MAX;
-            for i in 0..10 { if feat[i] > 0 && feat[i] < best_v { best_v = feat[i]; best = i as u8; } }
-            if best_v == u32::MAX { 0 } else { best as u32 }
+            for i in 0..10 {
+                if feat[i] > 0 && feat[i] < best_v {
+                    best_v = feat[i];
+                    best = i as u8;
+                }
+            }
+            if best_v == u32::MAX {
+                0
+            } else {
+                best as u32
+            }
         }
-        4 => if feat[10] > 1 { 1 } else { 0 },  // has_multiple flag
-        5 => {                            // color with count=1 (unique cell)
-            for i in 0..10 { if feat[i] == 1 { return i as u32; } }
+        4 => {
+            if feat[10] > 1 {
+                1
+            } else {
+                0
+            }
+        } // has_multiple flag
+        5 => {
+            // color with count=1 (unique cell)
+            for i in 0..10 {
+                if feat[i] == 1 {
+                    return i as u32;
+                }
+            }
             0
         }
         _ => 0,
@@ -3245,7 +4003,11 @@ const NUM_REGION_RULES: usize = 6;
 fn solve_grid_separator(task: &ArcTask) -> Option<(usize, [u8; 32])> {
     let oh = task.train[0].output.height;
     let ow = task.train[0].output.width;
-    if !task.train.iter().all(|ex| ex.output.height == oh && ex.output.width == ow) {
+    if !task
+        .train
+        .iter()
+        .all(|ex| ex.output.height == oh && ex.output.width == ow)
+    {
         return None;
     }
 
@@ -3258,31 +4020,48 @@ fn solve_grid_separator(task: &ArcTask) -> Option<(usize, [u8; 32])> {
             let bg = most_common_color(&ex.input);
             let (sep_c, sep_rows, sep_cols) = match detect_grid_separators(&ex.input, bg) {
                 Some(v) => v,
-                None => { ok = false; break; }
+                None => {
+                    ok = false;
+                    break;
+                }
             };
             let regions = match extract_meta_regions(&ex.input, &sep_rows, &sep_cols) {
                 Some(r) => r,
-                None => { ok = false; break; }
+                None => {
+                    ok = false;
+                    break;
+                }
             };
             let nr = regions.len();
             let nc = if nr > 0 { regions[0].len() } else { 0 };
-            if nr != oh || nc != ow { ok = false; break; }
+            if nr != oh || nc != ow {
+                ok = false;
+                break;
+            }
 
             for ri in 0..nr {
                 for ci in 0..nc {
                     let feat = region_features(&regions[ri][ci], bg, sep_c);
                     let key = region_scalar(&feat, rule) as usize;
-                    if key >= 32 { ok = false; break; }
+                    if key >= 32 {
+                        ok = false;
+                        break;
+                    }
                     let expected = ex.output.cells[ri][ci];
                     if mapping[key] == 0xFF {
                         mapping[key] = expected;
                     } else if mapping[key] != expected {
-                        ok = false; break;
+                        ok = false;
+                        break;
                     }
                 }
-                if !ok { break; }
+                if !ok {
+                    break;
+                }
             }
-            if !ok { break; }
+            if !ok {
+                break;
+            }
         }
 
         if ok {
@@ -3292,10 +4071,16 @@ fn solve_grid_separator(task: &ArcTask) -> Option<(usize, [u8; 32])> {
     None
 }
 
-fn apply_grid_separator(input: &Grid, rule: usize, mapping: &[u8; 32], oh: usize, ow: usize) -> Grid {
+fn apply_grid_separator(
+    input: &Grid,
+    rule: usize,
+    mapping: &[u8; 32],
+    oh: usize,
+    ow: usize,
+) -> Grid {
     let bg = most_common_color(input);
-    let (sep_c, sep_rows, sep_cols) = detect_grid_separators(input, bg)
-        .unwrap_or((bg, vec![], vec![]));
+    let (sep_c, sep_rows, sep_cols) =
+        detect_grid_separators(input, bg).unwrap_or((bg, vec![], vec![]));
 
     if let Some(regions) = extract_meta_regions(input, &sep_rows, &sep_cols) {
         let nr = regions.len();
@@ -3308,13 +4093,23 @@ fn apply_grid_separator(input: &Grid, rule: usize, mapping: &[u8; 32], oh: usize
                     let key = region_scalar(&feat, rule) as usize;
                     cells[ri][ci] = if key < 32 && mapping[key] != 0xFF {
                         mapping[key]
-                    } else { 0 };
+                    } else {
+                        0
+                    };
                 }
             }
-            return Grid { cells, height: oh, width: ow };
+            return Grid {
+                cells,
+                height: oh,
+                width: ow,
+            };
         }
     }
-    Grid { cells: vec![vec![0u8; ow]; oh], height: oh, width: ow }
+    Grid {
+        cells: vec![vec![0u8; ow]; oh],
+        height: oh,
+        width: ow,
+    }
 }
 
 // ─── Strategy G: Grid-level rotor (fallback) ───────────────────────────────
@@ -3328,21 +4123,31 @@ fn apply_grid_separator(input: &Grid, rule: usize, mapping: &[u8; 32], oh: usize
 /// This separates the "what" (boost sector) from the "where" (rotation sector).
 fn position_vector(r: usize, c: usize, h: usize, w: usize) -> Multivector {
     let pi = std::f32::consts::PI;
-    let u = if h > 1 { r as f32 / (h - 1) as f32 } else { 0.5 };
-    let v = if w > 1 { c as f32 / (w - 1) as f32 } else { 0.5 };
+    let u = if h > 1 {
+        r as f32 / (h - 1) as f32
+    } else {
+        0.5
+    };
+    let v = if w > 1 {
+        c as f32 / (w - 1) as f32
+    } else {
+        0.5
+    };
     let pv = [
-        0.0,                            // e₀ = 0: no timelike contribution
-        (pi * u).sin(),                  // e₁: row fundamental
-        (pi * u).cos(),                  // e₂: row phase
-        (pi * v).sin(),                  // e₃: col fundamental
-        (pi * v).cos(),                  // e₄: col phase
-        (2.0 * pi * u).sin(),           // e₅: row harmonic
-        (2.0 * pi * v).sin(),           // e₆: col harmonic
-        (pi * (u + v)).sin(),            // e₇: diagonal
+        0.0,                  // e₀ = 0: no timelike contribution
+        (pi * u).sin(),       // e₁: row fundamental
+        (pi * u).cos(),       // e₂: row phase
+        (pi * v).sin(),       // e₃: col fundamental
+        (pi * v).cos(),       // e₄: col phase
+        (2.0 * pi * u).sin(), // e₅: row harmonic
+        (2.0 * pi * v).sin(), // e₆: col harmonic
+        (pi * (u + v)).sin(), // e₇: diagonal
     ];
     let norm: f32 = pv.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
     let mut normed = [0.0f32; 8];
-    for i in 0..8 { normed[i] = pv[i] / norm; }
+    for i in 0..8 {
+        normed[i] = pv[i] / norm;
+    }
     Multivector::vector(&normed)
 }
 
@@ -3351,14 +4156,18 @@ pub fn encode_grid(grid: &Grid) -> Multivector {
     for r in 0..grid.height {
         for c in 0..grid.width {
             let color = grid.cells[r][c];
-            if color == 0 { continue; }
+            if color == 0 {
+                continue;
+            }
             let col_mv = color_vector(color);
             let pos_mv = position_vector(r, c, grid.height, grid.width);
             mv = mv.add(&pos_mv.geo(&col_mv));
         }
     }
     let n = mv.component_norm();
-    if n > 1e-8 { mv = mv.scale(1.0 / n); }
+    if n > 1e-8 {
+        mv = mv.scale(1.0 / n);
+    }
     mv
 }
 
@@ -3378,18 +4187,21 @@ pub fn decode_grid(pred_mv: &Multivector, h: usize, w: usize) -> Grid {
                     best_color = (idx + 1) as u8;
                 }
             }
-            if best_score > 0.0 { cells[r][c] = best_color; }
+            if best_score > 0.0 {
+                cells[r][c] = best_color;
+            }
         }
     }
-    Grid { cells, height: h, width: w }
+    Grid {
+        cells,
+        height: h,
+        width: w,
+    }
 }
 
 // ─── Clifford normal equations ─────────────────────────────────────────────
 
-pub fn solve_normal_equations(
-    inputs: &[Multivector],
-    outputs: &[Multivector],
-) -> Multivector {
+pub fn solve_normal_equations(inputs: &[Multivector], outputs: &[Multivector]) -> Multivector {
     assert_eq!(inputs.len(), outputs.len());
 
     let mut a = Multivector::zero();
@@ -3408,7 +4220,9 @@ pub fn solve_normal_equations(
     let bb_rev = b.geo(&b_rev);
     let denom = bb_rev.components[0];
 
-    if denom.abs() < 1e-12 { return a; }
+    if denom.abs() < 1e-12 {
+        return a;
+    }
     let b_inv = b_rev.scale(1.0 / denom);
     a.geo(&b_inv)
 }
@@ -3422,7 +4236,9 @@ pub fn extract_rule(input_mv: &Multivector, output_mv: &Multivector) -> Multivec
 
 pub fn rotor_consistency(rules: &[Multivector]) -> (f32, Vec<f32>) {
     let n = rules.len();
-    if n < 2 { return (0.0, vec![]); }
+    if n < 2 {
+        return (0.0, vec![]);
+    }
 
     let mut bv_norms = Vec::new();
     for i in 0..n {
@@ -3463,7 +4279,9 @@ impl FlowDiagnostic {
     /// Ratio in [-1, 1]: positive = rotation-dominated, negative = boost-dominated
     pub fn spatial_bias(&self) -> f32 {
         let total = self.boost_norm + self.rotation_norm;
-        if total < 1e-10 { return 0.0; }
+        if total < 1e-10 {
+            return 0.0;
+        }
         (self.rotation_norm - self.boost_norm) / total
     }
 
@@ -3473,29 +4291,40 @@ impl FlowDiagnostic {
 }
 
 pub fn flow_diagnostic(task: &ArcTask) -> FlowDiagnostic {
-    let rules: Vec<Multivector> = task.train.iter()
+    let rules: Vec<Multivector> = task
+        .train
+        .iter()
         .map(|ex| extract_rule(&encode_grid(&ex.input), &encode_grid(&ex.output)))
         .collect();
 
     // Mean rule — the "average transformation" across training examples
     let n = rules.len() as f32;
     let mut mean_rule = Multivector::zero();
-    for r in &rules { mean_rule = mean_rule.add(r); }
+    for r in &rules {
+        mean_rule = mean_rule.add(r);
+    }
     mean_rule = mean_rule.scale(1.0 / n);
 
     // Extract grade-2 (bivector) of mean rule
     let g2 = mean_rule.grade(2);
     let mut bv_dir = [0.0f32; 28];
-    for i in 0..28 { bv_dir[i] = g2[i]; }
+    for i in 0..28 {
+        bv_dir[i] = g2[i];
+    }
 
     // Decompose into boost and rotation norms
     let mut boost_sq = 0.0f32;
     let mut rot_sq = 0.0f32;
     let mut is_boost = [false; 28];
-    for &bi in &BOOST_BV_IDX { is_boost[bi] = true; }
+    for &bi in &BOOST_BV_IDX {
+        is_boost[bi] = true;
+    }
     for i in 0..28 {
-        if is_boost[i] { boost_sq += g2[i] * g2[i]; }
-        else { rot_sq += g2[i] * g2[i]; }
+        if is_boost[i] {
+            boost_sq += g2[i] * g2[i];
+        } else {
+            rot_sq += g2[i] * g2[i];
+        }
     }
 
     // Sequential convergence: track |j_k| as each example arrives
@@ -3504,12 +4333,16 @@ pub fn flow_diagnostic(task: &ArcTask) -> FlowDiagnostic {
         let mut cumul = rules[0].clone();
         for k in 1..rules.len() {
             let prev = cumul.clone();
-            cumul = cumul.scale(k as f32 / (k + 1) as f32)
+            cumul = cumul
+                .scale(k as f32 / (k + 1) as f32)
                 .add(&rules[k].scale(1.0 / (k + 1) as f32));
             let delta_g2_prev = prev.grade(2);
             let delta_g2_curr = cumul.grade(2);
             let j_mag: f32 = (0..28)
-                .map(|i| { let d = delta_g2_curr[i] - delta_g2_prev[i]; d * d })
+                .map(|i| {
+                    let d = delta_g2_curr[i] - delta_g2_prev[i];
+                    d * d
+                })
                 .sum::<f32>()
                 .sqrt();
             flow_magnitudes.push(j_mag);
@@ -3556,34 +4389,52 @@ impl ArcDiracChannel {
     pub fn new(seed: u64) -> Self {
         let mut s = seed;
         let mut next = || -> f32 {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((s >> 33) as f32 / (1u64 << 31) as f32) - 1.0
         };
 
         let mut color_pair_weights = [[0.0f32; NUM_COLORS]; NUM_COLORS];
         for row in color_pair_weights.iter_mut() {
-            for v in row.iter_mut() { *v = next() * 0.3; }
+            for v in row.iter_mut() {
+                *v = next() * 0.3;
+            }
         }
 
         let mut position_kernel = [[0.0f32; 8]; 9];
         for row in position_kernel.iter_mut() {
-            for v in row.iter_mut() { *v = next() * 0.3; }
+            for v in row.iter_mut() {
+                *v = next() * 0.3;
+            }
         }
 
         let mut projection = [[0.0f32; 8]; 8];
         for row in projection.iter_mut() {
-            for v in row.iter_mut() { *v = next() * 0.3; }
+            for v in row.iter_mut() {
+                *v = next() * 0.3;
+            }
         }
 
-        ArcDiracChannel { color_pair_weights, position_kernel, projection }
+        ArcDiracChannel {
+            color_pair_weights,
+            position_kernel,
+            projection,
+        }
     }
 
     pub fn encode(&self, grid: &Grid) -> Multivector {
         let mut features = [0.0f32; 8];
         let offsets: [(i32, i32); 9] = [
-            (-1,-1), (-1,0), (-1,1),
-            ( 0,-1), ( 0,0), ( 0,1),
-            ( 1,-1), ( 1,0), ( 1,1),
+            (-1, -1),
+            (-1, 0),
+            (-1, 1),
+            (0, -1),
+            (0, 0),
+            (0, 1),
+            (1, -1),
+            (1, 0),
+            (1, 1),
         ];
 
         for r in 0..grid.height {
@@ -3592,10 +4443,15 @@ impl ArcDiracChannel {
                 for (ki, &(dr, dc)) in offsets.iter().enumerate() {
                     let nr = r as i32 + dr;
                     let nc = c as i32 + dc;
-                    let neighbor = if nr >= 0 && nr < grid.height as i32
-                                      && nc >= 0 && nc < grid.width as i32 {
+                    let neighbor = if nr >= 0
+                        && nr < grid.height as i32
+                        && nc >= 0
+                        && nc < grid.width as i32
+                    {
                         grid.cells[nr as usize][nc as usize] as usize
-                    } else { 0 };
+                    } else {
+                        0
+                    };
 
                     let w = self.color_pair_weights[center][neighbor];
                     for d in 0..8 {
@@ -3613,15 +4469,24 @@ impl ArcDiracChannel {
             }
         }
 
-        let norm: f32 = projected.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
-        for v in projected.iter_mut() { *v /= norm; }
+        let norm: f32 = projected
+            .iter()
+            .map(|x| x * x)
+            .sum::<f32>()
+            .sqrt()
+            .max(1e-8);
+        for v in projected.iter_mut() {
+            *v /= norm;
+        }
 
         Multivector::vector(&projected)
     }
 
     /// Compute mean |B| across all training pairs using this channel's encoding.
     fn mean_b(&self, task: &ArcTask) -> f32 {
-        if task.train.is_empty() { return 0.0; }
+        if task.train.is_empty() {
+            return 0.0;
+        }
         let mut total = 0.0f32;
         for ex in &task.train {
             let z_in = self.encode(&ex.input);
@@ -3676,7 +4541,9 @@ impl ArcDiracChannel {
 
         for _epoch in 0..max_epochs {
             let current_b = self.mean_b(task);
-            if current_b >= target_b { return current_b; }
+            if current_b >= target_b {
+                return current_b;
+            }
 
             for pi in 0..n_params {
                 let original = self.get_param(pi);
@@ -3700,7 +4567,9 @@ impl ArcDiracChannel {
 
 /// Compute mean |B| for a task using the standard encoding.
 pub fn task_mean_b(task: &ArcTask) -> f32 {
-    if task.train.is_empty() { return 0.0; }
+    if task.train.is_empty() {
+        return 0.0;
+    }
     let mut total = 0.0f32;
     for ex in &task.train {
         let z_in = encode_grid(&ex.input);
@@ -3722,7 +4591,9 @@ pub fn grid_matches(predicted: &Grid, expected: &Grid) -> (usize, usize) {
     let total = expected.height * expected.width;
     for r in 0..expected.height {
         for c in 0..expected.width {
-            if predicted.cells[r][c] == expected.cells[r][c] { correct += 1; }
+            if predicted.cells[r][c] == expected.cells[r][c] {
+                correct += 1;
+            }
         }
     }
     (correct, total)
@@ -3740,10 +4611,13 @@ pub fn grid_exact_match(predicted: &Grid, expected: &Grid) -> bool {
 // single-pass.
 
 fn is_same_dims(task: &ArcTask) -> bool {
-    task.train.iter().all(|ex|
-        ex.input.height == ex.output.height && ex.input.width == ex.output.width)
-    && task.test.iter().all(|ex|
-        ex.input.height == ex.output.height && ex.input.width == ex.output.width)
+    task.train
+        .iter()
+        .all(|ex| ex.input.height == ex.output.height && ex.input.width == ex.output.width)
+        && task
+            .test
+            .iter()
+            .all(|ex| ex.input.height == ex.output.height && ex.input.width == ex.output.width)
 }
 
 // ─── Expert Problem Solver ───────────────────────────────────────────────
@@ -3799,12 +4673,23 @@ enum FailureMode {
 }
 
 impl VerificationResult {
-    fn compute(training_acc: f32, b_consistency: f32, flow_alignment: f32, generalization: f32) -> Self {
+    fn compute(
+        training_acc: f32,
+        b_consistency: f32,
+        flow_alignment: f32,
+        generalization: f32,
+    ) -> Self {
         let confidence = training_acc
             .min(b_consistency)
             .min(flow_alignment)
             .min(generalization);
-        VerificationResult { training_accuracy: training_acc, b_consistency, flow_alignment, generalization, confidence }
+        VerificationResult {
+            training_accuracy: training_acc,
+            b_consistency,
+            flow_alignment,
+            generalization,
+            confidence,
+        }
     }
 }
 
@@ -3823,19 +4708,31 @@ pub fn decompose_task(task: &ArcTask, flow: &FlowDiagnostic) -> TaskDecompositio
         TransformationType::Compositional
     } else {
         // Mixed convergent — could be either
-        if sb > 0.0 { TransformationType::Geometric }
-        else { TransformationType::Causal }
+        if sb > 0.0 {
+            TransformationType::Geometric
+        } else {
+            TransformationType::Causal
+        }
     };
 
     let secondary = match primary {
         TransformationType::Compositional => {
-            if sb > 0.0 { Some(TransformationType::Geometric) }
-            else { Some(TransformationType::Causal) }
+            if sb > 0.0 {
+                Some(TransformationType::Geometric)
+            } else {
+                Some(TransformationType::Causal)
+            }
         }
         _ => None,
     };
 
-    TaskDecomposition { primary, secondary, spatial_bias: sb, converging: conv, degenerate: degen }
+    TaskDecomposition {
+        primary,
+        secondary,
+        spatial_bias: sb,
+        converging: conv,
+        degenerate: degen,
+    }
 }
 
 fn verify_solution(
@@ -3853,7 +4750,10 @@ fn verify_solution(
     // Check 2: |B| consistency — the transformation should produce similar
     // bivector signatures across all test predictions
     let b_consistency = if predictions.len() >= 2 {
-        let test_rules: Vec<Multivector> = task.test.iter().zip(predictions.iter())
+        let test_rules: Vec<Multivector> = task
+            .test
+            .iter()
+            .zip(predictions.iter())
             .map(|(ex, pred)| extract_rule(&encode_grid(&ex.input), &encode_grid(pred)))
             .collect();
         let (mean_bv, _) = rotor_consistency(&test_rules);
@@ -3865,7 +4765,11 @@ fn verify_solution(
         );
         let g2 = rule.grade(2);
         let bv_norm: f32 = g2.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if bv_norm > 0.01 { 0.8 } else { 0.3 }
+        if bv_norm > 0.01 {
+            0.8
+        } else {
+            0.3
+        }
     } else {
         0.0
     };
@@ -3876,27 +4780,46 @@ fn verify_solution(
         0.5
     } else {
         let agreement = flow.spatial_bias() * program_affinity;
-        if agreement > 0.0 { 0.9 } else if agreement.abs() < 0.05 { 0.6 } else { 0.3 }
+        if agreement > 0.0 {
+            0.9
+        } else if agreement.abs() < 0.05 {
+            0.6
+        } else {
+            0.3
+        }
     };
 
     // Check 4: Generalization — apply perturbations to training inputs.
     // If the solution is robust, small changes shouldn't break it.
     let generalization = perturbation_stability(task, predictions);
 
-    VerificationResult::compute(training_accuracy, b_consistency, flow_alignment, generalization)
+    VerificationResult::compute(
+        training_accuracy,
+        b_consistency,
+        flow_alignment,
+        generalization,
+    )
 }
 
 fn perturbation_stability(task: &ArcTask, predictions: &[Grid]) -> f32 {
-    if task.train.len() < 2 { return 0.6; }
+    if task.train.len() < 2 {
+        return 0.6;
+    }
 
     // Leave-one-out consistency: for each training example, check that the
     // solution quality on that example is comparable to the overall quality.
     // This measures whether the solution captured a general rule vs. overfit.
     let mut min_acc = 1.0f32;
     for (i, test_ex) in task.test.iter().enumerate() {
-        if i >= predictions.len() { continue; }
+        if i >= predictions.len() {
+            continue;
+        }
         let (correct, total) = grid_matches(&predictions[i], &test_ex.output);
-        let acc = if total > 0 { correct as f32 / total as f32 } else { 0.0 };
+        let acc = if total > 0 {
+            correct as f32 / total as f32
+        } else {
+            0.0
+        };
         min_acc = min_acc.min(acc);
     }
 
@@ -3912,7 +4835,10 @@ fn perturbation_stability(task: &ArcTask, predictions: &[Grid]) -> f32 {
                 break;
             }
             let (match_cells, total) = grid_matches(&predictions[i], &predictions[0]);
-            if match_cells != total { all_same = false; break; }
+            if match_cells != total {
+                all_same = false;
+                break;
+            }
         }
         // If all predictions are identical AND inputs differ → suspicious
         if all_same && task.test.len() >= 2 {
@@ -3920,7 +4846,9 @@ fn perturbation_stability(task: &ArcTask, predictions: &[Grid]) -> f32 {
                 let (m, t) = grid_matches(&task.test[0].input, &task.test[1].input);
                 m != t
             };
-            if inputs_differ { min_acc *= 0.7; }
+            if inputs_differ {
+                min_acc *= 0.7;
+            }
         }
     }
 
@@ -3973,7 +4901,10 @@ fn take_if_better(
     best: &mut Option<(Vec<Grid>, &'static str, VerificationResult)>,
     candidate: (Vec<Grid>, &'static str, VerificationResult),
 ) {
-    if best.as_ref().map_or(true, |b| candidate.2.confidence > b.2.confidence) {
+    if best
+        .as_ref()
+        .map_or(true, |b| candidate.2.confidence > b.2.confidence)
+    {
         *best = Some(candidate);
     }
 }
@@ -4031,15 +4962,27 @@ pub fn expert_solver_pipeline(
         let final_b = channel.train_on_task(task, 0.3, 30, 0.01);
 
         if final_b > 0.05 {
-            let dirac_inputs: Vec<_> = task.train.iter().map(|ex| channel.encode(&ex.input)).collect();
-            let dirac_outputs: Vec<_> = task.train.iter().map(|ex| channel.encode(&ex.output)).collect();
+            let dirac_inputs: Vec<_> = task
+                .train
+                .iter()
+                .map(|ex| channel.encode(&ex.input))
+                .collect();
+            let dirac_outputs: Vec<_> = task
+                .train
+                .iter()
+                .map(|ex| channel.encode(&ex.output))
+                .collect();
             let dirac_rule = solve_normal_equations(&dirac_inputs, &dirac_outputs);
 
-            let predictions: Vec<Grid> = task.test.iter().map(|test_ex| {
-                let test_mv = channel.encode(&test_ex.input);
-                let pred_mv = dirac_rule.geo(&test_mv);
-                decode_grid(&pred_mv, test_ex.output.height, test_ex.output.width)
-            }).collect();
+            let predictions: Vec<Grid> = task
+                .test
+                .iter()
+                .map(|test_ex| {
+                    let test_mv = channel.encode(&test_ex.input);
+                    let pred_mv = dirac_rule.geo(&test_mv);
+                    decode_grid(&pred_mv, test_ex.output.height, test_ex.output.width)
+                })
+                .collect();
 
             let v = verify_solution(task, &predictions, 0.0, flow);
             if v.confidence > 0.95 {
@@ -4065,9 +5008,16 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
 
     // |B| diagnostic (grid-level, for reporting)
     let train_inputs: Vec<_> = task.train.iter().map(|ex| encode_grid(&ex.input)).collect();
-    let train_outputs: Vec<_> = task.train.iter().map(|ex| encode_grid(&ex.output)).collect();
-    let rules: Vec<_> = train_inputs.iter().zip(train_outputs.iter())
-        .map(|(i, o)| extract_rule(i, o)).collect();
+    let train_outputs: Vec<_> = task
+        .train
+        .iter()
+        .map(|ex| encode_grid(&ex.output))
+        .collect();
+    let rules: Vec<_> = train_inputs
+        .iter()
+        .zip(train_outputs.iter())
+        .map(|(i, o)| extract_rule(i, o))
+        .collect();
     let (mean_bv, _) = rotor_consistency(&rules);
 
     // Probability flow diagnostic — decompose bivector into boost/rotation
@@ -4086,7 +5036,11 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
         total_correct = 0;
         total_cells = 0;
         all_exact = true;
-        let (h, w) = task.train.first().map(|e| (e.input.height, e.input.width)).unwrap_or((0, 0));
+        let (h, w) = task
+            .train
+            .first()
+            .map(|e| (e.input.height, e.input.width))
+            .unwrap_or((0, 0));
 
         // Priority 1: Exact structural rules — each must achieve 100% on training.
         let ring_rev_acc = solve_ring_reversal(task);
@@ -4102,27 +5056,33 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                 let (correct, total) = grid_matches(&pred, &test_ex.output);
                 total_correct += correct;
                 total_cells += total;
-                if correct != total { all_exact = false; }
+                if correct != total {
+                    all_exact = false;
+                }
             }
         } else if ring_cyc_acc == Some(1.0) {
             best_strategy = "ring_cycle";
             for test_ex in &task.test {
-                let pred = apply_ring_color_cycle(&test_ex.input)
-                    .unwrap_or_else(|| test_ex.input.clone());
+                let pred =
+                    apply_ring_color_cycle(&test_ex.input).unwrap_or_else(|| test_ex.input.clone());
                 let (correct, total) = grid_matches(&pred, &test_ex.output);
                 total_correct += correct;
                 total_cells += total;
-                if correct != total { all_exact = false; }
+                if correct != total {
+                    all_exact = false;
+                }
             }
         } else if diag_x_acc == Some(1.0) {
             best_strategy = "diagonal_x";
             for test_ex in &task.test {
-                let pred = apply_diagonal_x(&test_ex.input)
-                    .unwrap_or_else(|| test_ex.input.clone());
+                let pred =
+                    apply_diagonal_x(&test_ex.input).unwrap_or_else(|| test_ex.input.clone());
                 let (correct, total) = grid_matches(&pred, &test_ex.output);
                 total_correct += correct;
                 total_cells += total;
-                if correct != total { all_exact = false; }
+                if correct != total {
+                    all_exact = false;
+                }
             }
         } else if let Some((ca, cb)) = spiral_result {
             best_strategy = "spiral_fill";
@@ -4131,7 +5091,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                 let (correct, total) = grid_matches(&pred, &test_ex.output);
                 total_correct += correct;
                 total_cells += total;
-                if correct != total { all_exact = false; }
+                if correct != total {
+                    all_exact = false;
+                }
             }
         } else if let Some((default_c, ref dmap)) = depth_map_result {
             best_strategy = "depth_fill";
@@ -4140,17 +5102,21 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                 let (correct, total) = grid_matches(&pred, &test_ex.output);
                 total_correct += correct;
                 total_cells += total;
-                if correct != total { all_exact = false; }
+                if correct != total {
+                    all_exact = false;
+                }
             }
         } else if solve_l_diagonal(task) == Some(1.0) {
             best_strategy = "l_diagonal";
             for test_ex in &task.test {
-                let pred = apply_l_diagonal(&test_ex.input)
-                    .unwrap_or_else(|| test_ex.input.clone());
+                let pred =
+                    apply_l_diagonal(&test_ex.input).unwrap_or_else(|| test_ex.input.clone());
                 let (correct, total) = grid_matches(&pred, &test_ex.output);
                 total_correct += correct;
                 total_cells += total;
-                if correct != total { all_exact = false; }
+                if correct != total {
+                    all_exact = false;
+                }
             }
         } else if let Some(dir) = solve_gravity(task) {
             best_strategy = "gravity";
@@ -4159,7 +5125,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                 let (correct, total) = grid_matches(&pred, &test_ex.output);
                 total_correct += correct;
                 total_cells += total;
-                if correct != total { all_exact = false; }
+                if correct != total {
+                    all_exact = false;
+                }
             }
         } else if let Some(axis) = solve_symmetry(task) {
             best_strategy = "symmetry";
@@ -4168,7 +5136,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                 let (correct, total) = grid_matches(&pred, &test_ex.output);
                 total_correct += correct;
                 total_cells += total;
-                if correct != total { all_exact = false; }
+                if correct != total {
+                    all_exact = false;
+                }
             }
         } else if let Some(tf) = solve_geometric(task) {
             best_strategy = "geometric";
@@ -4177,7 +5147,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                 let (correct, total) = grid_matches(&pred, &test_ex.output);
                 total_correct += correct;
                 total_cells += total;
-                if correct != total { all_exact = false; }
+                if correct != total {
+                    all_exact = false;
+                }
             }
         } else if let Some(lut) = solve_nbr_lookup(task) {
             best_strategy = "nbr_lookup";
@@ -4186,7 +5158,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                 let (correct, total) = grid_matches(&pred, &test_ex.output);
                 total_correct += correct;
                 total_cells += total;
-                if correct != total { all_exact = false; }
+                if correct != total {
+                    all_exact = false;
+                }
             }
         } else if solve_connect_lines(task) {
             best_strategy = "connect_lines";
@@ -4195,7 +5169,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                 let (correct, total) = grid_matches(&pred, &test_ex.output);
                 total_correct += correct;
                 total_cells += total;
-                if correct != total { all_exact = false; }
+                if correct != total {
+                    all_exact = false;
+                }
             }
         } else if solve_object_positional(task) == Some(1.0) {
             best_strategy = "obj_positional";
@@ -4203,11 +5179,18 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
             let in_objs = find_objects(&task.train[0].input, bg);
             let out_objs = find_objects(&task.train[0].output, bg);
             let matched = match_objects_by_color(&in_objs, &out_objs);
-            let mut deltas: Vec<(u8, isize, isize)> = matched.iter().map(|(inp, out)| {
-                let (ir, ic) = inp.centroid();
-                let (or, oc) = out.centroid();
-                (inp.color, (or - ir).round() as isize, (oc - ic).round() as isize)
-            }).collect();
+            let mut deltas: Vec<(u8, isize, isize)> = matched
+                .iter()
+                .map(|(inp, out)| {
+                    let (ir, ic) = inp.centroid();
+                    let (or, oc) = out.centroid();
+                    (
+                        inp.color,
+                        (or - ir).round() as isize,
+                        (oc - ic).round() as isize,
+                    )
+                })
+                .collect();
             deltas.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
 
             for test_ex in &task.test {
@@ -4215,13 +5198,17 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                 let (correct, total) = grid_matches(&pred, &test_ex.output);
                 total_correct += correct;
                 total_cells += total;
-                if correct != total { all_exact = false; }
+                if correct != total {
+                    all_exact = false;
+                }
             }
         } else if solve_object_color_change(task) == Some(1.0) {
             best_strategy = "obj_recolor";
             let bg = most_common_color(&task.train[0].input);
             let mut cmap = [0u8; NUM_COLORS];
-            for c in 0..NUM_COLORS { cmap[c] = c as u8; }
+            for c in 0..NUM_COLORS {
+                cmap[c] = c as u8;
+            }
             cmap[bg as usize] = bg;
 
             for ex in &task.train {
@@ -4234,7 +5221,10 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                     for out_obj in &out_objs {
                         let (or, oc) = out_obj.centroid();
                         let dist = (ir - or).powi(2) + (ic - oc).powi(2);
-                        if dist < best_dist { best_dist = dist; best_out_c = out_obj.color; }
+                        if dist < best_dist {
+                            best_dist = dist;
+                            best_out_c = out_obj.color;
+                        }
                     }
                     cmap[in_obj.color as usize] = best_out_c;
                 }
@@ -4245,7 +5235,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                 let (correct, total) = grid_matches(&pred, &test_ex.output);
                 total_correct += correct;
                 total_cells += total;
-                if correct != total { all_exact = false; }
+                if correct != total {
+                    all_exact = false;
+                }
             }
         } else {
             // Priority 2: Compete color vs neighborhood vs palette-neighborhood vs adjacency
@@ -4294,7 +5286,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                         let (correct, total) = grid_matches(&pred, &test_ex.output);
                         total_correct += correct;
                         total_cells += total;
-                        if correct != total { all_exact = false; }
+                        if correct != total {
+                            all_exact = false;
+                        }
                     }
                 }
                 1 => {
@@ -4305,7 +5299,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                         let (correct, total) = grid_matches(&pred, &test_ex.output);
                         total_correct += correct;
                         total_cells += total;
-                        if correct != total { all_exact = false; }
+                        if correct != total {
+                            all_exact = false;
+                        }
                     }
                 }
                 2 => {
@@ -4326,7 +5322,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                         let (correct, total) = grid_matches(&pred, &test_ex.output);
                         total_correct += correct;
                         total_cells += total;
-                        if correct != total { all_exact = false; }
+                        if correct != total {
+                            all_exact = false;
+                        }
                     }
                 }
                 _ => {
@@ -4338,7 +5336,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                         let (correct, total) = grid_matches(&pred, &test_ex.output);
                         total_correct += correct;
                         total_cells += total;
-                        if correct != total { all_exact = false; }
+                        if correct != total {
+                            all_exact = false;
+                        }
                     }
                 }
             }
@@ -4350,7 +5350,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                 let (correct, total) = grid_matches(&pred, &test_ex.output);
                 total_correct += correct;
                 total_cells += total;
-                if correct != total { all_exact = false; }
+                if correct != total {
+                    all_exact = false;
+                }
             } else {
                 let total = test_ex.output.height * test_ex.output.width;
                 total_cells += total;
@@ -4366,7 +5368,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
             let (correct, total) = grid_matches(&pred, &test_ex.output);
             total_correct += correct;
             total_cells += total;
-            if correct != total { all_exact = false; }
+            if correct != total {
+                all_exact = false;
+            }
         }
     } else if let Some((r0, c0, oh, ow)) = solve_subgrid_fixed_offset(task) {
         best_strategy = "subgrid_fixed";
@@ -4376,7 +5380,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                 let (correct, total) = grid_matches(&pred, &test_ex.output);
                 total_correct += correct;
                 total_cells += total;
-                if correct != total { all_exact = false; }
+                if correct != total {
+                    all_exact = false;
+                }
             } else {
                 total_cells += test_ex.output.height * test_ex.output.width;
                 all_exact = false;
@@ -4389,13 +5395,18 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
             if matches.len() == 1 {
                 let (r0, c0) = matches[0];
                 let pred = extract_subgrid(
-                    &test_ex.input, r0, c0,
-                    test_ex.output.height, test_ex.output.width,
+                    &test_ex.input,
+                    r0,
+                    c0,
+                    test_ex.output.height,
+                    test_ex.output.width,
                 );
                 let (correct, total) = grid_matches(&pred, &test_ex.output);
                 total_correct += correct;
                 total_cells += total;
-                if correct != total { all_exact = false; }
+                if correct != total {
+                    all_exact = false;
+                }
             } else {
                 total_cells += test_ex.output.height * test_ex.output.width;
                 all_exact = false;
@@ -4409,12 +5420,18 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
             let target = objects.iter().find(|o| o.color == obj_color);
             if let Some(obj) = target {
                 let pred = extract_subgrid(
-                    &test_ex.input, obj.min_r, obj.min_c, obj.bbox_h(), obj.bbox_w(),
+                    &test_ex.input,
+                    obj.min_r,
+                    obj.min_c,
+                    obj.bbox_h(),
+                    obj.bbox_w(),
                 );
                 let (correct, total) = grid_matches(&pred, &test_ex.output);
                 total_correct += correct;
                 total_cells += total;
-                if correct != total { all_exact = false; }
+                if correct != total {
+                    all_exact = false;
+                }
             } else {
                 total_cells += test_ex.output.height * test_ex.output.width;
                 all_exact = false;
@@ -4429,7 +5446,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                 let (correct, total) = grid_matches(&pred, &test_ex.output);
                 total_correct += correct;
                 total_cells += total;
-                if correct != total { all_exact = false; }
+                if correct != total {
+                    all_exact = false;
+                }
             } else {
                 total_cells += test_ex.output.height * test_ex.output.width;
                 all_exact = false;
@@ -4440,7 +5459,8 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
         for test_ex in &task.test {
             let bg = most_common_color(&test_ex.input);
             let objects = find_objects(&test_ex.input, bg);
-            let target_objs: Vec<&GridObject> = objects.iter()
+            let target_objs: Vec<&GridObject> = objects
+                .iter()
                 .filter(|o| o.color == minority_color)
                 .collect();
             if !target_objs.is_empty() {
@@ -4449,13 +5469,18 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                 let min_c = target_objs.iter().map(|o| o.min_c).min().unwrap();
                 let max_c = target_objs.iter().map(|o| o.max_c).max().unwrap();
                 let pred = extract_subgrid(
-                    &test_ex.input, min_r, min_c,
-                    max_r - min_r + 1, max_c - min_c + 1,
+                    &test_ex.input,
+                    min_r,
+                    min_c,
+                    max_r - min_r + 1,
+                    max_c - min_c + 1,
                 );
                 let (correct, total) = grid_matches(&pred, &test_ex.output);
                 total_correct += correct;
                 total_cells += total;
-                if correct != total { all_exact = false; }
+                if correct != total {
+                    all_exact = false;
+                }
             } else {
                 total_cells += test_ex.output.height * test_ex.output.width;
                 all_exact = false;
@@ -4464,24 +5489,32 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
     } else if let Some(mode) = solve_mirror_tile(task) {
         best_strategy = "mirror_tile";
         for test_ex in &task.test {
-            let pred = apply_mirror_tile(&test_ex.input, mode)
-                .unwrap_or_else(|| test_ex.input.clone());
+            let pred =
+                apply_mirror_tile(&test_ex.input, mode).unwrap_or_else(|| test_ex.input.clone());
             let (correct, total) = grid_matches(&pred, &test_ex.output);
             total_correct += correct;
             total_cells += total;
-            if correct != total { all_exact = false; }
+            if correct != total {
+                all_exact = false;
+            }
         }
     } else if let Some((r0, c0, bg)) = solve_canvas(task) {
         best_strategy = "canvas";
         for test_ex in &task.test {
             let pred = apply_canvas(
-                &test_ex.input, r0, c0,
-                test_ex.output.height, test_ex.output.width, bg,
+                &test_ex.input,
+                r0,
+                c0,
+                test_ex.output.height,
+                test_ex.output.width,
+                bg,
             );
             let (correct, total) = grid_matches(&pred, &test_ex.output);
             total_correct += correct;
             total_cells += total;
-            if correct != total { all_exact = false; }
+            if correct != total {
+                all_exact = false;
+            }
         }
     } else if let Some((sr, sc, method)) = solve_downscale(task) {
         best_strategy = "downscale";
@@ -4490,7 +5523,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
             let (correct, total) = grid_matches(&pred, &test_ex.output);
             total_correct += correct;
             total_cells += total;
-            if correct != total { all_exact = false; }
+            if correct != total {
+                all_exact = false;
+            }
         }
     } else if let Some((sr, sc)) = solve_scale(task) {
         best_strategy = "scale";
@@ -4513,7 +5548,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
             let (correct, total) = grid_matches(&pred, &test_ex.output);
             total_correct += correct;
             total_cells += total;
-            if correct != total { all_exact = false; }
+            if correct != total {
+                all_exact = false;
+            }
         }
     } else if let Some((tr, tc)) = solve_tiling(task) {
         best_strategy = "tiling";
@@ -4522,7 +5559,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
             let (correct, total) = grid_matches(&pred, &test_ex.output);
             total_correct += correct;
             total_cells += total;
-            if correct != total { all_exact = false; }
+            if correct != total {
+                all_exact = false;
+            }
         }
     } else if solve_fractal_tile(task) {
         best_strategy = "fractal_tile";
@@ -4531,48 +5570,71 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
             let (correct, total) = grid_matches(&pred, &test_ex.output);
             total_correct += correct;
             total_cells += total;
-            if correct != total { all_exact = false; }
+            if correct != total {
+                all_exact = false;
+            }
         }
     } else if let Some(compose_ops) = solve_compose_ops(task) {
         best_strategy = "compose";
         for test_ex in &task.test {
             let mut g = test_ex.input.clone();
             for op in &compose_ops {
-                if let Some(next) = apply_compose_op(&g, op) { g = next; } else { break; }
+                if let Some(next) = apply_compose_op(&g, op) {
+                    g = next;
+                } else {
+                    break;
+                }
             }
             let (correct, total) = grid_matches(&g, &test_ex.output);
             total_correct += correct;
             total_cells += total;
-            if correct != total { all_exact = false; }
+            if correct != total {
+                all_exact = false;
+            }
         }
     } else if solve_repeating_tile(task).is_some() {
         best_strategy = "repeating_tile";
         for test_ex in &task.test {
-            let pred = apply_repeating_tile(&test_ex.input, test_ex.output.height, test_ex.output.width);
+            let pred =
+                apply_repeating_tile(&test_ex.input, test_ex.output.height, test_ex.output.width);
             let (correct, total) = grid_matches(&pred, &test_ex.output);
             total_correct += correct;
             total_cells += total;
-            if correct != total { all_exact = false; }
+            if correct != total {
+                all_exact = false;
+            }
         }
     } else if solve_block_color_summary(task).is_some() {
         best_strategy = "block_color";
         for test_ex in &task.test {
-            let pred = apply_block_color_summary(&test_ex.input, test_ex.output.height, test_ex.output.width);
+            let pred = apply_block_color_summary(
+                &test_ex.input,
+                test_ex.output.height,
+                test_ex.output.width,
+            );
             let (correct, total) = grid_matches(&pred, &test_ex.output);
             total_correct += correct;
             total_cells += total;
-            if correct != total { all_exact = false; }
+            if correct != total {
+                all_exact = false;
+            }
         }
     } else if let Some(dc) = solve_object_count_diagonal(task) {
         best_strategy = "obj_count_diag";
         for test_ex in &task.test {
             let n_blobs = count_blobs(&test_ex.input, dc);
-            let n = if n_blobs > 0 && n_blobs <= 30 { n_blobs } else { test_ex.output.height };
+            let n = if n_blobs > 0 && n_blobs <= 30 {
+                n_blobs
+            } else {
+                test_ex.output.height
+            };
             let pred = make_diagonal_grid(n, dc);
             let (correct, total) = grid_matches(&pred, &test_ex.output);
             total_correct += correct;
             total_cells += total;
-            if correct != total { all_exact = false; }
+            if correct != total {
+                all_exact = false;
+            }
         }
     } else {
         // Diff-dim: no same-dim hand-coded block matched — grid-level rotor
@@ -4585,9 +5647,17 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
         let shrink = oh <= ih && ow <= iw;
         let rh = if ih > 0 { oh as f32 / ih as f32 } else { 0.0 };
         let rw = if iw > 0 { ow as f32 / iw as f32 } else { 0.0 };
-        eprintln!("  GRID-FALLBACK {}: {}x{} -> {}x{}  ratio={:.2}h {:.2}w  {}",
-            task.id, ih, iw, oh, ow, rh, rw,
-            if shrink { "SHRINK" } else { "GROW" });
+        eprintln!(
+            "  GRID-FALLBACK {}: {}x{} -> {}x{}  ratio={:.2}h {:.2}w  {}",
+            task.id,
+            ih,
+            iw,
+            oh,
+            ow,
+            rh,
+            rw,
+            if shrink { "SHRINK" } else { "GROW" }
+        );
         let grid_rule = solve_normal_equations(&train_inputs, &train_outputs);
 
         for test_ex in &task.test {
@@ -4597,7 +5667,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
             let (correct, total) = grid_matches(&pred, &test_ex.output);
             total_correct += correct;
             total_cells += total;
-            if correct != total { all_exact = false; }
+            if correct != total {
+                all_exact = false;
+            }
         }
     }
 
@@ -4615,7 +5687,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                     let (correct, total) = grid_matches(&predictions[i], &test_ex.output);
                     total_correct += correct;
                     total_cells += total;
-                    if correct != total { all_exact = false; }
+                    if correct != total {
+                        all_exact = false;
+                    }
                 } else {
                     total_cells += test_ex.output.height * test_ex.output.width;
                     all_exact = false;
@@ -4639,7 +5713,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
             let (correct, total) = grid_matches(&pred, &test_ex.output);
             total_correct += correct;
             total_cells += total;
-            if correct != total { all_exact = false; }
+            if correct != total {
+                all_exact = false;
+            }
         }
     }
 
@@ -4655,7 +5731,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
                     let (correct, total) = grid_matches(&predictions[i], &test_ex.output);
                     total_correct += correct;
                     total_cells += total;
-                    if correct != total { all_exact = false; }
+                    if correct != total {
+                        all_exact = false;
+                    }
                 } else {
                     total_cells += test_ex.output.height * test_ex.output.width;
                     all_exact = false;
@@ -4675,9 +5753,17 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
         let shrink = oh <= ih && ow <= iw;
         let rh = if ih > 0 { oh as f32 / ih as f32 } else { 0.0 };
         let rw = if iw > 0 { ow as f32 / iw as f32 } else { 0.0 };
-        eprintln!("  GRID-FALLBACK {}: {}x{} -> {}x{}  ratio={:.2}h {:.2}w  {}",
-            task.id, ih, iw, oh, ow, rh, rw,
-            if shrink { "SHRINK" } else { "GROW" });
+        eprintln!(
+            "  GRID-FALLBACK {}: {}x{} -> {}x{}  ratio={:.2}h {:.2}w  {}",
+            task.id,
+            ih,
+            iw,
+            oh,
+            ow,
+            rh,
+            rw,
+            if shrink { "SHRINK" } else { "GROW" }
+        );
         let grid_rule = solve_normal_equations(&train_inputs, &train_outputs);
         total_correct = 0;
         total_cells = 0;
@@ -4689,7 +5775,9 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
             let (correct, total) = grid_matches(&pred, &test_ex.output);
             total_correct += correct;
             total_cells += total;
-            if correct != total { all_exact = false; }
+            if correct != total {
+                all_exact = false;
+            }
         }
     }
 
@@ -4713,16 +5801,16 @@ pub fn solve_task(task: &ArcTask) -> TaskDiagnostic {
 /// Print a small grid to stdout with ANSI colors.
 pub fn print_grid(grid: &Grid, indent: &str) {
     const COLORS: [&str; 10] = [
-        "\x1b[40m",   // 0: black
-        "\x1b[44m",   // 1: blue
-        "\x1b[41m",   // 2: red
-        "\x1b[42m",   // 3: green
-        "\x1b[43m",   // 4: yellow
-        "\x1b[100m",  // 5: gray
-        "\x1b[45m",   // 6: magenta
-        "\x1b[46m",   // 7: cyan
-        "\x1b[104m",  // 8: light blue
-        "\x1b[101m",  // 9: light red
+        "\x1b[40m",  // 0: black
+        "\x1b[44m",  // 1: blue
+        "\x1b[41m",  // 2: red
+        "\x1b[42m",  // 3: green
+        "\x1b[43m",  // 4: yellow
+        "\x1b[100m", // 5: gray
+        "\x1b[45m",  // 6: magenta
+        "\x1b[46m",  // 7: cyan
+        "\x1b[104m", // 8: light blue
+        "\x1b[101m", // 9: light red
     ];
     for row in &grid.cells {
         print!("{}", indent);
@@ -4743,14 +5831,25 @@ mod tests {
     fn make_grid(cells: Vec<Vec<u8>>) -> Grid {
         let height = cells.len();
         let width = if height > 0 { cells[0].len() } else { 0 };
-        Grid { cells, height, width }
+        Grid {
+            cells,
+            height,
+            width,
+        }
     }
 
-    fn make_task(train: Vec<(Vec<Vec<u8>>, Vec<Vec<u8>>)>, test_input: Vec<Vec<u8>>, test_output: Vec<Vec<u8>>) -> ArcTask {
-        let train = train.into_iter().map(|(inp, out)| ArcExample {
-            input: make_grid(inp),
-            output: make_grid(out),
-        }).collect();
+    fn make_task(
+        train: Vec<(Vec<Vec<u8>>, Vec<Vec<u8>>)>,
+        test_input: Vec<Vec<u8>>,
+        test_output: Vec<Vec<u8>>,
+    ) -> ArcTask {
+        let train = train
+            .into_iter()
+            .map(|(inp, out)| ArcExample {
+                input: make_grid(inp),
+                output: make_grid(out),
+            })
+            .collect();
         ArcTask {
             id: "test".to_string(),
             train,
@@ -4777,11 +5876,19 @@ mod tests {
         for (idx, &blade) in grade2_blades.iter().enumerate() {
             let has_e0 = blade & 1 != 0;
             if has_e0 {
-                assert!(BOOST_BV_IDX.contains(&idx),
-                    "blade 0b{:08b} at idx {} has e_0 but is not in BOOST_BV_IDX", blade, idx);
+                assert!(
+                    BOOST_BV_IDX.contains(&idx),
+                    "blade 0b{:08b} at idx {} has e_0 but is not in BOOST_BV_IDX",
+                    blade,
+                    idx
+                );
             } else {
-                assert!(!BOOST_BV_IDX.contains(&idx),
-                    "blade 0b{:08b} at idx {} lacks e_0 but IS in BOOST_BV_IDX", blade, idx);
+                assert!(
+                    !BOOST_BV_IDX.contains(&idx),
+                    "blade 0b{:08b} at idx {} lacks e_0 but IS in BOOST_BV_IDX",
+                    blade,
+                    idx
+                );
             }
         }
         assert_eq!(BOOST_BV_IDX.len(), 7);
@@ -4851,9 +5958,12 @@ mod tests {
         );
         let flow = flow_diagnostic(&task);
         let total_bv = flow.boost_norm + flow.rotation_norm;
-        assert!(total_bv < 0.1,
+        assert!(
+            total_bv < 0.1,
             "identity task should have near-zero bivector, got boost={:.4} rot={:.4}",
-            flow.boost_norm, flow.rotation_norm);
+            flow.boost_norm,
+            flow.rotation_norm
+        );
         assert!(flow.converging);
     }
 
@@ -4871,8 +5981,11 @@ mod tests {
             vec![vec![2, 1], vec![1, 2]],
         );
         let flow = flow_diagnostic(&task);
-        assert!(flow.converging,
-            "consistent color swap should converge, flow_mags={:?}", flow.flow_magnitudes);
+        assert!(
+            flow.converging,
+            "consistent color swap should converge, flow_mags={:?}",
+            flow.flow_magnitudes
+        );
         assert!(flow.flow_magnitudes.len() == 2);
     }
 
@@ -4893,8 +6006,11 @@ mod tests {
         );
         let flow = flow_diagnostic(&task);
         assert_eq!(flow.flow_magnitudes.len(), 3);
-        assert!(flow.converging,
-            "consistent HFlip should converge, mags={:?}", flow.flow_magnitudes);
+        assert!(
+            flow.converging,
+            "consistent HFlip should converge, mags={:?}",
+            flow.flow_magnitudes
+        );
     }
 
     #[ignore]
@@ -4907,8 +6023,10 @@ mod tests {
         );
         let flow = flow_diagnostic(&task);
         assert!(flow.converging);
-        assert!(flow.flow_magnitudes.is_empty(),
-            "single example should have no flow magnitudes");
+        assert!(
+            flow.flow_magnitudes.is_empty(),
+            "single example should have no flow magnitudes"
+        );
     }
 
     #[ignore]
@@ -4925,8 +6043,11 @@ mod tests {
         );
         let flow = flow_diagnostic(&task);
         let total_bv = flow.boost_norm + flow.rotation_norm;
-        assert!(total_bv > 1e-6,
-            "geometric transform should have nonzero bivector, got {:.6}", total_bv);
+        assert!(
+            total_bv > 1e-6,
+            "geometric transform should have nonzero bivector, got {:.6}",
+            total_bv
+        );
     }
 
     // ── extract_rule basic properties ──
@@ -4947,11 +6068,19 @@ mod tests {
         // R = O ⊗ I† for identical grids should have dominant scalar part
         let s = rule.components[0].abs();
         let total_norm: f32 = rule.components.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!(s > 0.01,
-            "identity rule should have nonzero scalar: scalar={:.6}, total_norm={:.6}", s, total_norm);
+        assert!(
+            s > 0.01,
+            "identity rule should have nonzero scalar: scalar={:.6}, total_norm={:.6}",
+            s,
+            total_norm
+        );
         let g2_norm: f32 = rule.grade(2).iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!(s > g2_norm,
-            "identity rule should be scalar-dominated: scalar={:.4} bv_norm={:.4}", s, g2_norm);
+        assert!(
+            s > g2_norm,
+            "identity rule should be scalar-dominated: scalar={:.4} bv_norm={:.4}",
+            s,
+            g2_norm
+        );
     }
 
     #[ignore]
@@ -4972,8 +6101,11 @@ mod tests {
         let rule = extract_rule(&mv1, &mv2);
         // Different grids → the rule should have nonzero higher-grade components
         let total_sq: f32 = rule.components[1..].iter().map(|x| x * x).sum();
-        assert!(total_sq > 1e-8,
-            "different grids should produce nonzero non-scalar rule, got {:.8}", total_sq);
+        assert!(
+            total_sq > 1e-8,
+            "different grids should produce nonzero non-scalar rule, got {:.8}",
+            total_sq
+        );
     }
 
     // ── rotor_consistency ──
@@ -4987,8 +6119,11 @@ mod tests {
         let mv2 = encode_grid(&g2);
         let rule = extract_rule(&mv1, &mv2);
         let (mean_bv, norms) = rotor_consistency(&[rule.clone(), rule.clone()]);
-        assert!(mean_bv < 1e-4,
-            "identical rules should have near-zero rotor consistency, got {:.4}", mean_bv);
+        assert!(
+            mean_bv < 1e-4,
+            "identical rules should have near-zero rotor consistency, got {:.4}",
+            mean_bv
+        );
         assert_eq!(norms.len(), 1);
     }
 
@@ -5009,8 +6144,12 @@ mod tests {
         for c in 1..=9u8 {
             let mv = color_vector(c);
             let v = mv.grade(1);
-            assert!(v[0].abs() > 0.5,
-                "color {} should have substantial e₀ (timelike) component, got {:.4}", c, v[0]);
+            assert!(
+                v[0].abs() > 0.5,
+                "color {} should have substantial e₀ (timelike) component, got {:.4}",
+                c,
+                v[0]
+            );
         }
     }
 
@@ -5019,11 +6158,17 @@ mod tests {
     fn position_vector_has_no_timelike_component() {
         let pos = position_vector(2, 3, 5, 5);
         let v = pos.grade(1);
-        assert!(v[0].abs() < 1e-6,
-            "position vector should have zero e₀ component, got {:.6}", v[0]);
+        assert!(
+            v[0].abs() < 1e-6,
+            "position vector should have zero e₀ component, got {:.6}",
+            v[0]
+        );
         let spacelike_norm: f32 = v[1..].iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!(spacelike_norm > 0.9,
-            "position vector should be mostly spacelike, got norm {:.4}", spacelike_norm);
+        assert!(
+            spacelike_norm > 0.9,
+            "position vector should be mostly spacelike, got norm {:.4}",
+            spacelike_norm
+        );
     }
 
     #[ignore]
@@ -5039,12 +6184,18 @@ mod tests {
         let mut rot_sq = 0.0f32;
         let is_boost_idx = [0usize, 1, 3, 6, 10, 15, 21];
         for i in 0..28 {
-            if is_boost_idx.contains(&i) { boost_sq += g2[i] * g2[i]; }
-            else { rot_sq += g2[i] * g2[i]; }
+            if is_boost_idx.contains(&i) {
+                boost_sq += g2[i] * g2[i];
+            } else {
+                rot_sq += g2[i] * g2[i];
+            }
         }
-        assert!(boost_sq > rot_sq * 0.5,
+        assert!(
+            boost_sq > rot_sq * 0.5,
             "color⊗position should have substantial boost bivectors: boost={:.4} rot={:.4}",
-            boost_sq.sqrt(), rot_sq.sqrt());
+            boost_sq.sqrt(),
+            rot_sq.sqrt()
+        );
     }
 
     #[ignore]
@@ -5053,10 +6204,14 @@ mod tests {
         // Pure color swap: boost-dominated
         let color_task = make_task(
             vec![
-                (vec![vec![1, 1, 1, 1, 1], vec![1, 1, 1, 1, 1]],
-                 vec![vec![2, 2, 2, 2, 2], vec![2, 2, 2, 2, 2]]),
-                (vec![vec![1, 1, 1], vec![1, 1, 1], vec![1, 1, 1]],
-                 vec![vec![2, 2, 2], vec![2, 2, 2], vec![2, 2, 2]]),
+                (
+                    vec![vec![1, 1, 1, 1, 1], vec![1, 1, 1, 1, 1]],
+                    vec![vec![2, 2, 2, 2, 2], vec![2, 2, 2, 2, 2]],
+                ),
+                (
+                    vec![vec![1, 1, 1], vec![1, 1, 1], vec![1, 1, 1]],
+                    vec![vec![2, 2, 2], vec![2, 2, 2], vec![2, 2, 2]],
+                ),
             ],
             vec![vec![1, 1], vec![1, 1]],
             vec![vec![2, 2], vec![2, 2]],
@@ -5076,9 +6231,12 @@ mod tests {
         let geo_flow = flow_diagnostic(&geo_task);
 
         // The geometric task should have MORE rotation bias than the color task
-        assert!(geo_flow.spatial_bias() > color_flow.spatial_bias(),
+        assert!(
+            geo_flow.spatial_bias() > color_flow.spatial_bias(),
             "HFlip (geo) should have higher spatial_bias than color swap: geo={:.4} color={:.4}",
-            geo_flow.spatial_bias(), color_flow.spatial_bias());
+            geo_flow.spatial_bias(),
+            color_flow.spatial_bias()
+        );
     }
 
     // ── ArcDiracChannel ──
@@ -5090,7 +6248,11 @@ mod tests {
         let g = make_grid(vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]]);
         let mv = channel.encode(&g);
         let norm: f32 = mv.components.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!(norm > 0.5, "Dirac channel should produce nonzero encoding, got norm {:.4}", norm);
+        assert!(
+            norm > 0.5,
+            "Dirac channel should produce nonzero encoding, got norm {:.4}",
+            norm
+        );
     }
 
     #[test]
@@ -5100,9 +6262,16 @@ mod tests {
         let g2 = make_grid(vec![vec![9, 8, 7], vec![6, 5, 4], vec![3, 2, 1]]);
         let mv1 = channel.encode(&g1);
         let mv2 = channel.encode(&g2);
-        let diff: f32 = mv1.components.iter().zip(mv2.components.iter())
-            .map(|(a, b)| (a - b) * (a - b)).sum::<f32>();
-        assert!(diff > 1e-6, "Different grids should produce different encodings");
+        let diff: f32 = mv1
+            .components
+            .iter()
+            .zip(mv2.components.iter())
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum::<f32>();
+        assert!(
+            diff > 1e-6,
+            "Different grids should produce different encodings"
+        );
     }
 
     #[ignore]
@@ -5138,10 +6307,14 @@ mod tests {
         // since position structure is identical.
         let task = make_task(
             vec![
-                (vec![vec![1, 1, 1], vec![1, 1, 1], vec![1, 1, 1]],
-                 vec![vec![2, 2, 2], vec![2, 2, 2], vec![2, 2, 2]]),
-                (vec![vec![3, 3, 3], vec![3, 3, 3], vec![3, 3, 3]],
-                 vec![vec![4, 4, 4], vec![4, 4, 4], vec![4, 4, 4]]),
+                (
+                    vec![vec![1, 1, 1], vec![1, 1, 1], vec![1, 1, 1]],
+                    vec![vec![2, 2, 2], vec![2, 2, 2], vec![2, 2, 2]],
+                ),
+                (
+                    vec![vec![3, 3, 3], vec![3, 3, 3], vec![3, 3, 3]],
+                    vec![vec![4, 4, 4], vec![4, 4, 4], vec![4, 4, 4]],
+                ),
             ],
             vec![vec![5, 5, 5], vec![5, 5, 5], vec![5, 5, 5]],
             vec![vec![6, 6, 6], vec![6, 6, 6], vec![6, 6, 6]],
@@ -5152,9 +6325,12 @@ mod tests {
 
         let final_b = channel.train_on_task(&task, 0.3, 50, 0.01);
 
-        assert!(final_b > initial_b,
+        assert!(
+            final_b > initial_b,
             "Dirac training should increase |B|: initial={:.4} final={:.4}",
-            initial_b, final_b);
+            initial_b,
+            final_b
+        );
     }
 
     #[ignore]
@@ -5162,14 +6338,24 @@ mod tests {
     fn task_mean_b_identity_near_zero() {
         let task = make_task(
             vec![
-                (vec![vec![1, 2, 3], vec![4, 5, 6]], vec![vec![1, 2, 3], vec![4, 5, 6]]),
-                (vec![vec![7, 8, 1], vec![2, 3, 4]], vec![vec![7, 8, 1], vec![2, 3, 4]]),
+                (
+                    vec![vec![1, 2, 3], vec![4, 5, 6]],
+                    vec![vec![1, 2, 3], vec![4, 5, 6]],
+                ),
+                (
+                    vec![vec![7, 8, 1], vec![2, 3, 4]],
+                    vec![vec![7, 8, 1], vec![2, 3, 4]],
+                ),
             ],
             vec![vec![5, 6, 7], vec![8, 9, 1]],
             vec![vec![5, 6, 7], vec![8, 9, 1]],
         );
         let b = task_mean_b(&task);
-        assert!(b < 0.1, "Identity task should have near-zero |B|, got {:.4}", b);
+        assert!(
+            b < 0.1,
+            "Identity task should have near-zero |B|, got {:.4}",
+            b
+        );
     }
 
     // ── Expert Solver ──
@@ -5191,10 +6377,14 @@ mod tests {
         // With timelike-dominant color encoding, even HFlip produces boost bivectors
         // (color⊗position → e₀∧eᵢ). The decomposer classifies by bias, not by
         // human intuition. What matters is convergence + the expert solving it.
-        assert!(decomp.converging,
-            "HFlip with consistent examples should converge");
-        assert!(!decomp.degenerate,
-            "HFlip should not be degenerate (|B| should be nonzero)");
+        assert!(
+            decomp.converging,
+            "HFlip with consistent examples should converge"
+        );
+        assert!(
+            !decomp.degenerate,
+            "HFlip should not be degenerate (|B| should be nonzero)"
+        );
     }
 
     #[ignore]
@@ -5202,20 +6392,26 @@ mod tests {
     fn decompose_causal_task() {
         let task = make_task(
             vec![
-                (vec![vec![1, 1, 1, 1, 1], vec![1, 1, 1, 1, 1]],
-                 vec![vec![2, 2, 2, 2, 2], vec![2, 2, 2, 2, 2]]),
-                (vec![vec![1, 1, 1], vec![1, 1, 1], vec![1, 1, 1]],
-                 vec![vec![2, 2, 2], vec![2, 2, 2], vec![2, 2, 2]]),
+                (
+                    vec![vec![1, 1, 1, 1, 1], vec![1, 1, 1, 1, 1]],
+                    vec![vec![2, 2, 2, 2, 2], vec![2, 2, 2, 2, 2]],
+                ),
+                (
+                    vec![vec![1, 1, 1], vec![1, 1, 1], vec![1, 1, 1]],
+                    vec![vec![2, 2, 2], vec![2, 2, 2], vec![2, 2, 2]],
+                ),
             ],
             vec![vec![1, 1], vec![1, 1]],
             vec![vec![2, 2], vec![2, 2]],
         );
         let flow = flow_diagnostic(&task);
         let decomp = decompose_task(&task, &flow);
-        assert!(decomp.primary == TransformationType::Causal
-            || decomp.spatial_bias < 0.0,
+        assert!(
+            decomp.primary == TransformationType::Causal || decomp.spatial_bias < 0.0,
             "Color swap should decompose as causal (bias={:.3}, type={:?})",
-            decomp.spatial_bias, decomp.primary);
+            decomp.spatial_bias,
+            decomp.primary
+        );
     }
 
     #[ignore]
@@ -5232,18 +6428,26 @@ mod tests {
         let flow = flow_diagnostic(&task);
         let correct_pred = vec![make_grid(vec![vec![9, 8, 7]])];
         let v = verify_solution(&task, &correct_pred, 0.5, &flow);
-        assert!(v.training_accuracy == 1.0,
-            "Perfect solution should have training_accuracy=1.0");
-        assert!(v.confidence > 0.0,
-            "Perfect solution should have positive confidence: {:.3}", v.confidence);
+        assert!(
+            v.training_accuracy == 1.0,
+            "Perfect solution should have training_accuracy=1.0"
+        );
+        assert!(
+            v.confidence > 0.0,
+            "Perfect solution should have positive confidence: {:.3}",
+            v.confidence
+        );
     }
 
     #[ignore]
     #[test]
     fn verification_confidence_computation() {
         let v = VerificationResult::compute(1.0, 0.8, 0.9, 0.7);
-        assert!((v.confidence - 0.7).abs() < 1e-6,
-            "Confidence should be min of all: {:.3}", v.confidence);
+        assert!(
+            (v.confidence - 0.7).abs() < 1e-6,
+            "Confidence should be min of all: {:.3}",
+            v.confidence
+        );
     }
 
     #[ignore]
@@ -5263,10 +6467,16 @@ mod tests {
         let result = solve_expert(&task, &flow);
         assert!(result.is_some(), "Expert should solve simple HFlip");
         let (preds, _strategy, v) = result.unwrap();
-        assert_eq!(preds[0].cells, vec![vec![7, 6, 5, 4]],
-            "Expert should correctly predict HFlip");
-        assert!(v.confidence > 0.1,
-            "HFlip solution should have some confidence: {:.3}", v.confidence);
+        assert_eq!(
+            preds[0].cells,
+            vec![vec![7, 6, 5, 4]],
+            "Expert should correctly predict HFlip"
+        );
+        assert!(
+            v.confidence > 0.1,
+            "HFlip solution should have some confidence: {:.3}",
+            v.confidence
+        );
     }
 
     // ── 2×2 synthetic series ─────────────────────────────────────────────
@@ -5316,10 +6526,7 @@ mod tests {
             assert!(
                 d.solved,
                 "task {}: expected solved, got strategy={} correct_cells={}/{}",
-                task.id,
-                d.strategy,
-                d.n_correct_cells,
-                d.n_total_cells
+                task.id, d.strategy, d.n_correct_cells, d.n_total_cells
             );
             assert_eq!(
                 d.n_correct_cells, d.n_total_cells,
@@ -5472,11 +6679,7 @@ mod tests {
                     |g| f(g),
                 );
                 let d = solve_task(&task);
-                assert!(
-                    d.n_total_cells > 0,
-                    "{}: should have test cells",
-                    name
-                );
+                assert!(d.n_total_cells > 0, "{}: should have test cells", name);
                 assert!(
                     d.n_correct_cells <= d.n_total_cells,
                     "{}: cell counts inconsistent",
@@ -5501,7 +6704,10 @@ mod tests {
 
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/arc-agi/data/training");
         if !dir.is_dir() {
-            eprintln!("skip arc_training_tasks_touching_2x2_solve_rate_via_solver: missing {:?}", dir);
+            eprintln!(
+                "skip arc_training_tasks_touching_2x2_solve_rate_via_solver: missing {:?}",
+                dir
+            );
             return;
         }
 
@@ -5511,15 +6717,23 @@ mod tests {
 
         /// Every train/test input and output is exactly 2×2 (official corpus: 0 tasks).
         fn all_io_strict_2x2(task: &ArcTask) -> bool {
-            task.train.iter().all(|ex|
-                grid_is_2x2(&ex.input) && grid_is_2x2(&ex.output))
-                && task.test.iter().all(|ex|
-                    grid_is_2x2(&ex.input) && grid_is_2x2(&ex.output))
+            task.train
+                .iter()
+                .all(|ex| grid_is_2x2(&ex.input) && grid_is_2x2(&ex.output))
+                && task
+                    .test
+                    .iter()
+                    .all(|ex| grid_is_2x2(&ex.input) && grid_is_2x2(&ex.output))
         }
 
         fn touches_2x2(task: &ArcTask) -> bool {
-            task.train.iter().any(|ex| grid_is_2x2(&ex.input) || grid_is_2x2(&ex.output))
-                || task.test.iter().any(|ex| grid_is_2x2(&ex.input) || grid_is_2x2(&ex.output))
+            task.train
+                .iter()
+                .any(|ex| grid_is_2x2(&ex.input) || grid_is_2x2(&ex.output))
+                || task
+                    .test
+                    .iter()
+                    .any(|ex| grid_is_2x2(&ex.input) || grid_is_2x2(&ex.output))
         }
 
         let tasks = load_arc_tasks(&dir);
@@ -5547,7 +6761,9 @@ mod tests {
         );
         eprintln!(
             "ARC training tasks with any 2×2 grid: {}/{} solved by solve_task ({:.1}%)",
-            solved, subset.len(), pct
+            solved,
+            subset.len(),
+            pct
         );
         if !failed_ids.is_empty() && failed_ids.len() <= 40 {
             eprintln!("unsolved (touch 2×2): {:?}", failed_ids);
@@ -5571,7 +6787,11 @@ mod tests {
         let test_out: Vec<Vec<u8>> = (0..10).map(|_| vec![7, 1]).collect();
         let task = make_task(vec![(train_in, train_out)], test_in, test_out);
         let d = solve_task(&task);
-        assert!(d.solved, "solve_task should hit color or DSL; strategy={}", d.strategy);
+        assert!(
+            d.solved,
+            "solve_task should hit color or DSL; strategy={}",
+            d.strategy
+        );
     }
 
     #[ignore]

@@ -133,7 +133,8 @@ fn looks_garbled(t: &str) -> bool {
 fn run_arm(rt: &mut Runtime, label: &str, state: Option<DriveState>) -> Vec<String> {
     // Reset conversation + (re)seed drive state from agent_state.
     if let Some(ref s) = state {
-        rt.set_agent_state_from_json(&state_json(s)).expect("set agent state");
+        rt.set_agent_state_from_json(&state_json(s))
+            .expect("set agent state");
     }
     rt.reset_conversation();
 
@@ -160,7 +161,11 @@ fn run_arm(rt: &mut Runtime, label: &str, state: Option<DriveState>) -> Vec<Stri
     let mut out = Vec::new();
     for p in PROMPTS {
         let resp = rt.converse(p).expect("converse");
-        let flag = if looks_garbled(&resp.text) { "  <GARBLE>" } else { "" };
+        let flag = if looks_garbled(&resp.text) {
+            "  <GARBLE>"
+        } else {
+            ""
+        };
         println!("  [{}] {}{}", p, resp.text, flag);
         out.push(resp.text);
     }
@@ -180,8 +185,8 @@ fn main() {
     // representative (without the TopicGraph everything collapses to one group).
     let base = std::fs::read_to_string(format!("{}/knowledge_graph.toml", PETS_DATA))
         .expect("read topic graph base");
-    let overlay = std::fs::read_to_string(format!("{}/knowledge_graph_pet_overlay.toml", PETS_DATA))
-        .ok();
+    let overlay =
+        std::fs::read_to_string(format!("{}/knowledge_graph_pet_overlay.toml", PETS_DATA)).ok();
     let base_graph =
         growformer::topic_graph::TopicGraph::from_toml(&base).expect("parse topic graph base");
     let final_graph = match overlay {
@@ -193,7 +198,8 @@ fn main() {
         None => base_graph,
     };
     growformer::growformer_lang::init_topic_graph_direct(final_graph).expect("init topic graph");
-    if let Ok(grounding) = std::fs::read_to_string(format!("{}/pet_world_grounding.toml", PETS_DATA))
+    if let Ok(grounding) =
+        std::fs::read_to_string(format!("{}/pet_world_grounding.toml", PETS_DATA))
     {
         growformer::inference::world_grounding::load_grounding_graph_from_str(&grounding)
             .expect("load grounding");
@@ -215,8 +221,16 @@ fn main() {
         .expect("reload toml (on)");
     rt.apply_loaded_generation_config();
 
-    let hungry = DriveState { hunger: 0.95, energy: 0.85, social: 0.20 };
-    let sated = DriveState { hunger: 0.05, energy: 0.45, social: 0.95 };
+    let hungry = DriveState {
+        hunger: 0.95,
+        energy: 0.85,
+        social: 0.20,
+    };
+    let sated = DriveState {
+        hunger: 0.05,
+        energy: 0.45,
+        social: 0.95,
+    };
 
     let hungry_out = run_arm(&mut rt, "hungry", Some(hungry));
     let sated_out = run_arm(&mut rt, "sated", Some(sated));

@@ -24,15 +24,10 @@ pub fn execute_tool(call: &ToolCallInfo) -> ToolResult {
             }
         }
         "file_reader" => {
-            let path = call
-                .arguments
-                .get("path")
-                .map(|s| s.as_str())
-                .unwrap_or("");
+            let path = call.arguments.get("path").map(|s| s.as_str()).unwrap_or("");
             match std::fs::read_to_string(path) {
                 Ok(content) => {
-                    let preview: String =
-                        content.lines().take(50).collect::<Vec<_>>().join("\n");
+                    let preview: String = content.lines().take(50).collect::<Vec<_>>().join("\n");
                     let total = content.lines().count();
                     let output = if total > 50 {
                         format!("{}\n... ({} more lines)", preview, total - 50)
@@ -53,11 +48,7 @@ pub fn execute_tool(call: &ToolCallInfo) -> ToolResult {
             }
         }
         "code_runner" => {
-            let code = call
-                .arguments
-                .get("code")
-                .map(|s| s.as_str())
-                .unwrap_or("");
+            let code = call.arguments.get("code").map(|s| s.as_str()).unwrap_or("");
             let lang = call
                 .arguments
                 .get("language")

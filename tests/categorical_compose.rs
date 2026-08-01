@@ -6,11 +6,10 @@
 use growformer::category::compose::{
     CategoricalComposer, CategoricalDecomposition, ProgramTemplate,
 };
-use growformer::category::training::{AuxCategory, SentimentLabel};
 use growformer::category::compose::{EntitySlot, SentimentSlot};
+use growformer::category::training::{AuxCategory, SentimentLabel};
 use growformer::category::{
-    CurriculumScheduler, GrowformerNode, GrowformerTrainer, NodeId, TrainerConfig,
-    TrainingBatch,
+    CurriculumScheduler, GrowformerNode, GrowformerTrainer, NodeId, TrainerConfig, TrainingBatch,
 };
 
 fn make_composer() -> CategoricalComposer {
@@ -140,7 +139,10 @@ fn confidence_is_bounded() {
     let composer = make_composer();
     let emb = vec![1.0f32; 16];
     let out = composer.generate(&emb, "some text", None);
-    assert!(out.confidence <= 0.95, "confidence should be capped at 0.95");
+    assert!(
+        out.confidence <= 0.95,
+        "confidence should be capped at 0.95"
+    );
     assert!(out.confidence >= 0.0);
 }
 
@@ -150,11 +152,7 @@ fn confidence_is_bounded() {
 fn output_contains_grounding() {
     let composer = make_composer();
     let emb = vec![0.1f32; 16];
-    let out = composer.generate(
-        &emb,
-        "I keep going back to this song",
-        None,
-    );
+    let out = composer.generate(&emb, "I keep going back to this song", None);
     assert!(
         out.explanation.contains("Grounded in the user"),
         "composed output should include grounding: {:?}",
@@ -186,9 +184,21 @@ fn all_seven_labels_produce_composed_output() {
             entity_vec: vec![0.0; 8],
         };
         let out = composer.compose(&decomp, "test input text here", None);
-        assert!(out.composed, "label {:?} should produce composed output", label);
-        assert!(!out.text.is_empty(), "label {:?} should produce non-empty text", label);
-        assert!(!out.label_line.is_empty(), "label {:?} should have label_line", label);
+        assert!(
+            out.composed,
+            "label {:?} should produce composed output",
+            label
+        );
+        assert!(
+            !out.text.is_empty(),
+            "label {:?} should produce non-empty text",
+            label
+        );
+        assert!(
+            !out.label_line.is_empty(),
+            "label {:?} should have label_line",
+            label
+        );
     }
 }
 
@@ -219,9 +229,13 @@ fn train_and_extract_composer(steps: usize) -> CategoricalComposer {
     let curriculum = CurriculumScheduler::new(steps / 4, steps * 3 / 4);
     let mut trainer = GrowformerTrainer::with_config(curriculum, config.clone());
     trainer.add_node(GrowformerNode::new(
-        NodeId::new(0), "parse", config.embed_dim, vec![0.01; config.embed_dim],
+        NodeId::new(0),
+        "parse",
+        config.embed_dim,
+        vec![0.01; config.embed_dim],
     ));
-    trainer.train_and_export_composer(&batch, steps)
+    trainer
+        .train_and_export_composer(&batch, steps)
         .expect("train_and_export_composer should succeed")
 }
 
@@ -237,10 +251,21 @@ fn trained_composer_produces_grounded_output() {
     for prompt in &prompts {
         let emb = growformer::category::forward::char_hash_embed(prompt, 64);
         let out = composer.generate(&emb, prompt, None);
-        assert!(out.composed, "trained composer should produce composed output for: {}", prompt);
-        assert!(out.explanation.len() > 15, "explanation should be substantial for: {}", prompt);
+        assert!(
+            out.composed,
+            "trained composer should produce composed output for: {}",
+            prompt
+        );
+        assert!(
+            out.explanation.len() > 15,
+            "explanation should be substantial for: {}",
+            prompt
+        );
         assert!(out.confidence > 0.0, "confidence > 0 for: {}", prompt);
-        println!("[trained-composer] {} → {} (conf={:.3})", prompt, out.text, out.confidence);
+        println!(
+            "[trained-composer] {} → {} (conf={:.3})",
+            prompt, out.text, out.confidence
+        );
     }
 }
 
@@ -248,14 +273,16 @@ fn trained_composer_produces_grounded_output() {
 fn trained_composer_decomposes_differently_from_random() {
     let trained = train_and_extract_composer(200);
     let random = make_composer();
-    let emb = growformer::category::forward::char_hash_embed(
-        "PayPal, Affirm, and SoFi stock surged", 64
-    );
+    let emb =
+        growformer::category::forward::char_hash_embed("PayPal, Affirm, and SoFi stock surged", 64);
     let trained_out = trained.generate(&emb, "PayPal surged", None);
     let random_out = random.generate(&emb, "PayPal surged", None);
     let different = trained_out.text != random_out.text
         || (trained_out.confidence - random_out.confidence).abs() > 0.01;
-    assert!(different, "trained and random composers should produce different outputs");
+    assert!(
+        different,
+        "trained and random composers should produce different outputs"
+    );
 }
 
 #[test]
@@ -265,7 +292,10 @@ fn to_composer_round_trip_preserves_inference() {
     let curriculum = CurriculumScheduler::new(25, 75);
     let mut trainer = GrowformerTrainer::with_config(curriculum, config.clone());
     trainer.add_node(GrowformerNode::new(
-        NodeId::new(0), "parse", config.embed_dim, vec![0.01; config.embed_dim],
+        NodeId::new(0),
+        "parse",
+        config.embed_dim,
+        vec![0.01; config.embed_dim],
     ));
     trainer.train(&batch, 100);
 
@@ -274,6 +304,9 @@ fn to_composer_round_trip_preserves_inference() {
     let emb = growformer::category::forward::char_hash_embed("test input", 64);
     let out1 = composer1.generate(&emb, "test input", None);
     let out2 = composer2.generate(&emb, "test input", None);
-    assert_eq!(out1.text, out2.text, "repeated extraction should be deterministic");
+    assert_eq!(
+        out1.text, out2.text,
+        "repeated extraction should be deterministic"
+    );
     assert!((out1.confidence - out2.confidence).abs() < 1e-6);
 }

@@ -160,7 +160,13 @@ fn intent_token_set(intent_text: &str) -> HashSet<String> {
 }
 
 /// True if context id `t` is activated as a root, appears as a token, or appears in padded text.
-fn context_matched(g: &WorldGraph, roots: &[usize], intent_tokens: &HashSet<String>, padded: &str, t: &str) -> bool {
+fn context_matched(
+    g: &WorldGraph,
+    roots: &[usize],
+    intent_tokens: &HashSet<String>,
+    padded: &str,
+    t: &str,
+) -> bool {
     let t = normalize_key(t);
     if t.is_empty() {
         return false;
@@ -255,7 +261,11 @@ fn load_graph() -> WorldGraph {
                 kind,
                 target: t,
                 weight: e.weight,
-                requires_context: e.requires_context.as_ref().map(|s| normalize_key(s)).filter(|s| !s.is_empty()),
+                requires_context: e
+                    .requires_context
+                    .as_ref()
+                    .map(|s| normalize_key(s))
+                    .filter(|s| !s.is_empty()),
             });
         }
         nodes.push(WorldNode {
@@ -293,27 +303,37 @@ fn graph() -> &'static WorldGraph {
 }
 
 fn parse_grounding_toml(toml_str: &str) -> Result<WorldGraph, String> {
-    let file: WorldGroundingFile = toml::from_str(toml_str)
-        .map_err(|e| format!("parse grounding TOML: {}", e))?;
+    let file: WorldGroundingFile =
+        toml::from_str(toml_str).map_err(|e| format!("parse grounding TOML: {}", e))?;
 
     let mut nodes: Vec<WorldNode> = Vec::new();
     let mut lookup: HashMap<String, usize> = HashMap::new();
 
     for n in file.nodes {
         let id_norm = normalize_key(&n.id);
-        if id_norm.is_empty() { continue; }
+        if id_norm.is_empty() {
+            continue;
+        }
         let idx = nodes.len();
         let mut edges: Vec<WorldEdge> = Vec::new();
         for e in n.edges {
             let t = normalize_key(&e.target);
-            if t.is_empty() { continue; }
+            if t.is_empty() {
+                continue;
+            }
             let kind = e.kind.trim().to_ascii_lowercase();
-            if kind.is_empty() { continue; }
+            if kind.is_empty() {
+                continue;
+            }
             edges.push(WorldEdge {
                 kind,
                 target: t,
                 weight: e.weight,
-                requires_context: e.requires_context.as_ref().map(|s| normalize_key(s)).filter(|s| !s.is_empty()),
+                requires_context: e
+                    .requires_context
+                    .as_ref()
+                    .map(|s| normalize_key(s))
+                    .filter(|s| !s.is_empty()),
             });
         }
         nodes.push(WorldNode {
@@ -346,7 +366,8 @@ pub fn load_grounding_graph_from_str(toml_str: &str) -> Result<(), String> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let mut guard = DOMAIN_GRAPH_NATIVE.write()
+        let mut guard = DOMAIN_GRAPH_NATIVE
+            .write()
             .map_err(|e| format!("lock domain graph: {}", e))?;
         *guard = Some(graph);
     }
@@ -484,10 +505,7 @@ fn expand_from_roots(
         let pr_skip_bearing_only =
             pr_wire_headline_pass_active() && (node.id == "gain" || node.id == "fundraising");
         if node.magnitude_sensitive {
-            crate::infer_trace!(
-                "  [world-ground] magnitude-sensitive node hit: {}",
-                node.id
-            );
+            crate::infer_trace!("  [world-ground] magnitude-sensitive node hit: {}", node.id);
         }
         for e in &node.edges {
             if pr_skip_bearing_only && e.kind == "sentiment_bearing" {
@@ -556,7 +574,10 @@ fn has_domain_graph() -> bool {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        DOMAIN_GRAPH_NATIVE.read().map(|g| g.is_some()).unwrap_or(false)
+        DOMAIN_GRAPH_NATIVE
+            .read()
+            .map(|g| g.is_some())
+            .unwrap_or(false)
     }
 }
 
@@ -587,7 +608,9 @@ fn domain_graph_expand(dg: &WorldGraph, intent_text: &str, subject_kw: &mut Vec<
     let mut seen_idx = HashSet::new();
     for tok in tokenize(intent_text) {
         let k = normalize_key(&tok);
-        if k.len() < 2 { continue; }
+        if k.len() < 2 {
+            continue;
+        }
         if let Some(&ix) = dg.lookup.get(&k) {
             if seen_idx.insert(ix) {
                 roots.push(ix);
@@ -595,7 +618,9 @@ fn domain_graph_expand(dg: &WorldGraph, intent_text: &str, subject_kw: &mut Vec<
         }
     }
     filter_fundraising_root_from_indices(dg, intent_text, &mut roots, "domain-ground");
-    if roots.is_empty() { return; }
+    if roots.is_empty() {
+        return;
+    }
 
     let skip_fundraising = fundraising_root_false_positive_on_consumer_rate(intent_text);
     let fundraising_ix = dg.lookup.get("fundraising").copied();
@@ -605,21 +630,29 @@ fn domain_graph_expand(dg: &WorldGraph, intent_text: &str, subject_kw: &mut Vec<
     let mut queue: VecDeque<(usize, u8)> = roots.iter().map(|&r| (r, 0u8)).collect();
 
     while let Some((idx, depth)) = queue.pop_front() {
-        if depth > 2 || !visited.insert(idx) { continue; }
+        if depth > 2 || !visited.insert(idx) {
+            continue;
+        }
         if skip_fundraising && fundraising_ix == Some(idx) {
             continue;
         }
         let node = &dg.nodes[idx];
         for e in &node.edges {
             let kind = e.kind.as_str();
-            if kind == "disambiguated_by" { continue; }
+            if kind == "disambiguated_by" {
+                continue;
+            }
             if skip_fundraising && kind == "sentiment_bearing" && e.target == "positive" {
                 continue;
             }
             if let Some(ref ctx) = e.requires_context {
-                if !roots.iter().any(|&r| dg.nodes[r].id == *ctx) { continue; }
+                if !roots.iter().any(|&r| dg.nodes[r].id == *ctx) {
+                    continue;
+                }
             }
-            if e.weight < 0.3 { continue; }
+            if e.weight < 0.3 {
+                continue;
+            }
             let target_key = &e.target;
             if target_key.len() > 2
                 && !subject_kw.iter().any(|x| x == target_key)
@@ -644,7 +677,10 @@ fn domain_graph_expand(dg: &WorldGraph, intent_text: &str, subject_kw: &mut Vec<
     if !added.is_empty() {
         crate::infer_trace!(
             "  [domain-ground] activated {:?} +keywords {:?}",
-            roots.iter().filter_map(|&i| dg.nodes.get(i).map(|n| n.id.as_str())).collect::<Vec<_>>(),
+            roots
+                .iter()
+                .filter_map(|&i| dg.nodes.get(i).map(|n| n.id.as_str()))
+                .collect::<Vec<_>>(),
             added
         );
     }
@@ -722,7 +758,10 @@ pub struct GroundingNodeInfo {
     pub aliases: Vec<String>,
 }
 
-fn nodes_with_aliases_from_graph(g: &WorldGraph, domain: GroundingFleetDomain) -> Vec<GroundingNodeInfo> {
+fn nodes_with_aliases_from_graph(
+    g: &WorldGraph,
+    domain: GroundingFleetDomain,
+) -> Vec<GroundingNodeInfo> {
     let mut aliases_per_node: Vec<Vec<String>> = vec![Vec::new(); g.nodes.len()];
     for (alias, &idx) in &g.lookup {
         let node_id = &g.nodes[idx].id;
@@ -828,7 +867,8 @@ pub fn activated_root_ids_in_domain_graph(intent_text: &str) -> Vec<String> {
 
 /// Inventory of all loaded grounding graphs (per-domain slices, not merged).
 pub fn fleet_node_inventory() -> Vec<GroundingNodeInfo> {
-    let mut out = nodes_with_aliases_from_graph(&load_base_graph_only(), GroundingFleetDomain::Base);
+    let mut out =
+        nodes_with_aliases_from_graph(&load_base_graph_only(), GroundingFleetDomain::Base);
     out.extend(nodes_with_aliases_from_graph(
         &load_crypto_graph_only(),
         GroundingFleetDomain::Crypto,
@@ -838,7 +878,10 @@ pub fn fleet_node_inventory() -> Vec<GroundingNodeInfo> {
         GroundingFleetDomain::Fintech,
     ));
     if let Some(dg) = domain_graph_clone() {
-        out.extend(nodes_with_aliases_from_graph(&dg, GroundingFleetDomain::Runtime));
+        out.extend(nodes_with_aliases_from_graph(
+            &dg,
+            GroundingFleetDomain::Runtime,
+        ));
     }
     out
 }
@@ -879,7 +922,9 @@ mod tests {
             "HSBC granted Hong Kong stablecoin issuer licence",
             &mut kw,
         );
-        assert!(kw.iter().any(|x| x == "regulatory_approval" || x == "issuer"));
+        assert!(kw
+            .iter()
+            .any(|x| x == "regulatory_approval" || x == "issuer"));
     }
 
     #[test]
@@ -895,7 +940,10 @@ mod tests {
     #[test]
     fn because_adds_causal_frame() {
         let mut kw = Vec::new();
-        extend_subject_keywords_with_world_graph("Prices fell because regulation tightened", &mut kw);
+        extend_subject_keywords_with_world_graph(
+            "Prices fell because regulation tightened",
+            &mut kw,
+        );
         assert!(kw.contains(&"direct_cause".to_string()), "kw={kw:?}");
     }
 
@@ -920,11 +968,13 @@ mod tests {
             &mut kw,
         );
         assert!(
-            !kw.iter().any(|x| x == "positive" || x == "career" || x == "recognition"),
+            !kw.iter()
+                .any(|x| x == "positive" || x == "career" || x == "recognition"),
             "unexpected valence tokens in kw={kw:?}"
         );
         assert!(
-            kw.iter().any(|x| x == "venture_capital" || x == "ipo" || x == "listing"),
+            kw.iter()
+                .any(|x| x == "venture_capital" || x == "ipo" || x == "listing"),
             "PR-wire should still expand cap-table keywords (not sentiment), kw={kw:?}"
         );
         let b = super::sentiment_bearing_from_intent("raises money record profits");
@@ -965,7 +1015,8 @@ mod tests {
             "domain overlay fundraising spillover, kw={kw:?}"
         );
         assert!(
-            kw.iter().any(|x| x == "consumer_credit" || x == "interest_rate" || x == "mortgage"),
+            kw.iter()
+                .any(|x| x == "consumer_credit" || x == "interest_rate" || x == "mortgage"),
             "expected consumer mortgage keywords, kw={kw:?}"
         );
     }
@@ -978,11 +1029,16 @@ mod tests {
             &mut kw,
         );
         assert!(
-            !kw.iter().any(|x| x == "positive" || x == "venture_capital" || x == "ipo"),
+            !kw.iter()
+                .any(|x| x == "positive" || x == "venture_capital" || x == "ipo"),
             "fundraising spillover on consumer complaint, kw={kw:?}"
         );
-        let b = super::sentiment_bearing_from_intent("Chase raised my mortgage rate without notice");
-        assert!(b < 0.15, "consumer rate hike should not nudge positive, b={b}");
+        let b =
+            super::sentiment_bearing_from_intent("Chase raised my mortgage rate without notice");
+        assert!(
+            b < 0.15,
+            "consumer rate hike should not nudge positive, b={b}"
+        );
     }
 
     #[test]
@@ -993,7 +1049,8 @@ mod tests {
             &mut kw,
         );
         assert!(
-            kw.iter().any(|x| x == "venture_capital" || x == "startup_growth" || x == "ipo"),
+            kw.iter()
+                .any(|x| x == "venture_capital" || x == "startup_growth" || x == "ipo"),
             "expected cap-table expansion, kw={kw:?}"
         );
     }
@@ -1034,7 +1091,8 @@ mod tests {
         let mut kw = Vec::new();
         extend_subject_keywords_with_world_graph("she drifted away over winter", &mut kw);
         assert!(
-            kw.iter().any(|x| x == "relationships" || x == "retrospective_framing"),
+            kw.iter()
+                .any(|x| x == "relationships" || x == "retrospective_framing"),
             "kw={kw:?}"
         );
     }

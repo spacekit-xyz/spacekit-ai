@@ -3,9 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::GroupId;
-use crate::spectral::TokenDictionary;
 use crate::dimension::paramecium::InfraciliaryLattice;
+use crate::spectral::TokenDictionary;
+use crate::types::GroupId;
 
 use super::action::ActionType;
 
@@ -29,7 +29,11 @@ pub fn action_type_one_hot(at: &ActionType) -> [f32; NUM_ACTION_TYPES] {
 }
 
 /// One-hot encoding of routed group for conditioning generation heads.
-pub fn group_id_one_hot(group_id: Option<GroupId>, group_order: &[GroupId], num_dims: usize) -> Vec<f32> {
+pub fn group_id_one_hot(
+    group_id: Option<GroupId>,
+    group_order: &[GroupId],
+    num_dims: usize,
+) -> Vec<f32> {
     let mut v = vec![0.0f32; num_dims];
     if let Some(gid) = group_id {
         if let Some(idx) = group_order.iter().position(|&g| g == gid) {
@@ -52,7 +56,11 @@ fn index_to_action_type(idx: usize) -> ActionType {
 }
 
 const ACTION_LABELS: [&str; NUM_ACTION_TYPES] = [
-    "action_support", "action_coding", "action_general", "action_tool", "action_fallback",
+    "action_support",
+    "action_coding",
+    "action_general",
+    "action_tool",
+    "action_fallback",
 ];
 
 /// Paramecium lattice-based action classifier.
@@ -78,7 +86,8 @@ impl ActionClassifier {
     /// Build classifier from labeled data in one pass.
     pub fn build(input_dim: usize, samples: &[(Vec<f32>, ActionType)]) -> Self {
         let dict = TokenDictionary::build(&ACTION_LABELS, 64);
-        let pairs: Vec<(Vec<f32>, String)> = samples.iter()
+        let pairs: Vec<(Vec<f32>, String)> = samples
+            .iter()
             .map(|(emb, at)| {
                 let idx = action_type_index(at);
                 (emb.clone(), ACTION_LABELS[idx].to_string())
@@ -109,7 +118,10 @@ impl ActionClassifier {
         let mut best_sim = f32::NEG_INFINITY;
         for (i, prog) in self.lattice.programs.iter().enumerate() {
             let sim = cosine_sim(x, &prog.ema_centroid);
-            if sim > best_sim { best_sim = sim; best_idx = i; }
+            if sim > best_sim {
+                best_sim = sim;
+                best_idx = i;
+            }
         }
         let text = self.lattice.programs[best_idx].display_text(&self.lattice.dictionary);
         Self::parse_action(&text).unwrap_or(ActionType::Fallback)
@@ -127,7 +139,10 @@ impl ActionClassifier {
         let mut best_sim = f32::NEG_INFINITY;
         for (i, prog) in self.lattice.programs.iter().enumerate() {
             let sim = cosine_sim(x, &prog.ema_centroid);
-            if sim > best_sim { best_sim = sim; best_idx = i; }
+            if sim > best_sim {
+                best_sim = sim;
+                best_idx = i;
+            }
         }
         let text = self.lattice.programs[best_idx].display_text(&self.lattice.dictionary);
         let at = Self::parse_action(&text).unwrap_or(ActionType::Fallback);
@@ -143,7 +158,11 @@ impl ActionClassifier {
 
         let resp = self.lattice.respond(x);
         let predicted = Self::parse_action(&resp.text);
-        if predicted.as_ref() == Some(target) { 0.0 } else { 1.0 }
+        if predicted.as_ref() == Some(target) {
+            0.0
+        } else {
+            1.0
+        }
     }
 
     pub fn program_count(&self) -> usize {
@@ -174,7 +193,11 @@ fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
         nb += bi * bi;
     }
     let denom = na.sqrt() * nb.sqrt();
-    if denom < 1e-20 { 0.0 } else { (dot / denom) as f32 }
+    if denom < 1e-20 {
+        0.0
+    } else {
+        (dot / denom) as f32
+    }
 }
 
 pub fn action_target_to_type(target: &str) -> ActionType {
@@ -194,9 +217,18 @@ mod tests {
     #[test]
     fn test_classifier_build_and_predict() {
         let samples: Vec<(Vec<f32>, ActionType)> = vec![
-            (vec![1.0, 0.0, 0.0, 0.0, 0.5, 0.1, 0.0, 0.0], ActionType::SupportTicket),
-            (vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.1], ActionType::CodingAssist),
-            (vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.5, 0.0, 0.1], ActionType::GeneralAssist),
+            (
+                vec![1.0, 0.0, 0.0, 0.0, 0.5, 0.1, 0.0, 0.0],
+                ActionType::SupportTicket,
+            ),
+            (
+                vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.1],
+                ActionType::CodingAssist,
+            ),
+            (
+                vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.5, 0.0, 0.1],
+                ActionType::GeneralAssist,
+            ),
         ];
         let mut clf = ActionClassifier::build(8, &samples);
         assert_eq!(clf.predict(&samples[0].0), ActionType::SupportTicket);

@@ -15,11 +15,7 @@ pub struct SpineStepRecord {
 
 /// Stops the episode when `true`.
 pub trait EpisodePolicy {
-    fn on_observation(
-        &mut self,
-        belief: &mut BeliefState,
-        obs: &Observation,
-    ) -> PolicyTurn;
+    fn on_observation(&mut self, belief: &mut BeliefState, obs: &Observation) -> PolicyTurn;
 }
 
 /// What the spine should do after an observation.
@@ -117,10 +113,9 @@ fn observation_summary(obs: &Observation) -> String {
                 format!("UserText({})", t)
             }
         }
-        Observation::ReflectionCycle { quality, terminal } => format!(
-            "Reflection(quality={:.3}, {:?})",
-            quality, terminal
-        ),
+        Observation::ReflectionCycle { quality, terminal } => {
+            format!("Reflection(quality={:.3}, {:?})", quality, terminal)
+        }
     }
 }
 

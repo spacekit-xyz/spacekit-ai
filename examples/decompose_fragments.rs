@@ -64,7 +64,8 @@ struct FragmentKey {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let mut data_dir = PathBuf::from("/Users/astor/Projects/2026/spacekit/spacekit-projects/luna/data");
+    let mut data_dir =
+        PathBuf::from("/Users/astor/Projects/2026/spacekit/spacekit-projects/luna/data");
     let mut output = PathBuf::from("luna_fragments_v2.jsonl");
     let mut merge_hand: Option<PathBuf> = None;
     let mut min_count = 1usize;
@@ -114,10 +115,14 @@ fn main() {
     }
 
     let toml_path = inference_toml.unwrap_or_else(|| data_dir.join("inference_pets.toml"));
-    let vocab = FragmentComposeConfig::load_from_inference_toml_path(&toml_path).unwrap_or_else(|e| {
-        eprintln!("failed to load fragment vocab from {}: {e}", toml_path.display());
-        std::process::exit(1);
-    });
+    let vocab =
+        FragmentComposeConfig::load_from_inference_toml_path(&toml_path).unwrap_or_else(|e| {
+            eprintln!(
+                "failed to load fragment vocab from {}: {e}",
+                toml_path.display()
+            );
+            std::process::exit(1);
+        });
     vocab.validate_for_decompose().unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1);
@@ -151,7 +156,11 @@ fn main() {
             let row: TrainingRow = match serde_json::from_str(line) {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("  skip {}:{}: {e}", path.file_name().unwrap().to_string_lossy(), line_no + 1);
+                    eprintln!(
+                        "  skip {}:{}: {e}",
+                        path.file_name().unwrap().to_string_lossy(),
+                        line_no + 1
+                    );
                     rows_skipped += 1;
                     continue;
                 }
@@ -191,7 +200,11 @@ fn main() {
                     }
                 }
             }
-            eprintln!("merged hand library from {} ({} lines kept)", hand_path.display(), out_lines.len());
+            eprintln!(
+                "merged hand library from {} ({} lines kept)",
+                hand_path.display(),
+                out_lines.len()
+            );
         }
     }
 
@@ -218,7 +231,10 @@ fn main() {
         m
     });
 
-    println!("Decomposed {} training rows ({} skipped malformed)", rows_read, rows_skipped);
+    println!(
+        "Decomposed {} training rows ({} skipped malformed)",
+        rows_read, rows_skipped
+    );
     println!("Input files ({}):", input_files.len());
     for p in &input_files {
         println!("  {}", p.display());
@@ -249,8 +265,17 @@ fn select_input_files(data_dir: &Path) -> Vec<PathBuf> {
         "coverage_v1.jsonl",
         "seed_v2.jsonl",
     ];
-    let luna_only = ["expansion_v3.jsonl", "expansion_v4.jsonl", "expansion_v5.jsonl"];
-    let pete_only = ["expansion_v1.jsonl", "expansion_v2.jsonl", "comfort_bible_v1.jsonl", "lore_v1.jsonl"];
+    let luna_only = [
+        "expansion_v3.jsonl",
+        "expansion_v4.jsonl",
+        "expansion_v5.jsonl",
+    ];
+    let pete_only = [
+        "expansion_v1.jsonl",
+        "expansion_v2.jsonl",
+        "comfort_bible_v1.jsonl",
+        "lore_v1.jsonl",
+    ];
 
     let exclude: HashSet<String> = [
         format!("{prefix}ood.jsonl"),
@@ -286,7 +311,8 @@ fn select_input_files(data_dir: &Path) -> Vec<PathBuf> {
                 continue;
             }
             let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if !fname.starts_with(prefix) || exclude.contains(fname) || fname.contains("fragments") {
+            if !fname.starts_with(prefix) || exclude.contains(fname) || fname.contains("fragments")
+            {
                 continue;
             }
             if !files.iter().any(|f| f == &p) {
@@ -323,10 +349,7 @@ fn decompose_row(
         .as_ref()
         .and_then(|p| p.state.clone())
         .unwrap_or_default();
-    let source_id = row
-        .task_id
-        .clone()
-        .unwrap_or_else(|| "unknown".to_string());
+    let source_id = row.task_id.clone().unwrap_or_else(|| "unknown".to_string());
 
     let sentences = split_sentences(response, vocab);
     if sentences.is_empty() {
@@ -517,10 +540,7 @@ fn merge_state_gate(
     }
     let mut gate = HashMap::new();
     for dim in dims {
-        let vals: Vec<f32> = samples
-            .iter()
-            .filter_map(|s| s.get(dim).copied())
-            .collect();
+        let vals: Vec<f32> = samples.iter().filter_map(|s| s.get(dim).copied()).collect();
         if vals.is_empty() {
             continue;
         }
@@ -569,10 +589,7 @@ fn serialize_fragment(f: &DraftFragment, vocab: &FragmentComposeConfig) -> Strin
         obj.insert("body_slot".into(), slot.clone().into());
     }
     if !f.intent_exclude.is_empty() {
-        obj.insert(
-            "intent_exclude".into(),
-            serde_json::json!(f.intent_exclude),
-        );
+        obj.insert("intent_exclude".into(), serde_json::json!(f.intent_exclude));
     }
     obj.insert("weight".into(), serde_json::json!(1.0));
     serde_json::to_string(&obj).unwrap()

@@ -1,9 +1,9 @@
 //! Mirror Dimension — isolated training environment for one task. Full plasticity.
 
+use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::Rng;
 use rand::SeedableRng;
-use rand::rngs::StdRng;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -163,13 +163,22 @@ impl MirrorDimension {
             }
         }
         let loss = if n > 0 { total_loss / n as f32 } else { 0.0 };
-        let accuracy = if n > 0 { correct as f32 / n as f32 } else { 0.0 };
+        let accuracy = if n > 0 {
+            correct as f32 / n as f32
+        } else {
+            0.0
+        };
         self.epochs_trained += 1;
         self.current_accuracy = accuracy;
         if accuracy > self.best_accuracy {
             self.best_accuracy = accuracy;
         }
-        EpochResult { loss, accuracy, correct, total: n }
+        EpochResult {
+            loss,
+            accuracy,
+            correct,
+            total: n,
+        }
     }
 
     /// Train one epoch with minibatch SGD: B clones updated in parallel, then params averaged.
@@ -185,7 +194,12 @@ impl MirrorDimension {
     ) -> EpochResult {
         let n = data.len();
         if n == 0 {
-            return EpochResult { loss: 0.0, accuracy: 0.0, correct: 0, total: 0 };
+            return EpochResult {
+                loss: 0.0,
+                accuracy: 0.0,
+                correct: 0,
+                total: 0,
+            };
         }
         let mut indices: Vec<usize> = (0..n).collect();
         indices.shuffle(rng);
@@ -198,7 +212,9 @@ impl MirrorDimension {
             if b == 0 {
                 continue;
             }
-            let seed = (epoch as u64).wrapping_mul(1_000_000).wrapping_add(batch_idx as u64);
+            let seed = (epoch as u64)
+                .wrapping_mul(1_000_000)
+                .wrapping_add(batch_idx as u64);
             let mut clones: Vec<NeuralEnvironment> = (0..b).map(|_| self.env.clone()).collect();
 
             let losses: Vec<f32> = crate::maybe_par_iter_mut!(clones)
@@ -232,13 +248,22 @@ impl MirrorDimension {
                 correct += 1;
             }
         }
-        let accuracy = if n > 0 { correct as f32 / n as f32 } else { 0.0 };
+        let accuracy = if n > 0 {
+            correct as f32 / n as f32
+        } else {
+            0.0
+        };
         self.epochs_trained += 1;
         self.current_accuracy = accuracy;
         if accuracy > self.best_accuracy {
             self.best_accuracy = accuracy;
         }
-        EpochResult { loss, accuracy, correct, total: n }
+        EpochResult {
+            loss,
+            accuracy,
+            correct,
+            total: n,
+        }
     }
 
     /// Fast epoch: gradient-only ticks (no STDP/prune/grow/geometry). Demo default for 2D mirrors.
@@ -264,13 +289,22 @@ impl MirrorDimension {
             }
         }
         let loss = if n > 0 { total_loss / n as f32 } else { 0.0 };
-        let accuracy = if n > 0 { correct as f32 / n as f32 } else { 0.0 };
+        let accuracy = if n > 0 {
+            correct as f32 / n as f32
+        } else {
+            0.0
+        };
         self.epochs_trained += 1;
         self.current_accuracy = accuracy;
         if accuracy > self.best_accuracy {
             self.best_accuracy = accuracy;
         }
-        EpochResult { loss, accuracy, correct, total: n }
+        EpochResult {
+            loss,
+            accuracy,
+            correct,
+            total: n,
+        }
     }
 
     /// True if at least `window` epochs have been trained (used by promotion gate).
@@ -292,8 +326,8 @@ pub struct EpochResult {
 mod tests {
     use super::*;
     use crate::environment::NeuralEnvironment;
-    use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand::SeedableRng;
 
     #[test]
     fn test_residual_trigger_fires_after_streak() {

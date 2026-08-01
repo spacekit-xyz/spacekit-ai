@@ -161,8 +161,7 @@ toml = "data/sentiment/inference_sentiment_core.toml"
 [infer]
 # Default brain for `growformer --infer --project this_file.gf.toml` when --brain is omitted.
 brain = "agent-data/example/brain.bin"
-"#
-        ,
+"#,
         name = default_name
     )
 }

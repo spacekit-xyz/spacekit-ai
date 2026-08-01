@@ -119,10 +119,7 @@ impl ChatPolicySection {
             }
             other => {
                 // Pass through BCP-47 primary subtag (before `-` / `_`).
-                let primary = other
-                    .split(['-', '_'])
-                    .next()
-                    .unwrap_or(other);
+                let primary = other.split(['-', '_']).next().unwrap_or(other);
                 primary.to_string()
             }
         }
@@ -303,11 +300,7 @@ impl ChatPolicyLocale {
         for alt in &rule.response_match_any {
             let groups: Vec<Vec<String>> = alt
                 .iter()
-                .map(|or_g| {
-                    or_g.iter()
-                        .map(|s| s.to_ascii_lowercase())
-                        .collect()
-                })
+                .map(|or_g| or_g.iter().map(|s| s.to_ascii_lowercase()).collect())
                 .collect();
             if cnf_groups_match(response_lower, &groups) {
                 return true;
@@ -347,11 +340,7 @@ impl ChatPolicyLocale {
         None
     }
 
-    pub fn bleed_fallback(
-        &self,
-        prompt: &str,
-        bleed: &BleedHit,
-    ) -> Option<(String, String)> {
+    pub fn bleed_fallback(&self, prompt: &str, bleed: &BleedHit) -> Option<(String, String)> {
         let p = prompt.to_ascii_lowercase();
         for row in &self.bleed_fallbacks {
             if !row.bleed_id.is_empty() && row.bleed_id != bleed.rule_id {
@@ -520,10 +509,7 @@ mod tests {
     fn school_bleed_fallback_bedtime() {
         let loc = school_bleed_locale();
         let hit = loc
-            .detect_compose_bleed(
-                "time for bed",
-                "School is loud in your head. Come sit.",
-            )
+            .detect_compose_bleed("time for bed", "School is loud in your head. Come sit.")
             .expect("bleed");
         let (text, tid) = loc.bleed_fallback("time for bed", &hit).expect("fallback");
         assert_eq!(tid, "pet_bedtime_fallback");
@@ -560,7 +546,11 @@ template_id = "pet_lore_nickname_fallback"
         let w: Wrap = toml::from_str(raw).expect("parse");
         let hit = w
             .chat_policy
-            .detect_compose_bleed(Some("en"), "what's your nickname", "Long ago on medieval terra…")
+            .detect_compose_bleed(
+                Some("en"),
+                "what's your nickname",
+                "Long ago on medieval terra…",
+            )
             .expect("bleed");
         assert_eq!(hit.rule_id, "lore_nickname");
         let (text, _) = w

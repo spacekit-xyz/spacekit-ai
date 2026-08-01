@@ -45,7 +45,11 @@ impl ChunkCodec {
         let vs = vocab_size.min(MAX_VOCAB);
         let token_embeddings = Self::build_token_embeddings(vs);
         let codes = Self::build_position_codes();
-        Self { token_embeddings, position_codes: codes, vocab_size: vs }
+        Self {
+            token_embeddings,
+            position_codes: codes,
+            vocab_size: vs,
+        }
     }
 
     /// Raw per-token embedding (read-only). Used by the routing encoder to build
@@ -65,11 +69,15 @@ impl ChunkCodec {
             let idx = (tid as usize).min(self.vocab_size.saturating_sub(1));
             let emb = &self.token_embeddings[idx];
             let code = &self.position_codes[pos];
-            for j in 0..CATA_DIM { latent[j] += emb[j] * code[j]; }
+            for j in 0..CATA_DIM {
+                latent[j] += emb[j] * code[j];
+            }
         }
         if n > 0 {
             let s = 1.0 / (n as f32).sqrt();
-            for x in latent.iter_mut() { *x *= s; }
+            for x in latent.iter_mut() {
+                *x *= s;
+            }
         }
         latent
     }
@@ -78,35 +86,51 @@ impl ChunkCodec {
     /// Uses parallel decode + PIC refinement for high fidelity.
     pub fn decode_chunk(&self, latent: &[f32; CATA_DIM], num_tokens: usize) -> Vec<u16> {
         let n = num_tokens.min(CHUNK_K);
-        if n == 0 { return Vec::new(); }
+        if n == 0 {
+            return Vec::new();
+        }
         let scale = (n as f32).sqrt();
 
         // Pass 1: parallel de-spread (independent, no error propagation)
-        let mut tokens: Vec<u16> = (0..n).map(|pos| {
-            let code = &self.position_codes[pos];
-            let mut ds = [0.0f32; CATA_DIM];
-            for j in 0..CATA_DIM { ds[j] = latent[j] * scale * code[j]; }
-            self.nearest_token(&ds).0
-        }).collect();
+        let mut tokens: Vec<u16> = (0..n)
+            .map(|pos| {
+                let code = &self.position_codes[pos];
+                let mut ds = [0.0f32; CATA_DIM];
+                for j in 0..CATA_DIM {
+                    ds[j] = latent[j] * scale * code[j];
+                }
+                self.nearest_token(&ds).0
+            })
+            .collect();
 
         // Pass 2+: parallel interference cancellation
         for _ in 0..PIC_ROUNDS {
             let prev = tokens.clone();
             for pos in 0..n {
                 let mut iso = [0.0f32; CATA_DIM];
-                for j in 0..CATA_DIM { iso[j] = latent[j] * scale; }
+                for j in 0..CATA_DIM {
+                    iso[j] = latent[j] * scale;
+                }
                 for (q, &tok) in prev.iter().enumerate() {
-                    if q == pos { continue; }
+                    if q == pos {
+                        continue;
+                    }
                     let emb = &self.token_embeddings[tok as usize];
                     let code = &self.position_codes[q];
-                    for j in 0..CATA_DIM { iso[j] -= emb[j] * code[j]; }
+                    for j in 0..CATA_DIM {
+                        iso[j] -= emb[j] * code[j];
+                    }
                 }
                 let code = &self.position_codes[pos];
                 let mut ds = [0.0f32; CATA_DIM];
-                for j in 0..CATA_DIM { ds[j] = iso[j] * code[j]; }
+                for j in 0..CATA_DIM {
+                    ds[j] = iso[j] * code[j];
+                }
                 tokens[pos] = self.nearest_token(&ds).0;
             }
-            if tokens == prev { break; }
+            if tokens == prev {
+                break;
+            }
         }
         tokens
     }
@@ -114,10 +138,17 @@ impl ChunkCodec {
     /// Roundtrip accuracy for a single chunk.
     pub fn chunk_accuracy(&self, tokens: &[u16]) -> f32 {
         let n = tokens.len().min(CHUNK_K);
-        if n == 0 { return 1.0; }
+        if n == 0 {
+            return 1.0;
+        }
         let enc = self.encode_chunk(tokens);
         let dec = self.decode_chunk(&enc, n);
-        let hits = tokens.iter().take(n).zip(dec.iter()).filter(|(&a, &b)| a == b).count();
+        let hits = tokens
+            .iter()
+            .take(n)
+            .zip(dec.iter())
+            .filter(|(&a, &b)| a == b)
+            .count();
         hits as f32 / n as f32
     }
 
@@ -220,10 +251,16 @@ impl ChunkCodec {
 
     /// Full roundtrip accuracy for a token sequence (chunk-by-chunk).
     pub fn sequence_accuracy(&self, token_ids: &[u16]) -> f32 {
-        if token_ids.is_empty() { return 1.0; }
+        if token_ids.is_empty() {
+            return 1.0;
+        }
         let seq = self.encode_sequence(token_ids);
         let dec = self.decode_sequence(&seq);
-        let hits = token_ids.iter().zip(dec.iter()).filter(|(&a, &b)| a == b).count();
+        let hits = token_ids
+            .iter()
+            .zip(dec.iter())
+            .filter(|(&a, &b)| a == b)
+            .count();
         hits as f32 / token_ids.len() as f32
     }
 
@@ -234,7 +271,10 @@ impl ChunkCodec {
         let mut best_dot = f32::NEG_INFINITY;
         for (id, emb) in self.token_embeddings.iter().enumerate() {
             let d: f32 = signal.iter().zip(emb.iter()).map(|(a, b)| a * b).sum();
-            if d > best_dot { best_dot = d; best_id = id as u16; }
+            if d > best_dot {
+                best_dot = d;
+                best_id = id as u16;
+            }
         }
         (best_id, best_dot)
     }
@@ -267,7 +307,11 @@ impl ChunkCodec {
                 dim += 2;
             }
             let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
-            if norm > 1e-8 { for x in emb.iter_mut() { *x /= norm; } }
+            if norm > 1e-8 {
+                for x in emb.iter_mut() {
+                    *x /= norm;
+                }
+            }
             out.push(emb);
         }
         out
@@ -290,7 +334,9 @@ impl ChunkCodec {
         }
         let mut codes = [[0.0f32; CATA_DIM]; CHUNK_K];
         for (k, row) in h.into_iter().take(CHUNK_K).enumerate() {
-            for (j, &v) in row.iter().enumerate() { codes[k][j] = v; }
+            for (j, &v) in row.iter().enumerate() {
+                codes[k][j] = v;
+            }
         }
         codes
     }
@@ -311,17 +357,25 @@ pub struct ChunkSequence {
 }
 
 impl ChunkSequence {
-    pub fn num_chunks(&self) -> usize { self.chunks.len() }
+    pub fn num_chunks(&self) -> usize {
+        self.chunks.len()
+    }
 
     /// Semantic centroid: average of all chunk vectors.
     pub fn centroid(&self) -> [f32; CATA_DIM] {
         let mut c = [0.0f32; CATA_DIM];
-        if self.chunks.is_empty() { return c; }
+        if self.chunks.is_empty() {
+            return c;
+        }
         for chunk in &self.chunks {
-            for j in 0..CATA_DIM { c[j] += chunk[j]; }
+            for j in 0..CATA_DIM {
+                c[j] += chunk[j];
+            }
         }
         let n = self.chunks.len() as f32;
-        for x in c.iter_mut() { *x /= n; }
+        for x in c.iter_mut() {
+            *x /= n;
+        }
         c
     }
 
@@ -332,7 +386,11 @@ impl ChunkSequence {
         let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
         let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
         let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if na < 1e-8 || nb < 1e-8 { 0.0 } else { dot / (na * nb) }
+        if na < 1e-8 || nb < 1e-8 {
+            0.0
+        } else {
+            dot / (na * nb)
+        }
     }
 }
 
@@ -346,23 +404,31 @@ pub fn compose_trajectories(
     sources: &[(ChunkSequence, f32)],
     target_len: usize,
 ) -> Vec<[f32; CATA_DIM]> {
-    if sources.is_empty() { return Vec::new(); }
+    if sources.is_empty() {
+        return Vec::new();
+    }
     let n_chunks = target_len;
 
-    (0..n_chunks).map(|i| {
-        let mut result = [0.0f32; CATA_DIM];
-        let mut total_w = 0.0f32;
-        for (seq, w) in sources {
-            if i < seq.chunks.len() {
-                for j in 0..CATA_DIM { result[j] += seq.chunks[i][j] * w; }
-                total_w += w;
+    (0..n_chunks)
+        .map(|i| {
+            let mut result = [0.0f32; CATA_DIM];
+            let mut total_w = 0.0f32;
+            for (seq, w) in sources {
+                if i < seq.chunks.len() {
+                    for j in 0..CATA_DIM {
+                        result[j] += seq.chunks[i][j] * w;
+                    }
+                    total_w += w;
+                }
             }
-        }
-        if total_w > 1e-8 {
-            for x in result.iter_mut() { *x /= total_w; }
-        }
-        result
-    }).collect()
+            if total_w > 1e-8 {
+                for x in result.iter_mut() {
+                    *x /= total_w;
+                }
+            }
+            result
+        })
+        .collect()
 }
 
 /// Predict the next chunk vector given a trajectory so far.
@@ -425,14 +491,18 @@ pub fn slerp(a: &[f32; CATA_DIM], b: &[f32; CATA_DIM], t: f32) -> [f32; CATA_DIM
     let mut result = [0.0f32; CATA_DIM];
 
     if omega.abs() < 1e-6 {
-        for j in 0..CATA_DIM { result[j] = a[j] * (1.0 - t) + b[j] * t; }
+        for j in 0..CATA_DIM {
+            result[j] = a[j] * (1.0 - t) + b[j] * t;
+        }
         return result;
     }
 
     let sin_o = omega.sin();
     let w1 = ((1.0 - t) * omega).sin() / sin_o;
     let w2 = (t * omega).sin() / sin_o;
-    for j in 0..CATA_DIM { result[j] = a[j] * w1 + b[j] * w2; }
+    for j in 0..CATA_DIM {
+        result[j] = a[j] * w1 + b[j] * w2;
+    }
     result
 }
 
@@ -440,7 +510,11 @@ fn cosine(a: &[f32; CATA_DIM], b: &[f32; CATA_DIM]) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na < 1e-8 || nb < 1e-8 { 0.0 } else { dot / (na * nb) }
+    if na < 1e-8 || nb < 1e-8 {
+        0.0
+    } else {
+        dot / (na * nb)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -476,9 +550,8 @@ pub fn multivector_to_chunk(mv: &crate::clifford::Multivector) -> [f32; CATA_DIM
 // ---------------------------------------------------------------------------
 
 use crate::clifford::{
-    Multivector, Rotor, GRADE_OFFSETS, GRADE_DIMS,
-    apply_group_rotor, IntervalType,
-    BOOST_BIVECTOR_COUNT, ROTATION_BIVECTOR_COUNT,
+    apply_group_rotor, IntervalType, Multivector, Rotor, BOOST_BIVECTOR_COUNT, GRADE_DIMS,
+    GRADE_OFFSETS, ROTATION_BIVECTOR_COUNT,
 };
 
 /// A chunk enriched with grade-decomposed semantic features.
@@ -514,16 +587,30 @@ impl GradedChunk {
 
         let energy = chunk.iter().map(|x| x * x).sum::<f32>().sqrt();
 
-        GradedChunk { raw: *chunk, mv, semantic_dir, context_bivector, energy }
+        GradedChunk {
+            raw: *chunk,
+            mv,
+            semantic_dir,
+            context_bivector,
+            energy,
+        }
     }
 
     /// Cosine similarity of semantic direction (grade-1 only).
     pub fn semantic_similarity(&self, other: &GradedChunk) -> f32 {
-        let dot: f32 = self.semantic_dir.iter().zip(other.semantic_dir.iter())
-            .map(|(a, b)| a * b).sum();
+        let dot: f32 = self
+            .semantic_dir
+            .iter()
+            .zip(other.semantic_dir.iter())
+            .map(|(a, b)| a * b)
+            .sum();
         let na: f32 = self.semantic_dir.iter().map(|x| x * x).sum::<f32>().sqrt();
         let nb: f32 = other.semantic_dir.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if na < 1e-8 || nb < 1e-8 { 0.0 } else { dot / (na * nb) }
+        if na < 1e-8 || nb < 1e-8 {
+            0.0
+        } else {
+            dot / (na * nb)
+        }
     }
 }
 
@@ -611,9 +698,16 @@ impl SpacetimeChunk {
         let energy = raw.iter().map(|x| x * x).sum::<f32>().sqrt();
 
         SpacetimeChunk {
-            raw, mv, confidence, semantic_dir,
-            boost_causal, rotation_structural, discourse,
-            dual_marker, energy, interval_type: IntervalType::Spacelike,
+            raw,
+            mv,
+            confidence,
+            semantic_dir,
+            boost_causal,
+            rotation_structural,
+            discourse,
+            dual_marker,
+            energy,
+            interval_type: IntervalType::Spacelike,
         }
     }
 
@@ -629,29 +723,63 @@ impl SpacetimeChunk {
 
     /// Cosine similarity of grade-1 semantic direction.
     pub fn semantic_similarity(&self, other: &SpacetimeChunk) -> f32 {
-        let dot: f32 = self.semantic_dir.iter().zip(other.semantic_dir.iter())
-            .map(|(a, b)| a * b).sum();
+        let dot: f32 = self
+            .semantic_dir
+            .iter()
+            .zip(other.semantic_dir.iter())
+            .map(|(a, b)| a * b)
+            .sum();
         let na: f32 = self.semantic_dir.iter().map(|x| x * x).sum::<f32>().sqrt();
         let nb: f32 = other.semantic_dir.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if na < 1e-8 || nb < 1e-8 { 0.0 } else { dot / (na * nb) }
+        if na < 1e-8 || nb < 1e-8 {
+            0.0
+        } else {
+            dot / (na * nb)
+        }
     }
 
     /// Cosine similarity of boost (causal) bivectors only.
     pub fn causal_similarity(&self, other: &SpacetimeChunk) -> f32 {
-        let dot: f32 = self.boost_causal.iter().zip(other.boost_causal.iter())
-            .map(|(a, b)| a * b).sum();
+        let dot: f32 = self
+            .boost_causal
+            .iter()
+            .zip(other.boost_causal.iter())
+            .map(|(a, b)| a * b)
+            .sum();
         let na: f32 = self.boost_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
         let nb: f32 = other.boost_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if na < 1e-8 || nb < 1e-8 { 0.0 } else { dot / (na * nb) }
+        if na < 1e-8 || nb < 1e-8 {
+            0.0
+        } else {
+            dot / (na * nb)
+        }
     }
 
     /// Cosine similarity of rotation (structural) bivectors only.
     pub fn structural_similarity(&self, other: &SpacetimeChunk) -> f32 {
-        let dot: f32 = self.rotation_structural.iter().zip(other.rotation_structural.iter())
-            .map(|(a, b)| a * b).sum();
-        let na: f32 = self.rotation_structural.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let nb: f32 = other.rotation_structural.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if na < 1e-8 || nb < 1e-8 { 0.0 } else { dot / (na * nb) }
+        let dot: f32 = self
+            .rotation_structural
+            .iter()
+            .zip(other.rotation_structural.iter())
+            .map(|(a, b)| a * b)
+            .sum();
+        let na: f32 = self
+            .rotation_structural
+            .iter()
+            .map(|x| x * x)
+            .sum::<f32>()
+            .sqrt();
+        let nb: f32 = other
+            .rotation_structural
+            .iter()
+            .map(|x| x * x)
+            .sum::<f32>()
+            .sqrt();
+        if na < 1e-8 || nb < 1e-8 {
+            0.0
+        } else {
+            dot / (na * nb)
+        }
     }
 
     /// True if the pseudoscalar component indicates negated/counterfactual content.
@@ -668,23 +796,41 @@ impl SpacetimeChunk {
             // grade 0: scalar similarity
             if self.energy > 1e-8 && other.energy > 1e-8 {
                 (self.confidence * other.confidence).abs().sqrt()
-            } else { 0.0 },
+            } else {
+                0.0
+            },
             // grade 1: semantic direction
             self.semantic_similarity(other),
             // grade 2: combined boost + rotation
             0.4 * self.causal_similarity(other) + 0.6 * self.structural_similarity(other),
             // grade 3: discourse
             {
-                let dot: f32 = self.discourse.iter().zip(other.discourse.iter())
-                    .map(|(a, b)| a * b).sum();
+                let dot: f32 = self
+                    .discourse
+                    .iter()
+                    .zip(other.discourse.iter())
+                    .map(|(a, b)| a * b)
+                    .sum();
                 let na: f32 = self.discourse.iter().map(|x| x * x).sum::<f32>().sqrt();
                 let nb: f32 = other.discourse.iter().map(|x| x * x).sum::<f32>().sqrt();
-                if na < 1e-8 || nb < 1e-8 { 0.0 } else { dot / (na * nb) }
+                if na < 1e-8 || nb < 1e-8 {
+                    0.0
+                } else {
+                    dot / (na * nb)
+                }
             },
             // grade 8: pseudoscalar agreement
-            if (self.dual_marker > 0.0) == (other.dual_marker > 0.0) { 1.0 } else { -1.0 },
+            if (self.dual_marker > 0.0) == (other.dual_marker > 0.0) {
+                1.0
+            } else {
+                -1.0
+            },
         ];
-        WEIGHTS.iter().zip(sims.iter()).map(|(w, s)| w * s).sum::<f32>()
+        WEIGHTS
+            .iter()
+            .zip(sims.iter())
+            .map(|(w, s)| w * s)
+            .sum::<f32>()
             / WEIGHTS.iter().sum::<f32>()
     }
 }
@@ -721,7 +867,9 @@ pub fn compute_transition(a: &GradedChunk, b: &GradedChunk) -> ChunkTransition {
     let biv_norm: f32 = bivector.iter().map(|x| x * x).sum::<f32>().sqrt();
     if biv_norm > 1e-6 {
         let scale = biv_norm.min(std::f32::consts::PI) / biv_norm;
-        for v in &mut bivector { *v *= scale; }
+        for v in &mut bivector {
+            *v *= scale;
+        }
     }
 
     let rotor = Rotor::from_bivector(&bivector);
@@ -816,8 +964,8 @@ pub fn predict_next_spacetime(
                 // Blend: inertia_factor * rotored + (1 - inertia_factor) * last
                 let mut blended = [0.0f32; CATA_DIM];
                 for i in 0..CATA_DIM {
-                    blended[i] = inertia_factor * full_chunk[i]
-                        + (1.0 - inertia_factor) * last.raw[i];
+                    blended[i] =
+                        inertia_factor * full_chunk[i] + (1.0 - inertia_factor) * last.raw[i];
                 }
                 (blended, transition.fidelity * inertia_factor)
             } else {
@@ -876,7 +1024,9 @@ pub fn semantic_negate(chunk: &SpacetimeChunk) -> SpacetimeChunk {
 /// with erratic rotors (rapid topic changes) has high mass.
 /// Analogous to how physical mass measures resistance to acceleration.
 pub fn trajectory_mass(trajectory: &[SpacetimeChunk]) -> f32 {
-    if trajectory.len() < 3 { return 1.0; }
+    if trajectory.len() < 3 {
+        return 1.0;
+    }
     let mut biv_norms: Vec<f32> = Vec::new();
     for i in 1..trajectory.len() {
         let t = compute_transition(
@@ -888,8 +1038,8 @@ pub fn trajectory_mass(trajectory: &[SpacetimeChunk]) -> f32 {
         biv_norms.push(norm);
     }
     let mean = biv_norms.iter().sum::<f32>() / biv_norms.len() as f32;
-    let variance = biv_norms.iter().map(|n| (n - mean).powi(2)).sum::<f32>()
-        / biv_norms.len() as f32;
+    let variance =
+        biv_norms.iter().map(|n| (n - mean).powi(2)).sum::<f32>() / biv_norms.len() as f32;
     // High variance → high mass (erratic → resistant to prediction)
     // Low variance → low mass (steady → easy to extrapolate)
     (1.0 + variance * 10.0).min(5.0)
@@ -911,118 +1061,139 @@ pub fn compose_algebraic(
     sources: &[(ChunkSequence, f32)],
     target_len: usize,
 ) -> Vec<[f32; CATA_DIM]> {
-    if sources.is_empty() { return Vec::new(); }
+    if sources.is_empty() {
+        return Vec::new();
+    }
     if sources.len() == 1 {
-        return sources[0].0.chunks.iter().take(target_len).cloned().collect();
+        return sources[0]
+            .0
+            .chunks
+            .iter()
+            .take(target_len)
+            .cloned()
+            .collect();
     }
 
-    (0..target_len).map(|i| {
-        // Collect available chunks at this position with their weights
-        let mut available: Vec<(Multivector, f32)> = Vec::new();
-        for (seq, w) in sources {
-            if i < seq.chunks.len() {
-                available.push((chunk_to_multivector(&seq.chunks[i]), *w));
-            }
-        }
-        if available.is_empty() {
-            return [0.0f32; CATA_DIM];
-        }
-        if available.len() == 1 {
-            return multivector_to_chunk(&available[0].0);
-        }
-
-        // Sort by weight descending
-        available.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        let primary = &available[0].0;
-        let secondary = &available[1].0;
-        let w_primary = available[0].1;
-        let w_secondary = available[1].1;
-        let w_total = w_primary + w_secondary;
-        let alpha = if w_total > 1e-8 { w_primary / w_total } else { 0.5 };
-
-        let mut result = Multivector::zero();
-
-        // Grade 0 (scalar): weighted average
-        result.components[0] = primary.components[0] * alpha
-            + secondary.components[0] * (1.0 - alpha);
-
-        // Grade 1 (semantic direction): slerp between topic vectors
-        {
-            let start = GRADE_OFFSETS[1];
-            let dim = GRADE_DIMS[1];
-            for d in 0..dim {
-                result.components[start + d] =
-                    primary.components[start + d] * alpha
-                    + secondary.components[start + d] * (1.0 - alpha);
-            }
-            // Normalize grade-1 to preserve direction magnitude
-            let norm: f32 = (0..dim)
-                .map(|d| result.components[start + d].powi(2))
-                .sum::<f32>().sqrt();
-            let target_norm: f32 = (0..dim)
-                .map(|d| primary.components[start + d].powi(2))
-                .sum::<f32>().sqrt() * alpha
-                + (0..dim)
-                .map(|d| secondary.components[start + d].powi(2))
-                .sum::<f32>().sqrt() * (1.0 - alpha);
-            if norm > 1e-8 {
-                let scale = target_norm / norm;
-                for d in 0..dim { result.components[start + d] *= scale; }
-            }
-        }
-
-        // Grade 2 (relational context): geometric product of primary and secondary
-        // enriches the relational structure via the wedge product component.
-        // Safety: clamp the geometric product contribution to prevent
-        // numerically unstable values from corrupting the chunk.
-        {
-            let geo_product = primary.geo(secondary);
-            let start = GRADE_OFFSETS[2];
-            let dim = GRADE_DIMS[2];
-
-            let primary_g2_norm: f32 = (0..dim)
-                .map(|d| primary.components[start + d].powi(2))
-                .sum::<f32>().sqrt();
-            let geo_g2_norm: f32 = (0..dim)
-                .map(|d| geo_product.components[start + d].powi(2))
-                .sum::<f32>().sqrt();
-
-            // Only blend if the geo product grade-2 is within 3x of the primary's
-            // magnitude. Larger means the product amplified noise.
-            let blend_geo = if geo_g2_norm < primary_g2_norm * 3.0 && primary_g2_norm > 1e-6 {
-                0.2f32
-            } else {
-                0.0 // fall back to pure weighted average for grade 2
-            };
-
-            for d in 0..dim {
-                let primary_val = primary.components[start + d];
-                if blend_geo > 0.0 {
-                    let geo_val = geo_product.components[start + d]
-                        * (primary_g2_norm / geo_g2_norm.max(1e-8));
-                    result.components[start + d] =
-                        primary_val * (1.0 - blend_geo) + geo_val * blend_geo;
-                } else {
-                    result.components[start + d] =
-                        primary_val * alpha + secondary.components[start + d] * (1.0 - alpha);
+    (0..target_len)
+        .map(|i| {
+            // Collect available chunks at this position with their weights
+            let mut available: Vec<(Multivector, f32)> = Vec::new();
+            for (seq, w) in sources {
+                if i < seq.chunks.len() {
+                    available.push((chunk_to_multivector(&seq.chunks[i]), *w));
                 }
             }
-        }
-
-        // Grade 3+ (higher structure): weighted average
-        for grade in 3..=8 {
-            let start = GRADE_OFFSETS[grade];
-            let dim = GRADE_DIMS[grade];
-            for d in 0..dim {
-                result.components[start + d] =
-                    primary.components[start + d] * alpha
-                    + secondary.components[start + d] * (1.0 - alpha);
+            if available.is_empty() {
+                return [0.0f32; CATA_DIM];
             }
-        }
+            if available.len() == 1 {
+                return multivector_to_chunk(&available[0].0);
+            }
 
-        multivector_to_chunk(&result)
-    }).collect()
+            // Sort by weight descending
+            available.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            let primary = &available[0].0;
+            let secondary = &available[1].0;
+            let w_primary = available[0].1;
+            let w_secondary = available[1].1;
+            let w_total = w_primary + w_secondary;
+            let alpha = if w_total > 1e-8 {
+                w_primary / w_total
+            } else {
+                0.5
+            };
+
+            let mut result = Multivector::zero();
+
+            // Grade 0 (scalar): weighted average
+            result.components[0] =
+                primary.components[0] * alpha + secondary.components[0] * (1.0 - alpha);
+
+            // Grade 1 (semantic direction): slerp between topic vectors
+            {
+                let start = GRADE_OFFSETS[1];
+                let dim = GRADE_DIMS[1];
+                for d in 0..dim {
+                    result.components[start + d] = primary.components[start + d] * alpha
+                        + secondary.components[start + d] * (1.0 - alpha);
+                }
+                // Normalize grade-1 to preserve direction magnitude
+                let norm: f32 = (0..dim)
+                    .map(|d| result.components[start + d].powi(2))
+                    .sum::<f32>()
+                    .sqrt();
+                let target_norm: f32 = (0..dim)
+                    .map(|d| primary.components[start + d].powi(2))
+                    .sum::<f32>()
+                    .sqrt()
+                    * alpha
+                    + (0..dim)
+                        .map(|d| secondary.components[start + d].powi(2))
+                        .sum::<f32>()
+                        .sqrt()
+                        * (1.0 - alpha);
+                if norm > 1e-8 {
+                    let scale = target_norm / norm;
+                    for d in 0..dim {
+                        result.components[start + d] *= scale;
+                    }
+                }
+            }
+
+            // Grade 2 (relational context): geometric product of primary and secondary
+            // enriches the relational structure via the wedge product component.
+            // Safety: clamp the geometric product contribution to prevent
+            // numerically unstable values from corrupting the chunk.
+            {
+                let geo_product = primary.geo(secondary);
+                let start = GRADE_OFFSETS[2];
+                let dim = GRADE_DIMS[2];
+
+                let primary_g2_norm: f32 = (0..dim)
+                    .map(|d| primary.components[start + d].powi(2))
+                    .sum::<f32>()
+                    .sqrt();
+                let geo_g2_norm: f32 = (0..dim)
+                    .map(|d| geo_product.components[start + d].powi(2))
+                    .sum::<f32>()
+                    .sqrt();
+
+                // Only blend if the geo product grade-2 is within 3x of the primary's
+                // magnitude. Larger means the product amplified noise.
+                let blend_geo = if geo_g2_norm < primary_g2_norm * 3.0 && primary_g2_norm > 1e-6 {
+                    0.2f32
+                } else {
+                    0.0 // fall back to pure weighted average for grade 2
+                };
+
+                for d in 0..dim {
+                    let primary_val = primary.components[start + d];
+                    if blend_geo > 0.0 {
+                        let geo_val = geo_product.components[start + d]
+                            * (primary_g2_norm / geo_g2_norm.max(1e-8));
+                        result.components[start + d] =
+                            primary_val * (1.0 - blend_geo) + geo_val * blend_geo;
+                    } else {
+                        result.components[start + d] =
+                            primary_val * alpha + secondary.components[start + d] * (1.0 - alpha);
+                    }
+                }
+            }
+
+            // Grade 3+ (higher structure): weighted average
+            for grade in 3..=8 {
+                let start = GRADE_OFFSETS[grade];
+                let dim = GRADE_DIMS[grade];
+                for d in 0..dim {
+                    result.components[start + d] = primary.components[start + d] * alpha
+                        + secondary.components[start + d] * (1.0 - alpha);
+                }
+            }
+
+            multivector_to_chunk(&result)
+        })
+        .collect()
 }
 
 /// Grade-aware similarity: weighted combination of per-grade cosine similarities.
@@ -1035,12 +1206,18 @@ pub fn graded_similarity(a: &[f32; CATA_DIM], b: &[f32; CATA_DIM]) -> f32 {
     for grade in 0..9 {
         let start = GRADE_OFFSETS[grade];
         let dim = GRADE_DIMS[grade];
-        if dim == 0 { continue; }
+        if dim == 0 {
+            continue;
+        }
 
         let dot: f32 = (0..dim).map(|d| a[start + d] * b[start + d]).sum();
         let na: f32 = (0..dim).map(|d| a[start + d].powi(2)).sum::<f32>().sqrt();
         let nb: f32 = (0..dim).map(|d| b[start + d].powi(2)).sum::<f32>().sqrt();
-        let sim = if na > 1e-8 && nb > 1e-8 { dot / (na * nb) } else { 0.0 };
+        let sim = if na > 1e-8 && nb > 1e-8 {
+            dot / (na * nb)
+        } else {
+            0.0
+        };
 
         total += grade_weights[grade] * sim;
     }
@@ -1086,12 +1263,24 @@ impl Default for GradeTemperature {
 impl GradeTemperature {
     /// Conservative: low temperature across all grades.
     pub fn conservative() -> Self {
-        Self { scalar: 0.0, vector: 0.3, bivector: 0.3, trivector: 0.3, pseudoscalar: 0.1 }
+        Self {
+            scalar: 0.0,
+            vector: 0.3,
+            bivector: 0.3,
+            trivector: 0.3,
+            pseudoscalar: 0.1,
+        }
     }
 
     /// Creative: higher temperature on relational and discourse grades.
     pub fn creative() -> Self {
-        Self { scalar: 0.0, vector: 0.5, bivector: 1.5, trivector: 1.2, pseudoscalar: 0.5 }
+        Self {
+            scalar: 0.0,
+            vector: 0.5,
+            bivector: 1.5,
+            trivector: 1.2,
+            pseudoscalar: 0.5,
+        }
     }
 
     /// Balanced: moderate temperature, emphasizing content stability.
@@ -1135,16 +1324,21 @@ pub fn apply_grade_temperature(
     let mut rng_state = seed;
     for grade in 0..9 {
         let t = grade_temps[grade];
-        if t < 1e-6 { continue; }
+        if t < 1e-6 {
+            continue;
+        }
 
         let start = GRADE_OFFSETS[grade];
         let dim = GRADE_DIMS[grade];
 
         let grade_norm: f32 = (0..dim)
             .map(|d| mv.components[start + d].powi(2))
-            .sum::<f32>().sqrt();
+            .sum::<f32>()
+            .sqrt();
 
-        if grade_norm < 1e-10 { continue; }
+        if grade_norm < 1e-10 {
+            continue;
+        }
 
         let noise_scale = t * grade_norm * 0.1;
 
@@ -1231,7 +1425,9 @@ impl SemanticPropagator {
 
     /// Update the running mean rotor (exponential moving average of rotor components).
     fn update_mean_rotor(&mut self) {
-        if self.history.is_empty() { return; }
+        if self.history.is_empty() {
+            return;
+        }
         let n = self.history.len();
         let decay = 0.7f32;
 
@@ -1245,8 +1441,8 @@ impl SemanticPropagator {
                 let latest_mv = latest.to_multivector();
                 let mut blended = crate::clifford::Multivector::zero();
                 for i in 0..crate::clifford::CL8_DIM {
-                    blended.components[i] = mean_mv.components[i] * decay
-                        + latest_mv.components[i] * (1.0 - decay);
+                    blended.components[i] =
+                        mean_mv.components[i] * decay + latest_mv.components[i] * (1.0 - decay);
                 }
                 // Re-extract even-grade components for the rotor
                 let mut new_mean = Rotor::identity();
@@ -1264,7 +1460,9 @@ impl SemanticPropagator {
     /// Compute the kinetic energy of the trajectory: rate of rotor change.
     /// High kinetic energy means the semantic direction is changing rapidly.
     fn kinetic_energy(&self) -> f32 {
-        if self.history.len() < 2 { return 0.0; }
+        if self.history.len() < 2 {
+            return 0.0;
+        }
         let n = self.history.len();
         let curr = self.history[n - 1].to_multivector();
         let prev = self.history[n - 2].to_multivector();
@@ -1284,7 +1482,9 @@ impl SemanticPropagator {
             Some(r) => r,
             None => return 0.0,
         };
-        if self.history.is_empty() { return 0.0; }
+        if self.history.is_empty() {
+            return 0.0;
+        }
 
         let latest = self.history.last().unwrap().to_multivector();
         let mean_mv = mean.to_multivector();
@@ -1309,7 +1509,9 @@ impl SemanticPropagator {
     ///
     /// Returns (predicted_chunk, interval_type, confidence).
     pub fn predict_next(&self) -> Option<([f32; CATA_DIM], IntervalType, f32)> {
-        if self.chunk_history.len() < 2 { return None; }
+        if self.chunk_history.len() < 2 {
+            return None;
+        }
 
         let n = self.chunk_history.len();
         let last = &self.chunk_history[n - 1];
@@ -1323,26 +1525,27 @@ impl SemanticPropagator {
         let action_ratio = if ke + pe > 1e-8 { ke / (ke + pe) } else { 0.5 };
 
         // Get the prediction rotor: blend between latest and mean
-        let pred_rotor = if let (Some(latest_r), Some(mean_r)) = (self.history.last(), &self.mean_rotor) {
-            let latest_mv = latest_r.to_multivector();
-            let mean_mv = mean_r.to_multivector();
-            let mut blended = crate::clifford::Multivector::zero();
-            for i in 0..crate::clifford::CL8_DIM {
-                blended.components[i] = latest_mv.components[i] * action_ratio
-                    + mean_mv.components[i] * (1.0 - action_ratio);
-            }
-            let mut rotor = Rotor::identity();
-            let even = blended.even_grade_components();
-            for (i, &v) in even.iter().enumerate().take(128) {
-                rotor.components[i] = v;
-            }
-            rotor.normalize();
-            rotor
-        } else if let Some(r) = self.history.last() {
-            r.clone()
-        } else {
-            return None;
-        };
+        let pred_rotor =
+            if let (Some(latest_r), Some(mean_r)) = (self.history.last(), &self.mean_rotor) {
+                let latest_mv = latest_r.to_multivector();
+                let mean_mv = mean_r.to_multivector();
+                let mut blended = crate::clifford::Multivector::zero();
+                for i in 0..crate::clifford::CL8_DIM {
+                    blended.components[i] = latest_mv.components[i] * action_ratio
+                        + mean_mv.components[i] * (1.0 - action_ratio);
+                }
+                let mut rotor = Rotor::identity();
+                let even = blended.even_grade_components();
+                for (i, &v) in even.iter().enumerate().take(128) {
+                    rotor.components[i] = v;
+                }
+                rotor.normalize();
+                rotor
+            } else if let Some(r) = self.history.last() {
+                r.clone()
+            } else {
+                return None;
+            };
 
         // Apply inertia damping based on mass and interval type
         let damping = match interval {
@@ -1384,21 +1587,33 @@ impl SemanticPropagator {
             let mv = chunk_to_multivector(&pred);
 
             // Even grades (0, 2, 4, 6, 8): "positive energy" spinor components
-            let even_energy: f32 = [0, 2, 4, 6, 8].iter().map(|&g| {
-                let start = GRADE_OFFSETS[g];
-                let dim = GRADE_DIMS[g];
-                (0..dim).map(|d| mv.components[start + d].powi(2)).sum::<f32>()
-            }).sum();
+            let even_energy: f32 = [0, 2, 4, 6, 8]
+                .iter()
+                .map(|&g| {
+                    let start = GRADE_OFFSETS[g];
+                    let dim = GRADE_DIMS[g];
+                    (0..dim)
+                        .map(|d| mv.components[start + d].powi(2))
+                        .sum::<f32>()
+                })
+                .sum();
 
             // Odd grades (1, 3, 5, 7): "negative energy" spinor components
-            let odd_energy: f32 = [1, 3, 5, 7].iter().map(|&g| {
-                let start = GRADE_OFFSETS[g];
-                let dim = GRADE_DIMS[g];
-                (0..dim).map(|d| mv.components[start + d].powi(2)).sum::<f32>()
-            }).sum();
+            let odd_energy: f32 = [1, 3, 5, 7]
+                .iter()
+                .map(|&g| {
+                    let start = GRADE_OFFSETS[g];
+                    let dim = GRADE_DIMS[g];
+                    (0..dim)
+                        .map(|d| mv.components[start + d].powi(2))
+                        .sum::<f32>()
+                })
+                .sum();
 
             let total = even_energy + odd_energy;
-            if total < 1e-8 { return 0.0; }
+            if total < 1e-8 {
+                return 0.0;
+            }
 
             // Maximum ambiguity when even ≈ odd (equal interference)
             let ratio = even_energy.min(odd_energy) / even_energy.max(odd_energy).max(1e-8);
@@ -1420,44 +1635,57 @@ impl SemanticPropagator {
         sources: &[(Vec<SpacetimeChunk>, f32)],
         target_len: usize,
     ) -> Vec<[f32; CATA_DIM]> {
-        if sources.is_empty() { return Vec::new(); }
+        if sources.is_empty() {
+            return Vec::new();
+        }
         if sources.len() == 1 {
-            return sources[0].0.iter().take(target_len).map(|c| c.raw).collect();
+            return sources[0]
+                .0
+                .iter()
+                .take(target_len)
+                .map(|c| c.raw)
+                .collect();
         }
 
-        (0..target_len).map(|i| {
-            let mut weighted_sum = [0.0f32; CATA_DIM];
-            let mut total_weight = 0.0f32;
+        (0..target_len)
+            .map(|i| {
+                let mut weighted_sum = [0.0f32; CATA_DIM];
+                let mut total_weight = 0.0f32;
 
-            for (trajectory, base_weight) in sources {
-                if i >= trajectory.len() { continue; }
+                for (trajectory, base_weight) in sources {
+                    if i >= trajectory.len() {
+                        continue;
+                    }
 
-                // Build a sub-propagator for this source
-                let sub_traj = &trajectory[..=i.min(trajectory.len() - 1)];
-                let mut sub_prop = SemanticPropagator::new(self.mass, self.coupling);
-                for chunk in sub_traj {
-                    sub_prop.observe(chunk);
+                    // Build a sub-propagator for this source
+                    let sub_traj = &trajectory[..=i.min(trajectory.len() - 1)];
+                    let mut sub_prop = SemanticPropagator::new(self.mass, self.coupling);
+                    for chunk in sub_traj {
+                        sub_prop.observe(chunk);
+                    }
+
+                    // Weight includes both the source weight and the propagator's confidence
+                    let confidence = if sub_traj.len() >= 2 {
+                        sub_prop.predict_next().map(|(_, _, c)| c).unwrap_or(0.5)
+                    } else {
+                        0.5
+                    };
+                    let w = base_weight * (0.5 + confidence);
+
+                    for j in 0..CATA_DIM {
+                        weighted_sum[j] += trajectory[i].raw[j] * w;
+                    }
+                    total_weight += w;
                 }
 
-                // Weight includes both the source weight and the propagator's confidence
-                let confidence = if sub_traj.len() >= 2 {
-                    sub_prop.predict_next().map(|(_, _, c)| c).unwrap_or(0.5)
-                } else {
-                    0.5
-                };
-                let w = base_weight * (0.5 + confidence);
-
-                for j in 0..CATA_DIM {
-                    weighted_sum[j] += trajectory[i].raw[j] * w;
+                if total_weight > 1e-8 {
+                    for j in 0..CATA_DIM {
+                        weighted_sum[j] /= total_weight;
+                    }
                 }
-                total_weight += w;
-            }
-
-            if total_weight > 1e-8 {
-                for j in 0..CATA_DIM { weighted_sum[j] /= total_weight; }
-            }
-            weighted_sum
-        }).collect()
+                weighted_sum
+            })
+            .collect()
     }
 }
 
@@ -1484,10 +1712,14 @@ mod tests {
         let mut max_cos = 0.0f32;
         for i in 0..codec.vocab_size {
             for j in (i + 1)..codec.vocab_size {
-                let d: f32 = codec.token_embeddings[i].iter()
+                let d: f32 = codec.token_embeddings[i]
+                    .iter()
                     .zip(codec.token_embeddings[j].iter())
-                    .map(|(a, b)| a * b).sum();
-                if d.abs() > max_cos { max_cos = d.abs(); }
+                    .map(|(a, b)| a * b)
+                    .sum();
+                if d.abs() > max_cos {
+                    max_cos = d.abs();
+                }
             }
         }
         assert!(max_cos < 0.25, "max mutual cosine = {}", max_cos);
@@ -1498,9 +1730,11 @@ mod tests {
         let codec = ChunkCodec::new(16);
         for i in 0..CHUNK_K {
             for j in (i + 1)..CHUNK_K {
-                let dot: f32 = codec.position_codes[i].iter()
+                let dot: f32 = codec.position_codes[i]
+                    .iter()
                     .zip(codec.position_codes[j].iter())
-                    .map(|(a, b)| a * b).sum();
+                    .map(|(a, b)| a * b)
+                    .sum();
                 assert!(dot.abs() < 1e-4, "codes {},{} dot={}", i, j, dot);
             }
         }
@@ -1521,7 +1755,11 @@ mod tests {
         for start in [0u16, 50, 100, 500, 900] {
             let tokens: Vec<u16> = (start..start + CHUNK_K as u16).collect();
             let acc = codec.chunk_accuracy(&tokens);
-            assert_eq!(acc, 1.0, "K-token chunk starting at {} failed: acc={}", start, acc);
+            assert_eq!(
+                acc, 1.0,
+                "K-token chunk starting at {} failed: acc={}",
+                start, acc
+            );
         }
     }
 
@@ -1532,15 +1770,23 @@ mod tests {
         let mut total_correct = 0;
         let trials = 100;
         for _ in 0..trials {
-            let tokens: Vec<u16> = (0..CHUNK_K).map(|_| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-                ((state >> 33) % 2048) as u16
-            }).collect();
+            let tokens: Vec<u16> = (0..CHUNK_K)
+                .map(|_| {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    ((state >> 33) % 2048) as u16
+                })
+                .collect();
             let acc = codec.chunk_accuracy(&tokens);
-            if acc == 1.0 { total_correct += 1; }
+            if acc == 1.0 {
+                total_correct += 1;
+            }
         }
         let pct = total_correct as f32 / trials as f32;
-        assert!(pct >= 0.95, "random chunk perfect roundtrip rate = {:.1}%", pct * 100.0);
+        assert!(
+            pct >= 0.95,
+            "random chunk perfect roundtrip rate = {:.1}%",
+            pct * 100.0
+        );
     }
 
     #[test]
@@ -1555,10 +1801,12 @@ mod tests {
     fn test_sequence_roundtrip_64_tokens() {
         let codec = ChunkCodec::new(2048);
         let mut state = 99u64;
-        let tokens: Vec<u16> = (0..64).map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-            ((state >> 33) % 2048) as u16
-        }).collect();
+        let tokens: Vec<u16> = (0..64)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                ((state >> 33) % 2048) as u16
+            })
+            .collect();
         let acc = codec.sequence_accuracy(&tokens);
         assert!(acc >= 0.99, "64-token sequence accuracy = {:.3}", acc);
     }
@@ -1569,8 +1817,14 @@ mod tests {
         let s1 = codec.encode_sequence(&[10, 20, 30, 40, 50, 60, 70, 80]);
         let s2 = codec.encode_sequence(&[10, 20, 30, 40, 50, 60, 70, 80]);
         let s3 = codec.encode_sequence(&[200, 201, 202, 203, 204, 205, 206, 207]);
-        assert!((s1.similarity(&s2) - 1.0).abs() < 1e-4, "identical seqs should have sim=1");
-        assert!(s1.similarity(&s3) < 0.5, "different seqs should have low sim");
+        assert!(
+            (s1.similarity(&s2) - 1.0).abs() < 1e-4,
+            "identical seqs should have sim=1"
+        );
+        assert!(
+            s1.similarity(&s3) < 0.5,
+            "different seqs should have low sim"
+        );
     }
 
     #[test]
@@ -1580,9 +1834,22 @@ mod tests {
         let c1 = codec.encode_chunk(&[11, 21, 31, 41, 51, 61, 71, 81]);
         let pred = predict_next_chunk(&[c0, c1]);
         // Predicted chunk should be further along the same direction
-        let d01: f32 = c0.iter().zip(c1.iter()).map(|(a, b)| (b - a).powi(2)).sum::<f32>().sqrt();
-        let d1p: f32 = c1.iter().zip(pred.iter()).map(|(a, b)| (b - a).powi(2)).sum::<f32>().sqrt();
-        assert!((d01 - d1p).abs() < 0.1, "prediction should maintain velocity");
+        let d01: f32 = c0
+            .iter()
+            .zip(c1.iter())
+            .map(|(a, b)| (b - a).powi(2))
+            .sum::<f32>()
+            .sqrt();
+        let d1p: f32 = c1
+            .iter()
+            .zip(pred.iter())
+            .map(|(a, b)| (b - a).powi(2))
+            .sum::<f32>()
+            .sqrt();
+        assert!(
+            (d01 - d1p).abs() < 0.1,
+            "prediction should maintain velocity"
+        );
     }
 
     #[test]
@@ -1616,13 +1883,19 @@ mod tests {
     #[test]
     fn test_predict_from_library() {
         let codec = ChunkCodec::new(256);
-        let t1 = codec.encode_sequence(&[10, 20, 30, 40, 50, 60, 70, 80, 11, 21, 31, 41, 51, 61, 71, 81]);
+        let t1 = codec.encode_sequence(&[
+            10, 20, 30, 40, 50, 60, 70, 80, 11, 21, 31, 41, 51, 61, 71, 81,
+        ]);
         // Context: first chunk of t1
         let context = &t1.chunks[0..1];
         let pred = predict_next_from_library(context, &[t1.clone()], 0.5);
         // Should predict second chunk of t1
         let sim = cosine(&pred, &t1.chunks[1]);
-        assert!(sim > 0.9, "library prediction should find continuation, sim={}", sim);
+        assert!(
+            sim > 0.9,
+            "library prediction should find continuation, sim={}",
+            sim
+        );
     }
 
     #[test]
@@ -1652,10 +1925,23 @@ mod tests {
         let graded = GradedChunk::from_chunk(&chunk);
 
         assert!(graded.energy > 0.0, "energy should be positive");
-        let sem_norm: f32 = graded.semantic_dir.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let sem_norm: f32 = graded
+            .semantic_dir
+            .iter()
+            .map(|x| x * x)
+            .sum::<f32>()
+            .sqrt();
         assert!(sem_norm > 0.0, "semantic direction should be nonzero");
-        let ctx_norm: f32 = graded.context_bivector.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!(ctx_norm >= 0.0, "context bivector norm should be non-negative");
+        let ctx_norm: f32 = graded
+            .context_bivector
+            .iter()
+            .map(|x| x * x)
+            .sum::<f32>()
+            .sqrt();
+        assert!(
+            ctx_norm >= 0.0,
+            "context bivector norm should be non-negative"
+        );
     }
 
     #[test]
@@ -1663,12 +1949,22 @@ mod tests {
         let codec = ChunkCodec::new(256);
         let a = GradedChunk::from_chunk(&codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]));
         let b = GradedChunk::from_chunk(&codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]));
-        let c = GradedChunk::from_chunk(&codec.encode_chunk(&[200, 201, 202, 203, 204, 205, 206, 207]));
+        let c =
+            GradedChunk::from_chunk(&codec.encode_chunk(&[200, 201, 202, 203, 204, 205, 206, 207]));
 
         let sim_same = a.semantic_similarity(&b);
         let sim_diff = a.semantic_similarity(&c);
-        assert!(sim_same > sim_diff, "same chunk should be more similar: {} vs {}", sim_same, sim_diff);
-        assert!((sim_same - 1.0).abs() < 0.01, "identical chunks should have sim≈1.0: {}", sim_same);
+        assert!(
+            sim_same > sim_diff,
+            "same chunk should be more similar: {} vs {}",
+            sim_same,
+            sim_diff
+        );
+        assert!(
+            (sim_same - 1.0).abs() < 0.01,
+            "identical chunks should have sim≈1.0: {}",
+            sim_same
+        );
     }
 
     #[test]
@@ -1678,7 +1974,11 @@ mod tests {
         let b = GradedChunk::from_chunk(&codec.encode_chunk(&[11, 21, 31, 41, 51, 61, 71, 81]));
 
         let transition = compute_transition(&a, &b);
-        assert!(transition.fidelity > -1.0, "fidelity should be computed: {}", transition.fidelity);
+        assert!(
+            transition.fidelity > -1.0,
+            "fidelity should be computed: {}",
+            transition.fidelity
+        );
     }
 
     #[test]
@@ -1696,7 +1996,11 @@ mod tests {
 
         // Prediction should be further along the trajectory
         let sim_with_last = cosine(&pred, &c1);
-        assert!(sim_with_last > 0.0, "prediction should have positive similarity to last chunk: {}", sim_with_last);
+        assert!(
+            sim_with_last > 0.0,
+            "prediction should have positive similarity to last chunk: {}",
+            sim_with_last
+        );
     }
 
     #[test]
@@ -1721,7 +2025,12 @@ mod tests {
 
         let sim_same = graded_similarity(&a, &b);
         let sim_diff = graded_similarity(&a, &c);
-        assert!(sim_same > sim_diff, "same chunk should be more similar: {} vs {}", sim_same, sim_diff);
+        assert!(
+            sim_same > sim_diff,
+            "same chunk should be more similar: {} vs {}",
+            sim_same,
+            sim_diff
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1738,7 +2047,12 @@ mod tests {
         let sem_norm: f32 = st.semantic_dir.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!(sem_norm > 0.0, "semantic direction should be nonzero");
         let boost_norm: f32 = st.boost_causal.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let rot_norm: f32 = st.rotation_structural.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let rot_norm: f32 = st
+            .rotation_structural
+            .iter()
+            .map(|x| x * x)
+            .sum::<f32>()
+            .sqrt();
         assert!(boost_norm >= 0.0 && rot_norm >= 0.0);
     }
 
@@ -1747,11 +2061,18 @@ mod tests {
         let codec = ChunkCodec::new(256);
         let a = SpacetimeChunk::from_chunk(&codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]));
         let b = SpacetimeChunk::from_chunk(&codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]));
-        let c = SpacetimeChunk::from_chunk(&codec.encode_chunk(&[200, 201, 202, 203, 204, 205, 206, 207]));
+        let c = SpacetimeChunk::from_chunk(
+            &codec.encode_chunk(&[200, 201, 202, 203, 204, 205, 206, 207]),
+        );
 
         let sim_same = a.semantic_similarity(&b);
         let sim_diff = a.semantic_similarity(&c);
-        assert!(sim_same > sim_diff, "identical chunks should be more similar: {} vs {}", sim_same, sim_diff);
+        assert!(
+            sim_same > sim_diff,
+            "identical chunks should be more similar: {} vs {}",
+            sim_same,
+            sim_diff
+        );
         assert!((sim_same - 1.0).abs() < 0.01);
     }
 
@@ -1760,16 +2081,23 @@ mod tests {
         let codec = ChunkCodec::new(256);
         let a = SpacetimeChunk::from_chunk(&codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]));
         let b = SpacetimeChunk::from_chunk(&codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]));
-        let c = SpacetimeChunk::from_chunk(&codec.encode_chunk(&[200, 201, 202, 203, 204, 205, 206, 207]));
+        let c = SpacetimeChunk::from_chunk(
+            &codec.encode_chunk(&[200, 201, 202, 203, 204, 205, 206, 207]),
+        );
 
         let gs_same = a.graded_similarity(&b);
         let gs_diff = a.graded_similarity(&c);
-        assert!(gs_same > gs_diff, "graded sim should separate same vs different: {} vs {}", gs_same, gs_diff);
+        assert!(
+            gs_same > gs_diff,
+            "graded sim should separate same vs different: {} vs {}",
+            gs_same,
+            gs_diff
+        );
     }
 
     #[test]
     fn test_minkowski_interval_types() {
-        use crate::clifford::{Multivector, minkowski_interval, classify_interval, IntervalType};
+        use crate::clifford::{classify_interval, minkowski_interval, IntervalType, Multivector};
         // Pure timelike separation (only e0 differs)
         let mut a = Multivector::zero();
         let mut b = Multivector::zero();
@@ -1791,10 +2119,16 @@ mod tests {
         // Lightlike (e0 and e1 change equally)
         let mut e = Multivector::zero();
         let mut f = Multivector::zero();
-        e.components[1] = 0.0; e.components[2] = 0.0;
-        f.components[1] = 1.0; f.components[2] = 1.0;
+        e.components[1] = 0.0;
+        e.components[2] = 0.0;
+        f.components[1] = 1.0;
+        f.components[2] = 1.0;
         let s2 = minkowski_interval(&e, &f);
-        assert!(s2.abs() < 0.02, "equal e0/e1 separation should be lightlike: {}", s2);
+        assert!(
+            s2.abs() < 0.02,
+            "equal e0/e1 separation should be lightlike: {}",
+            s2
+        );
         assert_eq!(classify_interval(s2), IntervalType::Lightlike);
     }
 
@@ -1807,27 +2141,45 @@ mod tests {
         let (pred, _interval, confidence) = predict_next_spacetime(&[c0, c1], 1.0);
         let pred_norm: f32 = pred.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!(pred_norm > 0.0, "prediction should be nonzero");
-        assert!(confidence > 0.0, "confidence should be positive: {}", confidence);
+        assert!(
+            confidence > 0.0,
+            "confidence should be positive: {}",
+            confidence
+        );
     }
 
     #[test]
     fn test_semantic_negate() {
         let codec = ChunkCodec::new(256);
-        let original = SpacetimeChunk::from_chunk(&codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]));
+        let original =
+            SpacetimeChunk::from_chunk(&codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]));
         let negated = semantic_negate(&original);
 
         // Negation should change the multivector
-        let diff: f32 = original.raw.iter().zip(negated.raw.iter())
-            .map(|(a, b)| (a - b).powi(2)).sum::<f32>().sqrt();
-        assert!(diff > 0.1, "negation should change the embedding: diff={}", diff);
+        let diff: f32 = original
+            .raw
+            .iter()
+            .zip(negated.raw.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f32>()
+            .sqrt();
+        assert!(
+            diff > 0.1,
+            "negation should change the embedding: diff={}",
+            diff
+        );
 
         // Double negation should approximately recover original
         // (I² = -1 in Cl(1,7), so applying twice gives -original)
         let double_neg = semantic_negate(&negated);
         for i in 0..CATA_DIM {
-            assert!((double_neg.raw[i] + original.raw[i]).abs() < 1e-3,
-                "double negation should give -original at component {}: {} vs {}", 
-                i, double_neg.raw[i], -original.raw[i]);
+            assert!(
+                (double_neg.raw[i] + original.raw[i]).abs() < 1e-3,
+                "double negation should give -original at component {}: {} vs {}",
+                i,
+                double_neg.raw[i],
+                -original.raw[i]
+            );
         }
     }
 
@@ -1835,25 +2187,42 @@ mod tests {
     fn test_trajectory_mass() {
         let codec = ChunkCodec::new(256);
         // Steady trajectory: incrementing tokens
-        let steady: Vec<SpacetimeChunk> = (0..4).map(|k| {
-            let base = (10 + k * 1) as u16;
-            SpacetimeChunk::from_chunk(&codec.encode_chunk(&[
-                base, base+10, base+20, base+30, base+40, base+50, base+60, base+70
-            ]))
-        }).collect();
+        let steady: Vec<SpacetimeChunk> = (0..4)
+            .map(|k| {
+                let base = (10 + k * 1) as u16;
+                SpacetimeChunk::from_chunk(&codec.encode_chunk(&[
+                    base,
+                    base + 10,
+                    base + 20,
+                    base + 30,
+                    base + 40,
+                    base + 50,
+                    base + 60,
+                    base + 70,
+                ]))
+            })
+            .collect();
 
         // Erratic trajectory: jumping tokens
         let erratic: Vec<SpacetimeChunk> = vec![
             SpacetimeChunk::from_chunk(&codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80])),
-            SpacetimeChunk::from_chunk(&codec.encode_chunk(&[200, 201, 202, 203, 204, 205, 206, 207])),
+            SpacetimeChunk::from_chunk(
+                &codec.encode_chunk(&[200, 201, 202, 203, 204, 205, 206, 207]),
+            ),
             SpacetimeChunk::from_chunk(&codec.encode_chunk(&[5, 15, 25, 35, 45, 55, 65, 75])),
-            SpacetimeChunk::from_chunk(&codec.encode_chunk(&[150, 160, 170, 180, 190, 100, 110, 120])),
+            SpacetimeChunk::from_chunk(
+                &codec.encode_chunk(&[150, 160, 170, 180, 190, 100, 110, 120]),
+            ),
         ];
 
         let mass_steady = trajectory_mass(&steady);
         let mass_erratic = trajectory_mass(&erratic);
-        assert!(mass_erratic >= mass_steady,
-            "erratic trajectory should have higher mass: {} vs {}", mass_erratic, mass_steady);
+        assert!(
+            mass_erratic >= mass_steady,
+            "erratic trajectory should have higher mass: {} vs {}",
+            mass_erratic,
+            mass_steady
+        );
     }
 
     #[test]
@@ -1862,7 +2231,10 @@ mod tests {
         let a = SpacetimeChunk::from_chunk(&codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]));
         let b = SpacetimeChunk::from_chunk(&codec.encode_chunk(&[11, 21, 31, 41, 51, 61, 71, 81]));
         let interval = a.interval_to(&b);
-        assert!(matches!(interval, IntervalType::Timelike | IntervalType::Spacelike | IntervalType::Lightlike));
+        assert!(matches!(
+            interval,
+            IntervalType::Timelike | IntervalType::Spacelike | IntervalType::Lightlike
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -1874,12 +2246,19 @@ mod tests {
         let codec = ChunkCodec::new(256);
         let chunk = codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]);
         let zero_temp = GradeTemperature {
-            scalar: 0.0, vector: 0.0, bivector: 0.0, trivector: 0.0, pseudoscalar: 0.0,
+            scalar: 0.0,
+            vector: 0.0,
+            bivector: 0.0,
+            trivector: 0.0,
+            pseudoscalar: 0.0,
         };
         let result = apply_grade_temperature(&chunk, &zero_temp, 42);
         for i in 0..CATA_DIM {
-            assert!((result[i] - chunk[i]).abs() < 1e-7,
-                "zero temperature should not change chunk at {}", i);
+            assert!(
+                (result[i] - chunk[i]).abs() < 1e-7,
+                "zero temperature should not change chunk at {}",
+                i
+            );
         }
     }
 
@@ -1888,12 +2267,24 @@ mod tests {
         let codec = ChunkCodec::new(256);
         let chunk = codec.encode_chunk(&[10, 20, 30, 40, 50, 60, 70, 80]);
         let high_temp = GradeTemperature {
-            scalar: 1.0, vector: 1.0, bivector: 1.0, trivector: 1.0, pseudoscalar: 1.0,
+            scalar: 1.0,
+            vector: 1.0,
+            bivector: 1.0,
+            trivector: 1.0,
+            pseudoscalar: 1.0,
         };
         let result = apply_grade_temperature(&chunk, &high_temp, 42);
-        let diff: f32 = chunk.iter().zip(result.iter())
-            .map(|(a, b)| (a - b).powi(2)).sum::<f32>().sqrt();
-        assert!(diff > 0.01, "nonzero temperature should add variation: diff={}", diff);
+        let diff: f32 = chunk
+            .iter()
+            .zip(result.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f32>()
+            .sqrt();
+        assert!(
+            diff > 0.01,
+            "nonzero temperature should add variation: diff={}",
+            diff
+        );
     }
 
     #[test]
@@ -1904,7 +2295,10 @@ mod tests {
         let r1 = apply_grade_temperature(&chunk, &temp, 42);
         let r2 = apply_grade_temperature(&chunk, &temp, 42);
         for i in 0..CATA_DIM {
-            assert!((r1[i] - r2[i]).abs() < 1e-7, "same seed should give same result");
+            assert!(
+                (r1[i] - r2[i]).abs() < 1e-7,
+                "same seed should give same result"
+            );
         }
     }
 
@@ -1915,19 +2309,31 @@ mod tests {
         let temp = GradeTemperature::default();
         let r1 = apply_grade_temperature(&chunk, &temp, 42);
         let r2 = apply_grade_temperature(&chunk, &temp, 99);
-        let diff: f32 = r1.iter().zip(r2.iter())
-            .map(|(a, b)| (a - b).powi(2)).sum::<f32>().sqrt();
-        assert!(diff > 0.001, "different seeds should give different results: diff={}", diff);
+        let diff: f32 = r1
+            .iter()
+            .zip(r2.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f32>()
+            .sqrt();
+        assert!(
+            diff > 0.001,
+            "different seeds should give different results: diff={}",
+            diff
+        );
     }
 
     #[test]
     fn test_grade_temperature_presets() {
         let conservative = GradeTemperature::conservative();
         let creative = GradeTemperature::creative();
-        assert!(conservative.bivector < creative.bivector,
-            "creative should have higher bivector temp");
-        assert!(conservative.vector < creative.vector,
-            "creative should have higher vector temp");
+        assert!(
+            conservative.bivector < creative.bivector,
+            "creative should have higher bivector temp"
+        );
+        assert!(
+            conservative.vector < creative.vector,
+            "creative should have higher vector temp"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1937,19 +2343,32 @@ mod tests {
     #[test]
     fn test_propagator_observe_and_predict() {
         let codec = ChunkCodec::new(256);
-        let chunks: Vec<SpacetimeChunk> = (0..4).map(|k| {
-            let base = (10 + k * 2) as u16;
-            SpacetimeChunk::from_chunk(&codec.encode_chunk(&[
-                base, base+10, base+20, base+30, base+40, base+50, base+60, base+70
-            ]))
-        }).collect();
+        let chunks: Vec<SpacetimeChunk> = (0..4)
+            .map(|k| {
+                let base = (10 + k * 2) as u16;
+                SpacetimeChunk::from_chunk(&codec.encode_chunk(&[
+                    base,
+                    base + 10,
+                    base + 20,
+                    base + 30,
+                    base + 40,
+                    base + 50,
+                    base + 60,
+                    base + 70,
+                ]))
+            })
+            .collect();
 
         let mut prop = SemanticPropagator::new(1.0, 0.5);
         for c in &chunks {
             prop.observe(c);
         }
 
-        assert_eq!(prop.history.len(), 3, "should have 3 transitions for 4 chunks");
+        assert_eq!(
+            prop.history.len(),
+            3,
+            "should have 3 transitions for 4 chunks"
+        );
         assert!(prop.mean_rotor.is_some(), "mean rotor should be computed");
 
         let pred = prop.predict_next();
@@ -1957,18 +2376,31 @@ mod tests {
         let (pred_chunk, interval, confidence) = pred.unwrap();
         let pred_norm: f32 = pred_chunk.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!(pred_norm > 0.0, "prediction should be nonzero");
-        assert!(confidence > 0.0, "confidence should be positive: {}", confidence);
+        assert!(
+            confidence > 0.0,
+            "confidence should be positive: {}",
+            confidence
+        );
     }
 
     #[test]
     fn test_propagator_from_trajectory() {
         let codec = ChunkCodec::new(256);
-        let chunks: Vec<SpacetimeChunk> = (0..5).map(|k| {
-            let base = (10 + k * 3) as u16;
-            SpacetimeChunk::from_chunk(&codec.encode_chunk(&[
-                base, base+5, base+10, base+15, base+20, base+25, base+30, base+35
-            ]))
-        }).collect();
+        let chunks: Vec<SpacetimeChunk> = (0..5)
+            .map(|k| {
+                let base = (10 + k * 3) as u16;
+                SpacetimeChunk::from_chunk(&codec.encode_chunk(&[
+                    base,
+                    base + 5,
+                    base + 10,
+                    base + 15,
+                    base + 20,
+                    base + 25,
+                    base + 30,
+                    base + 35,
+                ]))
+            })
+            .collect();
 
         let prop = SemanticPropagator::from_trajectory(&chunks, 1.5, 0.3);
         assert_eq!(prop.history.len(), 4);
@@ -1978,34 +2410,64 @@ mod tests {
     #[test]
     fn test_propagator_ambiguity() {
         let codec = ChunkCodec::new(256);
-        let chunks: Vec<SpacetimeChunk> = (0..3).map(|k| {
-            let base = (10 + k * 5) as u16;
-            SpacetimeChunk::from_chunk(&codec.encode_chunk(&[
-                base, base+10, base+20, base+30, base+40, base+50, base+60, base+70
-            ]))
-        }).collect();
+        let chunks: Vec<SpacetimeChunk> = (0..3)
+            .map(|k| {
+                let base = (10 + k * 5) as u16;
+                SpacetimeChunk::from_chunk(&codec.encode_chunk(&[
+                    base,
+                    base + 10,
+                    base + 20,
+                    base + 30,
+                    base + 40,
+                    base + 50,
+                    base + 60,
+                    base + 70,
+                ]))
+            })
+            .collect();
 
         let prop = SemanticPropagator::from_trajectory(&chunks, 1.0, 0.5);
         let ambiguity = prop.ambiguity_score();
-        assert!(ambiguity >= 0.0 && ambiguity <= 1.0,
-            "ambiguity should be in [0,1]: {}", ambiguity);
+        assert!(
+            ambiguity >= 0.0 && ambiguity <= 1.0,
+            "ambiguity should be in [0,1]: {}",
+            ambiguity
+        );
     }
 
     #[test]
     fn test_propagator_compose() {
         let codec = ChunkCodec::new(256);
-        let traj1: Vec<SpacetimeChunk> = (0..3).map(|k| {
-            let base = (10 + k * 2) as u16;
-            SpacetimeChunk::from_chunk(&codec.encode_chunk(&[
-                base, base+10, base+20, base+30, base+40, base+50, base+60, base+70
-            ]))
-        }).collect();
-        let traj2: Vec<SpacetimeChunk> = (0..3).map(|k| {
-            let base = (100 + k * 3) as u16;
-            SpacetimeChunk::from_chunk(&codec.encode_chunk(&[
-                base, base+5, base+10, base+15, base+20, base+25, base+30, base+35
-            ]))
-        }).collect();
+        let traj1: Vec<SpacetimeChunk> = (0..3)
+            .map(|k| {
+                let base = (10 + k * 2) as u16;
+                SpacetimeChunk::from_chunk(&codec.encode_chunk(&[
+                    base,
+                    base + 10,
+                    base + 20,
+                    base + 30,
+                    base + 40,
+                    base + 50,
+                    base + 60,
+                    base + 70,
+                ]))
+            })
+            .collect();
+        let traj2: Vec<SpacetimeChunk> = (0..3)
+            .map(|k| {
+                let base = (100 + k * 3) as u16;
+                SpacetimeChunk::from_chunk(&codec.encode_chunk(&[
+                    base,
+                    base + 5,
+                    base + 10,
+                    base + 15,
+                    base + 20,
+                    base + 25,
+                    base + 30,
+                    base + 35,
+                ]))
+            })
+            .collect();
 
         let prop = SemanticPropagator::new(1.0, 0.5);
         let composed = prop.compose_trajectories(&[(traj1, 2.0), (traj2, 1.0)], 2);
@@ -2018,12 +2480,21 @@ mod tests {
     fn test_propagator_kinetic_potential_energy() {
         let codec = ChunkCodec::new(256);
         // Steady trajectory
-        let steady: Vec<SpacetimeChunk> = (0..5).map(|k| {
-            let base = (10 + k) as u16;
-            SpacetimeChunk::from_chunk(&codec.encode_chunk(&[
-                base, base+10, base+20, base+30, base+40, base+50, base+60, base+70
-            ]))
-        }).collect();
+        let steady: Vec<SpacetimeChunk> = (0..5)
+            .map(|k| {
+                let base = (10 + k) as u16;
+                SpacetimeChunk::from_chunk(&codec.encode_chunk(&[
+                    base,
+                    base + 10,
+                    base + 20,
+                    base + 30,
+                    base + 40,
+                    base + 50,
+                    base + 60,
+                    base + 70,
+                ]))
+            })
+            .collect();
         let prop_steady = SemanticPropagator::from_trajectory(&steady, 1.0, 0.5);
 
         // Erratic trajectory
@@ -2039,7 +2510,11 @@ mod tests {
         let ke_steady = prop_steady.kinetic_energy();
         let ke_erratic = prop_erratic.kinetic_energy();
         // Erratic trajectory should have higher kinetic energy
-        assert!(ke_erratic > ke_steady,
-            "erratic KE should exceed steady KE: {} vs {}", ke_erratic, ke_steady);
+        assert!(
+            ke_erratic > ke_steady,
+            "erratic KE should exceed steady KE: {} vs {}",
+            ke_erratic,
+            ke_steady
+        );
     }
 }

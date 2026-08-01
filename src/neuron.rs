@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::types::*;
+use serde::{Deserialize, Serialize};
 
 /// A full multidimensional neuron
 /// Each field is an active dimension — not metadata, not decoration
@@ -80,7 +80,10 @@ impl Neuron {
 
     /// Total metabolic cost at this moment — always non-negative
     pub fn current_energy_cost(&self) -> f32 {
-        self.synapses.iter().map(|s| s.metabolic_cost() * self.energy_cost).sum()
+        self.synapses
+            .iter()
+            .map(|s| s.metabolic_cost() * self.energy_cost)
+            .sum()
     }
 
     /// Whether this neuron is over its energy budget
@@ -103,7 +106,13 @@ impl Neuron {
     }
 
     /// Add a new synapse assigned to a specific dendritic branch of the target.
-    pub fn add_synapse_to_branch(&mut self, target: NeuronId, strength: f32, max: usize, branch_id: u8) -> bool {
+    pub fn add_synapse_to_branch(
+        &mut self,
+        target: NeuronId,
+        strength: f32,
+        max: usize,
+        branch_id: u8,
+    ) -> bool {
         if self.synapses.len() >= max || self.has_synapse_to(target) || target == self.id {
             return false;
         }
@@ -140,7 +149,11 @@ impl Neuron {
         // Simplified detection: high synapse count with low geometric spread
         // In a full impl you'd check actual partner positions
         self.synapses.len() > 20
-            && self.synapses.iter().map(|s| s.effective_strength()).sum::<f32>()
+            && self
+                .synapses
+                .iter()
+                .map(|s| s.effective_strength())
+                .sum::<f32>()
                 / self.synapses.len() as f32
                 > 0.8
     }

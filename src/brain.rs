@@ -4,6 +4,7 @@
 //! JSON `DimensionManager` checkpoint, optional personality JSON, and optional
 //! UTF-8 TOML **plugins** blob (see `crate::inference::BrainPluginsManifest`).
 //! Legacy format v1 ends after personality; v2 appends `plugin_len: u32` + plugin bytes.
+//! A separate `GWFCMPKG` v1 envelope can losslessly compress either inner format.
 
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +14,13 @@ pub const BRAIN_PACKAGE_MAGIC: &[u8; 8] = b"GWFBRPKG";
 pub const BRAIN_PACKAGE_FORMAT_VERSION: u32 = 1;
 /// Same as v1, then `u32` plugin length + plugin bytes (UTF-8 TOML manifest).
 pub const BRAIN_PACKAGE_FORMAT_VERSION_PLUGINS: u32 = 2;
+/// Magic for the optional outer compression envelope.
+pub const COMPRESSED_BRAIN_MAGIC: &[u8; 8] = b"GWFCMPKG";
+/// Current outer compression-envelope version.
+pub const COMPRESSED_BRAIN_FORMAT_VERSION: u32 = 1;
+/// SpaceKit's default binary codec (gzip level 6).
+const COMPRESSED_BRAIN_CODEC_GZIP: u8 = 1;
+const COMPRESSED_BRAIN_HEADER_LEN: usize = 32;
 
 /// Semantic version for display and provenance (not the binary format version).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -130,9 +138,15 @@ impl BrainPackage {
         )
     }
 
-    /// Decode from file bytes (v1 or v2).
+    /// Encode the package inside the versioned lossless compression envelope.
+    #[cfg(feature = "brain-compression")]
+    pub fn encode_to_compressed_bytes(&self) -> Result<Vec<u8>, String> {
+        wrap_compressed_brain_bytes(&self.encode_to_bytes()?)
+    }
+
+    /// Decode from uncompressed v1/v2 bytes or a compressed outer envelope.
     pub fn decode_from_bytes(data: &[u8]) -> Result<Self, String> {
-        decode_brain_package(data)
+        peel_brain_file_bytes(data)
     }
 }
 
@@ -147,9 +161,23 @@ fn push_u32_le(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_le_bytes());
 }
 
+fn u64_le(b: &[u8]) -> Result<u64, String> {
+    if b.len() < 8 {
+        return Err("compressed brain package: truncated u64".to_string());
+    }
+    Ok(u64::from_le_bytes(b[..8].try_into().unwrap()))
+}
+
 /// True if `data` begins with the brain package magic (not a raw JSON checkpoint).
 pub fn is_brain_package_bytes(data: &[u8]) -> bool {
-    data.len() >= BRAIN_PACKAGE_MAGIC.len() && &data[..BRAIN_PACKAGE_MAGIC.len()] == BRAIN_PACKAGE_MAGIC.as_slice()
+    data.len() >= BRAIN_PACKAGE_MAGIC.len()
+        && &data[..BRAIN_PACKAGE_MAGIC.len()] == BRAIN_PACKAGE_MAGIC.as_slice()
+}
+
+/// True if `data` begins with the optional outer compression-envelope magic.
+pub fn is_compressed_brain_bytes(data: &[u8]) -> bool {
+    data.len() >= COMPRESSED_BRAIN_MAGIC.len()
+        && &data[..COMPRESSED_BRAIN_MAGIC.len()] == COMPRESSED_BRAIN_MAGIC.as_slice()
 }
 
 /// Wrap checkpoint bytes (JSON `DimensionManager`), optional personality JSON, and optional plugins TOML.
@@ -217,12 +245,12 @@ pub fn decode_brain_package(data: &[u8]) -> Result<BrainPackage, String> {
         return Err("brain package: bad magic".to_string());
     }
     let format_ver = u32_le(&data[8..12])?;
-    if format_ver != BRAIN_PACKAGE_FORMAT_VERSION && format_ver != BRAIN_PACKAGE_FORMAT_VERSION_PLUGINS {
+    if format_ver != BRAIN_PACKAGE_FORMAT_VERSION
+        && format_ver != BRAIN_PACKAGE_FORMAT_VERSION_PLUGINS
+    {
         return Err(format!(
             "brain package: unsupported format version {} (expected {} or {})",
-            format_ver,
-            BRAIN_PACKAGE_FORMAT_VERSION,
-            BRAIN_PACKAGE_FORMAT_VERSION_PLUGINS
+            format_ver, BRAIN_PACKAGE_FORMAT_VERSION, BRAIN_PACKAGE_FORMAT_VERSION_PLUGINS
         ));
     }
     let header_len = u32_le(&data[12..16])? as usize;
@@ -297,10 +325,108 @@ pub fn decode_brain_package(data: &[u8]) -> Result<BrainPackage, String> {
     })
 }
 
+/// Wrap an encoded v1/v2 brain package in a versioned gzip envelope.
+#[cfg(feature = "brain-compression")]
+pub fn wrap_compressed_brain_bytes(data: &[u8]) -> Result<Vec<u8>, String> {
+    if !is_brain_package_bytes(data) {
+        return Err("compressed brain package: inner payload is not a brain package".to_string());
+    }
+    let compressor = spacekit_compressor::SpaceKitCompressor::new();
+    let result = compressor
+        .compress(data, spacekit_compressor::CompressionMode::Binary)
+        .map_err(|e| format!("compressed brain package: compression failed: {}", e))?;
+    let payload = result.compressed;
+    let mut out = Vec::with_capacity(COMPRESSED_BRAIN_HEADER_LEN + payload.len());
+    out.extend_from_slice(COMPRESSED_BRAIN_MAGIC);
+    push_u32_le(&mut out, COMPRESSED_BRAIN_FORMAT_VERSION);
+    out.push(COMPRESSED_BRAIN_CODEC_GZIP);
+    out.extend_from_slice(&[0, 0, 0]);
+    out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+    out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    out.extend_from_slice(&payload);
+    Ok(out)
+}
+
+#[cfg(feature = "brain-compression")]
+fn decode_compressed_brain_bytes(data: &[u8]) -> Result<Vec<u8>, String> {
+    if data.len() < COMPRESSED_BRAIN_HEADER_LEN {
+        return Err("compressed brain package: file too small".to_string());
+    }
+    if !is_compressed_brain_bytes(data) {
+        return Err("compressed brain package: bad magic".to_string());
+    }
+    let version = u32_le(&data[8..12])?;
+    if version != COMPRESSED_BRAIN_FORMAT_VERSION {
+        return Err(format!(
+            "compressed brain package: unsupported format version {} (expected {})",
+            version, COMPRESSED_BRAIN_FORMAT_VERSION
+        ));
+    }
+    let codec = data[12];
+    if data[13..16] != [0, 0, 0] {
+        return Err("compressed brain package: reserved header bytes are non-zero".to_string());
+    }
+    let original_len = usize::try_from(u64_le(&data[16..24])?)
+        .map_err(|_| "compressed brain package: original length is too large".to_string())?;
+    let payload_len = usize::try_from(u64_le(&data[24..32])?)
+        .map_err(|_| "compressed brain package: payload length is too large".to_string())?;
+    let expected_len = COMPRESSED_BRAIN_HEADER_LEN
+        .checked_add(payload_len)
+        .ok_or_else(|| "compressed brain package: payload length overflow".to_string())?;
+    if data.len() != expected_len {
+        return Err(format!(
+            "compressed brain package: length mismatch (file {} bytes, expected {})",
+            data.len(),
+            expected_len
+        ));
+    }
+    let payload = &data[COMPRESSED_BRAIN_HEADER_LEN..];
+    let decoded = match codec {
+        COMPRESSED_BRAIN_CODEC_GZIP => {
+            let compressor = spacekit_compressor::SpaceKitCompressor::new();
+            compressor
+                .decompress(payload, spacekit_compressor::CompressionMode::Binary)
+                .map_err(|e| format!("compressed brain package: decompression failed: {}", e))?
+        }
+        other => {
+            return Err(format!(
+                "compressed brain package: unsupported codec {}",
+                other
+            ))
+        }
+    };
+    if decoded.len() != original_len {
+        return Err(format!(
+            "compressed brain package: decoded length mismatch (got {}, expected {})",
+            decoded.len(),
+            original_len
+        ));
+    }
+    if !is_brain_package_bytes(&decoded) {
+        return Err(
+            "compressed brain package: decoded payload has invalid inner magic".to_string(),
+        );
+    }
+    Ok(decoded)
+}
+
 /// If `data` is a brain package, return checkpoint + optional personality; otherwise treat
 /// `data` as a legacy raw checkpoint (JSON only).
 pub fn peel_brain_file_bytes(data: &[u8]) -> Result<BrainPackage, String> {
-    if is_brain_package_bytes(data) {
+    if is_compressed_brain_bytes(data) {
+        #[cfg(feature = "brain-compression")]
+        {
+            let decoded = decode_compressed_brain_bytes(data)?;
+            return decode_brain_package(&decoded);
+        }
+        #[cfg(not(feature = "brain-compression"))]
+        {
+            return Err(
+                "compressed brain package: rebuild Growformer with the `brain-compression` feature"
+                    .to_string(),
+            );
+        }
+    } else if is_brain_package_bytes(data) {
         decode_brain_package(data)
     } else {
         Ok(BrainPackage {
@@ -343,6 +469,42 @@ mod tests {
         assert_eq!(p.plugins_blob.as_deref(), Some(plugins.as_slice()));
         let round = p.encode_to_bytes().unwrap();
         assert_eq!(round, bytes);
+    }
+
+    #[cfg(feature = "brain-compression")]
+    #[test]
+    fn compressed_brain_package_roundtrip() {
+        let mut h = BrainPackageHeader::default();
+        h.id = "compressed".to_string();
+        let checkpoint = format!(r#"{{"weights":"{}"}}"#, "0123456789".repeat(1000));
+        let pkg = BrainPackage::new(
+            h,
+            checkpoint.as_bytes().to_vec(),
+            Some(br#"{"O":0.5}"#.to_vec()),
+            Some(b"[sentiment]\nmeta_gk_margin = 0.06\n".to_vec()),
+        );
+        let plain = pkg.encode_to_bytes().unwrap();
+        let compressed = pkg.encode_to_compressed_bytes().unwrap();
+        assert!(is_compressed_brain_bytes(&compressed));
+        assert!(compressed.len() < plain.len());
+        let decoded = BrainPackage::decode_from_bytes(&compressed).unwrap();
+        assert_eq!(decoded, pkg);
+    }
+
+    #[cfg(feature = "brain-compression")]
+    #[test]
+    fn compressed_brain_package_rejects_unknown_version() {
+        let pkg = BrainPackage::new(
+            BrainPackageHeader::default(),
+            br#"{"v":1}"#.to_vec(),
+            None,
+            None,
+        );
+        let mut compressed = pkg.encode_to_compressed_bytes().unwrap();
+        compressed[8..12].copy_from_slice(&99u32.to_le_bytes());
+        assert!(BrainPackage::decode_from_bytes(&compressed)
+            .unwrap_err()
+            .contains("unsupported format version 99"));
     }
 
     #[test]

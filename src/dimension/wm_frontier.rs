@@ -278,7 +278,11 @@ pub fn run_phase3k_geo_seed(seed: u64, train_n: usize) -> GeoWmSeedResult {
         let b = e_out.affinity(&t.z);
         let pa = e_in.propose_next(&t.z);
         let pb = e_out.propose_next(&t.z);
-        let vg: Vec<f32> = pa.iter().zip(pb.iter()).map(|(u, v)| 0.5 * (u + v)).collect();
+        let vg: Vec<f32> = pa
+            .iter()
+            .zip(pb.iter())
+            .map(|(u, v)| 0.5 * (u + v))
+            .collect();
         vg_err += mse(&vg, &t.z_next);
         conf_err += mse(if a >= b { &pa } else { &pb }, &t.z_next);
         let d = router.decide(&cone_features(a, b));
@@ -400,8 +404,11 @@ pub fn run_phase3l_prob_seed(seed: u64, train_n: usize) -> ProbWmSeedResult {
         ens_in.push(a);
         ens_out.push(b);
     }
-    EnergyPromotionBundle::promote(&encoder, ens_in.iter().chain(ens_out.iter()).cloned().collect())
-        .expect("promote");
+    EnergyPromotionBundle::promote(
+        &encoder,
+        ens_in.iter().chain(ens_out.iter()).cloned().collect(),
+    )
+    .expect("promote");
 
     let temperature = 0.75f32;
     let mut data_rng = StdRng::seed_from_u64(seed.wrapping_mul(29).wrapping_add(4));
@@ -469,7 +476,11 @@ pub fn run_phase3l_prob_seed(seed: u64, train_n: usize) -> ProbWmSeedResult {
 
         let pa = propose(&ens_in, &t.z);
         let pb = propose(&ens_out, &t.z);
-        let vg: Vec<f32> = pa.iter().zip(pb.iter()).map(|(u, v)| 0.5 * (u + v)).collect();
+        let vg: Vec<f32> = pa
+            .iter()
+            .zip(pb.iter())
+            .map(|(u, v)| 0.5 * (u + v))
+            .collect();
         vg_err += mse(&vg, &t.z_next);
         conf_err += mse(if a0 >= b0 { &pa } else { &pb }, &t.z_next);
 
@@ -673,7 +684,11 @@ pub fn run_phase3m_sym_seed(seed: u64, train_n: usize) -> SymWmSeedResult {
         let b = e_out.affinity(&t.z);
         let pa = e_in.propose_next(&t.z);
         let pb = e_out.propose_next(&t.z);
-        let vg: Vec<f32> = pa.iter().zip(pb.iter()).map(|(u, v)| 0.5 * (u + v)).collect();
+        let vg: Vec<f32> = pa
+            .iter()
+            .zip(pb.iter())
+            .map(|(u, v)| 0.5 * (u + v))
+            .collect();
         vg_err += mse(&vg, &t.z_next);
         conf_err += mse(if a >= b { &pa } else { &pb }, &t.z_next);
         let d = router.decide(&cone_features(a, b));

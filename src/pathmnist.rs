@@ -8,16 +8,16 @@
 //!   images: N × 28 × 28 × 3 bytes (RGB, row-major)
 //!   labels: N × 1 bytes (class 0–8)
 
+use rand::rngs::StdRng;
+use rand::Rng;
 use std::fs;
 use std::path::Path;
-use rand::Rng;
-use rand::rngs::StdRng;
 
 pub const PATH_IMAGE_H: usize = 28;
 pub const PATH_IMAGE_W: usize = 28;
 pub const PATH_CHANNELS: usize = 3;
 pub const PATH_RGB_DIM: usize = PATH_IMAGE_H * PATH_IMAGE_W * PATH_CHANNELS; // 2352
-pub const PATH_GRAY_DIM: usize = PATH_IMAGE_H * PATH_IMAGE_W;               // 784
+pub const PATH_GRAY_DIM: usize = PATH_IMAGE_H * PATH_IMAGE_W; // 784
 pub const PATH_NUM_CLASSES: usize = 9;
 
 pub const CLASS_NAMES: [&str; 9] = [
@@ -65,9 +65,14 @@ impl PathMNISTDataset {
         let n = raw_lbl.len();
         let rgb_dim = h * w * PATH_CHANNELS;
         assert_eq!(
-            raw_img.len(), n * rgb_dim,
+            raw_img.len(),
+            n * rgb_dim,
             "Image file size mismatch: {} bytes for {} samples at {}x{} (expected {})",
-            raw_img.len(), n, h, w, n * rgb_dim
+            raw_img.len(),
+            n,
+            h,
+            w,
+            n * rgb_dim
         );
 
         let labels: Vec<u8> = raw_lbl.to_vec();
@@ -77,11 +82,12 @@ impl PathMNISTDataset {
 
         for rgb in raw_img.chunks_exact(rgb_dim) {
             let rgb_f: Vec<f32> = rgb.iter().map(|&b| b as f32 / 255.0).collect();
-            let gray: Vec<f32> = rgb.chunks_exact(3)
+            let gray: Vec<f32> = rgb
+                .chunks_exact(3)
                 .map(|px| {
                     0.299 * px[0] as f32 / 255.0
-                  + 0.587 * px[1] as f32 / 255.0
-                  + 0.114 * px[2] as f32 / 255.0
+                        + 0.587 * px[1] as f32 / 255.0
+                        + 0.114 * px[2] as f32 / 255.0
                 })
                 .collect();
             images_rgb.push(rgb_f);
@@ -89,7 +95,14 @@ impl PathMNISTDataset {
         }
 
         assert_eq!(images_rgb.len(), n);
-        PathMNISTDataset { images_rgb, images_gray, labels, n, height: h, width: w }
+        PathMNISTDataset {
+            images_rgb,
+            images_gray,
+            labels,
+            n,
+            height: h,
+            width: w,
+        }
     }
 
     pub fn class_distribution(&self) -> [usize; PATH_NUM_CLASSES] {
@@ -134,9 +147,9 @@ pub fn augment_histology(image: &[f32], rng: &mut StdRng) -> Vec<f32> {
         for y in 0..PATH_IMAGE_H {
             for x in 0..PATH_IMAGE_W {
                 let (ny, nx) = match rot {
-                    1 => (x, PATH_IMAGE_H - 1 - y),                  // 90°
+                    1 => (x, PATH_IMAGE_H - 1 - y),                    // 90°
                     2 => (PATH_IMAGE_H - 1 - y, PATH_IMAGE_W - 1 - x), // 180°
-                    3 => (PATH_IMAGE_W - 1 - x, y),                  // 270°
+                    3 => (PATH_IMAGE_W - 1 - x, y),                    // 270°
                     _ => unreachable!(),
                 };
                 rotated[ny * PATH_IMAGE_W + nx] = img[y * PATH_IMAGE_W + x];
@@ -167,7 +180,9 @@ pub fn augment_histology_rgb(image: &[f32], rng: &mut StdRng) -> Vec<f32> {
             for x in 0..w / 2 {
                 let a = (y * w + x) * 3;
                 let b = (y * w + (w - 1 - x)) * 3;
-                for c in 0..3 { img.swap(a + c, b + c); }
+                for c in 0..3 {
+                    img.swap(a + c, b + c);
+                }
             }
         }
     }
@@ -178,7 +193,9 @@ pub fn augment_histology_rgb(image: &[f32], rng: &mut StdRng) -> Vec<f32> {
             for x in 0..w {
                 let a = (y * w + x) * 3;
                 let b = ((h - 1 - y) * w + x) * 3;
-                for c in 0..3 { img.swap(a + c, b + c); }
+                for c in 0..3 {
+                    img.swap(a + c, b + c);
+                }
             }
         }
     }
@@ -197,7 +214,7 @@ pub fn augment_histology_rgb(image: &[f32], rng: &mut StdRng) -> Vec<f32> {
                 };
                 let src = (y * w + x) * 3;
                 let dst = (ny * w + nx) * 3;
-                rotated[dst]     = img[src];
+                rotated[dst] = img[src];
                 rotated[dst + 1] = img[src + 1];
                 rotated[dst + 2] = img[src + 2];
             }
@@ -210,7 +227,7 @@ pub fn augment_histology_rgb(image: &[f32], rng: &mut StdRng) -> Vec<f32> {
     let jg: f32 = 1.0 + rng.gen_range(-0.1..0.1);
     let jb: f32 = 1.0 + rng.gen_range(-0.1..0.1);
     for i in (0..img.len()).step_by(3) {
-        img[i]     = (img[i]     * jr).clamp(0.0, 1.0);
+        img[i] = (img[i] * jr).clamp(0.0, 1.0);
         img[i + 1] = (img[i + 1] * jg).clamp(0.0, 1.0);
         img[i + 2] = (img[i + 2] * jb).clamp(0.0, 1.0);
     }
@@ -237,8 +254,8 @@ pub struct CancerMetrics {
     pub sensitivity: f32,
     pub specificity: f32,
     pub f1: f32,
-    pub stroma_recall: f32,    // class 7
-    pub adeno_recall: f32,     // class 8
+    pub stroma_recall: f32, // class 7
+    pub adeno_recall: f32,  // class 8
 }
 
 pub fn compute_cancer_metrics(predictions: &[u8], labels: &[u8]) -> CancerMetrics {
@@ -260,17 +277,51 @@ pub fn compute_cancer_metrics(predictions: &[u8], labels: &[u8]) -> CancerMetric
             (false, true) => fn_ += 1,
             (false, false) => tn += 1,
         }
-        if label == 7 { stroma_total += 1; if pred == 7 { stroma_correct += 1; } }
-        if label == 8 { adeno_total += 1; if pred == 8 { adeno_correct += 1; } }
+        if label == 7 {
+            stroma_total += 1;
+            if pred == 7 {
+                stroma_correct += 1;
+            }
+        }
+        if label == 8 {
+            adeno_total += 1;
+            if pred == 8 {
+                adeno_correct += 1;
+            }
+        }
     }
 
-    let sensitivity = if tp + fn_ > 0 { tp as f32 / (tp + fn_) as f32 } else { 0.0 };
-    let specificity = if tn + fp > 0 { tn as f32 / (tn + fp) as f32 } else { 0.0 };
+    let sensitivity = if tp + fn_ > 0 {
+        tp as f32 / (tp + fn_) as f32
+    } else {
+        0.0
+    };
+    let specificity = if tn + fp > 0 {
+        tn as f32 / (tn + fp) as f32
+    } else {
+        0.0
+    };
     let f1 = if 2 * tp + fp + fn_ > 0 {
         2.0 * tp as f32 / (2 * tp + fp + fn_) as f32
-    } else { 0.0 };
-    let stroma_recall = if stroma_total > 0 { stroma_correct as f32 / stroma_total as f32 } else { 0.0 };
-    let adeno_recall = if adeno_total > 0 { adeno_correct as f32 / adeno_total as f32 } else { 0.0 };
+    } else {
+        0.0
+    };
+    let stroma_recall = if stroma_total > 0 {
+        stroma_correct as f32 / stroma_total as f32
+    } else {
+        0.0
+    };
+    let adeno_recall = if adeno_total > 0 {
+        adeno_correct as f32 / adeno_total as f32
+    } else {
+        0.0
+    };
 
-    CancerMetrics { sensitivity, specificity, f1, stroma_recall, adeno_recall }
+    CancerMetrics {
+        sensitivity,
+        specificity,
+        f1,
+        stroma_recall,
+        adeno_recall,
+    }
 }

@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use growformer::fragment_composer::{ComposeContext, FragmentComposer, ComposeExcludes};
+use growformer::fragment_composer::{ComposeContext, ComposeExcludes, FragmentComposer};
 use growformer::reflective_field::ReflectiveWeights;
 
 fn state(pairs: &[(&str, f32)]) -> HashMap<String, f32> {
@@ -26,7 +26,11 @@ fn main() {
         eprintln!("failed to load {path}: {e}");
         std::process::exit(1);
     });
-    println!("loaded {} fragments ({} skipped)\n", lib.fragments.len(), skipped);
+    println!(
+        "loaded {} fragments ({} skipped)\n",
+        lib.fragments.len(),
+        skipped
+    );
 
     // OCEAN for the cheerful, extraverted Luna.
     let ocean = [0.7, 0.5, 0.8, 0.7, 0.4];
@@ -66,7 +70,7 @@ fn main() {
                 archetype: Some("cheerful_companion".to_string()),
                 seed: seed.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(1),
                 body_slots: Some(vec![]).into(),
-                excludes:ComposeExcludes::default(),
+                excludes: ComposeExcludes::default(),
                 force_second_body: false,
                 use_opener: false,
                 min_bodies: 0,

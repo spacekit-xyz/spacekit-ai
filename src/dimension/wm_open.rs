@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use super::energy_jepa::EnergyAdapter;
 use super::jepa_adapters::WM_LATENT_DIM;
 use super::wm_transfer::{
-    deploy_step, load_composed_bundle, save_composed_bundle, train_composed_bundle, ComposedWmBundle,
-    DeployDecision,
+    deploy_step, load_composed_bundle, save_composed_bundle, train_composed_bundle,
+    ComposedWmBundle, DeployDecision,
 };
 
 pub const VISION_SIDE: usize = 8;
@@ -173,7 +173,8 @@ pub fn ensure_frozen_vision_encoder(seed: u64) -> Result<FrozenVisionEncoder, St
     }
     let enc = FrozenVisionEncoder::offline_pretrain(seed, 2500);
     enc.save(&path)?;
-    let card = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/wm/frozen_vision_encoder_v1.MODEL_CARD.md");
+    let card = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("data/wm/frozen_vision_encoder_v1.MODEL_CARD.md");
     let _ = std::fs::write(
         &card,
         "# Frozen vision encoder (JEPA slot)\n\n\
@@ -185,13 +186,7 @@ pub fn ensure_frozen_vision_encoder(seed: u64) -> Result<FrozenVisionEncoder, St
     Ok(enc)
 }
 
-fn encode_raw(
-    w1: &[Vec<f32>],
-    b1: &[f32],
-    w2: &[Vec<f32>],
-    b2: &[f32],
-    x: &[f32],
-) -> Vec<f32> {
+fn encode_raw(w1: &[Vec<f32>], b1: &[f32], w2: &[Vec<f32>], b2: &[f32], x: &[f32]) -> Vec<f32> {
     let h = hidden_raw(w1, b1, x);
     w2.iter()
         .zip(b2.iter())
@@ -579,7 +574,10 @@ impl WmHostSession {
     pub fn handle_json(&mut self, line: &str) -> String {
         match serde_json::from_str::<WmHostRequest>(line) {
             Ok(req) => serde_json::to_string(&self.handle(req)).unwrap_or_else(|e| {
-                format!(r#"{{"ok":false,"error":"{}","loaded":false,"note":"serde"}}"#, e)
+                format!(
+                    r#"{{"ok":false,"error":"{}","loaded":false,"note":"serde"}}"#,
+                    e
+                )
             }),
             Err(e) => format!(
                 r#"{{"ok":false,"error":"{}","loaded":false,"note":"bad request"}}"#,
@@ -619,30 +617,25 @@ pub fn run_phase3s_spacekit_host_seed(seed: u64, work_dir: &Path) -> SpacekitHos
         rng.gen_range(-0.2..0.2),
     ];
     let step = host.handle(WmHostRequest::Step { obs: obs.clone() });
-    let abstain_seen = step
-        .decision
-        .as_ref()
-        .map(|d| d.abstain)
-        .unwrap_or(false)
-        || {
-            // probe a few more
-            let mut any = false;
-            for _ in 0..12 {
-                let o = vec![
-                    rng.gen_range(-0.9..0.9),
-                    rng.gen_range(-0.9..0.9),
-                    rng.gen_range(-0.3..0.3),
-                    rng.gen_range(-0.3..0.3),
-                ];
-                if let Some(d) = host.handle(WmHostRequest::Step { obs: o }).decision {
-                    if d.abstain {
-                        any = true;
-                        break;
-                    }
+    let abstain_seen = step.decision.as_ref().map(|d| d.abstain).unwrap_or(false) || {
+        // probe a few more
+        let mut any = false;
+        for _ in 0..12 {
+            let o = vec![
+                rng.gen_range(-0.9..0.9),
+                rng.gen_range(-0.9..0.9),
+                rng.gen_range(-0.3..0.3),
+                rng.gen_range(-0.3..0.3),
+            ];
+            if let Some(d) = host.handle(WmHostRequest::Step { obs: o }).decision {
+                if d.abstain {
+                    any = true;
+                    break;
                 }
             }
-            any
-        };
+        }
+        any
+    };
 
     // Process-restart proxy: new session, reload same file.
     let mut host2 = WmHostSession::new();
@@ -660,21 +653,9 @@ pub fn run_phase3s_spacekit_host_seed(seed: u64, work_dir: &Path) -> SpacekitHos
     let log_path = work_dir.join(format!("spacekit_host_{seed}.jsonl"));
     if let Ok(mut f) = std::fs::File::create(&log_path) {
         use std::io::Write;
-        let _ = writeln!(
-            f,
-            "{}",
-            serde_json::to_string(&load).unwrap_or_default()
-        );
-        let _ = writeln!(
-            f,
-            "{}",
-            serde_json::to_string(&step).unwrap_or_default()
-        );
-        let _ = writeln!(
-            f,
-            "{}",
-            serde_json::to_string(&reload).unwrap_or_default()
-        );
+        let _ = writeln!(f, "{}", serde_json::to_string(&load).unwrap_or_default());
+        let _ = writeln!(f, "{}", serde_json::to_string(&step).unwrap_or_default());
+        let _ = writeln!(f, "{}", serde_json::to_string(&reload).unwrap_or_default());
     }
 
     SpacekitHostSeedResult {
@@ -744,11 +725,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("vm_{}", std::process::id()));
         let r = run_phase3s_visuomotor_seed(42, &dir);
         assert!(r.encoder_was_frozen);
-        assert!(
-            r.regime_agreement > 0.55,
-            "regime {}",
-            r.regime_agreement
-        );
+        assert!(r.regime_agreement > 0.55, "regime {}", r.regime_agreement);
         assert!(r.energy_margin > 0.0);
         let _ = std::fs::remove_dir_all(&dir);
     }

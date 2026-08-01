@@ -30,24 +30,56 @@ use crate::drive_field::Neuromodulators;
 /// Lexicons are intentionally generic English affect words (not domain-specific),
 /// so the selector ports across agents. They tag the *tone* of a candidate.
 const WARM_WORDS: &[&str] = &[
-    "safe", "calm", "gentle", "soft", "warm", "here", "stay", "close", "slow",
-    "okay", "rest", "breathe", "love", "comfort", "lean", "curl", "blink",
-    "nuzzle", "purr", "soothe", "easy", "quiet", "hold",
+    "safe", "calm", "gentle", "soft", "warm", "here", "stay", "close", "slow", "okay", "rest",
+    "breathe", "love", "comfort", "lean", "curl", "blink", "nuzzle", "purr", "soothe", "easy",
+    "quiet", "hold",
 ];
 const PLAYFUL_WORDS: &[&str] = &[
-    "play", "chase", "pounce", "zoom", "hunt", "leap", "dash", "bounce", "toy",
-    "wand", "feather", "fun", "go", "catch", "spring", "trill", "chirp", "wiggle",
+    "play", "chase", "pounce", "zoom", "hunt", "leap", "dash", "bounce", "toy", "wand", "feather",
+    "fun", "go", "catch", "spring", "trill", "chirp", "wiggle",
 ];
 /// Words in the *user's* message that signal distress (→ favor warm candidates).
 const USER_DISTRESS: &[&str] = &[
-    "scared", "anxious", "sad", "tired", "exhausted", "hate", "alone", "lonely",
-    "cry", "crying", "hurt", "stressed", "overwhelmed", "afraid", "worried",
-    "upset", "depressed", "miss you", "lost", "can't", "cannot cope", "down",
+    "scared",
+    "anxious",
+    "sad",
+    "tired",
+    "exhausted",
+    "hate",
+    "alone",
+    "lonely",
+    "cry",
+    "crying",
+    "hurt",
+    "stressed",
+    "overwhelmed",
+    "afraid",
+    "worried",
+    "upset",
+    "depressed",
+    "miss you",
+    "lost",
+    "can't",
+    "cannot cope",
+    "down",
 ];
 /// Words in the user's message that signal excitement (→ favor playful candidates).
 const USER_EXCITEMENT: &[&str] = &[
-    "play", "fun", "yay", "awesome", "let's", "lets", "chase", "excited", "treat",
-    "walk", "go get", "good girl", "good boy", "wanna", "want to play",
+    "play",
+    "fun",
+    "yay",
+    "awesome",
+    "let's",
+    "lets",
+    "chase",
+    "excited",
+    "treat",
+    "walk",
+    "go get",
+    "good girl",
+    "good boy",
+    "wanna",
+    "want to play",
 ];
 
 #[inline]
@@ -112,7 +144,14 @@ pub struct ValueWeights {
 impl Default for ValueWeights {
     fn default() -> Self {
         // Fit (prompt relevance) dominates; affect/identity refine; penalties guard.
-        Self { fit: 1.0, affect: 0.6, identity: 0.25, repeat: 0.8, garble: 1.5, verbosity: 0.3 }
+        Self {
+            fit: 1.0,
+            affect: 0.6,
+            identity: 0.25,
+            repeat: 0.8,
+            garble: 1.5,
+            verbosity: 0.3,
+        }
     }
 }
 
@@ -134,7 +173,11 @@ pub struct BasalGanglia {
 
 impl BasalGanglia {
     pub fn new(enabled: bool) -> Self {
-        Self { enabled, weights: ValueWeights::default(), ctx: ActionContext::default() }
+        Self {
+            enabled,
+            weights: ValueWeights::default(),
+            ctx: ActionContext::default(),
+        }
     }
 
     pub fn with_context(mut self, ctx: ActionContext) -> Self {
@@ -242,7 +285,11 @@ impl BasalGanglia {
             .collect();
 
         let (da, ser, ne) = match self.ctx.neuromods {
-            Some(nm) => (nm.dopamine - 0.5, nm.serotonin - 0.5, nm.norepinephrine - 0.5),
+            Some(nm) => (
+                nm.dopamine - 0.5,
+                nm.serotonin - 0.5,
+                nm.norepinephrine - 0.5,
+            ),
             None => (0.0, 0.0, 0.0),
         };
 
@@ -260,8 +307,14 @@ impl BasalGanglia {
 
         // Go-temperature: dopamine raises exploration, norepinephrine sharpens.
         let temp = (0.6 * (1.0 + 0.8 * da - 0.6 * ne)).clamp(0.05, 2.0);
-        let smax = survivors.iter().map(|&i| values[i]).fold(f32::NEG_INFINITY, f32::max);
-        let weights: Vec<f32> = survivors.iter().map(|&i| ((values[i] - smax) / temp).exp()).collect();
+        let smax = survivors
+            .iter()
+            .map(|&i| values[i])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let weights: Vec<f32> = survivors
+            .iter()
+            .map(|&i| ((values[i] - smax) / temp).exp())
+            .collect();
         let sum: f32 = weights.iter().sum::<f32>().max(1e-8);
 
         // Deterministic LCG draw from the seed.
@@ -287,7 +340,11 @@ mod tests {
     use crate::drive_field::DriveState;
 
     fn cand(idx: usize, text: &str, score: f32) -> Candidate {
-        Candidate { idx, text: text.to_string(), retrieval_score: score }
+        Candidate {
+            idx,
+            text: text.to_string(),
+            retrieval_score: score,
+        }
     }
 
     #[test]
@@ -297,8 +354,16 @@ mod tests {
         assert!(bg.ctx.user_affect.distress > 0.0);
         // Two equally-retrievable candidates; tone differs.
         let cands = vec![
-            cand(0, "Let's chase and pounce and zoom around, this is fun!", 1.0),
-            cand(1, "I am here with you. Stay close. Slow breathe. You are safe.", 1.0),
+            cand(
+                0,
+                "Let's chase and pounce and zoom around, this is fun!",
+                1.0,
+            ),
+            cand(
+                1,
+                "I am here with you. Stay close. Slow breathe. You are safe.",
+                1.0,
+            ),
         ];
         let pick = bg.select(&cands, &[], 42).unwrap();
         assert_eq!(pick, 1, "distressed user should land on the warm candidate");
@@ -309,8 +374,16 @@ mod tests {
         let mut bg = BasalGanglia::new(true);
         bg.ctx.user_affect = UserAffect::from_prompt("let's play, go get the toy!");
         let cands = vec![
-            cand(0, "I am here with you. Stay close and rest, you are safe.", 1.0),
-            cand(1, "I chase and pounce! Zoom! Catch the feather wand, so fun!", 1.0),
+            cand(
+                0,
+                "I am here with you. Stay close and rest, you are safe.",
+                1.0,
+            ),
+            cand(
+                1,
+                "I chase and pounce! Zoom! Catch the feather wand, so fun!",
+                1.0,
+            ),
         ];
         let pick = bg.select(&cands, &[], 7).unwrap();
         assert_eq!(pick, 1, "excited user should land on the playful candidate");
@@ -322,7 +395,11 @@ mod tests {
         let repeated = "The sun is in its spot. The birds are normal volume.";
         let cands = vec![
             cand(0, repeated, 1.0),
-            cand(1, "I trot over and bump your ankle with a soft trill.", 0.98),
+            cand(
+                1,
+                "I trot over and bump your ankle with a soft trill.",
+                0.98,
+            ),
         ];
         let recent = vec![repeated.to_string()];
         let pick = bg.select(&cands, &recent, 1).unwrap();
@@ -333,8 +410,16 @@ mod tests {
     fn rejects_garbled_candidate() {
         let bg = BasalGanglia::new(true);
         let cands = vec![
-            cand(0, "I do is the and warm. I stretch. I front I.. you back. I. to.", 1.2),
-            cand(1, "I flick both ears forward and trot over with a trill.", 0.9),
+            cand(
+                0,
+                "I do is the and warm. I stretch. I front I.. you back. I. to.",
+                1.2,
+            ),
+            cand(
+                1,
+                "I flick both ears forward and trot over with a trill.",
+                0.9,
+            ),
         ];
         let pick = bg.select(&cands, &[], 99).unwrap();
         assert_eq!(pick, 1, "garbled top-scorer must be vetoed");
@@ -344,8 +429,18 @@ mod tests {
     fn dopamine_widens_serotonin_narrows_selection() {
         // High dopamine (hungry/seeking) should admit more survivors than high
         // serotonin (sated/content) for the same value spread.
-        let seeking = DriveState { hunger: 0.95, energy: 0.8, social: 0.1 }.map_neuromodulators();
-        let content = DriveState { hunger: 0.05, energy: 0.4, social: 0.95 }.map_neuromodulators();
+        let seeking = DriveState {
+            hunger: 0.95,
+            energy: 0.8,
+            social: 0.1,
+        }
+        .map_neuromodulators();
+        let content = DriveState {
+            hunger: 0.05,
+            energy: 0.4,
+            social: 0.95,
+        }
+        .map_neuromodulators();
         let cands = vec![
             cand(0, "alpha response one here", 1.00),
             cand(1, "beta response two here", 0.92),

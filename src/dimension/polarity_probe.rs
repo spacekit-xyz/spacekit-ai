@@ -99,7 +99,7 @@ mod tests {
 
     #[test]
     fn opposite_prompts_differ_in_polarity() {
-        use crate::dimension::language::{HashingLanguageEncoder, EncoderPreset, LanguageEncoder};
+        use crate::dimension::language::{EncoderPreset, HashingLanguageEncoder, LanguageEncoder};
 
         let enc = HashingLanguageEncoder::new(EncoderPreset::MiniLmL6V2);
         let pos_raw = enc.encode("I love this product, it is amazing and wonderful");
@@ -111,12 +111,14 @@ mod tests {
         assert!(
             pf_pos[0] > pf_pos[1],
             "positive prompt: pos mass ({}) should exceed neg mass ({})",
-            pf_pos[0], pf_pos[1]
+            pf_pos[0],
+            pf_pos[1]
         );
         assert!(
             pf_neg[1] > pf_neg[0],
             "negative prompt: neg mass ({}) should exceed pos mass ({})",
-            pf_neg[1], pf_neg[0]
+            pf_neg[1],
+            pf_neg[0]
         );
         assert!(
             pf_pos[2] > 0.0,

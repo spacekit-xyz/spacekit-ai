@@ -26,11 +26,20 @@ fn merge_overlay_renumbers_groups() {
 
     let summary = base.merge_overlay_brain(overlay);
     assert_eq!(summary.gen_envs_added, 2);
-    assert!(base.group_gen_envs.contains_key(&0), "base group 0 preserved");
+    assert!(
+        base.group_gen_envs.contains_key(&0),
+        "base group 0 preserved"
+    );
     let new_0 = summary.group_id_map[&0];
     let new_1 = summary.group_id_map[&1];
-    assert!(base.group_gen_envs.contains_key(&new_0), "overlay group 0 remapped");
-    assert!(base.group_gen_envs.contains_key(&new_1), "overlay group 1 remapped");
+    assert!(
+        base.group_gen_envs.contains_key(&new_0),
+        "overlay group 0 remapped"
+    );
+    assert!(
+        base.group_gen_envs.contains_key(&new_1),
+        "overlay group 1 remapped"
+    );
     assert_ne!(new_0, 0, "overlay group 0 should be renumbered");
     assert_eq!(base.group_gen_envs.len(), 3, "total should be 3 gen envs");
 }
@@ -46,7 +55,10 @@ fn merge_summary_has_correct_counts() {
     overlay.group_gen_envs.insert(0, env);
 
     let summary = base.merge_overlay_brain(overlay);
-    assert_eq!(summary.base_groups_before, 2, "offset should be max(existing)+1");
+    assert_eq!(
+        summary.base_groups_before, 2,
+        "offset should be max(existing)+1"
+    );
     assert_eq!(summary.gen_envs_added, 1);
     assert_eq!(base.group_gen_envs.len(), 3);
 }

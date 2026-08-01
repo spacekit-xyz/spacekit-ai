@@ -20,9 +20,9 @@ where
 {
     RT.with(|cell| {
         let mut opt = cell.borrow_mut();
-        let rt = opt
-            .as_mut()
-            .ok_or_else(|| JsValue::from_str("growformer not initialized — call growformer_init() first"))?;
+        let rt = opt.as_mut().ok_or_else(|| {
+            JsValue::from_str("growformer not initialized — call growformer_init() first")
+        })?;
         f(rt).map_err(|e| JsValue::from_str(&e))
     })
 }
@@ -33,9 +33,9 @@ where
 {
     RT.with(|cell| {
         let opt = cell.borrow();
-        let rt = opt
-            .as_ref()
-            .ok_or_else(|| JsValue::from_str("growformer not initialized — call growformer_init() first"))?;
+        let rt = opt.as_ref().ok_or_else(|| {
+            JsValue::from_str("growformer not initialized — call growformer_init() first")
+        })?;
         f(rt).map_err(|e| JsValue::from_str(&e))
     })
 }
@@ -157,7 +157,11 @@ pub fn growformer_set_mode(mode: &str, confidence: f32, reason: &str) -> Result<
         "context_file" | "ContextFile" => AgentMode::ContextFile,
         "micro_brain" | "MicroBrain" => AgentMode::MicroBrain,
         "paramecium" | "Paramecium" => AgentMode::Paramecium,
-        _ => return Err(JsValue::from_str("unknown mode; use ContextFile, MicroBrain, or Paramecium")),
+        _ => {
+            return Err(JsValue::from_str(
+                "unknown mode; use ContextFile, MicroBrain, or Paramecium",
+            ))
+        }
     };
     with_rt(|rt| {
         rt.set_mode(m, confidence, reason);
@@ -307,7 +311,10 @@ pub fn growformer_enable_stochastic_retrieval(temperature: f32) -> Result<(), Js
 /// Accepts a base TOML string and an optional overlay TOML string.
 /// Call after `growformer_load_brain` and before inference.
 #[wasm_bindgen]
-pub fn growformer_load_topic_graph(base_toml: &str, overlay_toml: Option<String>) -> Result<(), JsValue> {
+pub fn growformer_load_topic_graph(
+    base_toml: &str,
+    overlay_toml: Option<String>,
+) -> Result<(), JsValue> {
     let base_graph = crate::topic_graph::TopicGraph::from_toml(base_toml)
         .map_err(|e| JsValue::from_str(&format!("topic graph base: {}", e)))?;
     let final_graph = if let Some(ref overlay) = overlay_toml {
@@ -317,8 +324,7 @@ pub fn growformer_load_topic_graph(base_toml: &str, overlay_toml: Option<String>
     } else {
         base_graph
     };
-    crate::growformer_lang::init_topic_graph_direct(final_graph)
-        .map_err(|e| JsValue::from_str(&e))
+    crate::growformer_lang::init_topic_graph_direct(final_graph).map_err(|e| JsValue::from_str(&e))
 }
 
 /// Drop the in-memory topic graph so the next `growformer_load_topic_graph` installs fresh rules.
@@ -344,9 +350,7 @@ pub fn growformer_load_grounding_graph(toml_str: &str) -> Result<(), JsValue> {
 /// Example: `{"dimensions": {"hunger": 0.4, "energy": 0.6, "mood": 0.7}, "profile": "cheerful_companion", "turn": 3}`
 #[wasm_bindgen]
 pub fn growformer_set_agent_state(state_json: &str) -> Result<(), JsValue> {
-    with_rt(|rt| {
-        rt.set_agent_state_from_json(state_json)
-    })
+    with_rt(|rt| rt.set_agent_state_from_json(state_json))
 }
 
 /// Load a JSONL fragment library for chat-mode fragment composition.

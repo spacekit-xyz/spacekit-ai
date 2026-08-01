@@ -29,9 +29,11 @@ impl BrainInferencePlugin for ChatPolicyPlugin {
         prompt: &str,
         response: &str,
     ) -> Option<BleedHit> {
-        inference_toml_loaded()
-            .chat_policy()
-            .detect_compose_bleed(language_channel, prompt, response)
+        inference_toml_loaded().chat_policy().detect_compose_bleed(
+            language_channel,
+            prompt,
+            response,
+        )
     }
 
     fn bleed_fallback(

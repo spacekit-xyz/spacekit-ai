@@ -47,9 +47,7 @@ pub struct ReflectionScores {
 #[derive(Clone, Debug)]
 pub enum ReflectionOutcome {
     /// Response passes quality gate — return it.
-    Accept {
-        scores: ReflectionScores,
-    },
+    Accept { scores: ReflectionScores },
     /// Response failed quality gate — retry with adjusted conditioning.
     /// The adjustment vector should be blended into the conditioning for retry.
     Retry {
@@ -140,12 +138,7 @@ impl MetaCognition {
 
     /// Train the reflection brain: absorb a known-good (prompt_emb, response_emb)
     /// pair with its topic label. Builds reference centroids via EMA.
-    pub fn absorb_pair(
-        &mut self,
-        prompt_emb: &[f32],
-        response_emb: &[f32],
-        topic: &str,
-    ) {
+    pub fn absorb_pair(&mut self, prompt_emb: &[f32], response_emb: &[f32], topic: &str) {
         let joint = Self::joint_embedding(prompt_emb, response_emb);
         let alpha = 0.05_f32;
 
@@ -162,7 +155,11 @@ impl MetaCognition {
         self.pair_count += 1;
 
         // Update or create topic-specific centroid
-        if let Some(pos) = self.reference_centroids.iter().position(|(t, _)| t == topic) {
+        if let Some(pos) = self
+            .reference_centroids
+            .iter()
+            .position(|(t, _)| t == topic)
+        {
             let centroid = &mut self.reference_centroids[pos].1;
             for (i, v) in joint.iter().enumerate() {
                 if i < centroid.len() {
@@ -232,26 +229,37 @@ impl MetaCognition {
         // (0.95) prevents garbled generation from slipping through the lower gate.
         const COHERENCE_FLOOR: f32 = 0.95;
         let rel_ok = scores.relevance >= self.config.min_relevance_for_accept;
-        if scores.quality >= self.config.accept_threshold && scores.coherence >= COHERENCE_FLOOR && rel_ok {
+        if scores.quality >= self.config.accept_threshold
+            && scores.coherence >= COHERENCE_FLOOR
+            && rel_ok
+        {
             return ReflectionOutcome::Accept { scores };
         }
-        if scores.quality >= self.config.accept_threshold && scores.coherence >= COHERENCE_FLOOR && !rel_ok {
+        if scores.quality >= self.config.accept_threshold
+            && scores.coherence >= COHERENCE_FLOOR
+            && !rel_ok
+        {
             infer_trace!(
                 "  [metacog] REJECT: relevance {:.3} < min {:.3} (topic mismatch)",
-                scores.relevance, self.config.min_relevance_for_accept
+                scores.relevance,
+                self.config.min_relevance_for_accept
             );
         }
         // High coherence with marginal quality: accept if clearly above a
         // soft floor — catches correct responses dragged down by one sub-metric.
         if scores.coherence >= COHERENCE_FLOOR && scores.quality >= 0.20 && rel_ok {
-            infer_trace!("  [metacog] ACCEPT (coherence-floor override): quality={:.3}, coherence={:.3}",
-                scores.quality, scores.coherence);
+            infer_trace!(
+                "  [metacog] ACCEPT (coherence-floor override): quality={:.3}, coherence={:.3}",
+                scores.quality,
+                scores.coherence
+            );
             return ReflectionOutcome::Accept { scores };
         }
         if scores.coherence >= COHERENCE_FLOOR && scores.quality >= 0.20 && !rel_ok {
             infer_trace!(
                 "  [metacog] REJECT coherence override: relevance {:.3} < min {:.3}",
-                scores.relevance, self.config.min_relevance_for_accept
+                scores.relevance,
+                self.config.min_relevance_for_accept
             );
         }
 
@@ -304,13 +312,16 @@ impl MetaCognition {
     fn surface_coherence(text: &str) -> f32 {
         let words: Vec<&str> = text.split_whitespace().collect();
         let wc = words.len();
-        if wc < 3 { return 0.5; }
+        if wc < 3 {
+            return 0.5;
+        }
 
         let unique: std::collections::HashSet<&str> = words.iter().copied().collect();
         let unique_ratio = unique.len() as f32 / wc as f32;
 
         // All single alphabetic chars (no exclusion list)
-        let all_single_alpha = words.iter()
+        let all_single_alpha = words
+            .iter()
             .filter(|w| w.len() == 1 && w.chars().next().map_or(false, |c| c.is_alphabetic()))
             .count();
         let fragment_ratio = all_single_alpha as f32 / wc as f32;
@@ -331,10 +342,13 @@ impl MetaCognition {
         let mut word_counts: std::collections::HashMap<&str, u32> =
             std::collections::HashMap::new();
         let stop_words: std::collections::HashSet<&str> = [
-            "a", "an", "the", "is", "are", "was", "were", "in", "on", "at",
-            "to", "for", "of", "and", "or", "but", "with", "by", "from", "as",
-            "it", "its", "that", "this", "be", "not", "no", "can", "do", "if",
-        ].iter().copied().collect();
+            "a", "an", "the", "is", "are", "was", "were", "in", "on", "at", "to", "for", "of",
+            "and", "or", "but", "with", "by", "from", "as", "it", "its", "that", "this", "be",
+            "not", "no", "can", "do", "if",
+        ]
+        .iter()
+        .copied()
+        .collect();
         for &w in &words {
             let lower = w.to_ascii_lowercase();
             if !stop_words.contains(lower.as_str()) && w.len() > 1 {
@@ -343,22 +357,39 @@ impl MetaCognition {
         }
         let content_repeat_count = word_counts.values().filter(|&&c| c >= 3).count();
 
-        let repeat_penalty = if max_repeat >= 3 { 0.0 }
-            else if max_repeat >= 2 { 0.6 }
-            else { 1.0 };
+        let repeat_penalty = if max_repeat >= 3 {
+            0.0
+        } else if max_repeat >= 2 {
+            0.6
+        } else {
+            1.0
+        };
 
-        let scatter_repeat_penalty = if content_repeat_count >= 3 { 0.1 }
-            else if content_repeat_count >= 2 { 0.3 }
-            else if content_repeat_count >= 1 { 0.6 }
-            else { 1.0 };
+        let scatter_repeat_penalty = if content_repeat_count >= 3 {
+            0.1
+        } else if content_repeat_count >= 2 {
+            0.3
+        } else if content_repeat_count >= 1 {
+            0.6
+        } else {
+            1.0
+        };
 
-        let diversity_score = if unique_ratio < 0.30 { 0.1 }
-            else if unique_ratio < 0.50 { 0.4 }
-            else { 1.0 };
+        let diversity_score = if unique_ratio < 0.30 {
+            0.1
+        } else if unique_ratio < 0.50 {
+            0.4
+        } else {
+            1.0
+        };
 
-        let fragment_penalty = if fragment_ratio > 0.20 { 0.1 }
-            else if fragment_ratio > 0.10 { 0.3 }
-            else { 1.0 };
+        let fragment_penalty = if fragment_ratio > 0.20 {
+            0.1
+        } else if fragment_ratio > 0.10 {
+            0.3
+        } else {
+            1.0
+        };
 
         // Propositional coherence: sentences must connect to neighbors.
         // Broken semantic trajectories (domain words in random order) score low.
@@ -376,22 +407,41 @@ impl MetaCognition {
             if sentences.len() >= 3 {
                 let mut connected = 0usize;
                 for i in 0..sentences.len() {
-                    let has_prev = i == 0
-                        || sentences[i - 1].intersection(&sentences[i]).count() > 0;
+                    let has_prev =
+                        i == 0 || sentences[i - 1].intersection(&sentences[i]).count() > 0;
                     let has_next = i == sentences.len() - 1
                         || sentences[i].intersection(&sentences[i + 1]).count() > 0;
-                    if has_prev || has_next { connected += 1; }
+                    if has_prev || has_next {
+                        connected += 1;
+                    }
                 }
                 let connectivity = connected as f32 / sentences.len() as f32;
-                if connectivity < 0.4 { 0.1 }
-                else if connectivity < 0.6 { 0.4 }
-                else { 1.0 }
-            } else { 1.0 }
-        } else { 1.0 };
+                if connectivity < 0.4 {
+                    0.1
+                } else if connectivity < 0.6 {
+                    0.4
+                } else {
+                    1.0
+                }
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        };
 
-        let raw = diversity_score * repeat_penalty * scatter_repeat_penalty
-            * fragment_penalty * prop_penalty;
-        if raw < 0.0 { 0.0f32 } else if raw > 1.0 { 1.0f32 } else { raw }
+        let raw = diversity_score
+            * repeat_penalty
+            * scatter_repeat_penalty
+            * fragment_penalty
+            * prop_penalty;
+        if raw < 0.0 {
+            0.0f32
+        } else if raw > 1.0 {
+            1.0f32
+        } else {
+            raw
+        }
     }
 
     /// Relevance: how close the (prompt, response) joint embedding is to
@@ -451,14 +501,20 @@ impl MetaCognition {
         // the response text length is consistent with training data norms.
         // Short responses to prompts that typically produce long answers are suspect.
         let embedding_bonus = if !self.reference_centroids.is_empty() {
-            let avg_topic_count = self.topic_counts.iter()
+            let avg_topic_count = self
+                .topic_counts
+                .iter()
                 .map(|(_, c)| *c as f32)
                 .sum::<f32>()
                 / self.topic_counts.len().max(1) as f32;
             // Well-covered topics (many training pairs) expect richer responses
-            if avg_topic_count > 5.0 && len > 100 { 0.15 }
-            else if avg_topic_count > 2.0 && len > 50 { 0.08 }
-            else { 0.0 }
+            if avg_topic_count > 5.0 && len > 100 {
+                0.15
+            } else if avg_topic_count > 2.0 && len > 50 {
+                0.08
+            } else {
+                0.0
+            }
         } else {
             0.0
         };
@@ -512,8 +568,16 @@ impl MetaCognition {
         let dim = prompt_emb.len().max(response_emb.len());
         let mut joint = vec![0.0f32; dim];
         for i in 0..dim {
-            let p = if i < prompt_emb.len() { prompt_emb[i] } else { 0.0 };
-            let r = if i < response_emb.len() { response_emb[i] } else { 0.0 };
+            let p = if i < prompt_emb.len() {
+                prompt_emb[i]
+            } else {
+                0.0
+            };
+            let r = if i < response_emb.len() {
+                response_emb[i]
+            } else {
+                0.0
+            };
             joint[i] = (p + r) * 0.5;
         }
         joint
@@ -539,9 +603,21 @@ fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
     if len == 0 {
         return 0.0;
     }
-    let dot: f64 = a[..len].iter().zip(b[..len].iter()).map(|(&x, &y)| (x as f64) * (y as f64)).sum();
-    let na = a[..len].iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
-    let nb = b[..len].iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+    let dot: f64 = a[..len]
+        .iter()
+        .zip(b[..len].iter())
+        .map(|(&x, &y)| (x as f64) * (y as f64))
+        .sum();
+    let na = a[..len]
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        .sqrt();
+    let nb = b[..len]
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        .sqrt();
     if na < 1e-20 || nb < 1e-20 {
         return 0.0;
     }
@@ -564,8 +640,17 @@ mod tests {
         }
 
         assert!(mc.is_ready());
-        let scores = mc.evaluate(&prompt, &good_response, "This is a good detailed response.", Some("test_topic"));
-        assert!(scores.quality > 0.2, "Good pair should score reasonably: {:.3}", scores.quality);
+        let scores = mc.evaluate(
+            &prompt,
+            &good_response,
+            "This is a good detailed response.",
+            Some("test_topic"),
+        );
+        assert!(
+            scores.quality > 0.2,
+            "Good pair should score reasonably: {:.3}",
+            scores.quality
+        );
     }
 
     #[test]

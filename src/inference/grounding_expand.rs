@@ -48,18 +48,10 @@ impl GroundingRule {
         {
             return false;
         }
-        if !self
-            .when_all
-            .iter()
-            .all(|s| subslice_hit(padded_lower, s))
-        {
+        if !self.when_all.iter().all(|s| subslice_hit(padded_lower, s)) {
             return false;
         }
-        if !self.when_any.is_empty()
-            && !self
-                .when_any
-                .iter()
-                .any(|s| subslice_hit(padded_lower, s))
+        if !self.when_any.is_empty() && !self.when_any.iter().any(|s| subslice_hit(padded_lower, s))
         {
             return false;
         }
@@ -90,7 +82,8 @@ fn load_rules() -> Vec<GroundingRule> {
         env!("CARGO_MANIFEST_DIR"),
         "/data/inference/grounding_expand.toml"
     ));
-    let file: GroundingExpandFile = toml::from_str(raw).expect("parse embedded grounding_expand.toml");
+    let file: GroundingExpandFile =
+        toml::from_str(raw).expect("parse embedded grounding_expand.toml");
     assert_eq!(file.version, 1, "unsupported grounding_expand.toml version");
     file.rules
         .into_iter()

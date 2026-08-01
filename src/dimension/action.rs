@@ -55,10 +55,16 @@ impl ActionJson {
     pub fn is_valid(&self) -> bool {
         matches!(
             (&self.action_type, &self.payload),
-            (ActionType::SupportTicket, Some(ActionPayload::SupportTicket { .. }))
-                | (ActionType::CodingAssist, Some(ActionPayload::CodingAssist { .. }))
-                | (ActionType::GeneralAssist, Some(ActionPayload::GeneralAssist { .. }))
-                | (ActionType::ToolCall, Some(ActionPayload::ToolCall { .. }))
+            (
+                ActionType::SupportTicket,
+                Some(ActionPayload::SupportTicket { .. })
+            ) | (
+                ActionType::CodingAssist,
+                Some(ActionPayload::CodingAssist { .. })
+            ) | (
+                ActionType::GeneralAssist,
+                Some(ActionPayload::GeneralAssist { .. })
+            ) | (ActionType::ToolCall, Some(ActionPayload::ToolCall { .. }))
                 | (ActionType::Fallback, Some(ActionPayload::Fallback { .. }))
         )
     }
@@ -221,13 +227,23 @@ fn infer_action_type_from_text(text: &str) -> Option<ActionType> {
 fn infer_tool_name(text: &str) -> String {
     if text.contains("calculate") || text.contains("compute") {
         "calculator".to_string()
-    } else if text.contains("search for") || text.contains("look up") || text.contains("find information") {
+    } else if text.contains("search for")
+        || text.contains("look up")
+        || text.contains("find information")
+    {
         "web_search".to_string()
-    } else if text.contains("run this") || text.contains("execute this") || text.contains("eval this")
-        || text.contains("run the code") || text.contains("execute the code") {
+    } else if text.contains("run this")
+        || text.contains("execute this")
+        || text.contains("eval this")
+        || text.contains("run the code")
+        || text.contains("execute the code")
+    {
         "code_runner".to_string()
-    } else if text.contains("read file") || text.contains("show file")
-        || text.contains("read the file") || text.contains("show me the file") {
+    } else if text.contains("read file")
+        || text.contains("show file")
+        || text.contains("read the file")
+        || text.contains("show me the file")
+    {
         "file_reader".to_string()
     } else {
         "unknown".to_string()
@@ -309,12 +325,12 @@ fn infer_topic(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dimension::main_dim::MainDimension;
     use crate::dimension::embedding::GroupEmbedding;
+    use crate::dimension::main_dim::MainDimension;
     use crate::environment::NeuralEnvironment;
     use crate::types::EnvironmentConfig;
-    use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand::SeedableRng;
 
     #[test]
     fn tool_call_detected_from_text() {
@@ -349,9 +365,10 @@ mod tests {
             reason: "tool_match".to_string(),
             payload: Some(ActionPayload::ToolCall {
                 tool_name: "calculator".to_string(),
-                arguments: std::collections::HashMap::from([
-                    ("expression".to_string(), "2+2".to_string()),
-                ]),
+                arguments: std::collections::HashMap::from([(
+                    "expression".to_string(),
+                    "2+2".to_string(),
+                )]),
             }),
         };
         assert!(action.is_valid());

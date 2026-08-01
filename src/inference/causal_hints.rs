@@ -168,7 +168,9 @@ mod tests {
     #[test]
     fn at_least_compensatory() {
         let v = causal_bm25_tokens("The tape was ugly at least funding cooled");
-        assert!(v.iter().any(|t| t.contains("compensatory") && t.contains("at_least")));
+        assert!(v
+            .iter()
+            .any(|t| t.contains("compensatory") && t.contains("at_least")));
     }
 
     #[test]
@@ -192,19 +194,27 @@ mod tests {
     #[test]
     fn interventional_if_id() {
         let v = causal_bm25_tokens("If I'd sold at the top I'd be fine now.");
-        assert!(v.iter().any(|t| t.contains("interventional_counterfactual")));
+        assert!(v
+            .iter()
+            .any(|t| t.contains("interventional_counterfactual")));
     }
 
     #[test]
     fn interventional_if_only() {
         let v = causal_bm25_tokens("If only they had listened to the audit.");
-        assert!(v.iter().any(|t| t.contains("interventional_counterfactual")));
+        assert!(v
+            .iter()
+            .any(|t| t.contains("interventional_counterfactual")));
     }
 
     #[test]
     fn both_connector_and_subtype_can_fire() {
-        let v = causal_bm25_tokens("I hated the renovation but looking back it doubled our home value.");
-        assert!(v.iter().any(|t| t.contains("compensatory") && t.contains("but")));
+        let v = causal_bm25_tokens(
+            "I hated the renovation but looking back it doubled our home value.",
+        );
+        assert!(v
+            .iter()
+            .any(|t| t.contains("compensatory") && t.contains("but")));
         assert!(v.iter().any(|t| t.contains("retrospective_framing")));
         assert_eq!(v.len(), 2);
     }
@@ -218,6 +228,8 @@ mod tests {
     #[test]
     fn since_explanatory() {
         let v = causal_bm25_tokens("I'm bullish since the ETF finally got approved.");
-        assert!(v.iter().any(|t| t.contains("explanatory") && t.contains("since")));
+        assert!(v
+            .iter()
+            .any(|t| t.contains("explanatory") && t.contains("since")));
     }
 }

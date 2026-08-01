@@ -111,7 +111,10 @@ fn load_embedded_default() -> RetrievalLexicon {
         "/data/inference/retrieval_lexicon.toml"
     ));
     let file: LexiconFile = toml::from_str(raw).expect("parse embedded retrieval_lexicon.toml");
-    assert_eq!(file.version, 1, "unsupported retrieval_lexicon.toml version");
+    assert_eq!(
+        file.version, 1,
+        "unsupported retrieval_lexicon.toml version"
+    );
     let key = if file.default_locale.is_empty() {
         "en".to_string()
     } else {

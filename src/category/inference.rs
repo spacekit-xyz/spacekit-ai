@@ -72,8 +72,7 @@ impl InferenceDetail {
 
 fn tail_entity(input: &str) -> String {
     let raw = input.split_whitespace().last().unwrap_or("");
-    raw
-        .trim_matches(|c: char| !c.is_alphanumeric())
+    raw.trim_matches(|c: char| !c.is_alphanumeric())
         .trim_end_matches('s')
         .to_string()
 }

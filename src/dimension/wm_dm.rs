@@ -8,10 +8,10 @@
 
 use std::path::Path;
 
-use rand::rngs::StdRng;
-use rand::SeedableRng;
 use crate::environment::NeuralEnvironment;
 use crate::types::{EnvironmentConfig, GroupId};
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 
 use super::embedding::{build_tag_vector, GroupEmbedding, TAG_VECTOR_DIM};
 use super::manager::{DimensionManager, DimensionManagerConfig};
@@ -30,6 +30,10 @@ pub struct WmDmSpikeResult {
     pub reload_fingerprint_match: bool,
     pub act_ok: bool,
     pub deploy_ok: bool,
+    pub checkpoint_roundtrip_ok: bool,
+    pub act_ok_after_load: bool,
+    pub deploy_ok_after_load: bool,
+    pub paths_portable: bool,
     pub chat_metric_used: bool,
     pub n_citizens: usize,
     pub note: String,
@@ -145,6 +149,17 @@ impl DimensionManager {
         self.wm_citizens.get(&gid)
     }
 
+    /// Route to a WM citizen by metatag (e.g. `"wm"`, `"acting"`, `"composed"`).
+    pub fn route_wm_citizen_by_tag(&self, tag: &str) -> Option<GroupId> {
+        self.main
+            .embedding_library
+            .iter()
+            .find(|e| {
+                e.metatags.iter().any(|m| m == tag) && self.wm_citizens.contains_key(&e.group_id)
+            })
+            .map(|e| e.group_id)
+    }
+
     /// Act via citizen's pinned acting bundle (disk).
     pub fn wm_act_disk(&self, gid: GroupId, obs: &[f32]) -> Result<ActDecision, String> {
         let c = self
@@ -178,8 +193,53 @@ impl DimensionManager {
     }
 }
 
-/// Phase 5a seed: train acting + composed, promote into DM, act + deploy, reload pin.
+/// Rewrite citizen bundle paths to absolute (portable across CWD for reload).
+pub fn canonicalize_wm_citizen_paths(dm: &mut DimensionManager) {
+    for c in dm.wm_citizens.values_mut() {
+        if let Ok(p) = std::fs::canonicalize(&c.bundle_path) {
+            if let Some(s) = p.to_str() {
+                c.bundle_path = s.to_string();
+            }
+        }
+    }
+}
+
+/// Install acting + composed WM citizens into an existing DimensionManager (sidecar bundles).
+/// Used by 5a spike and 5e brain.bin graduation.
+pub fn install_wm_citizens(
+    dm: &mut DimensionManager,
+    seed: u64,
+    work_dir: &Path,
+) -> Result<(GroupId, GroupId), String> {
+    let sidecar = work_dir.join("wm_sidecar");
+    std::fs::create_dir_all(&sidecar).map_err(|e| e.to_string())?;
+
+    let acting = train_disk_acting_bundle(seed);
+    let act_path = sidecar.join(format!("dm_acting_{seed}.json"));
+    acting.save(&act_path)?;
+    let proto_act = acting
+        .geo_encoder
+        .as_ref()
+        .map(|e| e.encode(&[0.2, 0.1, 0.0, 0.0]))
+        .unwrap_or_else(|| vec![0.0; 16]);
+    let act_gid = dm.promote_wm_acting_citizen("wm_disk_act", &acting, &act_path, &proto_act)?;
+
+    let composed = train_composed_bundle(seed.wrapping_add(3));
+    let comp_path = sidecar.join(format!("dm_composed_{seed}.json"));
+    save_composed_bundle(&comp_path, &composed)?;
+    let proto_c = composed.encoder.encode(&[0.15, -0.1, 0.05, 0.0]);
+    let dep_gid = dm.promote_wm_composed_citizen("wm_composed", &composed, &comp_path, &proto_c)?;
+
+    canonicalize_wm_citizen_paths(dm);
+    Ok((act_gid, dep_gid))
+}
+
+/// Phase 5a: promote acting+composed, pin, act/deploy, **DM checkpoint roundtrip**.
 pub fn run_phase5a_wm_dm_spike(seed: u64, work_dir: &Path) -> WmDmSpikeResult {
+    use crate::systems::checkpoint::{
+        deserialize_checkpoint_from_bytes, serialize_checkpoint_to_bytes,
+    };
+
     let _ = std::fs::create_dir_all(work_dir);
     let config = DimensionManagerConfig {
         mirror_config: EnvironmentConfig::default(),
@@ -191,46 +251,53 @@ pub fn run_phase5a_wm_dm_spike(seed: u64, work_dir: &Path) -> WmDmSpikeResult {
     };
     let mut dm = DimensionManager::new(config);
 
-    let acting = train_disk_acting_bundle(seed);
-    let act_path = work_dir.join(format!("dm_acting_{seed}.json"));
-    acting.save(&act_path).expect("save acting");
-    let proto_act = acting
-        .geo_encoder
-        .as_ref()
-        .map(|e| e.encode(&[0.2, 0.1, 0.0, 0.0]))
-        .unwrap_or_else(|| vec![0.0; 16]);
-    let act_gid = dm
-        .promote_wm_acting_citizen("wm_disk_act", &acting, &act_path, &proto_act)
-        .expect("promote acting");
+    let (act_gid, dep_gid) =
+        install_wm_citizens(&mut dm, seed, work_dir).expect("install wm citizens");
+    let acting_fp = dm
+        .wm_citizen(act_gid)
+        .map(|c| c.encoder_fingerprint)
+        .unwrap_or(0);
+    let act_path = dm
+        .wm_citizen(act_gid)
+        .map(|c| c.bundle_path.clone())
+        .unwrap_or_default();
 
-    let composed = train_composed_bundle(seed.wrapping_add(3));
-    let comp_path = work_dir.join(format!("dm_composed_{seed}.json"));
-    save_composed_bundle(&comp_path, &composed).expect("save composed");
-    let proto_c = composed.encoder.encode(&[0.15, -0.1, 0.05, 0.0]);
-    let dep_gid = dm
-        .promote_wm_composed_citizen("wm_composed", &composed, &comp_path, &proto_c)
-        .expect("promote composed");
+    let paths_portable = dm
+        .wm_citizens
+        .values()
+        .all(|c| Path::new(&c.bundle_path).is_absolute());
 
     let obs = [0.25f32, 0.05, 0.0, 0.0];
     let act_ok = dm.wm_act_disk(act_gid, &obs).is_ok();
     let deploy_ok = dm.wm_deploy_step(dep_gid, &obs).is_ok();
 
-    let reloaded = ActingWmBundle::load(&act_path).expect("reload");
+    let reloaded = ActingWmBundle::load(Path::new(&act_path)).expect("reload");
     let pin_stable = reloaded.verify().is_ok();
     let citizen = dm.wm_citizen(act_gid).expect("citizen");
     let reload_fingerprint_match = reloaded.encoder_fingerprint == citizen.encoder_fingerprint
-        && citizen.encoder_fingerprint == acting.encoder_fingerprint;
+        && citizen.encoder_fingerprint == acting_fp;
+
+    // Persist DM (wm_citizens included) and restore — Preview+ graduation gate.
+    let bytes = serialize_checkpoint_to_bytes(&dm).expect("serialize dm");
+    let dm2: DimensionManager = deserialize_checkpoint_from_bytes(&bytes).expect("deserialize dm");
+    let checkpoint_roundtrip_ok = dm2.wm_citizens.len() == dm.wm_citizens.len()
+        && dm2.wm_citizen(act_gid).map(|c| c.encoder_fingerprint) == Some(acting_fp);
+    let act_ok_after_load = dm2.wm_act_disk(act_gid, &obs).is_ok();
+    let deploy_ok_after_load = dm2.wm_deploy_step(dep_gid, &obs).is_ok();
 
     WmDmSpikeResult {
         group_id: act_gid,
-        encoder_fingerprint: acting.encoder_fingerprint,
+        encoder_fingerprint: acting_fp,
         pin_stable,
         reload_fingerprint_match,
         act_ok,
         deploy_ok,
+        checkpoint_roundtrip_ok,
+        act_ok_after_load,
+        deploy_ok_after_load,
+        paths_portable,
         chat_metric_used: false,
         n_citizens: dm.wm_citizens.len(),
-        note: "5a: WM acting+composed citizens in DimensionManager; pin + act/deploy via DM"
-            .into(),
+        note: "5a: WM citizens in DM + sidecar bundles + checkpoint roundtrip (Preview+)".into(),
     }
 }

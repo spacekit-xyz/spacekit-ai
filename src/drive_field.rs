@@ -37,7 +37,11 @@ pub struct DriveState {
 impl Default for DriveState {
     fn default() -> Self {
         // Mild baseline: a little hungry, decently rested, moderately social.
-        Self { hunger: 0.3, energy: 0.6, social: 0.6 }
+        Self {
+            hunger: 0.3,
+            energy: 0.6,
+            social: 0.6,
+        }
     }
 }
 
@@ -169,7 +173,12 @@ impl DriveState {
         // Acetylcholine: attention precision — needs energy and some alertness.
         let acetylcholine = clamp01(0.25 + 0.50 * energy + 0.20 * norepinephrine);
 
-        Neuromodulators { dopamine, serotonin, norepinephrine, acetylcholine }
+        Neuromodulators {
+            dopamine,
+            serotonin,
+            norepinephrine,
+            acetylcholine,
+        }
     }
 
     /// Full pipeline: drives → neuromodulators → knob modulation.
@@ -198,8 +207,20 @@ impl DriveState {
             tags.push("hunger");
         }
 
-        let social = ["pet", "scratch", "cuddle", "love", "good girl", "good kitty",
-            "hello", "hey", "hi ", "snuggle", "hold", "lap"];
+        let social = [
+            "pet",
+            "scratch",
+            "cuddle",
+            "love",
+            "good girl",
+            "good kitty",
+            "hello",
+            "hey",
+            "hi ",
+            "snuggle",
+            "hold",
+            "lap",
+        ];
         if social.iter().any(|k| l.contains(k)) {
             self.social = clamp01(self.social + 0.5);
             tags.push("social");
@@ -212,7 +233,15 @@ impl DriveState {
             tags.push("play");
         }
 
-        let rest = ["nap", "sleep", "rest", "bed", "bedtime", "goodnight", "night"];
+        let rest = [
+            "nap",
+            "sleep",
+            "rest",
+            "bed",
+            "bedtime",
+            "goodnight",
+            "night",
+        ];
         if rest.iter().any(|k| l.contains(k)) {
             self.energy = clamp01(self.energy + 0.50);
             tags.push("energy");
@@ -282,7 +311,12 @@ pub struct DriveField {
 
 impl DriveField {
     pub fn new(state: DriveState, enabled: bool) -> Self {
-        Self { state, enabled, base_temperature: 0.85, base_novelty: 1.0 }
+        Self {
+            state,
+            enabled,
+            base_temperature: 0.85,
+            base_novelty: 1.0,
+        }
     }
 
     pub fn with_bases(mut self, base_temperature: f32, base_novelty: f32) -> Self {
@@ -317,25 +351,63 @@ mod tests {
 
     #[test]
     fn hungry_lonely_is_high_dopamine_seeking() {
-        let hungry = DriveState { hunger: 0.95, energy: 0.7, social: 0.1 };
+        let hungry = DriveState {
+            hunger: 0.95,
+            energy: 0.7,
+            social: 0.1,
+        };
         let nm = hungry.map_neuromodulators();
-        assert!(nm.dopamine > 0.8, "hungry+lonely should spike dopamine: {}", nm.dopamine);
-        assert!(nm.norepinephrine > 0.6, "hunger+energy should raise alertness: {}", nm.norepinephrine);
-        assert!(nm.serotonin < 0.5, "unmet drives keep serotonin low: {}", nm.serotonin);
+        assert!(
+            nm.dopamine > 0.8,
+            "hungry+lonely should spike dopamine: {}",
+            nm.dopamine
+        );
+        assert!(
+            nm.norepinephrine > 0.6,
+            "hunger+energy should raise alertness: {}",
+            nm.norepinephrine
+        );
+        assert!(
+            nm.serotonin < 0.5,
+            "unmet drives keep serotonin low: {}",
+            nm.serotonin
+        );
     }
 
     #[test]
     fn sated_content_is_high_serotonin_calm() {
-        let sated = DriveState { hunger: 0.05, energy: 0.4, social: 0.95 };
+        let sated = DriveState {
+            hunger: 0.05,
+            energy: 0.4,
+            social: 0.95,
+        };
         let nm = sated.map_neuromodulators();
-        assert!(nm.serotonin > 0.8, "fed+social should raise serotonin: {}", nm.serotonin);
-        assert!(nm.dopamine < 0.5, "satisfied drives lower seeking: {}", nm.dopamine);
+        assert!(
+            nm.serotonin > 0.8,
+            "fed+social should raise serotonin: {}",
+            nm.serotonin
+        );
+        assert!(
+            nm.dopamine < 0.5,
+            "satisfied drives lower seeking: {}",
+            nm.dopamine
+        );
     }
 
     #[test]
     fn hungry_explores_more_than_sated() {
-        let hungry = DriveState { hunger: 0.95, energy: 0.8, social: 0.2 }.field_modulation();
-        let sated = DriveState { hunger: 0.05, energy: 0.4, social: 0.95 }.field_modulation();
+        let hungry = DriveState {
+            hunger: 0.95,
+            energy: 0.8,
+            social: 0.2,
+        }
+        .field_modulation();
+        let sated = DriveState {
+            hunger: 0.05,
+            energy: 0.4,
+            social: 0.95,
+        }
+        .field_modulation();
         // Hungry pushes harder on state-appropriate (food) programs.
         assert!(hungry.state_blend_scale > sated.state_blend_scale);
         // Sated is more patient (slower context decay → longer memory).
@@ -344,35 +416,55 @@ mod tests {
 
     #[test]
     fn feeding_relaxes_hunger() {
-        let mut s = DriveState { hunger: 0.9, energy: 0.5, social: 0.5 };
+        let mut s = DriveState {
+            hunger: 0.9,
+            energy: 0.5,
+            social: 0.5,
+        };
         s.satisfy("here is a treat for you");
         assert!(s.hunger < 0.4, "feeding should drop hunger: {}", s.hunger);
     }
 
     #[test]
     fn food_preference_question_does_not_satisfy_hunger() {
-        let mut s = DriveState { hunger: 0.9, energy: 0.5, social: 0.5 };
+        let mut s = DriveState {
+            hunger: 0.9,
+            energy: 0.5,
+            social: 0.5,
+        };
         s.satisfy("do you like tuna, salmon or fancy feast?");
         assert!(s.hunger > 0.85, "questions should not feed: {}", s.hunger);
     }
 
     #[test]
     fn petting_satisfies_social() {
-        let mut s = DriveState { hunger: 0.5, energy: 0.5, social: 0.1 };
+        let mut s = DriveState {
+            hunger: 0.5,
+            energy: 0.5,
+            social: 0.1,
+        };
         s.satisfy("good girl, come scratch your chin");
         assert!(s.social > 0.5, "petting should raise social: {}", s.social);
     }
 
     #[test]
     fn rest_restores_energy() {
-        let mut s = DriveState { hunger: 0.3, energy: 0.1, social: 0.6 };
+        let mut s = DriveState {
+            hunger: 0.3,
+            energy: 0.1,
+            social: 0.6,
+        };
         s.satisfy("time for a nap");
         assert!(s.energy > 0.5, "rest should restore energy: {}", s.energy);
     }
 
     #[test]
     fn tick_grows_deficits() {
-        let mut s = DriveState { hunger: 0.3, energy: 0.6, social: 0.8 };
+        let mut s = DriveState {
+            hunger: 0.3,
+            energy: 0.6,
+            social: 0.8,
+        };
         s.tick(60.0);
         assert!(s.hunger > 0.3, "hunger grows over a turn");
         assert!(s.social < 0.8, "social need grows over a turn");
@@ -382,7 +474,12 @@ mod tests {
     fn modulation_clamped_in_safe_range() {
         // Even an extreme state must keep knobs in bounds.
         for &(h, e, so) in &[(1.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)] {
-            let m = DriveState { hunger: h, energy: e, social: so }.field_modulation();
+            let m = DriveState {
+                hunger: h,
+                energy: e,
+                social: so,
+            }
+            .field_modulation();
             assert!(m.temperature_scale >= 0.5 && m.temperature_scale <= 1.8);
             assert!(m.novelty_scale >= 0.6 && m.novelty_scale <= 1.6);
             assert!(m.context_decay >= 0.40 && m.context_decay <= 0.90);
@@ -393,7 +490,14 @@ mod tests {
 
     #[test]
     fn disabled_field_is_neutral() {
-        let f = DriveField::new(DriveState { hunger: 1.0, energy: 1.0, social: 0.0 }, false);
+        let f = DriveField::new(
+            DriveState {
+                hunger: 1.0,
+                energy: 1.0,
+                social: 0.0,
+            },
+            false,
+        );
         assert_eq!(f.modulation(), FieldModulation::default());
     }
 }

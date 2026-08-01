@@ -5,12 +5,14 @@ use std::collections::{HashMap, VecDeque};
 use crate::types::GroupId;
 use serde::{Deserialize, Serialize};
 
-use super::embedding::{build_tag_vector, cosine_similarity, hidden_activation_vector, GroupEmbedding, TAG_VECTOR_DIM};
-use super::main_dim::MainDimension;
 use super::composition::RoutingEntropyGuard;
-use super::router::{apply_stickiness, LearnedRouter};
+use super::embedding::{
+    build_tag_vector, cosine_similarity, hidden_activation_vector, GroupEmbedding, TAG_VECTOR_DIM,
+};
+use super::main_dim::MainDimension;
 use super::mirror_dim::MirrorDimension;
 use super::promotion::{evaluate_promotion, promote, PromotionDecision, PromotionGateConfig};
+use super::router::{apply_stickiness, LearnedRouter};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RoutingConfig {
@@ -20,7 +22,10 @@ pub struct RoutingConfig {
 
 impl Default for RoutingConfig {
     fn default() -> Self {
-        Self { stickiness: 0.15, tag_rerank_weight: 0.3 }
+        Self {
+            stickiness: 0.15,
+            tag_rerank_weight: 0.3,
+        }
     }
 }
 
@@ -180,7 +185,11 @@ impl GlobalObserver {
         }
         self.last_routing_scores = Some(routing_scores);
 
-        apply_stickiness(&mut scores, self.last_chosen_group_id, self.routing_config.stickiness);
+        apply_stickiness(
+            &mut scores,
+            self.last_chosen_group_id,
+            self.routing_config.stickiness,
+        );
 
         let mut best_gid = main.group_order[0];
         let mut best_score = -2.0f32;
@@ -201,7 +210,10 @@ impl GlobalObserver {
     }
 
     fn update_activity(&mut self, group_id: GroupId, value: f32) {
-        let q = self.group_activity.entry(group_id).or_insert_with(VecDeque::new);
+        let q = self
+            .group_activity
+            .entry(group_id)
+            .or_insert_with(VecDeque::new);
         q.push_back(value);
         while q.len() > self.activity_window {
             q.pop_front();
@@ -219,12 +231,7 @@ impl GlobalObserver {
     ) -> Vec<String> {
         let mut to_promote = Vec::new();
         for (name, mirror) in mirrors.iter_mut() {
-            match evaluate_promotion(
-                mirror,
-                main,
-                calibration_data,
-                &self.promotion_gate_config,
-            ) {
+            match evaluate_promotion(mirror, main, calibration_data, &self.promotion_gate_config) {
                 PromotionDecision::Promote => to_promote.push(name.clone()),
                 _ => {}
             }

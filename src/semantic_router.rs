@@ -116,8 +116,8 @@ struct SnippetToml {
 fn load_snippet_catalog(path: &Path) -> Result<Vec<Snippet>, String> {
     let cat_raw = std::fs::read_to_string(path)
         .map_err(|e| format!("snippet catalog {}: {e}", path.display()))?;
-    let cat_doc: SnippetCatalogToml = toml::from_str(&cat_raw)
-        .map_err(|e| format!("snippet catalog {}: {e}", path.display()))?;
+    let cat_doc: SnippetCatalogToml =
+        toml::from_str(&cat_raw).map_err(|e| format!("snippet catalog {}: {e}", path.display()))?;
     Ok(cat_doc
         .snippet
         .into_iter()
@@ -193,12 +193,10 @@ impl SemanticRouter {
         let mut match_threshold = doc.semantic_routing.match_threshold;
         let mut margin_threshold = doc.semantic_routing.margin_threshold;
         if paths.thresholds.is_file() {
-            let thr_raw = std::fs::read_to_string(&paths.thresholds).map_err(|e| {
-                format!("routing thresholds {}: {e}", paths.thresholds.display())
-            })?;
-            let thr: ThresholdsJson = serde_json::from_str(&thr_raw).map_err(|e| {
-                format!("routing thresholds {}: {e}", paths.thresholds.display())
-            })?;
+            let thr_raw = std::fs::read_to_string(&paths.thresholds)
+                .map_err(|e| format!("routing thresholds {}: {e}", paths.thresholds.display()))?;
+            let thr: ThresholdsJson = serde_json::from_str(&thr_raw)
+                .map_err(|e| format!("routing thresholds {}: {e}", paths.thresholds.display()))?;
             if let Some(m) = thr.match_threshold {
                 match_threshold = m;
             }
@@ -299,8 +297,8 @@ impl SemanticRouter {
         struct Resp {
             embeddings: Vec<Vec<f32>>,
         }
-        let resp: Resp = serde_json::from_slice(&out.stdout)
-            .map_err(|e| format!("mpnet encoder JSON: {e}"))?;
+        let resp: Resp =
+            serde_json::from_slice(&out.stdout).map_err(|e| format!("mpnet encoder JSON: {e}"))?;
         if resp.embeddings.len() != texts.len() {
             return Err(format!(
                 "mpnet encoder returned {} vectors for {} texts",
@@ -351,10 +349,7 @@ impl SemanticRouter {
 
     pub fn infer_batch(&self, texts: &[String]) -> Result<Vec<RouteDecision>, String> {
         let embs = self.encode_texts(texts)?;
-        Ok(embs
-            .iter()
-            .map(|e| self.infer_embedding(e))
-            .collect())
+        Ok(embs.iter().map(|e| self.infer_embedding(e)).collect())
     }
 }
 
@@ -373,10 +368,7 @@ pub fn clear() {
 }
 
 pub fn is_loaded() -> bool {
-    ROUTER
-        .read()
-        .map(|g| g.is_some())
-        .unwrap_or(false)
+    ROUTER.read().map(|g| g.is_some()).unwrap_or(false)
 }
 
 /// When loaded: returns Some(decision). Caller must treat topic=None as abstain

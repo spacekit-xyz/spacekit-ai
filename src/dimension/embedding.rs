@@ -123,9 +123,21 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
-    let dot: f64 = a.iter().zip(b.iter()).map(|(&x, &y)| (x as f64) * (y as f64)).sum();
-    let na: f64 = a.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
-    let nb: f64 = b.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+    let dot: f64 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| (x as f64) * (y as f64))
+        .sum();
+    let na: f64 = a
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        .sqrt();
+    let nb: f64 = b
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        .sqrt();
     let denom = na * nb;
     if denom < 1e-20 {
         return 0.0;
@@ -151,9 +163,9 @@ pub fn retrieve_relevant_groups(
 mod tests {
     use super::*;
     use crate::types::EnvironmentConfig;
+    use rand::rngs::StdRng;
     use rand::Rng;
     use rand::SeedableRng;
-    use rand::rngs::StdRng;
 
     fn spiral_like(n: usize, _rng: &mut StdRng) -> Vec<crate::types::Sample> {
         use std::f32::consts::PI;
@@ -214,7 +226,11 @@ mod tests {
         let v = build_tag_vector(&[String::from("spiral")], TAG_VECTOR_DIM);
         assert_eq!(v.len(), TAG_VECTOR_DIM);
         let n: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!(n > 0.99 && n < 1.01, "tag vector should be L2-normalized, got norm {}", n);
+        assert!(
+            n > 0.99 && n < 1.01,
+            "tag vector should be L2-normalized, got norm {}",
+            n
+        );
     }
 
     #[test]
@@ -232,7 +248,11 @@ mod tests {
         let spiral = build_tag_vector(&[String::from("spiral")], TAG_VECTOR_DIM);
         let circles = build_tag_vector(&[String::from("circles")], TAG_VECTOR_DIM);
         let sim = cosine_similarity(&spiral, &circles);
-        assert!(sim < 1.0, "spiral and circles tag vectors should differ, cosine was {}", sim);
+        assert!(
+            sim < 1.0,
+            "spiral and circles tag vectors should differ, cosine was {}",
+            sim
+        );
     }
 
     #[test]
@@ -262,7 +282,11 @@ mod tests {
         let hidden = hidden_activation_vector(&env);
         assert_eq!(hidden.len(), embedding.len());
         let cos = cosine_similarity(&hidden, &embedding);
-        assert!((cos - 1.0).abs() < 1e-5, "single sample: activation should equal embedding, cos={}", cos);
+        assert!(
+            (cos - 1.0).abs() < 1e-5,
+            "single sample: activation should equal embedding, cos={}",
+            cos
+        );
     }
 
     /// Gold cosine in f64 (same semantics as [`cosine_similarity`]: zero on degenerate).
@@ -291,12 +315,8 @@ mod tests {
         let mut worst: f64 = 0.0;
         for &dim in &dims {
             for _ in 0..300 {
-                let a: Vec<f32> = (0..dim)
-                    .map(|_| rng.gen_range(-0.95f32..0.95))
-                    .collect();
-                let b: Vec<f32> = (0..dim)
-                    .map(|_| rng.gen_range(-0.95f32..0.95))
-                    .collect();
+                let a: Vec<f32> = (0..dim).map(|_| rng.gen_range(-0.95f32..0.95)).collect();
+                let b: Vec<f32> = (0..dim).map(|_| rng.gen_range(-0.95f32..0.95)).collect();
                 let got = cosine_similarity(&a, &b) as f64;
                 let gold = cosine_f64_gold(&a, &b);
                 worst = worst.max((got - gold).abs());

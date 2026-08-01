@@ -100,7 +100,11 @@ pub fn bifunctor_branch_vectors(
 // ── Parse-tree CE backprop (Hadamard + align) ─────────────────────────────────
 
 /// Forward: `out = align_to_dim(source, branch_dim)` with `source.len() == source_len`.
-fn grad_align_output_to_source(grad_branch: &[f32], source_len: usize, branch_dim: usize) -> Vec<f32> {
+fn grad_align_output_to_source(
+    grad_branch: &[f32],
+    source_len: usize,
+    branch_dim: usize,
+) -> Vec<f32> {
     let mut g = vec![0.0f32; source_len];
     if source_len >= branch_dim {
         for i in 0..branch_dim.min(grad_branch.len()) {
@@ -143,7 +147,11 @@ pub(crate) fn zero_weight_clone(node: &PythagorasNode<Vec<f32>>) -> PythagorasNo
     }
 }
 
-pub(crate) fn apply_weight_grad_sgd(node: &mut PythagorasNode<Vec<f32>>, grad: &PythagorasNode<Vec<f32>>, scale: f32) {
+pub(crate) fn apply_weight_grad_sgd(
+    node: &mut PythagorasNode<Vec<f32>>,
+    grad: &PythagorasNode<Vec<f32>>,
+    scale: f32,
+) {
     debug_assert_eq!(node.weights.len(), grad.weights.len());
     for (w, g) in node.weights.iter_mut().zip(grad.weights.iter()) {
         *w -= scale * g;
@@ -175,25 +183,39 @@ fn compose_aligned_backward_acc(
     match (&node.left, &node.right) {
         (None, None) => {
             let gw: Vec<f32> = grad_out.iter().zip(x0.iter()).map(|(g, x)| g * x).collect();
-            let gx0: Vec<f32> = grad_out.iter().zip(node.weights.iter()).map(|(g, w)| g * w).collect();
+            let gx0: Vec<f32> = grad_out
+                .iter()
+                .zip(node.weights.iter())
+                .map(|(g, w)| g * w)
+                .collect();
             for (a, g) in acc.weights.iter_mut().zip(gw.iter()) {
                 *a += g;
             }
             grad_align_to_dim(&gx0, input.len(), dim)
         }
         (Some(l), None) => {
-            let g_mid = compose_aligned_backward_acc(l, &out_root, grad_out, acc.left.as_mut().unwrap());
+            let g_mid =
+                compose_aligned_backward_acc(l, &out_root, grad_out, acc.left.as_mut().unwrap());
             let gw: Vec<f32> = g_mid.iter().zip(x0.iter()).map(|(g, x)| g * x).collect();
-            let gx0: Vec<f32> = g_mid.iter().zip(node.weights.iter()).map(|(g, w)| g * w).collect();
+            let gx0: Vec<f32> = g_mid
+                .iter()
+                .zip(node.weights.iter())
+                .map(|(g, w)| g * w)
+                .collect();
             for (a, g) in acc.weights.iter_mut().zip(gw.iter()) {
                 *a += g;
             }
             grad_align_to_dim(&gx0, input.len(), dim)
         }
         (None, Some(r)) => {
-            let g_mid = compose_aligned_backward_acc(r, &out_root, grad_out, acc.right.as_mut().unwrap());
+            let g_mid =
+                compose_aligned_backward_acc(r, &out_root, grad_out, acc.right.as_mut().unwrap());
             let gw: Vec<f32> = g_mid.iter().zip(x0.iter()).map(|(g, x)| g * x).collect();
-            let gx0: Vec<f32> = g_mid.iter().zip(node.weights.iter()).map(|(g, w)| g * w).collect();
+            let gx0: Vec<f32> = g_mid
+                .iter()
+                .zip(node.weights.iter())
+                .map(|(g, w)| g * w)
+                .collect();
             for (a, g) in acc.weights.iter_mut().zip(gw.iter()) {
                 *a += g;
             }
@@ -201,10 +223,16 @@ fn compose_aligned_backward_acc(
         }
         (Some(l), Some(r)) => {
             let left_out = compose_aligned(l, &out_root);
-            let g_mid = compose_aligned_backward_acc(r, &left_out, grad_out, acc.right.as_mut().unwrap());
-            let g_out1 = compose_aligned_backward_acc(l, &out_root, &g_mid, acc.left.as_mut().unwrap());
+            let g_mid =
+                compose_aligned_backward_acc(r, &left_out, grad_out, acc.right.as_mut().unwrap());
+            let g_out1 =
+                compose_aligned_backward_acc(l, &out_root, &g_mid, acc.left.as_mut().unwrap());
             let gw: Vec<f32> = g_out1.iter().zip(x0.iter()).map(|(g, x)| g * x).collect();
-            let gx0: Vec<f32> = g_out1.iter().zip(node.weights.iter()).map(|(g, w)| g * w).collect();
+            let gx0: Vec<f32> = g_out1
+                .iter()
+                .zip(node.weights.iter())
+                .map(|(g, w)| g * w)
+                .collect();
             for (a, g) in acc.weights.iter_mut().zip(gw.iter()) {
                 *a += g;
             }
@@ -264,7 +292,8 @@ pub(crate) fn bifunctor_branch_vectors_backward_acc(
             let e = compose_aligned(r, &ri);
             let ge_aligned = grad_align_output_to_source(grad_e, e.len(), branch_dim);
             let gs_root = grad_align_b_to_a(grad_s, out.len(), branch_dim);
-            let g_ri = compose_aligned_backward_acc(r, &ri, &ge_aligned, acc.right.as_mut().unwrap());
+            let g_ri =
+                compose_aligned_backward_acc(r, &ri, &ge_aligned, acc.right.as_mut().unwrap());
             let gb = grad_align_b_to_a(&g_ri, out.len(), r.dimension);
             let mut sum = vec![0.0f32; out.len()];
             for i in 0..out.len() {
@@ -326,12 +355,7 @@ mod tests {
 
     #[test]
     fn split_tree_runs() {
-        let root = PythagorasNode::auto_split(
-            vec![0.5f32; 5],
-            5,
-            vec![0.1f32; 3],
-            vec![0.1f32; 4],
-        );
+        let root = PythagorasNode::auto_split(vec![0.5f32; 5], 5, vec![0.1f32; 3], vec![0.1f32; 4]);
         let inp = vec![1.0f32; 5];
         let (a, b) = bifunctor_branch_vectors(&root, &inp, 8);
         assert_eq!(a.len(), 8);

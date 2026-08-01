@@ -5,8 +5,8 @@
 //! routing), and a MetaConcept (for meta-codebook routing). The graph is loaded
 //! once at startup and queried per-prompt at inference time.
 
-use std::collections::{HashMap, HashSet};
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 use crate::growformer_lang::MetaConcept;
@@ -38,7 +38,9 @@ pub struct NodeConfig {
     pub rules: Vec<RuleConfig>,
 }
 
-fn default_priority() -> i32 { 10 }
+fn default_priority() -> i32 {
+    10
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -68,11 +70,24 @@ impl TopicRule {
     /// - At least one `any` keyword is present (OR) — or `any` is empty
     /// - NONE of the `not` keywords are present (NOT)
     pub fn matches(&self, lower: &str) -> bool {
-        if !self.not.is_empty() && self.not.iter().any(|kw| keyword_matches_in_lower(lower, kw)) {
+        if !self.not.is_empty()
+            && self
+                .not
+                .iter()
+                .any(|kw| keyword_matches_in_lower(lower, kw))
+        {
             return false;
         }
-        let all_ok = self.all.is_empty() || self.all.iter().all(|kw| keyword_matches_in_lower(lower, kw));
-        let any_ok = self.any.is_empty() || self.any.iter().any(|kw| keyword_matches_in_lower(lower, kw));
+        let all_ok = self.all.is_empty()
+            || self
+                .all
+                .iter()
+                .all(|kw| keyword_matches_in_lower(lower, kw));
+        let any_ok = self.any.is_empty()
+            || self
+                .any
+                .iter()
+                .any(|kw| keyword_matches_in_lower(lower, kw));
         all_ok && any_ok
     }
 
@@ -126,11 +141,15 @@ impl TopicGraph {
         let mut nodes = Vec::with_capacity(config.nodes.len());
         for nc in &config.nodes {
             let concept = parse_concept(&nc.concept);
-            let rules: Vec<TopicRule> = nc.rules.iter().map(|r| TopicRule {
-                any: r.any.clone(),
-                all: r.all.clone(),
-                not: r.not.clone(),
-            }).collect();
+            let rules: Vec<TopicRule> = nc
+                .rules
+                .iter()
+                .map(|r| TopicRule {
+                    any: r.any.clone(),
+                    all: r.all.clone(),
+                    not: r.not.clone(),
+                })
+                .collect();
 
             if rules.is_empty() {
                 return Err(format!("Node '{}' has no rules", nc.topic));
@@ -163,13 +182,17 @@ impl TopicGraph {
                 nodes.len(), action_target_map.len(), concept_keywords.len());
         }
 
-        Ok(TopicGraph { nodes, action_target_map, concept_keywords })
+        Ok(TopicGraph {
+            nodes,
+            action_target_map,
+            concept_keywords,
+        })
     }
 
     /// Load from a file path.
     pub fn from_file(path: &str) -> Result<Self, String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read {}: {}", path, e))?;
+        let content =
+            std::fs::read_to_string(path).map_err(|e| format!("Failed to read {}: {}", path, e))?;
         Self::from_toml(&content)
     }
 
@@ -189,13 +212,18 @@ impl TopicGraph {
                 .extend(kws);
         }
         if crate::infer_log::infer_trace_enabled() {
-            println!("  [topic-graph] merged overlay: +{} nodes (total {} nodes)",
-                added, self.nodes.len());
+            println!(
+                "  [topic-graph] merged overlay: +{} nodes (total {} nodes)",
+                added,
+                self.nodes.len()
+            );
         }
         self
     }
 
-    pub fn node_count(&self) -> usize { self.nodes.len() }
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
 
     /// Collect all unique keywords from all rule `any`/`all` lists
     /// and `concept_keywords` arrays. Used as the saliency lexicon
@@ -232,7 +260,9 @@ impl TopicGraph {
 
         for node in &self.nodes {
             // Skip concept-only nodes (empty topic)
-            if node.topic.is_empty() { continue; }
+            if node.topic.is_empty() {
+                continue;
+            }
 
             if let Some(specificity) = node.matches(&lower) {
                 let dominated = best.as_ref().map_or(false, |(prev, prev_spec)| {
@@ -310,8 +340,11 @@ impl TopicGraph {
         let intent = semantic_intent.unwrap_or("").to_lowercase();
         let target = action_target.unwrap_or("").to_lowercase();
 
-        if intent.contains("coding") || target.contains("coding")
-            || lower.contains("implement") || lower.contains("write a") || lower.contains("create a")
+        if intent.contains("coding")
+            || target.contains("coding")
+            || lower.contains("implement")
+            || lower.contains("write a")
+            || lower.contains("create a")
         {
             return MetaConcept::FunctionDefinition;
         }
@@ -455,25 +488,37 @@ BinaryArithmetic = ["add two", "calculator"]
     #[test]
     fn test_infer_topic_arithmetic() {
         let g = test_graph();
-        assert_eq!(g.infer_topic("write an addition function"), Some("addition_operation".into()));
+        assert_eq!(
+            g.infer_topic("write an addition function"),
+            Some("addition_operation".into())
+        );
     }
 
     #[test]
     fn test_infer_topic_decorator_rust() {
         let g = test_graph();
-        assert_eq!(g.infer_topic("use decorator for extensibility"), Some("structural".into()));
+        assert_eq!(
+            g.infer_topic("use decorator for extensibility"),
+            Some("structural".into())
+        );
     }
 
     #[test]
     fn test_infer_topic_decorator_python() {
         let g = test_graph();
-        assert_eq!(g.infer_topic("write a python decorator"), Some("decorator_operation".into()));
+        assert_eq!(
+            g.infer_topic("write a python decorator"),
+            Some("decorator_operation".into())
+        );
     }
 
     #[test]
     fn test_infer_topic_lru() {
         let g = test_graph();
-        assert_eq!(g.infer_topic("implement an LRU cache"), Some("lru_cache_operation".into()));
+        assert_eq!(
+            g.infer_topic("implement an LRU cache"),
+            Some("lru_cache_operation".into())
+        );
     }
 
     #[test]
@@ -553,6 +598,9 @@ all = ["explain", "paxos"]
     fn test_concept_from_action_target_broad() {
         let g = test_graph();
         assert!(g.concept_from_action_target("coding_general").is_none());
-        assert_eq!(g.concept_from_action_target("support"), Some(MetaConcept::Support));
+        assert_eq!(
+            g.concept_from_action_target("support"),
+            Some(MetaConcept::Support)
+        );
     }
 }

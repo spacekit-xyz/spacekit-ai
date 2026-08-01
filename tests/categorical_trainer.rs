@@ -33,7 +33,9 @@ fn trainer_reduces_sentiment_ce_on_batch() {
         let emb = record_embedding(first, embed_dim);
         let comp = &trainer.nodes[&0].node.composition;
         let (s, _) = bifunctor_branch_vectors(comp, &emb, branch_dim);
-        trainer.sentiment_head.cross_entropy(&s, first.sentiment.class_index())
+        trainer
+            .sentiment_head
+            .cross_entropy(&s, first.sentiment.class_index())
     };
 
     for _ in 0..80 {
@@ -44,7 +46,9 @@ fn trainer_reduces_sentiment_ce_on_batch() {
         let emb = record_embedding(first, embed_dim);
         let comp = &trainer.nodes[&0].node.composition;
         let (s, _) = bifunctor_branch_vectors(comp, &emb, branch_dim);
-        trainer.sentiment_head.cross_entropy(&s, first.sentiment.class_index())
+        trainer
+            .sentiment_head
+            .cross_entropy(&s, first.sentiment.class_index())
     };
 
     assert!(
@@ -60,7 +64,12 @@ fn infer_head_runs_after_registering_parse() {
     let curriculum = CurriculumScheduler::new(10, 20);
     let mut trainer = GrowformerTrainer::new(curriculum);
     let d = 32usize;
-    trainer.add_node(GrowformerNode::new(NodeId::new(0), "parse", d, vec![0.3f32; d]));
+    trainer.add_node(GrowformerNode::new(
+        NodeId::new(0),
+        "parse",
+        d,
+        vec![0.3f32; d],
+    ));
     let r = trainer.infer_head("I hate mondays");
     assert!(r.is_ok());
 }
@@ -70,7 +79,12 @@ fn infer_head_detail_has_probs_and_aux_head() {
     let curriculum = CurriculumScheduler::new(10, 20);
     let mut trainer = GrowformerTrainer::new(curriculum);
     let d = 16usize;
-    trainer.add_node(GrowformerNode::new(NodeId::new(0), "parse", d, vec![0.2f32; d]));
+    trainer.add_node(GrowformerNode::new(
+        NodeId::new(0),
+        "parse",
+        d,
+        vec![0.2f32; d],
+    ));
     let det = trainer.infer_head_detail("I love fridays").expect("detail");
     assert_eq!(det.sentiment_probs.len(), 7);
     assert_eq!(det.aux_probs.len(), 6);
@@ -93,7 +107,12 @@ fn infer_head_with_embedding_matches_explicit_hash() {
         ..Default::default()
     };
     let mut trainer = GrowformerTrainer::with_config(curriculum, cfg);
-    trainer.add_node(GrowformerNode::new(NodeId::new(0), "parse", d, vec![0.15f32; d]));
+    trainer.add_node(GrowformerNode::new(
+        NodeId::new(0),
+        "parse",
+        d,
+        vec![0.15f32; d],
+    ));
     let text = "snow is cold";
     let emb = char_hash_embed(text, d);
     let a = trainer.infer_head_with_embedding(text, &emb).expect("a");
@@ -107,7 +126,12 @@ fn infer_head_batch_len_matches() {
     let curriculum = CurriculumScheduler::new(10, 20);
     let mut trainer = GrowformerTrainer::new(curriculum);
     let d = 12usize;
-    trainer.add_node(GrowformerNode::new(NodeId::new(0), "parse", d, vec![0.4f32; d]));
+    trainer.add_node(GrowformerNode::new(
+        NodeId::new(0),
+        "parse",
+        d,
+        vec![0.4f32; d],
+    ));
     let lines = ["a", "b c", "d e f"];
     let out = trainer.infer_head_batch(&lines);
     assert_eq!(out.len(), 3);

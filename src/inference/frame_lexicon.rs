@@ -37,7 +37,10 @@ struct RejectFrameRow {
 }
 
 fn cnf_groups_match(haystack: &str, groups: &[Vec<String>]) -> bool {
-    !groups.is_empty() && groups.iter().all(|or_alts| or_alts.iter().any(|p| haystack.contains(p)))
+    !groups.is_empty()
+        && groups
+            .iter()
+            .all(|or_alts| or_alts.iter().any(|p| haystack.contains(p)))
 }
 
 fn load_lexicon() -> FrameLexiconFile {
@@ -92,7 +95,9 @@ mod tests {
     #[test]
     fn etf_delay_frame_routes() {
         assert_eq!(
-            resolve_scenario_topic("Regulators shelved the spot BTC ETF again and Bitcoin slid on the open"),
+            resolve_scenario_topic(
+                "Regulators shelved the spot BTC ETF again and Bitcoin slid on the open"
+            ),
             Some("etf_delay_bearish".into())
         );
     }
@@ -100,7 +105,9 @@ mod tests {
     #[test]
     fn mortgage_frame_routes() {
         assert_eq!(
-            resolve_scenario_topic("Wells Fargo lifted my mortgage APR overnight with no email alert"),
+            resolve_scenario_topic(
+                "Wells Fargo lifted my mortgage APR overnight with no email alert"
+            ),
             Some("mortgage_rate_complaint".into())
         );
     }

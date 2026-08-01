@@ -13,17 +13,15 @@
 
 use std::collections::VecDeque;
 
-use rand::Rng;
 use rand::seq::SliceRandom;
+use rand::Rng;
 
 use crate::arc_agi::{
-    encode_grid, extract_rule, multivector_cosine_similarity,
-    Grid, ArcTask, NUM_COLORS,
-    find_objects, grid_exact_match,
-    most_common_color, content_bbox, find_enclosed_bbox, extract_subgrid,
-    apply_gravity, apply_symmetry, apply_connect_lines, apply_geometric,
-    scale_grid, tile_grid, downscale_grid, apply_mirror_tile, apply_fractal_tile,
-    FlowDiagnostic, flow_diagnostic,
+    apply_connect_lines, apply_fractal_tile, apply_geometric, apply_gravity, apply_mirror_tile,
+    apply_symmetry, content_bbox, downscale_grid, encode_grid, extract_rule, extract_subgrid,
+    find_enclosed_bbox, find_objects, flow_diagnostic, grid_exact_match, most_common_color,
+    multivector_cosine_similarity, scale_grid, tile_grid, ArcTask, FlowDiagnostic, Grid,
+    NUM_COLORS,
 };
 use crate::clifford::Multivector;
 
@@ -81,7 +79,9 @@ pub enum Op {
 // ─── Apply ─────────────────────────────────────────────────────────────────
 
 pub fn apply_op(grid: &Grid, op: &Op) -> Option<Grid> {
-    if grid.height == 0 || grid.width == 0 { return None; }
+    if grid.height == 0 || grid.width == 0 {
+        return None;
+    }
     match op {
         Op::HFlip => Some(apply_geometric(grid, 3)),
         Op::VFlip => Some(apply_geometric(grid, 4)),
@@ -94,7 +94,9 @@ pub fn apply_op(grid: &Grid, op: &Op) -> Option<Grid> {
             let mut g = grid.clone();
             for row in g.cells.iter_mut() {
                 for cell in row.iter_mut() {
-                    if *cell == *a { *cell = *b; }
+                    if *cell == *a {
+                        *cell = *b;
+                    }
                 }
             }
             Some(g)
@@ -103,8 +105,11 @@ pub fn apply_op(grid: &Grid, op: &Op) -> Option<Grid> {
             let mut g = grid.clone();
             for row in g.cells.iter_mut() {
                 for cell in row.iter_mut() {
-                    if *cell == *a { *cell = *b; }
-                    else if *cell == *b { *cell = *a; }
+                    if *cell == *a {
+                        *cell = *b;
+                    } else if *cell == *b {
+                        *cell = *a;
+                    }
                 }
             }
             Some(g)
@@ -154,8 +159,12 @@ pub fn apply_op(grid: &Grid, op: &Op) -> Option<Grid> {
             let mut g = grid.clone();
             for _ in 0..20 {
                 let next = apply_op(&g, inner)?;
-                if next.height != g.height || next.width != g.width { return None; }
-                if grid_exact_match(&next, &g) { break; }
+                if next.height != g.height || next.width != g.width {
+                    return None;
+                }
+                if grid_exact_match(&next, &g) {
+                    break;
+                }
                 g = next;
             }
             Some(g)
@@ -178,7 +187,11 @@ fn op_output_dims(ih: usize, iw: usize, op: &Op) -> Option<(usize, usize)> {
         Op::Scale(sr, sc) => Some((ih * sr, iw * sc)),
         Op::Tile(tr, tc) => Some((ih * tr, iw * tc)),
         Op::Downscale(sr, sc, _) => {
-            if ih % sr == 0 && iw % sc == 0 { Some((ih / sr, iw / sc)) } else { None }
+            if ih % sr == 0 && iw % sc == 0 {
+                Some((ih / sr, iw / sc))
+            } else {
+                None
+            }
         }
         Op::MirrorTile(mode) => match mode {
             0 | 3 => Some((ih * 2, iw * 2)),
@@ -245,14 +258,21 @@ fn fill_enclosed(grid: &Grid) -> Grid {
                     let nc = c as i32 + dc;
                     if nr >= 0 && nr < h as i32 && nc >= 0 && nc < w as i32 {
                         let v = grid.cells[nr as usize][nc as usize];
-                        if v != bg { fill_color = v; break; }
+                        if v != bg {
+                            fill_color = v;
+                            break;
+                        }
                     }
                 }
                 cells[r][c] = fill_color;
             }
         }
     }
-    Grid { cells, height: h, width: w }
+    Grid {
+        cells,
+        height: h,
+        width: w,
+    }
 }
 
 fn expand_non_bg(grid: &Grid) -> Grid {
@@ -263,18 +283,27 @@ fn expand_non_bg(grid: &Grid) -> Grid {
 
     for r in 0..h {
         for c in 0..w {
-            if grid.cells[r][c] != bg { continue; }
+            if grid.cells[r][c] != bg {
+                continue;
+            }
             for (dr, dc) in [(-1i32, 0), (1, 0), (0, -1), (0, 1)] {
                 let nr = r as i32 + dr;
                 let nc = c as i32 + dc;
                 if nr >= 0 && nr < h as i32 && nc >= 0 && nc < w as i32 {
                     let v = grid.cells[nr as usize][nc as usize];
-                    if v != bg { cells[r][c] = v; break; }
+                    if v != bg {
+                        cells[r][c] = v;
+                        break;
+                    }
                 }
             }
         }
     }
-    Grid { cells, height: h, width: w }
+    Grid {
+        cells,
+        height: h,
+        width: w,
+    }
 }
 
 fn erode_non_bg(grid: &Grid) -> Grid {
@@ -285,62 +314,123 @@ fn erode_non_bg(grid: &Grid) -> Grid {
 
     for r in 0..h {
         for c in 0..w {
-            if grid.cells[r][c] == bg { continue; }
-            let has_bg_neighbor = [(-1i32, 0), (1, 0), (0, -1i32), (0, 1)].iter().any(|(dr, dc)| {
-                let nr = r as i32 + dr;
-                let nc = c as i32 + dc;
-                if nr < 0 || nr >= h as i32 || nc < 0 || nc >= w as i32 { return true; }
-                grid.cells[nr as usize][nc as usize] == bg
-            });
-            if has_bg_neighbor { cells[r][c] = bg; }
+            if grid.cells[r][c] == bg {
+                continue;
+            }
+            let has_bg_neighbor =
+                [(-1i32, 0), (1, 0), (0, -1i32), (0, 1)]
+                    .iter()
+                    .any(|(dr, dc)| {
+                        let nr = r as i32 + dr;
+                        let nc = c as i32 + dc;
+                        if nr < 0 || nr >= h as i32 || nc < 0 || nc >= w as i32 {
+                            return true;
+                        }
+                        grid.cells[nr as usize][nc as usize] == bg
+                    });
+            if has_bg_neighbor {
+                cells[r][c] = bg;
+            }
         }
     }
-    Grid { cells, height: h, width: w }
+    Grid {
+        cells,
+        height: h,
+        width: w,
+    }
 }
 
 fn keep_color(grid: &Grid, color: u8) -> Grid {
     let bg = most_common_color(grid);
-    let cells = grid.cells.iter().map(|row|
-        row.iter().map(|&c| if c == color || c == bg { c } else { bg }).collect()
-    ).collect();
-    Grid { cells, height: grid.height, width: grid.width }
+    let cells = grid
+        .cells
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|&c| if c == color || c == bg { c } else { bg })
+                .collect()
+        })
+        .collect();
+    Grid {
+        cells,
+        height: grid.height,
+        width: grid.width,
+    }
 }
 
 fn remove_color(grid: &Grid, color: u8) -> Grid {
     let bg = most_common_color(grid);
-    let cells = grid.cells.iter().map(|row|
-        row.iter().map(|&c| if c == color { bg } else { c }).collect()
-    ).collect();
-    Grid { cells, height: grid.height, width: grid.width }
+    let cells = grid
+        .cells
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|&c| if c == color { bg } else { c })
+                .collect()
+        })
+        .collect();
+    Grid {
+        cells,
+        height: grid.height,
+        width: grid.width,
+    }
 }
 
 fn replace_background(grid: &Grid, new_bg: u8) -> Grid {
     let bg = most_common_color(grid);
-    if bg == new_bg { return grid.clone(); }
-    let cells = grid.cells.iter().map(|row|
-        row.iter().map(|&c| if c == bg { new_bg } else { c }).collect()
-    ).collect();
-    Grid { cells, height: grid.height, width: grid.width }
+    if bg == new_bg {
+        return grid.clone();
+    }
+    let cells = grid
+        .cells
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|&c| if c == bg { new_bg } else { c })
+                .collect()
+        })
+        .collect();
+    Grid {
+        cells,
+        height: grid.height,
+        width: grid.width,
+    }
 }
 
 fn keep_largest_obj(grid: &Grid) -> Grid {
     let bg = most_common_color(grid);
     let objects = find_objects(grid, bg);
-    if objects.is_empty() { return grid.clone(); }
+    if objects.is_empty() {
+        return grid.clone();
+    }
     let largest = objects.iter().max_by_key(|o| o.pixels.len()).unwrap();
     let mut cells = vec![vec![bg; grid.width]; grid.height];
-    for &(r, c) in &largest.pixels { cells[r][c] = largest.color; }
-    Grid { cells, height: grid.height, width: grid.width }
+    for &(r, c) in &largest.pixels {
+        cells[r][c] = largest.color;
+    }
+    Grid {
+        cells,
+        height: grid.height,
+        width: grid.width,
+    }
 }
 
 fn keep_smallest_obj(grid: &Grid) -> Grid {
     let bg = most_common_color(grid);
     let objects = find_objects(grid, bg);
-    if objects.is_empty() { return grid.clone(); }
+    if objects.is_empty() {
+        return grid.clone();
+    }
     let smallest = objects.iter().min_by_key(|o| o.pixels.len()).unwrap();
     let mut cells = vec![vec![bg; grid.width]; grid.height];
-    for &(r, c) in &smallest.pixels { cells[r][c] = smallest.color; }
-    Grid { cells, height: grid.height, width: grid.width }
+    for &(r, c) in &smallest.pixels {
+        cells[r][c] = smallest.color;
+    }
+    Grid {
+        cells,
+        height: grid.height,
+        width: grid.width,
+    }
 }
 
 fn outline_objects(grid: &Grid) -> Grid {
@@ -351,30 +441,46 @@ fn outline_objects(grid: &Grid) -> Grid {
 
     for r in 0..h {
         for c in 0..w {
-            if grid.cells[r][c] == bg { continue; }
-            let on_border = [(-1i32, 0), (1, 0), (0, -1i32), (0, 1)].iter().any(|(dr, dc)| {
-                let nr = r as i32 + dr;
-                let nc = c as i32 + dc;
-                if nr < 0 || nr >= h as i32 || nc < 0 || nc >= w as i32 { return true; }
-                grid.cells[nr as usize][nc as usize] == bg
-            });
-            if on_border { cells[r][c] = grid.cells[r][c]; }
+            if grid.cells[r][c] == bg {
+                continue;
+            }
+            let on_border = [(-1i32, 0), (1, 0), (0, -1i32), (0, 1)]
+                .iter()
+                .any(|(dr, dc)| {
+                    let nr = r as i32 + dr;
+                    let nc = c as i32 + dc;
+                    if nr < 0 || nr >= h as i32 || nc < 0 || nc >= w as i32 {
+                        return true;
+                    }
+                    grid.cells[nr as usize][nc as usize] == bg
+                });
+            if on_border {
+                cells[r][c] = grid.cells[r][c];
+            }
         }
     }
-    Grid { cells, height: h, width: w }
+    Grid {
+        cells,
+        height: h,
+        width: w,
+    }
 }
 
 fn crop_to_bbox(grid: &Grid) -> Option<Grid> {
     let bg = most_common_color(grid);
     let (r0, c0, bh, bw) = content_bbox(grid, bg)?;
-    if bh == 0 || bw == 0 || r0 + bh > grid.height || c0 + bw > grid.width { return None; }
+    if bh == 0 || bw == 0 || r0 + bh > grid.height || c0 + bw > grid.width {
+        return None;
+    }
     Some(extract_subgrid(grid, r0, c0, bh, bw))
 }
 
 fn crop_to_enclosed(grid: &Grid) -> Option<Grid> {
     let bg = most_common_color(grid);
     let (r0, c0, bh, bw) = find_enclosed_bbox(grid, bg)?;
-    if bh == 0 || bw == 0 || r0 + bh > grid.height || c0 + bw > grid.width { return None; }
+    if bh == 0 || bw == 0 || r0 + bh > grid.height || c0 + bw > grid.width {
+        return None;
+    }
     Some(extract_subgrid(grid, r0, c0, bh, bw))
 }
 
@@ -404,7 +510,9 @@ fn extract_obj_by_color(grid: &Grid, color: u8) -> Option<Grid> {
     let bg = most_common_color(grid);
     let objects = find_objects(grid, bg);
     let targets: Vec<_> = objects.iter().filter(|o| o.color == color).collect();
-    if targets.is_empty() { return None; }
+    if targets.is_empty() {
+        return None;
+    }
     let min_r = targets.iter().map(|o| o.min_r).min().unwrap();
     let max_r = targets.iter().map(|o| o.max_r).max().unwrap();
     let min_c = targets.iter().map(|o| o.min_c).min().unwrap();
@@ -420,9 +528,13 @@ fn extract_obj_by_color(grid: &Grid, color: u8) -> Option<Grid> {
 // ─── Parameter inference ───────────────────────────────────────────────────
 
 fn infer_color_map(task: &ArcTask) -> Option<[u8; NUM_COLORS]> {
-    if !task.train.iter().all(|ex|
-        ex.input.height == ex.output.height && ex.input.width == ex.output.width
-    ) { return None; }
+    if !task
+        .train
+        .iter()
+        .all(|ex| ex.input.height == ex.output.height && ex.input.width == ex.output.width)
+    {
+        return None;
+    }
 
     let mut map = [0xFFu8; NUM_COLORS];
     for ex in &task.train {
@@ -430,15 +542,22 @@ fn infer_color_map(task: &ArcTask) -> Option<[u8; NUM_COLORS]> {
             for c in 0..ex.input.width {
                 let ic = ex.input.cells[r][c] as usize;
                 let oc = ex.output.cells[r][c];
-                if map[ic] == 0xFF { map[ic] = oc; }
-                else if map[ic] != oc { return None; }
+                if map[ic] == 0xFF {
+                    map[ic] = oc;
+                } else if map[ic] != oc {
+                    return None;
+                }
             }
         }
     }
     for i in 0..NUM_COLORS {
-        if map[i] == 0xFF { map[i] = i as u8; }
+        if map[i] == 0xFF {
+            map[i] = i as u8;
+        }
     }
-    if (0..NUM_COLORS).all(|i| map[i] == i as u8) { return None; }
+    if (0..NUM_COLORS).all(|i| map[i] == i as u8) {
+        return None;
+    }
     Some(map)
 }
 
@@ -456,8 +575,12 @@ fn generate_candidates(task: &ArcTask) -> Vec<Op> {
     ops.push(Op::Transpose);
 
     // Gravity, symmetry
-    for d in 0..4u8 { ops.push(Op::Gravity(d)); }
-    for a in 0..4u8 { ops.push(Op::SymmetryComplete(a)); }
+    for d in 0..4u8 {
+        ops.push(Op::Gravity(d));
+    }
+    for a in 0..4u8 {
+        ops.push(Op::SymmetryComplete(a));
+    }
     ops.push(Op::ConnectLines);
     ops.push(Op::FillEnclosed);
     ops.push(Op::ExpandNonBg);
@@ -477,14 +600,26 @@ fn generate_candidates(task: &ArcTask) -> Vec<Op> {
     // Color operations — use colors actually present in the task
     let mut all_colors = [false; NUM_COLORS];
     for ex in &task.train {
-        for row in &ex.input.cells { for &v in row { all_colors[v as usize] = true; } }
-        for row in &ex.output.cells { for &v in row { all_colors[v as usize] = true; } }
+        for row in &ex.input.cells {
+            for &v in row {
+                all_colors[v as usize] = true;
+            }
+        }
+        for row in &ex.output.cells {
+            for &v in row {
+                all_colors[v as usize] = true;
+            }
+        }
     }
-    let palette: Vec<u8> = (0..NUM_COLORS as u8).filter(|&c| all_colors[c as usize]).collect();
+    let palette: Vec<u8> = (0..NUM_COLORS as u8)
+        .filter(|&c| all_colors[c as usize])
+        .collect();
 
     for &a in &palette {
         for &b in &palette {
-            if a != b { ops.push(Op::ColorSub(a, b)); }
+            if a != b {
+                ops.push(Op::ColorSub(a, b));
+            }
         }
     }
     for i in 0..palette.len() {
@@ -527,16 +662,23 @@ fn generate_candidates(task: &ArcTask) -> Vec<Op> {
             let sc = iw / ow;
             if sr >= 2 && sc >= 2 && !added_scale.contains(&(sr, sc, 1)) {
                 added_scale.insert((sr, sc, 1));
-                for method in 0..3u8 { ops.push(Op::Downscale(sr, sc, method)); }
+                for method in 0..3u8 {
+                    ops.push(Op::Downscale(sr, sc, method));
+                }
             }
         }
     }
     // Common scale factors
     for f in 2usize..=4 {
-        if !added_scale.contains(&(f, f, 0)) { ops.push(Op::Scale(f, f)); ops.push(Op::Tile(f, f)); }
+        if !added_scale.contains(&(f, f, 0)) {
+            ops.push(Op::Scale(f, f));
+            ops.push(Op::Tile(f, f));
+        }
     }
 
-    for mode in 0..4u8 { ops.push(Op::MirrorTile(mode)); }
+    for mode in 0..4u8 {
+        ops.push(Op::MirrorTile(mode));
+    }
     ops.push(Op::FractalTile);
 
     // RepeatUntilStable wrapping same-dim ops
@@ -567,7 +709,9 @@ fn validate_program_on_training(task: &ArcTask, program: &[&Op]) -> bool {
                 None => return false,
             }
         }
-        if !grid_exact_match(&g, &ex.output) { return false; }
+        if !grid_exact_match(&g, &ex.output) {
+            return false;
+        }
     }
     true
 }
@@ -587,11 +731,7 @@ pub fn dsl_op_reference_grid() -> Grid {
     Grid {
         height: 3,
         width: 3,
-        cells: vec![
-            vec![1, 2, 3],
-            vec![4, 5, 6],
-            vec![7, 8, 9],
-        ],
+        cells: vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]],
     }
 }
 
@@ -625,7 +765,11 @@ fn clifford_op_hint_score_with_consensus(consensus: &Multivector, op: &Op) -> f3
         None => return 0.0,
     };
     let c = multivector_cosine_similarity(consensus, &sig);
-    if c.is_finite() { c } else { 0.0 }
+    if c.is_finite() {
+        c
+    } else {
+        0.0
+    }
 }
 
 /// Cosine similarity between training rule consensus and the op’s reference signature.
@@ -647,7 +791,9 @@ pub fn dsl_solve_with_flow(
     task: &ArcTask,
     flow: Option<&FlowDiagnostic>,
 ) -> Option<(Vec<Grid>, &'static str)> {
-    if task.train.is_empty() || task.test.is_empty() { return None; }
+    if task.train.is_empty() || task.test.is_empty() {
+        return None;
+    }
 
     let oh = task.train[0].output.height;
     let ow = task.train[0].output.width;
@@ -679,7 +825,9 @@ pub fn dsl_solve_with_flow(
     let mut best: Option<(f32, Vec<Grid>)> = None;
     for op in &candidates {
         if let Some(pred_dims) = op_output_dims(ih, iw, op) {
-            if pred_dims.0 != oh || pred_dims.1 != ow { continue; }
+            if pred_dims.0 != oh || pred_dims.1 != ow {
+                continue;
+            }
         }
         if validate_program_on_training(task, &[op]) {
             if let Some(predictions) = predict_test(task, &[op]) {
@@ -699,7 +847,9 @@ pub fn dsl_solve_with_flow(
     let step2_final: Vec<usize> = (0..candidates.len()).collect();
 
     for (i, op1) in candidates.iter().enumerate() {
-        if start.elapsed() > budget_d2 { break; }
+        if start.elapsed() > budget_d2 {
+            break;
+        }
 
         let mid_dims = op_output_dims(ih, iw, op1);
         let actual_mid = if mid_dims.is_none() {
@@ -714,9 +864,13 @@ pub fn dsl_solve_with_flow(
 
         for &j in &step2_final {
             if let Some(pred_dims) = op_output_dims(mh, mw, &candidates[j]) {
-                if pred_dims.0 != oh || pred_dims.1 != ow { continue; }
+                if pred_dims.0 != oh || pred_dims.1 != ow {
+                    continue;
+                }
             }
-            if i == j && is_self_inverse(&candidates[i]) { continue; }
+            if i == j && is_self_inverse(&candidates[i]) {
+                continue;
+            }
 
             if validate_program_on_training(task, &[&candidates[i], &candidates[j]]) {
                 let predictions = predict_test(task, &[&candidates[i], &candidates[j]])?;
@@ -726,24 +880,30 @@ pub fn dsl_solve_with_flow(
     }
 
     // ── Depth 3 (structural ops only at middle, strict pruning) ──
-    let structural_indices: Vec<usize> = candidates.iter().enumerate()
+    let structural_indices: Vec<usize> = candidates
+        .iter()
+        .enumerate()
         .filter(|(_, op)| is_structural_op(op))
         .map(|(i, _)| i)
         .collect();
 
     for &i in &structural_indices {
-        if start.elapsed() > budget_d3 { break; }
+        if start.elapsed() > budget_d3 {
+            break;
+        }
 
-        let mid1 = op_output_dims(ih, iw, &candidates[i]).or_else(||
+        let mid1 = op_output_dims(ih, iw, &candidates[i]).or_else(|| {
             apply_op(&task.train[0].input, &candidates[i]).map(|g| (g.height, g.width))
-        );
+        });
         let (m1h, m1w) = match mid1 {
             Some(d) if d.0 > 0 && d.1 > 0 && d.0 <= 60 && d.1 <= 60 => d,
             _ => continue,
         };
 
         for &j in &structural_indices {
-            if start.elapsed() > budget_d3 { break; }
+            if start.elapsed() > budget_d3 {
+                break;
+            }
 
             let mid2 = match op_output_dims(m1h, m1w, &candidates[j]) {
                 Some(d) if d.0 > 0 && d.1 > 0 && d.0 <= 60 && d.1 <= 60 => d,
@@ -752,10 +912,16 @@ pub fn dsl_solve_with_flow(
 
             for &k in &step2_final {
                 if let Some(pred_dims) = op_output_dims(mid2.0, mid2.1, &candidates[k]) {
-                    if pred_dims.0 != oh || pred_dims.1 != ow { continue; }
+                    if pred_dims.0 != oh || pred_dims.1 != ow {
+                        continue;
+                    }
                 }
-                if validate_program_on_training(task, &[&candidates[i], &candidates[j], &candidates[k]]) {
-                    let predictions = predict_test(task, &[&candidates[i], &candidates[j], &candidates[k]])?;
+                if validate_program_on_training(
+                    task,
+                    &[&candidates[i], &candidates[j], &candidates[k]],
+                ) {
+                    let predictions =
+                        predict_test(task, &[&candidates[i], &candidates[j], &candidates[k]])?;
                     return Some((predictions, "dsl_d3"));
                 }
             }
@@ -775,26 +941,32 @@ fn predict_test(task: &ArcTask, program: &[&Op]) -> Option<Vec<Grid>> {
 
 // ─── A* program search (Clifford-guided) ────────────────────────────────────
 
-use std::collections::BinaryHeap;
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 
 struct AstarNode {
     program: Vec<usize>,
-    grids: Vec<Grid>,     // current grid per training example after applying program
-    g: f32,               // cost = program length
-    h: f32,               // heuristic = mean Clifford distance to target
+    grids: Vec<Grid>, // current grid per training example after applying program
+    g: f32,           // cost = program length
+    h: f32,           // heuristic = mean Clifford distance to target
 }
 
 impl AstarNode {
-    fn f(&self) -> f32 { self.g + 2.0 * self.h }
+    fn f(&self) -> f32 {
+        self.g + 2.0 * self.h
+    }
 }
 
 impl PartialEq for AstarNode {
-    fn eq(&self, other: &Self) -> bool { self.f().to_bits() == other.f().to_bits() }
+    fn eq(&self, other: &Self) -> bool {
+        self.f().to_bits() == other.f().to_bits()
+    }
 }
 impl Eq for AstarNode {}
 impl PartialOrd for AstarNode {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 impl Ord for AstarNode {
     fn cmp(&self, other: &Self) -> Ordering {
@@ -803,7 +975,9 @@ impl Ord for AstarNode {
 }
 
 fn clifford_distance_to_targets(grids: &[Grid], targets: &[Grid]) -> f32 {
-    if grids.len() != targets.len() || grids.is_empty() { return f32::MAX; }
+    if grids.len() != targets.len() || grids.is_empty() {
+        return f32::MAX;
+    }
     let mut total = 0.0f32;
     for (g, t) in grids.iter().zip(targets.iter()) {
         if g.height != t.height || g.width != t.width {
@@ -820,8 +994,14 @@ fn clifford_distance_to_targets(grids: &[Grid], targets: &[Grid]) -> f32 {
 
 /// A* search through DSL program space, using Clifford distance as heuristic.
 /// Returns (predictions_for_test, strategy_label) if a program is found.
-pub fn astar_dsl_solve(task: &ArcTask, max_depth: usize, budget_ms: u64) -> Option<(Vec<Grid>, &'static str)> {
-    if task.train.is_empty() || task.test.is_empty() { return None; }
+pub fn astar_dsl_solve(
+    task: &ArcTask,
+    max_depth: usize,
+    budget_ms: u64,
+) -> Option<(Vec<Grid>, &'static str)> {
+    if task.train.is_empty() || task.test.is_empty() {
+        return None;
+    }
 
     let candidates = generate_candidates(task);
     let targets: Vec<&Grid> = task.train.iter().map(|ex| &ex.output).collect();
@@ -844,15 +1024,21 @@ pub fn astar_dsl_solve(task: &ArcTask, max_depth: usize, budget_ms: u64) -> Opti
     let max_expand = 50_000u64;
 
     while let Some(node) = heap.pop() {
-        if start.elapsed() > budget || expanded > max_expand { break; }
+        if start.elapsed() > budget || expanded > max_expand {
+            break;
+        }
         expanded += 1;
 
-        if node.program.len() >= max_depth { continue; }
+        if node.program.len() >= max_depth {
+            continue;
+        }
 
         for (i, op) in candidates.iter().enumerate() {
             // Skip no-ops (same op twice if self-inverse)
             if let Some(&last) = node.program.last() {
-                if last == i && is_self_inverse(&candidates[last]) { continue; }
+                if last == i && is_self_inverse(&candidates[last]) {
+                    continue;
+                }
             }
 
             // Apply op to all training grids
@@ -863,17 +1049,25 @@ pub fn astar_dsl_solve(task: &ArcTask, max_depth: usize, budget_ms: u64) -> Opti
             for (j, g) in node.grids.iter().enumerate() {
                 match apply_op(g, op) {
                     Some(ng) => {
-                        if !grid_exact_match(&ng, &target_grids[j]) { all_match = false; }
+                        if !grid_exact_match(&ng, &target_grids[j]) {
+                            all_match = false;
+                        }
                         next_grids.push(ng);
                     }
-                    None => { all_ok = false; break; }
+                    None => {
+                        all_ok = false;
+                        break;
+                    }
                 }
             }
-            if !all_ok { continue; }
+            if !all_ok {
+                continue;
+            }
 
             // Goal check: all training examples match
             if all_match {
-                let mut prog_refs: Vec<&Op> = node.program.iter().map(|&idx| &candidates[idx]).collect();
+                let mut prog_refs: Vec<&Op> =
+                    node.program.iter().map(|&idx| &candidates[idx]).collect();
                 prog_refs.push(op);
                 if let Some(preds) = predict_test(task, &prog_refs) {
                     let label = match prog_refs.len() {
@@ -912,32 +1106,52 @@ pub fn astar_dsl_solve(task: &ArcTask, max_depth: usize, budget_ms: u64) -> Opti
 }
 
 fn is_self_inverse(op: &Op) -> bool {
-    matches!(op,
-        Op::HFlip | Op::VFlip | Op::Rot180 |
-        Op::SwapColors(..) | Op::ConnectLines
+    matches!(
+        op,
+        Op::HFlip | Op::VFlip | Op::Rot180 | Op::SwapColors(..) | Op::ConnectLines
     )
 }
 
 /// Structural ops: geometric, gravity, symmetry, object — excludes color parametric variants
 /// to keep depth-3 search tractable.
 fn is_structural_op(op: &Op) -> bool {
-    matches!(op,
-        Op::HFlip | Op::VFlip | Op::Rot90CW | Op::Rot90CCW | Op::Rot180 | Op::Transpose |
-        Op::Gravity(..) | Op::SymmetryComplete(..) | Op::ConnectLines |
-        Op::FillEnclosed | Op::ExpandNonBg | Op::ErodeNonBg |
-        Op::KeepLargestObj | Op::KeepSmallestObj | Op::OutlineObjects |
-        Op::CropToBBox | Op::CropToEnclosed |
-        Op::ExtractLargestObj | Op::ExtractSmallestObj |
-        Op::MapColors(..) | Op::RepeatUntilStable(..)
+    matches!(
+        op,
+        Op::HFlip
+            | Op::VFlip
+            | Op::Rot90CW
+            | Op::Rot90CCW
+            | Op::Rot180
+            | Op::Transpose
+            | Op::Gravity(..)
+            | Op::SymmetryComplete(..)
+            | Op::ConnectLines
+            | Op::FillEnclosed
+            | Op::ExpandNonBg
+            | Op::ErodeNonBg
+            | Op::KeepLargestObj
+            | Op::KeepSmallestObj
+            | Op::OutlineObjects
+            | Op::CropToBBox
+            | Op::CropToEnclosed
+            | Op::ExtractLargestObj
+            | Op::ExtractSmallestObj
+            | Op::MapColors(..)
+            | Op::RepeatUntilStable(..)
     )
 }
 
 #[allow(dead_code)]
 fn is_cheap_op(op: &Op) -> bool {
-    is_structural_op(op) || matches!(op,
-        Op::ColorSub(..) | Op::SwapColors(..) |
-        Op::KeepColor(..) | Op::RemoveColor(..) | Op::ReplaceBackground(..)
-    )
+    is_structural_op(op)
+        || matches!(
+            op,
+            Op::ColorSub(..)
+                | Op::SwapColors(..)
+                | Op::KeepColor(..)
+                | Op::RemoveColor(..)
+                | Op::ReplaceBackground(..)
+        )
 }
 
 /// Classify ops into spatial (rotation-plane) vs causal (boost-plane) families.
@@ -945,26 +1159,32 @@ fn is_cheap_op(op: &Op) -> bool {
 fn op_spatial_affinity(op: &Op) -> f32 {
     match op {
         // Purely geometric — rotation-plane transformations
-        Op::HFlip | Op::VFlip | Op::Rot90CW | Op::Rot90CCW |
-        Op::Rot180 | Op::Transpose => 1.0,
+        Op::HFlip | Op::VFlip | Op::Rot90CW | Op::Rot90CCW | Op::Rot180 | Op::Transpose => 1.0,
         Op::Gravity(..) | Op::SymmetryComplete(..) => 0.8,
-        Op::Scale(..) | Op::Tile(..) | Op::Downscale(..) |
-        Op::MirrorTile(..) | Op::FractalTile => 0.7,
+        Op::Scale(..) | Op::Tile(..) | Op::Downscale(..) | Op::MirrorTile(..) | Op::FractalTile => {
+            0.7
+        }
         Op::ConnectLines => 0.5,
 
         // Object extraction — mixed but spatially oriented
-        Op::CropToBBox | Op::CropToEnclosed |
-        Op::ExtractLargestObj | Op::ExtractSmallestObj |
-        Op::KeepLargestObj | Op::KeepSmallestObj => 0.3,
+        Op::CropToBBox
+        | Op::CropToEnclosed
+        | Op::ExtractLargestObj
+        | Op::ExtractSmallestObj
+        | Op::KeepLargestObj
+        | Op::KeepSmallestObj => 0.3,
         Op::ExtractObjByColor(..) => 0.1,
 
         // Purely color — boost-plane transformations
-        Op::ColorSub(..) | Op::SwapColors(..) | Op::MapColors(..) |
-        Op::KeepColor(..) | Op::RemoveColor(..) | Op::ReplaceBackground(..) => -1.0,
+        Op::ColorSub(..)
+        | Op::SwapColors(..)
+        | Op::MapColors(..)
+        | Op::KeepColor(..)
+        | Op::RemoveColor(..)
+        | Op::ReplaceBackground(..) => -1.0,
 
         // Morphological — mixed
-        Op::FillEnclosed | Op::ExpandNonBg | Op::ErodeNonBg |
-        Op::OutlineObjects => 0.0,
+        Op::FillEnclosed | Op::ExpandNonBg | Op::ErodeNonBg | Op::OutlineObjects => 0.0,
 
         Op::RepeatUntilStable(inner) => op_spatial_affinity(inner) * 0.9,
     }
@@ -974,7 +1194,9 @@ fn op_spatial_affinity(op: &Op) -> f32 {
 /// spatial_bias > 0 → prefer geometric ops; < 0 → prefer color ops.
 fn reorder_by_flow(candidates: &mut Vec<Op>, flow: &FlowDiagnostic) {
     let bias = flow.spatial_bias();
-    if bias.abs() < 0.05 { return; }
+    if bias.abs() < 0.05 {
+        return;
+    }
 
     candidates.sort_by(|a, b| {
         let sa = op_spatial_affinity(a) * bias;
@@ -1001,7 +1223,10 @@ fn train_grids_all_match(grids: &[Grid], task: &ArcTask) -> bool {
     if grids.len() != task.train.len() {
         return false;
     }
-    grids.iter().zip(task.train.iter()).all(|(g, ex)| grid_exact_match(g, &ex.output))
+    grids
+        .iter()
+        .zip(task.train.iter())
+        .all(|(g, ex)| grid_exact_match(g, &ex.output))
 }
 
 fn mcts_label(depth: usize) -> &'static str {
@@ -1022,7 +1247,12 @@ fn mcts_ucb_value(node: &MctsNode, parent_visits: u32, exploration: f32) -> f32 
     mean + bonus
 }
 
-fn mcts_pick_child(arena: &[MctsNode], parent_idx: usize, exploration: f32, rng: &mut impl Rng) -> usize {
+fn mcts_pick_child(
+    arena: &[MctsNode],
+    parent_idx: usize,
+    exploration: f32,
+    rng: &mut impl Rng,
+) -> usize {
     let children = &arena[parent_idx].children;
     let pv = arena[parent_idx].visits.max(1);
     let mut best = children[0];
@@ -1336,22 +1566,38 @@ pub fn mcts_dsl_solve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arc_agi::{encode_grid, extract_rule, multivector_cosine_similarity, Grid, ArcTask, ArcExample, FlowDiagnostic};
+    use crate::arc_agi::{
+        encode_grid, extract_rule, multivector_cosine_similarity, ArcExample, ArcTask,
+        FlowDiagnostic, Grid,
+    };
 
     fn make_grid(cells: Vec<Vec<u8>>) -> Grid {
         let height = cells.len();
         let width = if height > 0 { cells[0].len() } else { 0 };
-        Grid { cells, height, width }
+        Grid {
+            cells,
+            height,
+            width,
+        }
     }
 
-    fn make_task(train: Vec<(Vec<Vec<u8>>, Vec<Vec<u8>>)>, test_in: Vec<Vec<u8>>, test_out: Vec<Vec<u8>>) -> ArcTask {
+    fn make_task(
+        train: Vec<(Vec<Vec<u8>>, Vec<Vec<u8>>)>,
+        test_in: Vec<Vec<u8>>,
+        test_out: Vec<Vec<u8>>,
+    ) -> ArcTask {
         ArcTask {
             id: "test".to_string(),
-            train: train.into_iter().map(|(i, o)| ArcExample {
-                input: make_grid(i), output: make_grid(o),
-            }).collect(),
+            train: train
+                .into_iter()
+                .map(|(i, o)| ArcExample {
+                    input: make_grid(i),
+                    output: make_grid(o),
+                })
+                .collect(),
             test: vec![ArcExample {
-                input: make_grid(test_in), output: make_grid(test_out),
+                input: make_grid(test_in),
+                output: make_grid(test_out),
             }],
         }
     }
@@ -1401,11 +1647,20 @@ mod tests {
     #[ignore]
     #[test]
     fn geometric_ops_have_positive_affinity() {
-        let geos = [Op::HFlip, Op::VFlip, Op::Rot90CW, Op::Rot90CCW,
-                     Op::Rot180, Op::Transpose];
+        let geos = [
+            Op::HFlip,
+            Op::VFlip,
+            Op::Rot90CW,
+            Op::Rot90CCW,
+            Op::Rot180,
+            Op::Transpose,
+        ];
         for op in &geos {
-            assert!(op_spatial_affinity(op) > 0.0,
-                "{:?} should have positive spatial affinity", op);
+            assert!(
+                op_spatial_affinity(op) > 0.0,
+                "{:?} should have positive spatial affinity",
+                op
+            );
         }
     }
 
@@ -1413,23 +1668,38 @@ mod tests {
     #[test]
     fn color_ops_have_negative_affinity() {
         let colors = [
-            Op::ColorSub(1, 2), Op::SwapColors(1, 2),
+            Op::ColorSub(1, 2),
+            Op::SwapColors(1, 2),
             Op::MapColors([0; NUM_COLORS]),
-            Op::KeepColor(1), Op::RemoveColor(1), Op::ReplaceBackground(1),
+            Op::KeepColor(1),
+            Op::RemoveColor(1),
+            Op::ReplaceBackground(1),
         ];
         for op in &colors {
-            assert!(op_spatial_affinity(op) < 0.0,
-                "{:?} should have negative spatial affinity", op);
+            assert!(
+                op_spatial_affinity(op) < 0.0,
+                "{:?} should have negative spatial affinity",
+                op
+            );
         }
     }
 
     #[ignore]
     #[test]
     fn morphological_ops_are_neutral() {
-        let morphs = [Op::FillEnclosed, Op::ExpandNonBg, Op::ErodeNonBg, Op::OutlineObjects];
+        let morphs = [
+            Op::FillEnclosed,
+            Op::ExpandNonBg,
+            Op::ErodeNonBg,
+            Op::OutlineObjects,
+        ];
         for op in &morphs {
-            assert_eq!(op_spatial_affinity(op), 0.0,
-                "{:?} should have zero spatial affinity", op);
+            assert_eq!(
+                op_spatial_affinity(op),
+                0.0,
+                "{:?} should have zero spatial affinity",
+                op
+            );
         }
     }
 
@@ -1438,7 +1708,10 @@ mod tests {
     fn repeat_until_stable_inherits_inner_affinity() {
         let inner = Op::FillEnclosed;
         let wrapped = Op::RepeatUntilStable(Box::new(inner.clone()));
-        assert_eq!(op_spatial_affinity(&wrapped), op_spatial_affinity(&inner) * 0.9);
+        assert_eq!(
+            op_spatial_affinity(&wrapped),
+            op_spatial_affinity(&inner) * 0.9
+        );
 
         let geo_inner = Op::Gravity(0);
         let geo_wrapped = Op::RepeatUntilStable(Box::new(geo_inner.clone()));
@@ -1459,10 +1732,15 @@ mod tests {
         let flow = flow_rotation_dominated();
         reorder_by_flow(&mut ops, &flow);
 
-        assert!(op_spatial_affinity(&ops[0]) >= op_spatial_affinity(&ops[1]),
-            "first op should have highest spatial affinity after rotation-flow reorder");
-        assert!(matches!(ops[0], Op::HFlip | Op::Rot90CW),
-            "geometric ops should lead after rotation-flow reorder, got {:?}", ops[0]);
+        assert!(
+            op_spatial_affinity(&ops[0]) >= op_spatial_affinity(&ops[1]),
+            "first op should have highest spatial affinity after rotation-flow reorder"
+        );
+        assert!(
+            matches!(ops[0], Op::HFlip | Op::Rot90CW),
+            "geometric ops should lead after rotation-flow reorder, got {:?}",
+            ops[0]
+        );
     }
 
     #[ignore]
@@ -1477,8 +1755,11 @@ mod tests {
         let flow = flow_boost_dominated();
         reorder_by_flow(&mut ops, &flow);
 
-        assert!(matches!(ops[0], Op::ColorSub(..) | Op::RemoveColor(..)),
-            "color ops should lead after boost-flow reorder, got {:?}", ops[0]);
+        assert!(
+            matches!(ops[0], Op::ColorSub(..) | Op::RemoveColor(..)),
+            "color ops should lead after boost-flow reorder, got {:?}",
+            ops[0]
+        );
     }
 
     #[ignore]
@@ -1529,10 +1810,14 @@ mod tests {
     #[ignore]
     #[test]
     fn apply_op_empty_grid_returns_none() {
-        let g = Grid { cells: vec![], height: 0, width: 0 };
+        let g = Grid {
+            cells: vec![],
+            height: 0,
+            width: 0,
+        };
         assert!(apply_op(&g, &Op::HFlip).is_none());
     }
-    
+
     #[ignore]
     #[test]
     fn apply_op_color_sub() {
@@ -1631,14 +1916,23 @@ mod tests {
         // No single program can satisfy both.
         let task = make_task(
             vec![
-                (vec![vec![1, 2, 3], vec![4, 5, 6]], vec![vec![6, 2, 1], vec![3, 5, 4]]),
-                (vec![vec![1, 2, 3], vec![4, 5, 6]], vec![vec![4, 5, 6], vec![1, 2, 3]]),
+                (
+                    vec![vec![1, 2, 3], vec![4, 5, 6]],
+                    vec![vec![6, 2, 1], vec![3, 5, 4]],
+                ),
+                (
+                    vec![vec![1, 2, 3], vec![4, 5, 6]],
+                    vec![vec![4, 5, 6], vec![1, 2, 3]],
+                ),
             ],
             vec![vec![7, 8, 9], vec![1, 2, 3]],
             vec![vec![0, 0, 0], vec![0, 0, 0]],
         );
         let result = dsl_solve(&task);
-        assert!(result.is_none(), "DSL should return None for inconsistent mapping");
+        assert!(
+            result.is_none(),
+            "DSL should return None for inconsistent mapping"
+        );
     }
 
     #[ignore]
@@ -1659,8 +1953,12 @@ mod tests {
     fn op_output_dims_geometric_preserve_size() {
         let same_dim_ops = [Op::HFlip, Op::VFlip, Op::Rot180];
         for op in &same_dim_ops {
-            assert_eq!(op_output_dims(5, 7, op), Some((5, 7)),
-                "{:?} should preserve dims", op);
+            assert_eq!(
+                op_output_dims(5, 7, op),
+                Some((5, 7)),
+                "{:?} should preserve dims",
+                op
+            );
         }
     }
 
