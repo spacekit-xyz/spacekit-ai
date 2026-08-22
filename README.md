@@ -10,6 +10,7 @@
 | [`docs/GROWFORMER_WHITEPAPER.md`](docs/GROWFORMER_WHITEPAPER.md) | Technical and reproducibility companion — detailed protocols, internal experiment labels, artifacts, and deployment appendices |
 | [`USE_CASES.md`](USE_CASES.md) | Where the substrate wins, emergent architectures, continual learning, edge deployment, explainability (uses “Neuro” naming for the same system) |
 | [`DOCKER.md`](DOCKER.md) | Linux amd64 builds (`build-linux.sh`), Docker image, cloud VM deployment |
+| [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Release performance harness, scientific reproduction suites, and the required matched-baseline protocol |
 | [`src/category/README.md`](src/category/README.md) | Categorical DAG + Pythagoras trainer (`--features categorical`) |
 | [`pkg/README.md`](pkg/README.md) | `wasm-pack` output, browser/WASM consumer notes |
 
@@ -17,7 +18,11 @@
 
 - **Project manifests** — [`scripts/*.gf.toml`](scripts/) (sentiment, fintech, crypto, code, causal); parser in `src/project_gf.rs`
 - **Runnable examples** — [`examples/`](examples/) (fragment compose/decompose, reflective/drive/basal A/B, categorical sentiment train)
-- **Benchmark scripts** — [`scripts/benchmark_language.sh`](scripts/benchmark_language.sh), [`scripts/benchmark_core_tasks.sh`](scripts/benchmark_core_tasks.sh)
+- **Benchmark scripts** — release performance:
+  [`scripts/benchmark_language.sh`](scripts/benchmark_language.sh) and
+  [`scripts/benchmark_core_tasks.sh`](scripts/benchmark_core_tasks.sh);
+  fixed-gate scientific reproduction:
+  [`scripts/benchmark_science.sh`](scripts/benchmark_science.sh)
 
 ---
 
@@ -269,12 +274,14 @@ Brains ship as versioned binary packages (`brain.rs`):
 - Optional outer magic `GWFCMPKG`, format v1: versioned gzip envelope around an unchanged v1/v2 package
 - Parsed on `LanguageService::load_brain`; plugins manifest → `InferenceHarness`
 - `LanguageService::export_brain_compressed` and `Runtime::export_brain_compressed` emit compressed packages when the `brain-compression` feature is enabled
+- Native `load_brain_from_path` / `export_brain_to_path` APIs parse and serialize checkpoints through bounded readers/writers instead of buffering the complete artifact
 - Existing uncompressed packages and legacy raw JSON checkpoints remain readable
 
-The outer envelope is owned and versioned by Growformer; compression is
-provided by the shared `spacekit-compressor` library. Brain packages use only
-its Binary/gzip mode—text-pattern substitution never touches checkpoints,
-router prototypes, or model representations.
+The outer envelope and gzip implementation are owned and versioned by
+Growformer. Compression uses the optional, pure-Rust `flate2` dependency;
+text-pattern substitution never touches checkpoints, router prototypes, or
+model representations. The crate therefore builds without a sibling SpaceKit
+checkout.
 
 Lean inference without the full training CLI:
 
@@ -286,6 +293,18 @@ Lean inference without the full training CLI:
 The default feature set includes `brain-compression`. A lean runtime built with
 `--no-default-features` reads uncompressed packages; add
 `--features brain-compression` when it must read `GWFCMPKG` files.
+
+Native brain I/O defaults to a 1 GiB file and decoded-size limit. The HTTP node
+accepts `GROWFORMER_MAX_BRAIN_FILE_BYTES` and
+`GROWFORMER_MAX_BRAIN_DECODED_BYTES` as positive byte counts when a deployment
+needs a different ceiling. Compressed input is bounded while gzip is decoded,
+before the declared output can exhaust memory or disk.
+
+Streaming preserves the existing package formats and substantially lowers
+native load/export and network-transfer peaks. It does not make the current
+JSON `DimensionManager` lazy: the complete deserialized model remains resident.
+The wasm-bindgen API also still receives one contiguous `Uint8Array`. A future
+package version is required for independently loadable specialists.
 
 ### Categorical Training (optional)
 
@@ -736,6 +755,12 @@ Growformer Node (HTTP dev server):
   - `curl -X POST http://127.0.0.1:8080/v1/chat -H "Content-Type: application/json" -d '{"mode":"codegen","message":"implement a web server in rust","options":{"include_raw_stdout":false}}'`
 - SSE chat stream:
   - `curl -N -X POST http://127.0.0.1:8080/v1/chat/stream -H "Content-Type: application/json" -d '{"mode":"codegen","message":"implement a web server in rust"}'`
+- Stream the active brain without assembling an HTTP response buffer:
+  - `curl -fSLo brain.bin http://127.0.0.1:8080/v1/brain/export`
+  - Add `?brain=user-a&compressed=true` to select and gzip-wrap a named brain.
+  - When `GROWFORMER_NODE_TOKEN` is configured, include `-H "Authorization: Bearer $GROWFORMER_NODE_TOKEN"`.
+- Save atomically on the node filesystem:
+  - `curl -X POST http://127.0.0.1:8080/v1/brain/save -H "Content-Type: application/json" -d '{"path":"brain.bin","compressed":true}'`
 - Runtime note:
   - `growformer-node` now calls Growformer as a shared library in-process (no CLI subprocess per request).
 
@@ -749,8 +774,9 @@ You can load several trained brains and switch between them. Each brain is a **f
   - **Multiple brains:** `GROWFORMER_BRAIN_DIR=micro-brains` — loads every `*.bin` in that directory; each file is registered under its stem (e.g. `my-brain.bin` → `"my-brain"`, `user-a-brain.bin` → `"user-a"`). The first name (alphabetically) is set active at startup.
 - **API:**
   - `GET /v1/brains` — returns `{ "brains": ["default", "my-brain", "user-a"], "active": "my-brain" }`.
+  - `GET /v1/brain/export?brain=user-a&compressed=true` — streams a selected checkpoint as an opaque `.bin` artifact.
   - In `POST /v1/chat`, optional body field `"brain": "user-a"` — uses that checkpoint for the request and sets it active for subsequent requests until changed.
-- **Library:** `LanguageService` has `load_brain(data)` (single default), `load_brain_as(name, data)` (additional named checkpoint), `list_brains()`, `set_active_brain(name)`, and `active_dm()` for inspection. Inference (action, generation, codegen) always uses the active checkpoint.
+- **Library:** `LanguageService` has byte-compatible `load_brain(data)` / `load_brain_as(name, data)` plus native streaming `load_brain_from_path` / `load_brain_as_from_path`, `list_brains()`, `set_active_brain(name)`, and `active_dm()` for inspection. Inference (action, generation, codegen) always uses the active checkpoint.
 
 Example: train or obtain `my-brain.bin` and `user-a-brain.bin`, put both in `micro-brains/`, set `GROWFORMER_BRAIN_DIR=micro-brains`, start the node — then call `GET /v1/brains` and pass `"brain": "user-a"` in the chat body when you want that subject’s stack.
 

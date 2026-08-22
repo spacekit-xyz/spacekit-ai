@@ -6,6 +6,7 @@ pub mod action_classifier;
 pub mod codegen;
 pub mod composition;
 pub mod cone_router;
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 pub mod context_free_mnist;
 pub mod embedding;
 pub mod energy_jepa;
@@ -20,6 +21,7 @@ pub mod observer;
 pub mod policy;
 pub mod promotion;
 pub mod router;
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 pub mod split_cifar_scaffold;
 pub mod wm_act;
 pub mod wm_citizen;
@@ -52,6 +54,7 @@ pub use cone_router::{
     cone_features, AdjustableConeRouter, ConeConfig, ConeDecision, ConeSample, LabelFreeStrategy,
     CONE_FEATURE_DIM,
 };
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 pub use context_free_mnist::{
     run_phase4a_context_free_mnist, run_phase4b_cf_mnist_router, run_phase4d_cf_mnist_full,
     run_phase4d_cf_mnist_multiseed, CfMnistMultiSeedResult, CfMnistRouterResult,
@@ -91,6 +94,7 @@ pub use observer::{GlobalObserver, RoutingConfig};
 pub use policy::{ContinuousPolicy, Policy};
 pub use promotion::{evaluate_promotion, promote, PromotionDecision, PromotionGateConfig};
 pub use router::{attend_by_query, KnnRouter, LearnedRouter};
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 pub use split_cifar_scaffold::{
     run_phase4c_split_cifar_scaffold, run_phase4e_split_cifar_lite, run_phase4f_knn_router_probe,
     run_phase4f_split_cifar_frozen, SplitCifarFrozenResult, SplitCifarLiteResult,

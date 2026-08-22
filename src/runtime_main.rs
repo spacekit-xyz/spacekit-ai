@@ -20,15 +20,11 @@ fn main() {
     }
 
     let brain_path = &args[1];
-    let data = std::fs::read(brain_path).unwrap_or_else(|e| {
-        eprintln!("Failed to read {}: {}", brain_path, e);
-        std::process::exit(1);
-    });
-
-    let mut rt = Runtime::from_brain_bytes(&data).unwrap_or_else(|e| {
-        eprintln!("Failed to load brain: {}", e);
-        std::process::exit(1);
-    });
+    let mut rt = Runtime::from_brain_path(brain_path, growformer::brain::BrainIoLimits::default())
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to load brain: {}", e);
+            std::process::exit(1);
+        });
 
     let info = rt.brain_info();
     eprintln!("Brain loaded: {}", brain_path);

@@ -18,6 +18,7 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::{Read, Write};
 
 // =============================================================================
 // Checkpoint struct — env state + metadata (frozen flags live on neurons/synapses)
@@ -248,10 +249,23 @@ pub fn serialize_checkpoint_to_bytes<T: Serialize>(val: &T) -> Result<Vec<u8>, S
     serde_json::to_vec(val).map_err(|e| format!("serialize failed: {}", e))
 }
 
+pub fn serialize_checkpoint_to_writer<T: Serialize, W: Write>(
+    val: &T,
+    writer: W,
+) -> Result<(), String> {
+    serde_json::to_writer(writer, val).map_err(|e| format!("serialize failed: {}", e))
+}
+
 pub fn deserialize_checkpoint_from_bytes<T: for<'de> Deserialize<'de>>(
     data: &[u8],
 ) -> Result<T, String> {
     serde_json::from_slice(data).map_err(|e| format!("deserialize failed: {}", e))
+}
+
+pub fn deserialize_checkpoint_from_reader<T: for<'de> Deserialize<'de>, R: Read>(
+    reader: R,
+) -> Result<T, String> {
+    serde_json::from_reader(reader).map_err(|e| format!("deserialize failed: {}", e))
 }
 
 // =============================================================================

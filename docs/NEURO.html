@@ -1,0 +1,820 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Neuro — System Architecture</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Space+Grotesk:wght@300;400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:      #060A14;
+    --panel:   #0C1525;
+    --border:  #1A2E50;
+    --blue1:   #1B6CF2;
+    --blue2:   #4D9FFF;
+    --blue3:   #A8D1FF;
+    --cyan:    #00E5CC;
+    --gold:    #FFB830;
+    --red:     #FF4D6A;
+    --green:   #39E57A;
+    --purple:  #9B6DFF;
+    --text:    #C8D8F0;
+    --dim:     #4A6080;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    font-family: 'Space Grotesk', sans-serif;
+    color: var(--text);
+    padding: 40px;
+    min-height: 100vh;
+  }
+
+  /* ─── HEADER ─── */
+  .header {
+    display: flex;
+    align-items: baseline;
+    gap: 20px;
+    margin-bottom: 8px;
+  }
+  .title {
+    font-size: 36px;
+    font-weight: 700;
+    letter-spacing: 0.15em;
+    color: #fff;
+    text-transform: uppercase;
+  }
+  .title span { color: var(--blue2); }
+  .subtitle {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: var(--dim);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 32px;
+  }
+
+  /* ─── MAIN GRID ─── */
+  .main-grid {
+    display: grid;
+    grid-template-columns: 220px 1fr 220px;
+    grid-template-rows: auto auto auto;
+    gap: 16px;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  /* ─── PANELS ─── */
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    position: relative;
+  }
+  .panel::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    border-radius: 8px 8px 0 0;
+  }
+  .panel.blue::before  { background: var(--blue1); }
+  .panel.cyan::before  { background: var(--cyan); }
+  .panel.gold::before  { background: var(--gold); }
+  .panel.red::before   { background: var(--red); }
+  .panel.green::before { background: var(--green); }
+  .panel.purple::before{ background: var(--purple); }
+
+  .panel-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+  }
+  .panel.blue   .panel-title { color: var(--blue2); }
+  .panel.cyan   .panel-title { color: var(--cyan); }
+  .panel.gold   .panel-title { color: var(--gold); }
+  .panel.red    .panel-title { color: var(--red); }
+  .panel.green  .panel-title { color: var(--green); }
+  .panel.purple .panel-title { color: var(--purple); }
+
+  /* ─── NETWORK DIAGRAM (center) ─── */
+  .network-panel {
+    grid-column: 2;
+    grid-row: 1 / 3;
+    padding: 24px;
+  }
+
+  .net-svg {
+    width: 100%;
+    display: block;
+  }
+
+  /* ─── ITEMS ─── */
+  .item {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .item:last-child { margin-bottom: 0; }
+  .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    margin-top: 4px;
+    flex-shrink: 0;
+  }
+  .dot.blue   { background: var(--blue2); }
+  .dot.cyan   { background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
+  .dot.gold   { background: var(--gold); }
+  .dot.red    { background: var(--red); }
+  .dot.green  { background: var(--green); }
+  .dot.purple { background: var(--purple); }
+
+  .item-label {
+    font-weight: 600;
+    font-size: 11px;
+    display: block;
+  }
+  .item-desc {
+    color: var(--dim);
+    font-size: 10px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* ─── FORMULA BOXES ─── */
+  .formula {
+    background: rgba(27,108,242,0.08);
+    border: 1px solid rgba(27,108,242,0.2);
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--blue3);
+    margin: 6px 0;
+    line-height: 1.6;
+  }
+  .formula.gold {
+    background: rgba(255,184,48,0.08);
+    border-color: rgba(255,184,48,0.2);
+    color: var(--gold);
+  }
+  .formula.cyan {
+    background: rgba(0,229,204,0.06);
+    border-color: rgba(0,229,204,0.2);
+    color: var(--cyan);
+  }
+  .formula.green {
+    background: rgba(57,229,122,0.06);
+    border-color: rgba(57,229,122,0.2);
+    color: var(--green);
+  }
+  .formula.red {
+    background: rgba(255,77,106,0.06);
+    border-color: rgba(255,77,106,0.2);
+    color: var(--red);
+  }
+  .formula.purple {
+    background: rgba(155,109,255,0.06);
+    border-color: rgba(155,109,255,0.2);
+    color: var(--purple);
+  }
+
+  /* ─── STATUS BAR ─── */
+  .status-row {
+    grid-column: 1 / 4;
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 10px;
+  }
+
+  .stat {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    text-align: center;
+  }
+  .stat-val {
+    font-size: 22px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    display: block;
+    line-height: 1;
+    margin-bottom: 4px;
+  }
+  .stat-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--dim);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* ─── BOTTOM ROW ─── */
+  .bottom-row {
+    grid-column: 1 / 4;
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 16px;
+  }
+
+  /* ─── FLOW ARROWS ─── */
+  .flow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--dim);
+    margin: 6px 0;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .arrow { color: var(--blue2); font-size: 14px; }
+  .flow-label { color: var(--text); font-size: 11px; }
+
+  /* ─── DIVIDER ─── */
+  .divider {
+    height: 1px;
+    background: var(--border);
+    margin: 10px 0;
+  }
+
+  /* ─── TAG ─── */
+  .tag {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-left: 4px;
+  }
+  .tag.active { background: rgba(57,229,122,0.15); color: var(--green); }
+  .tag.inactive { background: rgba(255,77,106,0.12); color: var(--red); }
+  .tag.new { background: rgba(155,109,255,0.15); color: var(--purple); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="title">NEU<span>RO</span></div>
+</div>
+<div class="subtitle">Physics-Based Neural Architecture · Rust · System Diagram · 2→16→16→1</div>
+
+<div class="main-grid">
+
+  <!-- ═══ LEFT COLUMN ═══ -->
+
+  <!-- Physics Engine -->
+  <div class="panel cyan" style="grid-column:1; grid-row:1;">
+    <div class="panel-title">⬡ Physics Engine</div>
+
+    <div class="item">
+      <div class="dot cyan"></div>
+      <div>
+        <span class="item-label">Langevin Dynamics</span>
+        <span class="item-desc">m·dv/dt = F_grav + F_repel + F_hebb + F_noise</span>
+      </div>
+    </div>
+
+    <div class="formula cyan">
+F_gravity = -γ · mass · (pos − centroid)
+γ = 0.005
+    </div>
+
+    <div class="item">
+      <div class="dot cyan"></div>
+      <div>
+        <span class="item-label">Debye Repulsion</span>
+        <span class="item-desc">screened exponential</span>
+      </div>
+    </div>
+    <div class="formula cyan">
+F_repel = k · exp(−d/λ) / (d² + ε)
+λ = 1.5  k = 0.5
+    </div>
+
+    <div class="item">
+      <div class="dot cyan"></div>
+      <div>
+        <span class="item-label">Johnson-Nyquist Noise</span>
+        <span class="item-desc">thermal symmetry breaking</span>
+      </div>
+    </div>
+    <div class="formula cyan">
+v += 𝒩(0, σ_thermal)
+σ = 0.02  (per axis, per tick)
+    </div>
+
+    <div class="item">
+      <div class="dot cyan"></div>
+      <div>
+        <span class="item-label">Hebbian Attraction</span>
+        <span class="item-desc">correlated neurons cluster</span>
+      </div>
+    </div>
+    <div class="formula cyan">
+F_hebb = α · w_ij · (pos_j − pos_i)
+α = 0.001
+    </div>
+
+    <div class="divider"></div>
+    <div style="font-size:10px; color:var(--dim); font-family:'JetBrains Mono',monospace;">
+      interval: every 500 ticks<br>
+      damping: 0.3 / tick
+    </div>
+  </div>
+
+  <!-- Competition -->
+  <div class="panel gold" style="grid-column:1; grid-row:2;">
+    <div class="panel-title">◈ Competition</div>
+
+    <div class="item">
+      <div class="dot gold"></div>
+      <div>
+        <span class="item-label">Local KWTA <span class="tag new">current</span></span>
+        <span class="item-desc">neighborhood radius = 1.5</span>
+      </div>
+    </div>
+    <div class="formula gold">
+beaten = ∃j: dist(i,j) < r ∧ a_j > a_i
+if beaten → a_i = 0.0
+gradient PRESERVED (no dropout_mask)
+    </div>
+
+    <div class="item">
+      <div class="dot gold"></div>
+      <div>
+        <span class="item-label">Reaction-Diffusion Inhibition</span>
+        <span class="item-desc">Turing-pattern lateral suppression</span>
+      </div>
+    </div>
+    <div class="formula gold">
+w(i,j) = exp(−dist/σ_inhib) / Σw
+a_i −= λ_inhib · Σ(a_j · w_ij)
+σ = 2.0  λ = 0.12
+    </div>
+  </div>
+
+  <!-- ═══ CENTER: NETWORK ═══ -->
+  <div class="panel blue network-panel" style="grid-column:2; grid-row:1/3;">
+    <div class="panel-title">◎ Neural Architecture — 2 → 16 → 16 → 1</div>
+
+    <svg class="net-svg" viewBox="0 0 620 440" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arr" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L6,3 z" fill="#1B6CF2" opacity="0.5"/>
+        </marker>
+        <marker id="arr-back" markerWidth="6" markerHeight="6" refX="1" refY="3" orient="auto">
+          <path d="M6,0 L6,6 L0,3 z" fill="#FF4D6A" opacity="0.6"/>
+        </marker>
+        <marker id="arr-gold" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L6,3 z" fill="#FFB830" opacity="0.7"/>
+        </marker>
+        <filter id="glow">
+          <feGaussianBlur stdDeviation="3" result="blur"/>
+          <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <radialGradient id="neuron-blue" cx="50%" cy="35%">
+          <stop offset="0%" stop-color="#4D9FFF" stop-opacity="0.9"/>
+          <stop offset="100%" stop-color="#1B3A70" stop-opacity="0.9"/>
+        </radialGradient>
+        <radialGradient id="neuron-cyan" cx="50%" cy="35%">
+          <stop offset="0%" stop-color="#00E5CC" stop-opacity="0.9"/>
+          <stop offset="100%" stop-color="#005540" stop-opacity="0.9"/>
+        </radialGradient>
+        <radialGradient id="neuron-out" cx="50%" cy="35%">
+          <stop offset="0%" stop-color="#9B6DFF" stop-opacity="0.9"/>
+          <stop offset="100%" stop-color="#3A1A70" stop-opacity="0.9"/>
+        </radialGradient>
+        <radialGradient id="neuron-in" cx="50%" cy="35%">
+          <stop offset="0%" stop-color="#FFB830" stop-opacity="0.9"/>
+          <stop offset="100%" stop-color="#5A3800" stop-opacity="0.9"/>
+        </radialGradient>
+      </defs>
+
+      <!-- ─── FORWARD PASS CONNECTIONS (sample) ─── -->
+      <!-- Input → Layer 1 (sparse sample lines) -->
+      <g opacity="0.18" stroke="#1B6CF2" stroke-width="0.8">
+        <line x1="75" y1="160" x2="195" y2="50"/>
+        <line x1="75" y1="160" x2="195" y2="95"/>
+        <line x1="75" y1="160" x2="195" y2="140"/>
+        <line x1="75" y1="160" x2="195" y2="185"/>
+        <line x1="75" y1="160" x2="195" y2="230"/>
+        <line x1="75" y1="280" x2="195" y2="95"/>
+        <line x1="75" y1="280" x2="195" y2="185"/>
+        <line x1="75" y1="280" x2="195" y2="275"/>
+        <line x1="75" y1="280" x2="195" y2="320"/>
+        <line x1="75" y1="280" x2="195" y2="365"/>
+      </g>
+
+      <!-- Layer 1 → Layer 2 (sparse) -->
+      <g opacity="0.15" stroke="#4D9FFF" stroke-width="0.7">
+        <line x1="235" y1="50" x2="375" y2="95"/>
+        <line x1="235" y1="95" x2="375" y2="50"/>
+        <line x1="235" y1="140" x2="375" y2="185"/>
+        <line x1="235" y1="185" x2="375" y2="140"/>
+        <line x1="235" y1="230" x2="375" y2="275"/>
+        <line x1="235" y1="275" x2="375" y2="230"/>
+        <line x1="235" y1="320" x2="375" y2="365"/>
+        <line x1="235" y1="365" x2="375" y2="320"/>
+        <line x1="235" y1="50" x2="375" y2="275"/>
+        <line x1="235" y1="365" x2="375" y2="95"/>
+        <line x1="235" y1="230" x2="375" y2="50"/>
+      </g>
+
+      <!-- Layer 2 → Output -->
+      <g opacity="0.18" stroke="#9B6DFF" stroke-width="0.8">
+        <line x1="415" y1="50" x2="535" y2="220"/>
+        <line x1="415" y1="95" x2="535" y2="220"/>
+        <line x1="415" y1="140" x2="535" y2="220"/>
+        <line x1="415" y1="185" x2="535" y2="220"/>
+        <line x1="415" y1="230" x2="535" y2="220"/>
+        <line x1="415" y1="275" x2="535" y2="220"/>
+        <line x1="415" y1="320" x2="535" y2="220"/>
+        <line x1="415" y1="365" x2="535" y2="220"/>
+      </g>
+
+      <!-- ─── KWTA WINNER HIGHLIGHT (4 bright connections) ─── -->
+      <g opacity="0.7" stroke="#FFB830" stroke-width="1.5">
+        <line x1="75" y1="160" x2="195" y2="50"/>
+        <line x1="75" y1="280" x2="195" y2="185"/>
+      </g>
+
+      <!-- ─── BACKPROP GRADIENT FLOW ─── -->
+      <path d="M530,245 Q490,400 420,390 Q360,385 350,370" 
+            fill="none" stroke="#FF4D6A" stroke-width="1.2" 
+            stroke-dasharray="5,4" opacity="0.5"
+            marker-end="url(#arr-back)"/>
+      <text x="465" y="408" font-family="JetBrains Mono" font-size="9" fill="#FF4D6A" opacity="0.7">∂L/∂w</text>
+
+      <!-- ─── LAYER 1 LOCAL KWTA RING ─── -->
+      <circle cx="215" cy="140" r="52" fill="none" stroke="#FFB830" 
+              stroke-width="1" stroke-dasharray="3,3" opacity="0.4"/>
+      <text x="270" y="100" font-family="JetBrains Mono" font-size="9" fill="#FFB830" opacity="0.8">local KWTA r=1.5</text>
+
+      <!-- ─── INPUT NEURONS ─── -->
+      <g filter="url(#glow)">
+        <circle cx="75" cy="160" r="16" fill="url(#neuron-in)" stroke="#FFB830" stroke-width="1.5"/>
+        <text x="75" y="165" text-anchor="middle" font-family="JetBrains Mono" font-size="10" font-weight="700" fill="white">x</text>
+        <circle cx="75" cy="280" r="16" fill="url(#neuron-in)" stroke="#FFB830" stroke-width="1.5"/>
+        <text x="75" y="285" text-anchor="middle" font-family="JetBrains Mono" font-size="10" font-weight="700" fill="white">y</text>
+      </g>
+
+      <!-- ─── LAYER 1 NEURONS (16) ─── -->
+      <g>
+        <!-- winners bright, losers dim -->
+        <circle cx="215" cy="50" r="13" fill="url(#neuron-blue)" stroke="#4D9FFF" stroke-width="2"/>
+        <circle cx="215" cy="95" r="13" fill="url(#neuron-blue)" stroke="#4D9FFF" stroke-width="2"/>
+        <circle cx="215" cy="140" r="13" fill="url(#neuron-blue)" stroke="#4D9FFF" stroke-width="2"/>
+        <circle cx="215" cy="185" r="13" fill="url(#neuron-blue)" stroke="#4D9FFF" stroke-width="2"/>
+        <circle cx="215" cy="230" r="13" fill="#0C1525" stroke="#1A2E50" stroke-width="1" opacity="0.5"/>
+        <circle cx="215" cy="275" r="13" fill="#0C1525" stroke="#1A2E50" stroke-width="1" opacity="0.5"/>
+        <circle cx="215" cy="320" r="13" fill="#0C1525" stroke="#1A2E50" stroke-width="1" opacity="0.5"/>
+        <circle cx="215" cy="365" r="13" fill="#0C1525" stroke="#1A2E50" stroke-width="1" opacity="0.5"/>
+      </g>
+      <!-- Layer 1 right column -->
+      <g>
+        <circle cx="235" cy="50" r="13" fill="url(#neuron-blue)" stroke="#4D9FFF" stroke-width="2"/>
+        <circle cx="235" cy="95" r="13" fill="url(#neuron-blue)" stroke="#4D9FFF" stroke-width="2"/>
+        <circle cx="235" cy="140" r="13" fill="#0C1525" stroke="#1A2E50" stroke-width="1" opacity="0.5"/>
+        <circle cx="235" cy="185" r="13" fill="url(#neuron-blue)" stroke="#4D9FFF" stroke-width="2"/>
+        <circle cx="235" cy="230" r="13" fill="#0C1525" stroke="#1A2E50" stroke-width="1" opacity="0.5"/>
+        <circle cx="235" cy="275" r="13" fill="#0C1525" stroke="#1A2E50" stroke-width="1" opacity="0.5"/>
+        <circle cx="235" cy="320" r="13" fill="url(#neuron-blue)" stroke="#4D9FFF" stroke-width="2"/>
+        <circle cx="235" cy="365" r="13" fill="#0C1525" stroke="#1A2E50" stroke-width="1" opacity="0.5"/>
+      </g>
+
+      <!-- ─── LAYER 2 NEURONS (16) ─── -->
+      <g>
+        <circle cx="395" cy="50" r="13" fill="url(#neuron-cyan)" stroke="#00E5CC" stroke-width="2"/>
+        <circle cx="395" cy="95" r="13" fill="#0C1525" stroke="#1A2E50" stroke-width="1" opacity="0.5"/>
+        <circle cx="395" cy="140" r="13" fill="url(#neuron-cyan)" stroke="#00E5CC" stroke-width="2"/>
+        <circle cx="395" cy="185" r="13" fill="url(#neuron-cyan)" stroke="#00E5CC" stroke-width="2"/>
+        <circle cx="395" cy="230" r="13" fill="#0C1525" stroke="#1A2E50" stroke-width="1" opacity="0.5"/>
+        <circle cx="395" cy="275" r="13" fill="url(#neuron-cyan)" stroke="#00E5CC" stroke-width="2"/>
+        <circle cx="395" cy="320" r="13" fill="#0C1525" stroke="#1A2E50" stroke-width="1" opacity="0.5"/>
+        <circle cx="395" cy="365" r="13" fill="#0C1525" stroke="#1A2E50" stroke-width="1" opacity="0.5"/>
+      </g>
+      <g>
+        <circle cx="415" cy="50" r="13" fill="#0C1525" stroke="#1A2E50" stroke-width="1" opacity="0.5"/>
+        <circle cx="415" cy="95" r="13" fill="url(#neuron-cyan)" stroke="#00E5CC" stroke-width="2"/>
+        <circle cx="415" cy="140" r="13" fill="#0C1525" stroke="#1A2E50" stroke-width="1" opacity="0.5"/>
+        <circle cx="415" cy="185" r="13" fill="url(#neuron-cyan)" stroke="#00E5CC" stroke-width="2"/>
+        <circle cx="415" cy="230" r="13" fill="url(#neuron-cyan)" stroke="#00E5CC" stroke-width="2"/>
+        <circle cx="415" cy="275" r="13" fill="#0C1525" stroke="#1A2E50" stroke-width="1" opacity="0.5"/>
+        <circle cx="415" cy="320" r="13" fill="url(#neuron-cyan)" stroke="#00E5CC" stroke-width="2"/>
+        <circle cx="415" cy="365" r="13" fill="#0C1525" stroke="#1A2E50" stroke-width="1" opacity="0.5"/>
+      </g>
+
+      <!-- ─── OUTPUT NEURON ─── -->
+      <circle cx="535" cy="220" r="20" fill="url(#neuron-out)" stroke="#9B6DFF" stroke-width="2" filter="url(#glow)"/>
+      <text x="535" y="224" text-anchor="middle" font-family="JetBrains Mono" font-size="9" font-weight="700" fill="white">σ(z)</text>
+
+      <!-- ─── LAYER LABELS ─── -->
+      <text x="75" y="325" text-anchor="middle" font-family="JetBrains Mono" font-size="9" fill="#FFB830" opacity="0.8">INPUT</text>
+      <text x="75" y="337" text-anchor="middle" font-family="JetBrains Mono" font-size="9" fill="#FFB830" opacity="0.8">2 neurons</text>
+
+      <text x="225" y="400" text-anchor="middle" font-family="JetBrains Mono" font-size="9" fill="#4D9FFF" opacity="0.8">LAYER 1</text>
+      <text x="225" y="412" text-anchor="middle" font-family="JetBrains Mono" font-size="9" fill="#4D9FFF" opacity="0.8">16 neurons</text>
+      <text x="225" y="424" text-anchor="middle" font-family="JetBrains Mono" font-size="9" fill="#4D9FFF" opacity="0.5">feature detectors</text>
+
+      <text x="405" y="400" text-anchor="middle" font-family="JetBrains Mono" font-size="9" fill="#00E5CC" opacity="0.8">LAYER 2</text>
+      <text x="405" y="412" text-anchor="middle" font-family="JetBrains Mono" font-size="9" fill="#00E5CC" opacity="0.8">16 neurons</text>
+      <text x="405" y="424" text-anchor="middle" font-family="JetBrains Mono" font-size="9" fill="#00E5CC" opacity="0.5">integrators</text>
+
+      <text x="535" y="260" text-anchor="middle" font-family="JetBrains Mono" font-size="9" fill="#9B6DFF" opacity="0.8">OUTPUT</text>
+      <text x="535" y="272" text-anchor="middle" font-family="JetBrains Mono" font-size="9" fill="#9B6DFF" opacity="0.8">1 neuron</text>
+
+      <!-- ─── INPUT LABELS ─── -->
+      <text x="40" y="164" text-anchor="middle" font-family="JetBrains Mono" font-size="10" fill="#FFB830" opacity="0.7">x_coord</text>
+      <text x="40" y="284" text-anchor="middle" font-family="JetBrains Mono" font-size="10" fill="#FFB830" opacity="0.7">y_coord</text>
+
+      <!-- ─── WINNER LABELS ─── -->
+      <text x="255" y="46" font-family="JetBrains Mono" font-size="8" fill="#FFB830" opacity="0.9">winner</text>
+      <text x="255" y="91" font-family="JetBrains Mono" font-size="8" fill="#FFB830" opacity="0.9">winner</text>
+
+      <!-- ─── MASS INDICATOR ─── -->
+      <circle cx="215" cy="50" r="5" fill="#39E57A" opacity="0.8"/>
+      <text x="258" y="54" font-family="JetBrains Mono" font-size="8" fill="#39E57A" opacity="0.8">mass↑</text>
+
+      <!-- ─── LEGEND ─── -->
+      <g transform="translate(20, 430)">
+        <circle cx="8" cy="0" r="5" fill="url(#neuron-blue)" stroke="#4D9FFF" stroke-width="1"/>
+        <text x="16" y="4" font-family="JetBrains Mono" font-size="8" fill="#4D9FFF">active</text>
+        <circle cx="80" cy="0" r="5" fill="#0C1525" stroke="#1A2E50" stroke-width="1" opacity="0.5"/>
+        <text x="88" y="4" font-family="JetBrains Mono" font-size="8" fill="#4A6080">suppressed (KWTA)</text>
+        <line x1="200" y1="0" x2="220" y2="0" stroke="#FFB830" stroke-width="1.5"/>
+        <text x="224" y="4" font-family="JetBrains Mono" font-size="8" fill="#FFB830">winner connections</text>
+        <line x1="340" y1="0" x2="360" y2="0" stroke="#FF4D6A" stroke-width="1" stroke-dasharray="3,2"/>
+        <text x="364" y="4" font-family="JetBrains Mono" font-size="8" fill="#FF4D6A">backprop gradient</text>
+      </g>
+    </svg>
+  </div>
+
+  <!-- ═══ RIGHT COLUMN ═══ -->
+
+  <!-- Plasticity -->
+  <div class="panel green" style="grid-column:3; grid-row:1;">
+    <div class="panel-title">⟲ Plasticity</div>
+
+    <div class="item">
+      <div class="dot green"></div>
+      <div>
+        <span class="item-label">Synapse Pruning</span>
+        <span class="item-desc">3-phase strength gating</span>
+      </div>
+    </div>
+    <div class="formula green">
+Phase 1 (0-100):   w < 0.001
+Phase 2 (100-2k):  w < 0.01 ∧ f ≤ 1.02
+Phase 3 (2k+):     w < 0.005 ∧ dormant
+    </div>
+
+    <div class="item">
+      <div class="dot green"></div>
+      <div>
+        <span class="item-label">Input Protection</span>
+        <span class="item-desc">input_ids never pruned</span>
+      </div>
+    </div>
+    <div class="formula green">
+∀ s ∈ input_ids → skip pruning
+prevents geometric blindness
+    </div>
+
+    <div class="item">
+      <div class="dot green"></div>
+      <div>
+        <span class="item-label">Facilitation (LTP)</span>
+        <span class="item-desc">active synapses potentiate</span>
+      </div>
+    </div>
+    <div class="formula green">
+if f > floor·1.5:
+  w += 0.002·(f − floor)
+    </div>
+  </div>
+
+  <!-- Mass Coupling -->
+  <div class="panel red" style="grid-column:3; grid-row:2;">
+    <div class="panel-title">◉ Mass Coupling</div>
+
+    <div class="item">
+      <div class="dot red"></div>
+      <div>
+        <span class="item-label">Winner Growth</span>
+        <span class="item-desc">a > 0.15 threshold</span>
+      </div>
+    </div>
+    <div class="formula red">
+mass *= (1 − 0.00015)
+if a > 0.15:
+  mass += 0.0005 · win_strength
+mass ∈ [0.30, 3.0]
+    </div>
+
+    <div class="item">
+      <div class="dot red"></div>
+      <div>
+        <span class="item-label">Geometric Feedback</span>
+        <span class="item-desc">mass → physics forces</span>
+      </div>
+    </div>
+    <div class="formula red">
+F_grav ∝ mass      (hub anchoring)
+F_repel ∝ m_i·m_j  (hub separation)
+light neurons → drift to niches
+    </div>
+
+    <div class="divider"></div>
+    <div style="font-size:10px; color:var(--dim); font-family:'JetBrains Mono',monospace;">
+      best run: mass 1.02 → 1.31<br>
+      previous runs: stuck at 0.30
+    </div>
+  </div>
+
+  <!-- ═══ STATUS ROW ═══ -->
+  <div class="status-row">
+    <div class="stat">
+      <span class="stat-val" style="color:var(--green)">66%</span>
+      <span class="stat-label">Best Accuracy</span>
+    </div>
+    <div class="stat">
+      <span class="stat-val" style="color:var(--blue2)">0.9121</span>
+      <span class="stat-label">Mirror Symmetry</span>
+    </div>
+    <div class="stat">
+      <span class="stat-val" style="color:var(--cyan)">1.31</span>
+      <span class="stat-label">Peak Mass</span>
+    </div>
+    <div class="stat">
+      <span class="stat-val" style="color:var(--gold)">272</span>
+      <span class="stat-label">Active Synapses</span>
+    </div>
+    <div class="stat">
+      <span class="stat-val" style="color:var(--purple)">75–85%</span>
+      <span class="stat-label">Target Accuracy</span>
+    </div>
+    <div class="stat">
+      <span class="stat-val" style="color:var(--text)">3.2M</span>
+      <span class="stat-label">Training Steps</span>
+    </div>
+  </div>
+
+  <!-- ═══ BOTTOM ROW ═══ -->
+  <div class="bottom-row">
+
+    <!-- Learning Pipeline -->
+    <div class="panel blue">
+      <div class="panel-title">▶ Training Pipeline</div>
+
+      <div class="flow">
+        <span class="arrow">→</span>
+        <span class="flow-label">Spiral data (400 pts)</span>
+      </div>
+      <div class="flow">
+        <span class="arrow">→</span>
+        <span class="flow-label">Shuffle per epoch</span>
+      </div>
+      <div class="flow">
+        <span class="arrow">→</span>
+        <span class="flow-label">Forward pass + dropout</span>
+      </div>
+      <div class="flow">
+        <span class="arrow">→</span>
+        <span class="flow-label">MSE loss</span>
+      </div>
+      <div class="flow">
+        <span class="arrow">→</span>
+        <span class="flow-label">Backprop (clipped ±1)</span>
+      </div>
+      <div class="flow">
+        <span class="arrow">→</span>
+        <span class="flow-label">Mass update</span>
+      </div>
+      <div class="flow">
+        <span class="arrow">→</span>
+        <span class="flow-label">Physics tick (÷500)</span>
+      </div>
+      <div class="flow">
+        <span class="arrow">→</span>
+        <span class="flow-label">Pruning (÷500)</span>
+      </div>
+
+      <div class="divider"></div>
+      <div class="formula">
+lr(e) = 0.15·exp(−8e-5·e)
+lr(0)=0.150  lr(8000)=0.068
+      </div>
+    </div>
+
+    <!-- Diagnostics -->
+    <div class="panel purple">
+      <div class="panel-title">◎ Per-Epoch Diagnostics</div>
+
+      <div class="item">
+        <div class="dot purple"></div>
+        <div>
+          <span class="item-label">act — mean hidden activation</span>
+          <span class="item-desc">target: 0.25–0.40</span>
+        </div>
+      </div>
+      <div class="item">
+        <div class="dot purple"></div>
+        <div>
+          <span class="item-label">spread — geometric stddev</span>
+          <span class="item-desc">healthy: 2.5–3.5</span>
+        </div>
+      </div>
+      <div class="item">
+        <div class="dot purple"></div>
+        <div>
+          <span class="item-label">mass — mean hidden mass</span>
+          <span class="item-desc">diverging = competition active</span>
+        </div>
+      </div>
+      <div class="item">
+        <div class="dot purple"></div>
+        <div>
+          <span class="item-label">sparse — firing sparsity</span>
+          <span class="item-desc">target: ~0.25 (k=4 of 16)</span>
+        </div>
+      </div>
+      <div class="item">
+        <div class="dot purple"></div>
+        <div>
+          <span class="item-label">sym — mirror symmetry</span>
+          <span class="item-desc">below 0.95 = specialisation</span>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+      <div style="font-size:10px; color:var(--dim); font-family:'JetBrains Mono',monospace;">
+        logged every 500 epochs<br>
+        structural report at end
+      </div>
+    </div>
+
+    <!-- Homeostasis (inactive) + Roadmap -->
+    <div class="panel" style="border-top-color: var(--dim);">
+      <div class="panel-title" style="color:var(--dim);">⊘ Homeostasis <span class="tag inactive">disabled</span></div>
+
+      <div class="formula" style="opacity:0.5; color:var(--dim); border-color:rgba(74,96,128,0.2); background:rgba(74,96,128,0.05);">
+run_act = (1−τ)·run_act + τ·a
+bias −= lr·(run_act − 0.30)
+τ=0.001  lr=0.0 (OFF)
+      </div>
+      <div style="font-size:10px; color:var(--dim); font-family:'JetBrains Mono',monospace; margin-bottom:12px;">
+        Disabled: drove all 32 neurons<br>
+        to identical bias −0.76
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="panel-title" style="color:#39E57A; margin-top:10px;">▸ Roadmap</div>
+
+      <div class="item">
+        <div class="dot green"></div>
+        <div>
+          <span class="item-label">Local KWTA r=1.5 <span class="tag new">running now</span></span>
+          <span class="item-desc">territorial competition</span>
+        </div>
+      </div>
+      <div class="item">
+        <div class="dot green"></div>
+        <div>
+          <span class="item-label">Dataset → 600 samples</span>
+          <span class="item-desc">inner region density</span>
+        </div>
+      </div>
+      <div class="item">
+        <div class="dot gold"></div>
+        <div>
+          <span class="item-label">Toroidal geometry</span>
+          <span class="item-desc">remove edge artifacts</span>
+        </div>
+      </div>
+      <div class="item">
+        <div class="dot purple"></div>
+        <div>
+          <span class="item-label">STDP</span>
+          <span class="item-desc">timing-based plasticity</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

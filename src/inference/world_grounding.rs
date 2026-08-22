@@ -565,6 +565,10 @@ pub fn extend_subject_keywords_with_world_graph(intent_text: &str, subject_kw: &
     }
     // Also walk the domain-specific graph
     extend_subject_keywords_with_domain_graph(intent_text, subject_kw);
+    if pr_wire_headline_pass_active() {
+        subject_kw
+            .retain(|keyword| !matches!(keyword.as_str(), "positive" | "career" | "recognition"));
+    }
 }
 
 fn has_domain_graph() -> bool {

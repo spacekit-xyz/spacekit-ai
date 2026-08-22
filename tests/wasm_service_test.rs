@@ -20,8 +20,10 @@ fn test_wasm_compatible_service_lifecycle() {
         .expect("generation");
     assert!(!response.text.is_empty(), "generation should produce text");
 
-    let (_action, code) = svc.codegen("implement a rust web server").expect("codegen");
-    let code = code.expect("should produce code for coding prompt");
-    assert_eq!(code.language, "rust");
-    assert!(!code.code.is_empty(), "code output should be non-empty");
+    let (code_action, code) = svc.codegen("implement a rust web server").expect("codegen");
+    assert_eq!(code_action.action_type, ActionType::CodingAssist);
+    assert!(
+        code.is_none(),
+        "an empty service must abstain instead of fabricating an untrained code stub"
+    );
 }

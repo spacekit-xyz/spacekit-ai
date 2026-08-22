@@ -1,6 +1,8 @@
-use axum::extract::State;
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::body::{Body, Bytes};
+use axum::extract::{Query, State};
+use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use growformer::service::{AgentMode, Feedback, LanguageService};
@@ -21,6 +23,7 @@ struct AppState {
     service: Arc<Mutex<LanguageService>>,
     auth_token: Option<String>,
     log_path: Option<String>,
+    brain_io_limits: growformer::brain::BrainIoLimits,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,6 +91,10 @@ async fn main() {
         .expect("invalid GROWFORMER_NODE_ADDR");
     let auth_token = std::env::var("GROWFORMER_NODE_TOKEN").ok();
     let log_path = std::env::var("GROWFORMER_NODE_LOG_PATH").ok();
+    let brain_io_limits = brain_io_limits_from_env().unwrap_or_else(|e| {
+        eprintln!("Growformer startup configuration error: {}", e);
+        std::process::exit(2);
+    });
     let mut service =
         LanguageService::new_default().expect("failed to initialize language service");
 
@@ -117,10 +124,11 @@ async fn main() {
                         .and_then(|s| s.to_str())
                         .unwrap_or("unnamed")
                         .to_string();
-                    if let Ok(data) = std::fs::read(&path) {
-                        if service.load_brain_as(&name, &data).is_ok() {
-                            names.push(name);
-                        }
+                    if service
+                        .load_brain_as_from_path(&name, &path, brain_io_limits)
+                        .is_ok()
+                    {
+                        names.push(name);
                     }
                 }
             }
@@ -139,9 +147,12 @@ async fn main() {
     } else {
         let brain_path =
             std::env::var("GROWFORMER_BRAIN_PATH").unwrap_or_else(|_| "brain.bin".to_string());
-        if let Ok(data) = std::fs::read(&brain_path) {
-            match service.load_brain(&data) {
+        if std::path::Path::new(&brain_path).is_file() {
+            match service.load_brain_from_path(&brain_path, brain_io_limits) {
                 Ok(()) => {
+                    let file_kb = std::fs::metadata(&brain_path)
+                        .map(|m| m.len() / 1024)
+                        .unwrap_or(0);
                     let dm = service.active_dm();
                     let has_gen = dm.generation_head.is_some();
                     let has_code = dm.codegen_head.is_some();
@@ -149,12 +160,7 @@ async fn main() {
                     let has_router = dm.observer.learned_router.is_some();
                     println!(
                         "Brain loaded: {} ({} KB) router={} classifier={} gen_head={} code_head={}",
-                        brain_path,
-                        data.len() / 1024,
-                        has_router,
-                        has_clf,
-                        has_gen,
-                        has_code
+                        brain_path, file_kb, has_router, has_clf, has_gen, has_code
                     );
                 }
                 Err(e) => eprintln!("Warning: failed to load brain {}: {}", brain_path, e),
@@ -166,6 +172,7 @@ async fn main() {
         service: Arc::new(Mutex::new(service)),
         auth_token,
         log_path,
+        brain_io_limits,
     });
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -179,6 +186,7 @@ async fn main() {
         .route("/v1/acceptance", get(acceptance))
         .route("/v1/mode", post(set_mode))
         .route("/v1/brain/save", post(brain_save))
+        .route("/v1/brain/export", get(brain_export))
         .route("/v1/feedback", post(feedback))
         .route("/v1/reset", post(reset_conversation))
         .route("/v1/personality", get(get_personality))
@@ -222,6 +230,8 @@ struct BrainSaveRequest {
     path: Option<String>,
     #[serde(default)]
     brain: Option<String>,
+    #[serde(default)]
+    compressed: bool,
 }
 
 async fn brain_save(
@@ -242,15 +252,86 @@ async fn brain_save(
         }
         svc.set_active_brain(name);
     }
-    let bytes = svc
-        .export_brain()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let result = svc.export_brain_to_path(&path, req.compressed, state.brain_io_limits);
     svc.set_active_brain(&prev_active);
-    std::fs::write(&path, &bytes)
+    let bytes = result.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(json!({ "ok": true, "path": path, "bytes": bytes })))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BrainExportQuery {
+    #[serde(default)]
+    brain: Option<String>,
+    #[serde(default)]
+    compressed: bool,
+}
+
+async fn brain_export(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<BrainExportQuery>,
+) -> Result<Response, (StatusCode, String)> {
+    authorize(&headers, &state)?;
+    let mut temp = tempfile::NamedTempFile::new()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(
-        json!({ "ok": true, "path": path, "bytes": bytes.len() }),
-    ))
+    let (bytes, filename) = {
+        let mut svc = state.service.lock().await;
+        let prev_active = svc.active_brain.clone();
+        if let Some(name) = &query.brain {
+            if !svc.list_brains().contains(name) {
+                return Err((StatusCode::BAD_REQUEST, format!("unknown brain '{}'", name)));
+            }
+            svc.set_active_brain(name);
+        }
+        let result =
+            svc.export_brain_to_writer(temp.as_file_mut(), query.compressed, state.brain_io_limits);
+        svc.set_active_brain(&prev_active);
+        let bytes = result.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        let stem = query
+            .brain
+            .as_deref()
+            .unwrap_or("brain")
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        (bytes, format!("{}.bin", stem))
+    };
+
+    let std_file = temp
+        .reopen()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut file = tokio::fs::File::from_std(std_file);
+    let stream = async_stream::stream! {
+        let _temp_guard = temp;
+        let mut buffer = vec![0u8; 64 * 1024];
+        loop {
+            use tokio::io::AsyncReadExt;
+            match file.read(&mut buffer).await {
+                Ok(0) => break,
+                Ok(n) => yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(&buffer[..n])),
+                Err(e) => {
+                    yield Err(e);
+                    break;
+                }
+            }
+        }
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_LENGTH, bytes.to_string())
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", filename),
+        )
+        .body(Body::from_stream(stream))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 async fn feedback(
@@ -557,4 +638,129 @@ fn append_jsonl(path: &str, line: &str) -> std::io::Result<()> {
     let mut f = OpenOptions::new().create(true).append(true).open(path)?;
     writeln!(f, "{}", line)?;
     Ok(())
+}
+
+fn brain_io_limits_from_env() -> Result<growformer::brain::BrainIoLimits, String> {
+    Ok(growformer::brain::BrainIoLimits {
+        max_file_bytes: parse_positive_byte_limit(
+            "GROWFORMER_MAX_BRAIN_FILE_BYTES",
+            growformer::brain::DEFAULT_BRAIN_IO_LIMIT_BYTES,
+        )?,
+        max_decoded_bytes: parse_positive_byte_limit(
+            "GROWFORMER_MAX_BRAIN_DECODED_BYTES",
+            growformer::brain::DEFAULT_BRAIN_IO_LIMIT_BYTES,
+        )?,
+    })
+}
+
+fn parse_positive_byte_limit(name: &str, default: u64) -> Result<u64, String> {
+    let Some(raw) = std::env::var_os(name) else {
+        return Ok(default);
+    };
+    let raw = raw
+        .into_string()
+        .map_err(|_| format!("{} must be valid UTF-8", name))?;
+    let value = raw.parse::<u64>().map_err(|_| {
+        format!(
+            "{} must be a positive integer byte count, got {:?}",
+            name, raw
+        )
+    })?;
+    if value == 0 {
+        return Err(format!("{} must be greater than zero", name));
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    fn test_state(token: Option<&str>) -> Arc<AppState> {
+        Arc::new(AppState {
+            service: Arc::new(Mutex::new(
+                LanguageService::new_default().expect("test language service"),
+            )),
+            auth_token: token.map(str::to_owned),
+            log_path: None,
+            brain_io_limits: growformer::brain::BrainIoLimits::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn brain_export_requires_configured_bearer_token() {
+        let err = brain_export(
+            State(test_state(Some("secret"))),
+            HeaderMap::new(),
+            Query(BrainExportQuery::default()),
+        )
+        .await
+        .expect_err("missing token must fail");
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn brain_export_streams_a_valid_package_with_headers() {
+        let response = brain_export(
+            State(test_state(None)),
+            HeaderMap::new(),
+            Query(BrainExportQuery::default()),
+        )
+        .await
+        .expect("export response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            response.headers().get(header::CONTENT_DISPOSITION).unwrap(),
+            "attachment; filename=\"brain.bin\""
+        );
+
+        let declared = response
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.len(), declared);
+        growformer::brain::BrainPackage::decode_from_bytes(&bytes)
+            .expect("streamed package must decode");
+    }
+
+    #[cfg(feature = "brain-compression")]
+    #[tokio::test]
+    async fn brain_export_selects_named_brain_and_streams_compressed_package() {
+        let state = test_state(Some("secret"));
+        {
+            let mut svc = state.service.lock().await;
+            let bytes = svc.export_brain().unwrap();
+            svc.load_brain_as("alternate", &bytes).unwrap();
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer secret".parse().unwrap());
+        let response = brain_export(
+            State(state),
+            headers,
+            Query(BrainExportQuery {
+                brain: Some("alternate".to_string()),
+                compressed: true,
+            }),
+        )
+        .await
+        .expect("compressed export response");
+        assert_eq!(
+            response.headers().get(header::CONTENT_DISPOSITION).unwrap(),
+            "attachment; filename=\"alternate.bin\""
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(growformer::brain::is_compressed_brain_bytes(&bytes));
+        growformer::brain::BrainPackage::decode_from_bytes(&bytes)
+            .expect("compressed streamed package must decode");
+    }
 }

@@ -5539,12 +5539,21 @@ impl LanguageService {
     /// [`load_brain`](Self::load_brain) accepts this envelope, its optional compressed wrapper,
     /// or legacy raw checkpoint JSON.
     pub fn export_brain(&mut self) -> Result<Vec<u8>, String> {
+        let (header, personality, plugins_blob) = self.prepare_brain_export()?;
+        let checkpoint =
+            crate::systems::checkpoint::serialize_checkpoint_to_bytes(self.active_dm())?;
+        let pkg =
+            crate::brain::BrainPackage::new(header, checkpoint, Some(personality), plugins_blob);
+        pkg.encode_to_bytes()
+    }
+
+    fn prepare_brain_export(
+        &mut self,
+    ) -> Result<(crate::brain::BrainPackageHeader, Vec<u8>, Option<Vec<u8>>), String> {
         #[cfg(not(target_arch = "wasm32"))]
         self.active_dm_mut()
             .language_runtime
             .ensure_students_preloaded();
-        let checkpoint =
-            crate::systems::checkpoint::serialize_checkpoint_to_bytes(self.active_dm())?;
         let personality = self.export_personality()?;
         let mut header = crate::brain::BrainPackageHeader::default();
         let mut id_raw = [0u8; 16];
@@ -5576,10 +5585,7 @@ impl LanguageService {
         let plugins_blob = crate::inference::serialize_plugins_manifest(&manifest)
             .ok()
             .filter(|v| !v.is_empty());
-
-        let pkg =
-            crate::brain::BrainPackage::new(header, checkpoint, Some(personality), plugins_blob);
-        pkg.encode_to_bytes()
+        Ok((header, personality, plugins_blob))
     }
 
     /// Export the current brain inside the versioned, lossless compression envelope.
@@ -5589,6 +5595,71 @@ impl LanguageService {
     #[cfg(feature = "brain-compression")]
     pub fn export_brain_compressed(&mut self) -> Result<Vec<u8>, String> {
         crate::brain::wrap_compressed_brain_bytes(&self.export_brain()?)
+    }
+
+    /// Stream the current brain to a seekable writer without a full checkpoint/package `Vec`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn export_brain_to_writer<W: std::io::Write + std::io::Seek>(
+        &mut self,
+        writer: &mut W,
+        compressed: bool,
+        limits: crate::brain::BrainIoLimits,
+    ) -> Result<u64, String> {
+        let (header, personality, plugins_blob) = self.prepare_brain_export()?;
+        if compressed {
+            #[cfg(feature = "brain-compression")]
+            {
+                use std::io::{Seek, SeekFrom};
+                let mut inner = tempfile::tempfile()
+                    .map_err(|e| format!("brain export temporary file failed: {}", e))?;
+                let inner_len = crate::brain::write_brain_package_seekable(
+                    &mut inner,
+                    &header,
+                    Some(&personality),
+                    plugins_blob.as_deref(),
+                    limits,
+                    |out| {
+                        crate::systems::checkpoint::serialize_checkpoint_to_writer(
+                            self.active_dm(),
+                            out,
+                        )
+                    },
+                )?;
+                inner
+                    .seek(SeekFrom::Start(0))
+                    .map_err(|e| format!("brain export rewind failed: {}", e))?;
+                return crate::brain::write_compressed_brain_seekable(
+                    inner, inner_len, writer, limits,
+                );
+            }
+            #[cfg(not(feature = "brain-compression"))]
+            {
+                return Err(
+                    "compressed brain export requires the `brain-compression` feature".to_string(),
+                );
+            }
+        }
+        crate::brain::write_brain_package_seekable(
+            writer,
+            &header,
+            Some(&personality),
+            plugins_blob.as_deref(),
+            limits,
+            |out| crate::systems::checkpoint::serialize_checkpoint_to_writer(self.active_dm(), out),
+        )
+    }
+
+    /// Atomically export using a same-directory temporary file and rename.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn export_brain_to_path<P: AsRef<std::path::Path>>(
+        &mut self,
+        path: P,
+        compressed: bool,
+        limits: crate::brain::BrainIoLimits,
+    ) -> Result<u64, String> {
+        crate::brain::atomic_write_path(path, |file| {
+            self.export_brain_to_writer(file, compressed, limits)
+        })
     }
 
     /// Export current personality as JSON bytes (for persistence alongside brain).
@@ -5792,7 +5863,41 @@ impl LanguageService {
     /// Load a brain as the default checkpoint (replaces current default / single-brain behavior).
     /// Accepts a [`crate::brain::BrainPackage`] file or legacy raw JSON checkpoint bytes.
     pub fn load_brain(&mut self, data: &[u8]) -> Result<(), String> {
-        let peeled = crate::brain::peel_brain_file_bytes(data)?;
+        let limits = crate::brain::BrainIoLimits {
+            max_file_bytes: data.len() as u64,
+            ..crate::brain::BrainIoLimits::default()
+        };
+        self.load_brain_from_reader(std::io::Cursor::new(data), limits)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_brain_from_path<P: AsRef<std::path::Path>>(
+        &mut self,
+        path: P,
+        limits: crate::brain::BrainIoLimits,
+    ) -> Result<(), String> {
+        let path = path.as_ref();
+        let file = std::fs::File::open(path)
+            .map_err(|e| format!("failed to open brain {}: {}", path.display(), e))?;
+        self.load_brain_from_reader(file, limits)
+    }
+
+    pub fn load_brain_from_reader<R: std::io::Read>(
+        &mut self,
+        reader: R,
+        limits: crate::brain::BrainIoLimits,
+    ) -> Result<(), String> {
+        let peeled: crate::brain::ParsedBrain<DimensionManager> =
+            crate::brain::parse_brain_reader(reader, limits, |checkpoint| {
+                crate::systems::checkpoint::deserialize_checkpoint_from_reader(checkpoint)
+            })?;
+        self.apply_loaded_brain(peeled)
+    }
+
+    fn apply_loaded_brain(
+        &mut self,
+        peeled: crate::brain::ParsedBrain<DimensionManager>,
+    ) -> Result<(), String> {
         self.brain_package_header = Some(peeled.header.clone());
         self.brain_plugins_manifest = match &peeled.plugins_blob {
             Some(blob) => match crate::inference::parse_plugins_manifest_bytes(blob) {
@@ -5825,8 +5930,7 @@ impl LanguageService {
         if let Some(ref p) = peeled.personality {
             self.import_personality(p)?;
         }
-        let mut dm: DimensionManager =
-            crate::systems::checkpoint::deserialize_checkpoint_from_bytes(&peeled.checkpoint)?;
+        let mut dm = peeled.checkpoint;
         if let Some(ref mut clf) = dm.action_classifier {
             clf.ensure_output_dim();
         }
@@ -5913,9 +6017,37 @@ impl LanguageService {
 
     /// Load an additional brain under a name. Use `set_active_brain(name)` to switch to it.
     pub fn load_brain_as(&mut self, name: &str, data: &[u8]) -> Result<(), String> {
-        let peeled = crate::brain::peel_brain_file_bytes(data)?;
-        let mut dm: DimensionManager =
-            crate::systems::checkpoint::deserialize_checkpoint_from_bytes(&peeled.checkpoint)?;
+        let limits = crate::brain::BrainIoLimits {
+            max_file_bytes: data.len() as u64,
+            ..crate::brain::BrainIoLimits::default()
+        };
+        self.load_brain_as_from_reader(name, std::io::Cursor::new(data), limits)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_brain_as_from_path<P: AsRef<std::path::Path>>(
+        &mut self,
+        name: &str,
+        path: P,
+        limits: crate::brain::BrainIoLimits,
+    ) -> Result<(), String> {
+        let path = path.as_ref();
+        let file = std::fs::File::open(path)
+            .map_err(|e| format!("failed to open brain {}: {}", path.display(), e))?;
+        self.load_brain_as_from_reader(name, file, limits)
+    }
+
+    pub fn load_brain_as_from_reader<R: std::io::Read>(
+        &mut self,
+        name: &str,
+        reader: R,
+        limits: crate::brain::BrainIoLimits,
+    ) -> Result<(), String> {
+        let peeled: crate::brain::ParsedBrain<DimensionManager> =
+            crate::brain::parse_brain_reader(reader, limits, |checkpoint| {
+                crate::systems::checkpoint::deserialize_checkpoint_from_reader(checkpoint)
+            })?;
+        let mut dm = peeled.checkpoint;
         if let Some(ref mut clf) = dm.action_classifier {
             clf.ensure_output_dim();
         }

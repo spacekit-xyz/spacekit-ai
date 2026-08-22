@@ -1009,16 +1009,13 @@ fn repack_brain(
     brain_description: Option<&str>,
     brain_author: Option<&str>,
 ) -> Result<(), String> {
-    let data =
-        std::fs::read(brain_path).map_err(|e| format!("Failed to read {}: {}", brain_path, e))?;
     let mut svc = LanguageService::new_default()?;
-    svc.load_brain(&data)?;
+    svc.load_brain_from_path(brain_path, crate::brain::BrainIoLimits::default())?;
     apply_brain_package_cli(&mut svc, brain_name, brain_description, brain_author);
-    println!(
-        "Loaded brain from {} ({} KB)",
-        brain_path,
-        data.len() / 1024
-    );
+    let input_len = std::fs::metadata(brain_path)
+        .map_err(|e| format!("Failed to stat {}: {}", brain_path, e))?
+        .len();
+    println!("Loaded brain from {} ({} KB)", brain_path, input_len / 1024);
 
     let loaded = crate::inference::inference_toml::inference_toml_loaded();
     let n_headline = loaded.rules().headline_lexical_topic.len();
@@ -1030,9 +1027,9 @@ fn repack_brain(
         n_headline, n_misfire, n_pr_prefix, n_pr_intent
     );
 
-    let brain_bytes = svc.export_brain()?;
-    let size_kb = brain_bytes.len() / 1024;
-    std::fs::write(output_path, &brain_bytes).map_err(|e| format!("write failed: {}", e))?;
+    let output_len =
+        svc.export_brain_to_path(output_path, false, crate::brain::BrainIoLimits::default())?;
+    let size_kb = output_len / 1024;
     println!("Brain repacked: {} ({} KB)", output_path, size_kb);
     Ok(())
 }
@@ -1776,18 +1773,23 @@ fn merge_brains(base_path: &str, overlay_path: &str, output_path: &str) -> Resul
     println!("  Overlay brain: {}", overlay_path);
     println!("  Output:        {}\n", output_path);
 
-    let base_data = std::fs::read(base_path)
-        .map_err(|e| format!("Failed to read base brain {}: {}", base_path, e))?;
-    let overlay_data = std::fs::read(overlay_path)
-        .map_err(|e| format!("Failed to read overlay brain {}: {}", overlay_path, e))?;
+    let base_file = std::fs::File::open(base_path)
+        .map_err(|e| format!("Failed to open base brain {}: {}", base_path, e))?;
+    let overlay_file = std::fs::File::open(overlay_path)
+        .map_err(|e| format!("Failed to open overlay brain {}: {}", overlay_path, e))?;
+    let base_peeled = crate::brain::parse_brain_reader(
+        base_file,
+        crate::brain::BrainIoLimits::default(),
+        |reader| crate::systems::checkpoint::deserialize_checkpoint_from_reader(reader),
+    )?;
+    let overlay_peeled = crate::brain::parse_brain_reader(
+        overlay_file,
+        crate::brain::BrainIoLimits::default(),
+        |reader| crate::systems::checkpoint::deserialize_checkpoint_from_reader(reader),
+    )?;
 
-    let base_peeled = crate::brain::peel_brain_file_bytes(&base_data)?;
-    let overlay_peeled = crate::brain::peel_brain_file_bytes(&overlay_data)?;
-
-    let mut base_dm: crate::dimension::manager::DimensionManager =
-        crate::systems::checkpoint::deserialize_checkpoint_from_bytes(&base_peeled.checkpoint)?;
-    let overlay_dm: crate::dimension::manager::DimensionManager =
-        crate::systems::checkpoint::deserialize_checkpoint_from_bytes(&overlay_peeled.checkpoint)?;
+    let mut base_dm: crate::dimension::manager::DimensionManager = base_peeled.checkpoint;
+    let overlay_dm: crate::dimension::manager::DimensionManager = overlay_peeled.checkpoint;
 
     let base_groups = base_dm.main.group_order.len();
     let base_gen_envs = base_dm.group_gen_envs.len();
@@ -1820,31 +1822,26 @@ fn merge_brains(base_path: &str, overlay_path: &str, output_path: &str) -> Resul
         println!("    GLE students embedded: {}", gle_count);
     }
 
-    let checkpoint_bytes = crate::systems::checkpoint::serialize_checkpoint_to_bytes(&base_dm)?;
-
     let mut merged_header = base_peeled.header.clone();
     merged_header.description = format!(
         "{} + overlay merge ({} groups added)",
         merged_header.description, summary.overlay_groups
     );
 
-    let merged_package = crate::brain::BrainPackage::new(
-        merged_header,
-        checkpoint_bytes,
-        base_peeled.personality.clone(),
-        base_peeled.plugins_blob.clone(),
-    );
-
-    let out_bytes = merged_package.encode_to_bytes()?;
-    if let Some(parent) = std::path::Path::new(output_path).parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create output dir: {}", e))?;
-    }
-    std::fs::write(output_path, &out_bytes).map_err(|e| format!("write merged brain: {}", e))?;
+    let out_len = crate::brain::atomic_write_path(output_path, |file| {
+        crate::brain::write_brain_package_seekable(
+            file,
+            &merged_header,
+            base_peeled.personality.as_deref(),
+            base_peeled.plugins_blob.as_deref(),
+            crate::brain::BrainIoLimits::default(),
+            |writer| crate::systems::checkpoint::serialize_checkpoint_to_writer(&base_dm, writer),
+        )
+    })?;
 
     println!(
         "\n  Merged brain written to {} ({} bytes)",
-        output_path,
-        out_bytes.len()
+        output_path, out_len
     );
     println!("\n=== Merge Complete ===");
     Ok(())
@@ -1862,10 +1859,10 @@ fn run_inference(
     reload_disk_inference_after_brain: bool,
     fragments_override: Option<&std::path::Path>,
 ) -> Result<(), String> {
-    let data =
-        std::fs::read(brain_path).map_err(|e| format!("Failed to read {}: {}", brain_path, e))?;
-
-    let mut rt = crate::runtime::Runtime::from_brain_bytes(&data)?;
+    let mut rt = crate::runtime::Runtime::from_brain_path(
+        brain_path,
+        crate::brain::BrainIoLimits::default(),
+    )?;
     if reload_disk_inference_after_brain {
         crate::inference::inference_toml::force_native_inference_rebuild_from_disk();
     }

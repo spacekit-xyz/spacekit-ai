@@ -2,12 +2,23 @@
 target/
 src/.DS_Store
 ./src/.DS_Store
+**/.DS_Store
+.idea/
+.vscode/
+*.swp
+*.log
 
 # Local secrets — never commit API keys
+.env
+.env.*
+!.env.example
 .env.local
 *.env.local
+*.pem
+*.key
+*_secret*
+*_private*
 
-docs
 agent-data/
 certify_artifacts/
 data/audio
@@ -21,3 +32,29 @@ growformer-pkg
 micro-brains
 visualizer
 capture_artifacts/
+drift_artifacts/
+reports/
+scripts/__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Generated models, datasets, and experiment reports
+checkpoints/
+*.bin
+*.safetensors
+*.gguf
+*.onnx
+*.pt
+*.pth
+*_results.txt
+*_diagnostic.csv
+*_curve.csv
+*_captures.csv
+*_proposals.csv
+embeddings_*.json
+language_checkpoint.json
+certify_verdict_latest.json
+cmi_spiral_resolve.json
+cmi_*.txt
+grounding_*_meta.txt
+phrases_to_encode.json

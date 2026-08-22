@@ -80,6 +80,18 @@ impl Runtime {
         Ok(Self { svc })
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn from_brain_path<P: AsRef<std::path::Path>>(
+        path: P,
+        limits: crate::brain::BrainIoLimits,
+    ) -> Result<Self, String> {
+        let config = LanguageConfig::default();
+        let mut svc =
+            LanguageService::new_with_config(config).map_err(|e| format!("init: {}", e))?;
+        svc.load_brain_from_path(path, limits)?;
+        Ok(Self { svc })
+    }
+
     /// Create an empty runtime (no brain loaded yet). Call [`Self::load_brain`] later.
     pub fn empty() -> Result<Self, String> {
         let config = LanguageConfig::default();
@@ -90,6 +102,25 @@ impl Runtime {
     /// Hot-swap the brain without rebuilding the runtime.
     pub fn load_brain(&mut self, data: &[u8]) -> Result<(), String> {
         self.svc.load_brain(data)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_brain_path<P: AsRef<std::path::Path>>(
+        &mut self,
+        path: P,
+        limits: crate::brain::BrainIoLimits,
+    ) -> Result<(), String> {
+        self.svc.load_brain_from_path(path, limits)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn export_brain_path<P: AsRef<std::path::Path>>(
+        &mut self,
+        path: P,
+        compressed: bool,
+        limits: crate::brain::BrainIoLimits,
+    ) -> Result<u64, String> {
+        self.svc.export_brain_to_path(path, compressed, limits)
     }
 
     /// Export current brain state as bytes (for caching / saving).

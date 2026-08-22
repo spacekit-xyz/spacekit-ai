@@ -2,6 +2,35 @@
 name = "growformer"
 version = "0.1.0"
 edition = "2021"
+authors = ["Astor Rivera-Carcamo"]
+description = "A promote-freeze neural substrate for deterministic specialist routing and local inference"
+license = "Apache-2.0"
+readme = "README.md"
+documentation = "https://docs.rs/growformer"
+repository = "https://github.com/spacekit-xyz/growformer"
+homepage = "https://github.com/spacekit-xyz/growformer"
+keywords = ["continual-learning", "routing", "neural-networks", "wasm", "inference"]
+categories = ["science", "algorithms"]
+include = [
+    "/src/**",
+    "/tests/**",
+    "/examples/**",
+    "/benches/**",
+    "/scripts/*.sh",
+    "/scripts/*.py",
+    "/scripts/*.gf.toml",
+    "/docs/*.md",
+    "/data/inference/*.toml",
+    "/data/sentiment/*.toml",
+    "/data/fintech/*.toml",
+    "/data/crypto/*.toml",
+    "/data/linguistics/frame_lexicon.toml",
+    "/build.rs",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/LICENSE",
+]
 build = "build.rs"
 default-run = "growformer"
 
@@ -68,7 +97,7 @@ native = ["reqwest"]
 server = ["axum", "tokio", "tower-http", "async-stream", "futures-core", "uuid"]
 parallel = ["rayon"]
 training = []
-brain-compression = ["dep:spacekit-compressor"]
+brain-compression = ["dep:flate2"]
 # Categorical DAG + Pythagoras sentiment trainer (disable with --no-default-features for lean builds).
 categorical = []
 cli = ["clap", "indicatif", "mnist", "kiddo", "training"]
@@ -93,11 +122,11 @@ aho-corasick = "1.1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
 uuid = { version = "1", features = ["v4", "serde"], optional = true }
 axum = { version = "0.7", optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util"], optional = true }
 tower-http = { version = "0.5", features = ["cors"], optional = true }
 async-stream = { version = "0.3", optional = true }
 futures-core = { version = "0.3", optional = true }
-spacekit-compressor = { path = "../../spacekit/spacekit-ai/spacekit-compressor", optional = true }
+flate2 = { version = "1", optional = true }
 
 # Pin to match `wasm-bindgen-cli` (schema versions must match exactly).
 wasm-bindgen = { version = "=0.2.115", optional = true }
@@ -106,6 +135,7 @@ console_error_panic_hook = { version = "0.1", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+http-body-util = "0.1"
 
 [[bench]]
 name = "cosine_similarity"
@@ -114,3 +144,6 @@ harness = false
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
 instant = { version = "0.1", features = ["wasm-bindgen"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tempfile = "3"
