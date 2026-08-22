@@ -1,0 +1,440 @@
+# Declarative retrieval rescore for sentiment lattice when the query looks like crypto/tape.
+# Schema: see `inference::retrieval_rescore`. Add locale-specific tables later (e.g. sentiment_crypto_rescore.fr.toml).
+# Do not add new English heuristics in Rust — extend this file or ship a WASM plugin (see docs/RETRIEVAL_EXTENSIBILITY.md).
+
+version = 1
+locale = "en"
+
+[[rules]]
+id = "fintech_consumer_noise"
+# Down-rank payment/fraud templates that collide on generic tokens.
+when_program_any = [
+  "security friction",
+  "patient assistance leading to resolution",
+  "networking — patient",
+  "gratitude without intensity",
+  "slightly improved performance",
+  "everyday purchase misclassified",
+  "fraud system blocked",
+  "fraud system flagged",
+  "fraud team flagged",
+  "payment got flagged but at least",
+  "notified me instantly",
+  "my bank finally added alerts",
+  "my payment got flagged",
+  "merchant says pending",
+]
+delta = -0.38
+
+[[rules]]
+id = "breakdown_funding_match_boost"
+when_query_all = ["breakdown", "funding"]
+when_program_all = ["breakdown", "funding"]
+delta = 0.28
+
+[[rules]]
+id = "breakdown_funding_penalize_compression_story"
+when_query_all = ["breakdown", "funding"]
+unless_query_any = ["compression", "coil"]
+when_program_any = ["compression implies", "imminent move but not which way", "coiling tighter"]
+delta = -0.34
+
+[[rules]]
+id = "breakdown_funding_penalize_rotation_boilerplate_a"
+when_query_all = ["breakdown", "funding"]
+when_program_any = ["positive for btc but negative for altcoins"]
+delta = -0.45
+
+[[rules]]
+id = "breakdown_funding_penalize_rotation_boilerplate_b"
+when_query_all = ["breakdown", "funding"]
+when_program_all = ["dominance is rising", "alts bleed"]
+delta = -0.45
+
+[[rules]]
+id = "breakdown_funding_penalize_rsi_disbelief_line"
+when_query_all = ["breakdown", "funding"]
+when_program_all = ["rsi"]
+when_program_any = ["disbelief", "not buying", "exhaustion"]
+delta = -0.48
+
+[[rules]]
+id = "breakdown_funding_penalize_altbtc_mismatch_line"
+when_query_all = ["breakdown", "funding"]
+when_program_all = ["altcoin", "btc"]
+when_program_any = ["strength", "weakness", "contrast"]
+delta = -0.52
+
+[[rules]]
+id = "dominance_bleed_extra_penalty_rotation_copy"
+when_query_all = ["dominance"]
+when_query_any = ["bleed", "bleeding", "falling"]
+when_program_any = ["positive for btc but negative for altcoins"]
+delta = -0.35
+
+[[rules]]
+id = "dominance_bleed_boost_fork_phrase"
+when_query_all = ["dominance"]
+when_query_any = ["bleed", "bleeding", "falling"]
+when_program_any = ["genuine forked", "forked narrative", "altseason vs nuke"]
+delta = 0.22
+
+[[rules]]
+id = "funding_positive_penalize_micro_red_fragile"
+when_query_all = ["funding"]
+when_query_any = ["positive", "flipped"]
+unless_query_any = ["tiny", "candle", "breakdown"]
+when_program_any = ["micro red bar", "fragile positioning"]
+delta = -0.48
+
+[[rules]]
+id = "cold_storage_penalize_options_template"
+when_query_all = ["cold", "storage"]
+when_program_any = ["options positioning", "large options"]
+delta = -0.45
+
+[[rules]]
+id = "staking_slow_penalize_demand_bullish_template"
+when_query_all = ["staking"]
+when_query_any = ["slow", "slowed"]
+when_program_any = [
+  "staking demand",
+  "reduced supply",
+  "bullish interpretation",
+  "strong bullish interpretation",
+]
+delta = -0.58
+
+[[rules]]
+id = "onchain_exploding_penalize_capitulation"
+when_query_all = ["activity", "exploding"]
+when_query_any = ["on-chain", "onchain", "on\u2011chain"]
+unless_query_any = ["blockchain"]
+when_program_any = ["capitulation", "loss of confidence"]
+delta = -0.52
+
+[[rules]]
+id = "on_chain_exploding_penalize_capitulation_words"
+when_query_all = ["on", "chain", "activity", "exploding"]
+unless_query_any = ["blockchain"]
+when_program_any = ["capitulation", "loss of confidence"]
+delta = -0.52
+
+[[rules]]
+id = "onchain_activity_exploding_penalize_capitulation_big_coming"
+when_query_all = ["activity", "exploding"]
+when_query_any = ["on-chain", "onchain", "on\u2011chain", "something big"]
+unless_query_any = ["blockchain"]
+when_program_any = ["capitulation", "loss of confidence", "exhaustion and loss"]
+delta = -0.55
+
+[[rules]]
+id = "tps_ux_penalize_price_funding_mismatch"
+when_query_all = ["tps"]
+when_program_any = ["price decline", "positive funding"]
+delta = -0.45
+
+[[rules]]
+id = "cpi_macro_penalize_fintech_security_line"
+when_query_any = ["cpi", "puked", "fed paused"]
+when_program_any = ["security friction", "real-time alerts", "real time alerts"]
+delta = -0.5
+
+[[rules]]
+id = "pump_sold_penalize_false_positives_line"
+when_query_all = ["pump", "sold"]
+when_program_any = ["false positives", "create friction"]
+delta = -0.55
+
+[[rules]]
+id = "compression_coil_boost_a"
+unless_query_all = ["breakdown", "funding"]
+when_query_any = ["compression", "coil"]
+when_program_any = ["compression implies", "imminent move but not which way"]
+delta = 0.2
+
+[[rules]]
+id = "compression_coil_boost_b"
+unless_query_all = ["breakdown", "funding"]
+when_query_any = ["compression", "coil"]
+when_program_all = ["coil", "compression"]
+delta = 0.2
+
+[[rules]]
+id = "dominance_bleed_fork_boost_tape"
+when_query_all = ["dominance"]
+when_query_any = ["bleed", "falling"]
+when_program_any = ["falling btc dominance", "altseason vs nuke"]
+delta = 0.36
+
+[[rules]]
+id = "dominance_bleed_fork_boost_forked_copy"
+when_query_all = ["dominance"]
+when_query_any = ["bleed", "falling"]
+when_program_all = ["forked narrative", "dominance"]
+delta = 0.36
+
+[[rules]]
+id = "dominance_bleed_penalize_rising_rotation"
+when_query_all = ["dominance"]
+when_query_any = ["bleed", "falling"]
+when_program_any = ["dominance is rising", "positive for btc but negative for altcoins"]
+delta = -0.55
+
+[[rules]]
+id = "dominance_rising_boost"
+when_query_all = ["dominance"]
+when_query_any = ["rising", "climbing"]
+when_program_any = ["dominance is rising", "positive for btc but negative for altcoins"]
+delta = 0.24
+
+[[rules]]
+id = "dominance_rising_penalize_bleed_fork"
+when_query_all = ["dominance"]
+when_query_any = ["rising", "climbing"]
+when_program_any = ["falling btc dominance", "altseason vs nuke"]
+delta = -0.36
+
+[[rules]]
+id = "dominance_overlap_boost"
+when_query_all = ["dominance"]
+when_program_all = ["dominance"]
+delta = 0.14
+
+[[rules]]
+id = "euphoric_overlap"
+when_query_all = ["euphoric"]
+when_program_any = ["euphor"]
+delta = 0.12
+
+[[rules]]
+id = "tiny_green_program_both"
+when_query_all = ["tiny", "green"]
+when_program_all = ["tiny", "green"]
+delta = 0.12
+
+[[rules]]
+id = "tiny_green_negligible_upside"
+when_query_all = ["tiny", "green"]
+when_program_any = ["negligible upside"]
+delta = 0.12
+
+[[rules]]
+id = "pump_sold_supply_boost"
+when_query_all = ["pump", "sold"]
+when_program_any = ["shifting trend", "instant supply", "sellers in control"]
+delta = 0.22
+
+[[rules]]
+id = "pump_sold_penalize_rumor"
+when_query_all = ["pump", "sold"]
+when_program_any = ["rumor"]
+unless_query_any = ["rumor"]
+delta = -0.35
+
+[[rules]]
+id = "pump_sold_penalize_catalyst_line"
+when_query_all = ["pump", "sold"]
+unless_query_any = ["catalyst"]
+when_program_any = ["positive catalysts"]
+delta = -0.4
+
+[[rules]]
+id = "pump_sold_penalize_consumer_bleed"
+when_query_all = ["pump", "sold"]
+when_program_any = ["everyday purchase", "misclassified as risk"]
+delta = -0.72
+
+[[rules]]
+id = "pump_sold_penalize_irritation_sarcasm_line"
+when_query_all = ["pump", "sold"]
+when_program_any = ["irritation with light sarcasm", "light sarcasm"]
+delta = -0.55
+
+[[rules]]
+id = "volume_spike_absorption_boost"
+when_query_all = ["volume", "spiking"]
+when_query_any = ["absorbing", "absorb"]
+when_program_any = ["aggressive absorption", "flat print"]
+delta = 0.34
+
+[[rules]]
+id = "volume_spike_penalize_adoption_confusion"
+when_query_all = ["volume", "spiking"]
+when_query_any = ["absorbing", "absorb"]
+when_program_any = ["adoption"]
+unless_query_any = ["adoption"]
+delta = -0.48
+
+[[rules]]
+id = "zero_news_positioning_boost"
+when_query_all = ["zero", "news"]
+when_query_any = ["know", "someone"]
+when_program_any = [
+  "informed positioning",
+  "asymmetric info",
+  "ahead of public news",
+  "mainstream headlines",
+  "positioning ahead",
+  "someone knows framing",
+]
+delta = 0.18
+
+[[rules]]
+id = "zero_news_penalize_hopium_copium"
+when_query_all = ["zero", "news"]
+when_query_any = ["know", "someone"]
+when_program_any = ["hopium", "copium", "denial from bulls", "pure hopium"]
+delta = -0.22
+
+[[rules]]
+id = "oi_climbing_danger_penalize_bullish_coil_template"
+when_query_all = ["interest", "climbing"]
+when_query_any = ["dangerous", "too fast", "way too"]
+unless_query_any = ["spring", "coiled", "flat"]
+when_program_any = ["coiled spring", "bullish lean", "cautiously optimistic"]
+delta = -0.42
+
+[[rules]]
+id = "sec_vague_penalize_support_failure_boilerplate"
+when_query_all = ["sec"]
+when_query_any = ["vague", "statement"]
+when_program_any = [
+  "severe service failure",
+  "dismissive support",
+  "customer support",
+  "support guidance",
+]
+delta = -0.48
+
+[[rules]]
+id = "rate_cuts_macro_penalize_processing_speed_line"
+when_query_any = ["rate cut", "rate cuts", "cuts might"]
+when_program_any = [
+  "faster-than-expected processing",
+  "faster than expected processing",
+  "pleasant but not intense",
+]
+delta = -0.46
+
+[[rules]]
+id = "etf_outflow_penalize_inflow_celebration_line"
+when_query_all = ["outflow"]
+when_query_any = ["etf", "massive", "not bullish"]
+when_program_any = ["record inflows", "institutions are hungry", "clearly buying the dip"]
+delta = -0.44
+
+[[rules]]
+id = "miner_outflow_penalize_demand_bullish_line"
+when_query_all = ["miner"]
+when_query_any = ["outflow", "outflows", "spiked"]
+when_program_any = ["staking demand", "reduced supply", "bullish interpretation"]
+delta = -0.5
+
+[[rules]]
+id = "reserves_low_rhetorical_penalize_plain_bullish_template"
+when_query_all = ["reserves", "low"]
+when_query_any = ["exchange", "year", "bullish"]
+when_program_any = ["strong institutional demand", "record inflows", "clearly buying"]
+delta = -0.4
+
+[[rules]]
+id = "governance_promising_boost_cautious_regulatory"
+when_query_all = ["governance"]
+when_query_any = ["promising", "proposal"]
+when_program_any = ["regulatory tone improving", "cautiously positive", "uncertainty remains"]
+delta = 0.2
+
+[[rules]]
+id = "fear_greed_penalize_btc_alt_rotation_boilerplate"
+when_query_all = ["fear", "greed"]
+when_program_all = ["strength", "btc"]
+when_program_any = ["altcoin", "weakness in alt", "alts"]
+delta = -0.52
+
+[[rules]]
+id = "fear_greed_penalize_liquidation_calm_template"
+when_query_all = ["fear", "greed"]
+when_program_any = [
+  "two-sided liquidat",
+  "calm before the move",
+  "calm before a big move",
+  "liquidations are stacking",
+]
+delta = -0.58
+
+[[rules]]
+id = "btc_coil_compress_penalize_btc_alt_rotation"
+when_query_all = ["btc"]
+when_query_any = ["coil", "compression", "tighter"]
+unless_query_any = ["alts are", "while alts", "alts ripping"]
+when_program_all = ["strength", "btc"]
+when_program_any = ["altcoin", "weakness in alt", "alts"]
+delta = -0.52
+
+[[rules]]
+id = "btc_coil_compress_penalize_grinding_vibe_line"
+when_query_all = ["btc"]
+when_query_any = ["coil", "compression", "tighter", "tight"]
+unless_query_any = ["grinding up", "nobody seems", "vibe here"]
+when_program_any = [
+  "slow upward movement",
+  "lack of enthusiasm",
+  "nobody seems excited",
+]
+delta = -0.54
+
+[[rules]]
+id = "resistance_sitting_penalize_falling_under_line"
+when_query_all = ["resistance"]
+when_query_any = ["sitting", "we're", "were"]
+when_program_any = ["falling under resistance", "falling under the resistance"]
+delta = -0.5
+
+[[rules]]
+id = "tiny_green_penalize_negative_upside_garble"
+when_query_all = ["tiny", "green"]
+when_program_any = ["negative upside", "over negative upside"]
+delta = -0.52
+
+[[rules]]
+id = "funding_negative_wont_drop_penalize_dump_line"
+when_query_all = ["funding", "negative"]
+when_query_any = ["won't", "wont", "weird"]
+unless_query_any = ["we're dumping", "were dumping", "dumping but"]
+when_program_any = ["decisive dump", "decision dump", "aligns bearish leverage with price"]
+delta = -0.58
+
+[[rules]]
+id = "funding_positive_penalize_oi_liquidation_mismatch"
+when_query_all = ["funding"]
+when_query_any = ["positive", "flipped"]
+unless_query_any = ["tiny", "candle", "breakdown", "liquidat"]
+when_program_any = [
+  "oi wipe",
+  "forced liquidations and instability",
+  "liquidations and instability",
+  "bearish third-party headline",
+  "holder outcomes",
+]
+delta = -0.55
+
+[[rules]]
+id = "zero_news_penalize_headline_garble"
+when_query_all = ["zero", "news"]
+when_query_any = ["know", "someone"]
+when_program_any = ["headline snack"]
+delta = -0.55
+
+[[rules]]
+id = "hopium_explicit_penalize_product_ux_line"
+when_query_all = ["hopium"]
+when_program_any = ["straightforward product", "ux praise", "tokenization"]
+delta = -0.48
+
+[[rules]]
+id = "laughing_pain_penalize_hopium_regulatory_line"
+when_query_all = ["laughing"]
+when_query_any = ["pain"]
+when_program_any = ["hopium", "regulatory progress"]
+delta = -0.5

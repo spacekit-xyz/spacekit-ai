@@ -1,0 +1,26 @@
+# Inference rules for Brain B — causal relationship classifier
+# Seven causal types: direct, compensatory, contrastive, explanatory,
+# retrospective_framing, interventional_counterfactual, concessive
+# (plus inferential as a variant of explanatory)
+
+[rules]
+
+# Connector-based routing hints
+lexicon_keywords = [
+    "so", "therefore", "thus", "consequently", "causing", "hence",
+    "but", "however", "at least", "though", "nonetheless",
+    "even though", "despite", "even as", "notwithstanding",
+    "because", "since", "as", "due to", "owing to",
+    "which means", "meaning", "implying", "suggesting", "indicating",
+    "somehow", "still", "yet", "and yet", "nevertheless",
+    "would have", "if", "had", "without", "could have",
+    "looking back", "in hindsight", "turned out", "now we understand",
+]
+
+# Hard-reject substrings for garbled causal output
+hard_reject_substrings = [
+    "Set Theory",
+    "Consensus Algorithms",
+    "quantum",
+    "ISO 27001",
+]

@@ -1,0 +1,37 @@
+# Layer 0 — query expansion for retrieval (BM25 / subject keywords).
+# Loaded at compile time; extend with new [[rules]] instead of Rust substring logic.
+# See docs/RETRIEVAL_EXTENSIBILITY.md and GROWFORMER_CAUSAL_AI.md (World grounding).
+
+version = 1
+locale = "en"
+
+# Rule: all `when_all` substrings must appear in the padded lowercase query.
+# Optional `when_any`: at least one must appear (empty = ignore).
+# `unless_any`: if any appears, rule is skipped.
+# `add_keywords`: appended to subject keywords when matched (deduped, len > 2).
+
+[[rules]]
+# Money loss + "game" → gambling frame (disambiguate from video games)
+when_all = ["lost", "game"]
+unless_any = ["video game", "steam", "esports", "twitch", "npc", "patch"]
+add_keywords = ["gambling", "betting", "wager", "stake", "casino"]
+
+[[rules]]
+when_all = ["loss", "game"]
+unless_any = ["video game", "esports", "twitch", "steam"]
+add_keywords = ["gambling", "betting", "wager"]
+
+[[rules]]
+# Crypto loss lines → trading / position vocabulary
+when_all = ["lost", "crypto"]
+add_keywords = ["trading", "position", "liquidation"]
+
+[[rules]]
+when_all = ["loss", "crypto"]
+add_keywords = ["trading", "portfolio", "drawdown"]
+
+[[rules]]
+# Negative funding + stubborn price → short-squeeze / trapped-shorts retrieval bias
+when_all = ["funding", "negative"]
+when_any = ["price", "drop", "dump", "flat", "won't", "wont", "doesn't", "doesnt"]
+add_keywords = ["shorts", "squeeze", "trapped", "perp"]

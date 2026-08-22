@@ -1,0 +1,46 @@
+# Declarative frame → scenario-topic map (linguistics brain Phase 1).
+# `scenario_topic` feeds forced-topic lattice retrieval; `frame_id` is the stable semantic name.
+
+[[frames]]
+frame_id = "ETF_DELAY_BEARISH"
+scenario_topic = "etf_delay_bearish"
+intent = [
+  ["bitcoin", "btc", " spot btc", "crypto"],
+  ["etf", " etf", "spot etf"],
+  ["crash", "crashed", "sell-off", "selloff", "dump", "plunged", "fell", "slid", "slide", " broke down"],
+  ["delay", "delayed", "postpon", "shelved", "shelf", "pushed back", "slipped", "approval", "decision", "hearing"],
+]
+
+[[frames]]
+frame_id = "MORTGAGE_RATE_COMPLAINT"
+scenario_topic = "mortgage_rate_complaint"
+intent = [
+  ["mortgage", "home loan", "fixed mortgage", " my loan"],
+  ["raised", "hiked", "increased", "bumped", "adjusted", "lifted", " went up", " jumped"],
+  ["rate", " apr", "payment", "interest rate"],
+]
+
+[[frames]]
+frame_id = "MORTGAGE_RATE_COMPLAINT"
+scenario_topic = "mortgage_rate_complaint"
+intent = [
+  ["chase", "wells fargo", "bank of america", " my bank", "the bank", "lender", " servicer"],
+  ["mortgage", "home loan"],
+  ["without notice", "no notice", "no warning", "no email alert", "email alert", "overnight"],
+]
+
+[[frames]]
+frame_id = "FEE_COMPLAINT"
+scenario_topic = "fee_complaint"
+intent = [
+  ["custody fee", "monthly fee", "monthly custody", "account fee", "service fee"],
+  ["non-negotiable", "keep charging", "charging a"],
+]
+
+# Hard-reject: counterfactual positive — not a bearish headline bucket.
+[[reject_frames]]
+frame_id = "COUNTERFACTUAL_POSITIVE"
+intent = [
+  ["would have", "would've", "would have loved", "wish i had"],
+  ["rally", "moon", "pump", "gain", "green", "loved that"],
+]

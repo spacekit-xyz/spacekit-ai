@@ -9,7 +9,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-authors = ["Astor Rivera-Carcamo"]
+authors = ["Astor Rivera-Carcamo <astor@swtch.ai>"]
 repository = "https://github.com/spacekit-xyz/spacekit-ai"
 
 [workspace.dependencies]

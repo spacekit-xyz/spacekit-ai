@@ -1,0 +1,45 @@
+# Domain gate: routes prompt to correct narrow brain (crypto vs tradfi).
+# -------------------------------------------------------------------------
+# The gate runs a simple keyword scan on the lowered prompt text.
+# First matching route wins.  When neither matches, the default domain
+# ("tradfi") is used — conservative for a financial context.
+#
+# Usage: the runtime (or a shell wrapper) loads this file, scans the prompt,
+# and dispatches to the correct brain .bin.
+
+default_domain = "tradfi"
+
+[[routes]]
+domain = "crypto"
+any_keywords = [
+  "bitcoin", "btc", "ethereum", "eth", "crypto", "cryptocurrency",
+  "defi", "nft", "stablecoin", "usdt", "usdc", "blockchain",
+  "token", "altcoin", "binance", "coinbase", "kraken", "solana",
+  "xrp", "cardano", "dogecoin", "mining", "miner", "dao",
+  "web3", "metaverse", "airdrop", "staking", "yield farming",
+  "rug pull", "pump-and-dump", "pump and dump", "halving",
+  "debank", "dex", "cex", "liquidity pool", "smart contract",
+  "validator", "hash rate", "cold wallet", "hot wallet",
+  "memecoin", "degen", "wagmi", "ngmi", "diamond hands",
+  "satoshi", "lightning network", "layer 2", "wrapped",
+]
+
+[[routes]]
+domain = "tradfi"
+any_keywords = [
+  "stock", "equity", "equities", "earnings", "dividend", "ipo",
+  "nasdaq", "s&p", "dow jones", "nyse", "ftse", "nikkei",
+  "bank", "banking", "credit card", "mortgage", "fintech",
+  "payment", "paypal", "visa", "mastercard", "stripe",
+  "insurance", "pension", "401k", "social security", "hedge fund",
+  "mutual fund", "bond", "treasury", "fed ", "federal reserve",
+  "interest rate", "credit union", "chartered", "open banking",
+  "open finance", "revenue", "profit margin", "valuation",
+]
+
+# Out-of-domain keywords — if only these match, reject as OUT_OF_SCOPE.
+[[routes]]
+domain = "out_of_scope"
+any_keywords = [
+  "preschool", "kindergarten", "hibachi", "porn", "sleep porn",
+]

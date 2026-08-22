@@ -1,0 +1,1140 @@
+# Customer-safe inference defaults (numeric gates + structural [rules] lists only).
+# -----------------------------------------------------------------------------
+# A minimal `[[rules.headline_lexical_topic]]` table is included for everyday lines that
+# must beat coarse mixed heuristics without loading the full reference pack.
+# For the full internal sentiment pack (tests, `sentiment-analysis` script), use
+# `inference_sentiment_reference.toml` via `--inference-toml` / `[inference].toml`.
+#
+# Built-in discovery prefers this file first (see `inference_toml.rs`). Omitted or empty
+# `[rules]` arrays merge from `--inference-defaults-toml` / baseline search when set.
+# -----------------------------------------------------------------------------
+
+meta_gk_margin = 0.05
+meta_gk_confidence = 0.55
+min_meta_confidence_user_anchored = 0.28
+mixed_override_confidence = 0.88
+default_line_confidence = 0.92
+ambiguous_line_confidence = 0.58
+
+[rules]
+contrastive_markers = [
+  " but ", ", but ", ". but ", " although ", " even though ", " however ", "; but ",
+  " on the other hand ", " on the flip side ", " that said ", " having said that ",
+  " with that said ", " at the same time ", " then again ", " still, ", " all that said ",
+  " even so ", " mind you ", " in the same breath ",
+  " which is weird", " weird because", " strange that", " odd that",
+  " though ", ", though ", ". though ",
+  " shame that", " shame ",
+]
+
+sarcasm_simple = [
+  "yeah, because", "sure, because", "right, because",
+  "gotta love when", "meritocracy at its finest", "genius move", "living the dream",
+  "isn't it just perfect", "isnt it just perfect",
+  "thanks for ghosting", "thanks for the zero notice",
+  "clearly i'm the problem", "clearly im the problem",
+  "thanks for the overdraft", "thanks for the fee", "great time to freeze my account",
+  "love when my card gets declined", "perfect timing on that maintenance window",
+  "oh great",
+]
+
+positive_anchor_tokens = [
+  "love", "adore", "treasure", "obsessed", "enjoy", "like", "prefer", "best", "great",
+  "amazing", "wonderful", "fantastic", "excellent", "happy", "glad", "good", "nice",
+  "fine", "better", "beautiful", "incredible", "perfect",
+  "slick", "seamless", "snappy", "polished", "nifty",
+]
+
+negative_anchor_tokens = [
+  "hate", "despise", "loathe", "awful", "terrible", "worst", "horrible", "bad",
+  "sucks", "disgusting", "dislike", "miserable", "depressing",
+]
+
+bipolar_positive_tokens = [
+  "love", "adore", "enjoy", "like", "prefer", "great", "good", "incredible", "amazing",
+  "wonderful", "fantastic", "excellent", "beautiful", "best", "nice", "fine", "glad", "happy",
+  "perfect", "flawless", "fun",
+  "refunded", "reimbursed", "waived", "cleared", "approved", "resolved", "reversed",
+  "slick", "seamless", "snappy", "polished", "nifty",
+  "jumps", "jump", "surge", "surges", "surged", "soars", "soared",
+  "climbs", "climbed", "rallies", "rallied", "rally", "recovery", "recovered",
+]
+
+bipolar_negative_tokens = [
+  "hate", "despise", "awful", "terrible", "worst", "horrible", "bad", "sucks", "slow",
+  "sloppy", "mediocre", "disappointing", "disappointed", "poor", "worse", "weak", "crash",
+  "crashes", "crashed", "broken", "bug", "bugs", "ugly",
+  "declined", "overdraft", "frozen", "blocked", "bounced", "penalty", "nsf",
+  "annoyed", "frustrated", "irritated", "cautious", "bearish", "skeptical",
+  "concerned", "worried", "risky", "overvalued",
+]
+
+crypto_market_surface_tokens = [
+  "bitcoin", "btc", "xrp", "doge", "dogecoin", "ethereum", " eth ", "solana",
+  "crypto", "altcoin", "defi", "stablecoin", "blockchain", "token ", " spot etf",
+]
+crypto_market_surface_prefixes = ["eth "]
+crypto_market_tape_tokens = [
+  "dominance", "liquidation", "altseason", "funding", "open interest", " perp", "perps", "perpetual",
+  "rsi", "wick", "candle", "greed", "hash rate", "hashrate", "pump",
+]
+like_perception_verbs = [
+  "feel", "feels", "look", "looks", "sound", "sounds", "seem", "seems", "smell", "smells",
+]
+like_intensity_exception_phrases = ["like crazy", "like mad"]
+like_comparison_preceding_tokens = [
+  "stocks", "companies", "firms", "products", "platforms", "services",
+  "apps", "exchanges", "tokens", "coins", "assets", "brands", "currencies",
+  "banks", "brokers", "providers", "tools", "features", "games",
+  "names", "players", "competitors", "alternatives", "options",
+]
+strong_positive_tokens = ["love", "adore", "treasure", "obsessed"]
+
+# PR-wire press gate, mixed-signal lexicon, ambiguous-valence cues, anchor glosses (see `inference_toml.rs`).
+pr_wire_press_min_trim_len = 32
+mixed_plausible_headline_topics = ["confused", "cautiously_positive", "mixed"]
+mixed_silver_lining_bad_phrases = [
+  "failed again", "failed twice", "crashed", "broke again", "two days of errors", "days of errors",
+]
+mixed_silver_lining_good_phrases = [
+  "at least support", "at least they", "responded quickly", "saved my draft", "quick response",
+]
+mixed_fraud_relief_anchor_phrases = ["glad"]
+mixed_fraud_relief_trigger_any = [
+  "flagged", "fraud alert", "fraud system", "froze", "frozen", "locked my",
+]
+mixed_implicit_followon_phrases = ["that's unusual", "that is unusual", "thats unusual"]
+mixed_implicit_unusual_token = "unusual"
+mixed_implicit_unusual_context_any = ["that", "worked", "actually"]
+mixed_implicit_unusual_exclude_any = ["actually worked"]
+mixed_positive_outcome_phrases = [
+  "deposit hit early", "paycheck hit early", "payment hit early", "payment finally cleared",
+  "finally cleared", "refund posted", "glad the refund", "nice that", "went through instantly",
+  "went through today", "transfer went through", "transfer was instant", "instant today",
+  "payment went through", "it went through", "cleared early", "posted early", "credited early",
+  "credit score jumped", "score jumped", "points jumped", "actually worked", "app actually worked",
+  "responded quickly", "at least support", "at least they", "fraud system is paying",
+]
+mixed_skepticism_friction_phrases = [
+  "weird", "strange", "odd that", "don't trust", "dont trust", "do not trust", "don't understand",
+  "dont understand", "do not understand", "never does", "never did", "never has", "didn't update",
+  "didnt update", "logged me out", "logged out", "looks wrong", "feel wrong", "whatever system",
+  "suspicious", "usually a disaster", "shame that", " shame ", "two days of errors", "failed again",
+  "why the charge", "why did the charge", "relieved but", " but annoyed", "days of errors",
+]
+mixed_operational_decline_phrases = ["declined"]
+mixed_operational_approve_phrases = ["approved"]
+ambiguous_lukewarm_okay_primary_phrases = ["it's okay", "it is okay"]
+ambiguous_lukewarm_okay_supplement_phrases = ["suppose"]
+ambiguous_fine_meh_primary_phrases = ["it's fine", "it is fine", "it was fine", "that was fine"]
+ambiguous_fine_meh_supplement_phrases = [
+  "nothing special", "nothing memorable", "elevator", "stuck in an elevator",
+]
+ambiguous_neutral_conjunction_groups = [["okay", "suppose"]]
+
+[[rules.anchor_positive_gloss]]
+token = "love"
+gloss = "strong positive affection"
+[[rules.anchor_positive_gloss]]
+token = "adore"
+gloss = "strong positive affection"
+[[rules.anchor_positive_gloss]]
+token = "treasure"
+gloss = "strong positive affection"
+[[rules.anchor_positive_gloss]]
+token = "enjoy"
+gloss = "warm approval / preference"
+[[rules.anchor_positive_gloss]]
+token = "like"
+gloss = "warm approval / preference"
+[[rules.anchor_positive_gloss]]
+token = "prefer"
+gloss = "warm approval / preference"
+
+[[rules.anchor_negative_gloss]]
+token = "hate"
+gloss = "strong negative affect"
+[[rules.anchor_negative_gloss]]
+token = "despise"
+gloss = "strong negative affect"
+[[rules.anchor_negative_gloss]]
+token = "loathe"
+gloss = "strong negative affect"
+
+ambiguous_disappointment_phrases = [
+  "thought it would be better", "thought it'd be better", "expected it to be better",
+  "expected more", "hoped for better", "hoped it would be", "could have been better", "was hoping for",
+  "not what i hoped", "not what i expected", "wasn't what i expected", "wasnt what i expected",
+  "lower than i expected", "not what the rate said", "not what they advertised",
+]
+
+ambiguous_neutral_hedge_phrases = [
+  "i guess", "i suppose", "nothing special", "nothing great", "mediocre",
+  "so-so", "so so", "could be worse", "not great", "not amazing",
+  "but it's fine", "but its fine", "but it is fine",
+  "but fine", "it's fine though", "its fine though",
+  "annoyed but", "frustrated but", "irritated but",
+]
+
+evaluative_words = [
+  "hate", "love", "terrible", "awful", "amazing", "horrible", "fantastic", "disappointed",
+  "disappointing", "thrilled", "annoyed", "frustrated", "excited", "worried", "anxious",
+  "regret", "ashamed", "proud", "grateful", "annoying", "wonderful", "sucks", "best ever",
+  "worst", "ridiculous", "outraged", "relieved", "stressed", "furious", "ripped off",
+  "slick", "seamless", "polished",
+  "jailed", "prison", "sentenced", "convicted", "indicted", "arrested",
+  "scam", "scammed", "fraud", "hacked", "kidnapped", "busted",
+  "horror", "horrific", "slumped", "struggling", "surging",
+]
+
+disappointment_words = ["disappointed", "disappointing"]
+
+# First match wins: negation / rejection before positive idioms.
+#
+# English edges: common litotes get a tight positive_mild lexical row below; contrast still leans on
+# contrastive_markers + bipolar tokens + training (MIXED / dominant-clause labels).
+# Remaining: sarcasm, questions, hypotheticals, domain jargon, multilingual code-switching.
+[[rules.lexical_polarity]]
+topic = "negative_mild"
+phrases = [
+  "don't like", "dont like", "do not like",
+  "doesn't like", "doesnt like", "didn't like", "didnt like", "did not like",
+  "don't love", "dont love", "don't enjoy", "dont enjoy", "don't prefer", "dont prefer",
+  "not a fan", "not a big fan", "no fan of",
+  "not happy", "not glad", "not satisfied", "not impressed",
+  "not fond of", "am not fond", "i'm not fond", "im not fond",
+  "not good enough", "not good at", "nowhere near as good",
+  "wouldn't use", "wouldnt use", "won't use", "wont use", "will not use",
+  "don't use", "dont use", "do not use", "doesn't use", "doesnt use",
+  "shouldn't use", "shouldnt use", "should not use",
+  "wouldn't touch", "wouldnt touch", "won't touch", "wont touch",
+  "can't stand", "cant stand", "cannot stand",
+  "wouldn't recommend", "wouldnt recommend", "won't recommend", "wont recommend",
+  "don't recommend", "dont recommend", "don't trust", "dont trust",
+  "hardly recommend", "can't recommend", "cant recommend", "cannot recommend",
+  "not interested in using", "don't want to use", "dont want to use",
+  "prefer not to", "rather not", "no thanks",
+  "not going to use", "stopped using", "quit using", "switching away from",
+  "never use again", "never using again",
+  "avoid using", "stay away from",
+  "could do without", "can do without",
+  "wish i hadn't", "wish i had not", "wish i never",
+  "regret using", "regret buying", "regret trying",
+  "waste of money", "waste of time", "waste of ",
+  "rip off", "rip-off",
+  "overrated", "underwhelmed", "underwhelming",
+  "dissatisfied", "unhappy with", "frustrated with", "annoyed with",
+  "sick of", "tired of", "fed up", "fed up with", "had enough of",
+  "not for me", "not what i expected", "not what i hoped",
+  "not worth it", "not worth the", "not worth using",
+  "falls short", "left a lot to be desired", "leaves a lot to be desired",
+  "wouldn't buy", "wouldnt buy", "won't buy again", "wont buy again",
+  "never buying again", "not buying again", "won't purchase again", "wouldn't purchase again",
+  "will not buy again", "won't be buying", "wont be buying", "not worth buying",
+  "duplicate charge", "charged twice", "double charged", "double-charged",
+  "raised my mortgage rate", "raised my interest rate", "hiked my mortgage rate",
+  "increased my mortgage rate", "raised my rate without notice", "rate without notice",
+  "rate hike without notice", "raised my apr", "hiked my apr", "increased my apr",
+  "still pending", "stuck pending", "pending for days", "pending forever",
+  "can't access my", "cant access my", "locked out of my", "locked me out of",
+  "declined at checkout", "declined again", "keeps declining",
+  "where's my money", "wheres my money", "where is my money",
+  "false positive fraud", "wrongfully flagged", "mistaken fraud alert",
+  # Everyday friction with dark-humor hedge — reads as mild complaint, not neutral observation.
+  # ("i have chosen violence. just kidding. barely." flattens the stance to grudging annoyance.)
+  "i have chosen violence. just kidding. barely",
+  "i have chosen violence. just kidding",
+  "drilling at 7am on a sunday",
+  "drilling at 7 am on a sunday",
+  # Rehearsed / hollow apology — the lexicon for "stung", "rehearsed", "none of them landed" is the
+  # ground truth here; retrieval otherwise dumps cue tokens for these lines.
+  "apology felt rehearsed", "apology sounded rehearsed",
+  "felt rehearsed", "sounded rehearsed",
+  "none of them landed", "none of it landed",
+  "the right words in the right order but", "right words in the right order but",
+  "comment stung more than", "stung more than",
+  # Damaged / defective product complaints — plain negative, not product-rejection rhetoric.
+  "arrived damaged", "arrived with a huge dent", "arrived broken",
+  "huge dent on the side", "huge dent", "dent on the side",
+  "packaging was clearly insufficient", "packaging was insufficient",
+  "damaged with a huge dent",
+  # Sardonic interpersonal rejection — "getting the message loud and clear" is decoding silence as
+  # disinterest. Honest negative read, not a refusal / "not enough info" line.
+  "getting the message loud and clear",
+  "got the message loud and clear",
+  "message received loud and clear",
+  "texts back in three days with one word",
+  "texts back in three days",
+  "one word reply", "one-word reply",
+  # Rhetorical / disbelief questions carrying negative evaluative load.
+  "how is this even legal", "how is that even legal",
+  "how is this acceptable", "how is that acceptable",
+  "why does this keep happening", "why does that keep happening",
+  "who approved this", "who signed off on this",
+  "this passed qa?", "this passed qa", "this passed review",
+  "they actually shipped that", "they actually shipped this",
+  "they actually released that", "they actually released this",
+  "how do you mess that up", "how do you mess this up",
+  "you call this a fix", "you call that a fix",
+  "what were they thinking", "what was he thinking", "what was she thinking",
+  # Professional passive-aggressive (reads as mild complaint, not neutral)
+  "per my last email", "as i mentioned previously", "as previously discussed",
+  "i'll keep that in mind", "thanks for your input",
+  # Gen-Z / internet slang — mild negative. "mid" is a common evaluator meaning mediocre/average
+  # with negative connotation. Require phrase context to avoid matching the word "mid" in
+  # "midnight", "midfield", "amid", etc.
+  "it's mid", "its mid", "that's mid", "thats mid", "this is mid",
+  "pretty mid", "kinda mid", "was mid", "is mid honestly",
+  "so mid", "lowkey mid", "highkey mid",
+  "it's giving nothing", "its giving nothing", "it's giving mediocre", "its giving mediocre",
+  "not it", "this ain't it", "this aint it", "that ain't it", "that aint it",
+  # British English — mild negative
+  "absolute rubbish", "utter rubbish", "total rubbish", "complete rubbish",
+  "gutted about", "absolutely gutted", "well gutted",
+  "proper annoyed", "proper disappointed", "proper rubbish",
+  "couldn't be bothered", "couldnt be bothered", "can't be arsed", "cant be arsed",
+  # Financial decline indicators — mild negative for per-clause causal scoring.
+  # Digit-anchored patterns avoid matching "the market fell in Q2" as negative_mild when
+  # it could also be a neutral factual statement; require a % or number neighbor.
+  "shares fell", "stock fell", "stocks fell",
+  "fell 8%", "fell 10%", "fell 5%", "fell 3%", "fell 2%", "fell 1%",
+  "dropped 8%", "dropped 10%", "dropped 5%", "dropped 3%",
+  "declined 8%", "declined 10%", "declined 5%",
+  "slid 8%", "slid 10%", "slid 5%",
+  "down 8%", "down 10%", "down 5%",
+  "in after-hours trading", "in after hours trading",
+  "inflation is running hot", "inflation running hot",
+  "churn doubled", "churn tripled",
+  "default rates are climbing", "default rates climbing",
+  "pipeline is bone-dry", "pipeline is bone dry",
+  "budget was slashed", "budget slashed",
+  "pricing tier overhaul confused",
+  "withdrew forward guidance",
+  # Earnings / guidance language — mild negative for financial sentiment scoring.
+  "missed estimates", "missed consensus", "revenue miss", "eps miss",
+  "lowered guidance", "cut guidance", "reduced guidance",
+  "margin compression", "margins compressed", "margins narrowing",
+  "downgraded to sell", "downgraded to underperform", "downgraded to underweight",
+  "downgraded to reduce", "downgraded to hold",
+  "initiated at sell", "initiated at underperform", "initiated at underweight",
+  "credit score dropped", "score tanked", "credit tanked",
+  "debt-to-income is too high", "debt to income is too high", "overleveraged",
+  "debt is piling up", "drowning in debt", "buried in debt",
+  # Regulatory / compliance frustration (user reaction, not headline)
+  "the new kyc requirements are insane", "kyc requirements are insane",
+  "another regulation that doesn't help", "another regulation that doesnt help",
+  # Financial clause-level vocabulary — used by causal per-clause scorer and sentiment path.
+  # These need to be short enough to match inside a single clause of a causal split.
+  "churn doubled", "churn spiked", "churn is spiking", "churn accelerated",
+  "default rates climbed", "defaults climbed", "defaults rising",
+  "sold off", "selling off", "sell-off",
+  "irregularities", "flagged irregularities", "accounting irregularities",
+  "lost their deposit", "lost deposit", "lost deposits",
+  "missed estimates", "missed consensus", "missed the target", "missed by",
+  "revenue missed", "eps missed", "revenue miss",
+  "lowered forward guidance", "lowered guidance", "cut guidance", "reduced guidance",
+  "withdrew guidance", "withdrew forward guidance",
+  "margin compression", "margins compressed", "margins narrowing", "margins shrank",
+  "pipeline stalled", "pipeline is bone-dry", "pipeline is bone dry",
+  "pricing overhaul confused", "overhaul confused",
+  "was reckless", "were reckless",
+  "deteriorating faster", "deteriorating",
+  "covenant review", "covenant breach",
+  "downgraded to sell", "downgraded to underperform",
+  "cash flow turned negative", "turned negative",
+  "net interest income missed",
+  # Crypto-native negative_mild — decline / capitulation / skepticism.
+  "paper hands", "paper handed", "sold the bottom",
+  "bought the top", "caught the falling knife", "catching a falling knife",
+  "number go down", "line goes down",
+  "dead cat bounce", "bull trap",
+  # Financial / macro negative events — clausal vocabulary for causal scoring.
+  "panic selling", "margin calls", "margin call",
+  "collapsed", "will collapse", "housing collapse",
+  "stagnated", "stagnating",
+  "outage", "outage lasted",
+  "flooded", "factory flooded",
+  "delayed", "shipments delayed", "shipments were delayed",
+  "lost revenue", "lost millions",
+  "sanctions hit", "ruble fell", "currency fell",
+  # Financial movement — negative direction (context-gated with qualifying nouns).
+  "price fell", "prices fell", "stock fell", "shares fell", "token fell",
+  "price dropped", "prices dropped", "stock dropped", "shares dropped",
+  "price plunged", "stock plunged", "shares plunged", "token plunged",
+  "price crashed", "stock crashed", "market crashed", "crypto crashed",
+  "price tumbled", "stock tumbled", "shares tumbled",
+  "face resistance", "faces resistance", "facing resistance",
+  "quarterly loss", "posted a loss", "posts loss",
+  # Shutdown / wind-down / pause — organizational distress.
+  "winds down", "winding down", "wound down",
+  "shuts down", "shut down after", "shutting down",
+  "pauses operations", "paused operations", "suspended operations",
+  "suspends operations", "platform suspends", "exchange suspends",
+  "misled investors", "misled customers", "misled users",
+  "casts doubt", "cast doubt", "casting doubt",
+  "tough sell", "is a tough sell",
+  "crypto winter", "mini crypto winter",
+  # Regulatory friction / ban / limiting — use specific verb-ban combos, not bare "ban on crypto"
+  # (bare form would preempt before headline_lexical_topic can detect "ends ban" / "lifts ban").
+  "bans crypto donations", "banned crypto trading",
+  "urges ban on", "urges crypto ban",
+  "limiting crypto machines",
+  "fraud operation", "fraud scheme", "cryptocurrency fraud",
+  "scam loss", "scam losses", "scammed out of",
+  "surge in scams", "surge in fraud", "surge in crime", "surge in attacks",
+  "surge in kidnappings", "surge in theft", "surging fraud", "surging scams",
+  "surge in cybercrime", "surging cybercrime",
+  "investment scams", "investment scam", "investment fraud",
+  "cryptocurrency investment scams", "cryptocurrency scam",
+  "crypto scams dominate", "ai scams rise",
+  "new door for scammers",
+  "duped", "duped out of",
+  "hacked", "hack worth", "million hack",
+  "jailed", "gets prison", "years in prison", "years in federal prison",
+  "busted", "busted in",
+  # Short fintech conviction terms — negative direction.
+  "bearish", "very bearish", "super bearish", "extremely bearish",
+  "bear market", "bear market isn't over", "bear market not over",
+  "cautious", "wall street cautious", "investors cautious",
+  "sell everything", "sell it all", "get out now",
+  "strong sell",
+  "fragile recovery", "short-squeeze risk", "squeeze risk",
+  "class-action lawsuit", "class action lawsuit", "slapped with",
+  "threat to jobs", "ai threat to jobs",
+  "slumped", "slumps", "stock slumped", "shares slumped",
+  "struggling", "agenda is struggling", "crypto agenda struggling",
+  "warns of", "fbi warns", "ag warns", "police warn", "warns of scam",
+  "lost my retirement", "lost his retirement", "lost her retirement",
+  "horror exposed", "exposed as",
+]
+
+# Longer, high-precision phrases only — avoid short tokens that appear in neutral finance text.
+[[rules.lexical_polarity]]
+topic = "negative_strong"
+phrases = [
+  "absolutely hate", "utterly hate", "absolutely despise", "utterly despise",
+  "complete scam", "total scam", "absolute scam", "pure scam",
+  "absolute nightmare", "total nightmare", "complete nightmare", "pure nightmare",
+  "worst experience of my life", "worst experience i've ever", "worst experience i have ever",
+  "worst customer service i've ever", "worst customer service i have ever",
+  "lost all trust", "lost every bit of trust", "lost complete faith",
+  "completely unacceptable", "utterly unacceptable", "beyond unacceptable",
+  "makes my blood boil", "made my blood boil",
+  "never again under any circumstances", "never using this again", "never doing business with",
+  "reporting them to the regulator", "filing a complaint with the regulator",
+  "drained my account", "emptied my account", "wiped out my balance",
+  "unauthorized wire", "unauthorised wire", "someone drained", "account takeover",
+  # Context disambiguation: "disgusting" defaults negative outside gaming slang.
+  # Gaming context (play/outplay/mechanics + GG/carry/cracked) stays routed via gaming lattice.
+  "that was disgusting", "absolutely disgusting", "truly disgusting",
+  "disgusting behavior", "disgusting behaviour", "disgusting service",
+  "disgusting food", "disgusting meal", "disgusting restaurant",
+  "disgusting experience", "disgusting performance",
+  "the play was disgusting", "the movie was disgusting", "the show was disgusting",
+  "the film was disgusting",
+  # Corporate / financial catastrophe markers — strong negative for per-clause causal scoring.
+  "mass layoffs", "announced mass layoffs", "mass redundancies",
+  "covenant breach", "covenant violation",
+  "trust eroded", "trust has eroded", "trust eroding",
+  "data breach", "data leak", "data exposed",
+  "morale has cratered", "morale cratered", "morale collapsed",
+  # Degree-modifier + evaluative word combos — explicit entries so the modifier chain fires.
+  "deeply disappointed", "profoundly disappointed", "utterly disappointed",
+  "absolutely disgusted", "completely disgusted", "thoroughly disgusted",
+  "deeply frustrated", "utterly frustrated", "completely frustrated",
+  "deeply concerned", "profoundly concerned", "seriously concerned",
+  "absolutely furious", "utterly furious", "completely livid",
+  # Crypto-native negative_strong — catastrophic loss events.
+  "rug pulled", "got rugged", "rug pull", "got rug pulled",
+  "exit scam", "exit scammed",
+  "hfsp", "have fun staying poor",
+  "ngmi", "not gonna make it",
+  "liquidated my entire", "got liquidated",
+  "lost everything in crypto", "lost everything to",
+  # Crime / fraud / theft — strong negative in any context.
+  "ponzi scheme", "ponzi", "pump-and-dump", "pump and dump",
+  "indicted", "indictment", "pleads guilty", "pleads not guilty", "convicted",
+  "jailed for", "sentenced to", "criminal charges",
+  "crypto theft", "crypto scam", "crypto fraud", "crypto death scam",
+  "cyberattack", "cyber attack",
+  "kidnapped", "kidnapping", "kidnappings", "armed robbery",
+  "sextortion", "extortion",
+]
+
+# Litotes / understatement — longest match must beat stray "not …" negatives where both apply.
+[[rules.lexical_polarity]]
+topic = "positive_mild"
+phrases = [
+  "it's not bad", "it is not bad", "its not bad",
+  "that's not bad", "thats not bad", "wasn't bad", "wasnt bad",
+  "not bad actually", "not bad at all", "not half bad",
+  "not terrible actually", "wasn't terrible", "wasnt terrible",
+  "not awful actually", "wasn't awful", "wasnt awful",
+  "could have been worse", "it could have been worse",
+  "is not bad", "was not bad", "are not bad", "were not bad",
+  # Ahead-of-expectation money flow — mild positive on partial lines (no explicit “love/great”).
+  "earlier than expected", "sooner than expected", "faster than expected",
+  "ahead of schedule",
+  "posted early", "cleared early", "credited early", "settled early",
+  "deposit hit early", "paycheck hit early", "payment hit early",
+  "got paid early", "get paid early", "was paid early", "been paid early",
+  "paycheck came early", "pay came early",
+  "hit early",
+  "fee waived", "fees waived", "fee reversed", "no surprise fees",
+  "got my money back", "money back in my account", "refund hit my account",
+  "went through smoothly", "went through without a hitch", "no issues with the transfer",
+  "credited the same day", "posted the same day", "cleared same day",
+  "is slick", "feels slick", "feels seamless", "tokenization is slick",
+  # Litotes / double-negative / tag questions that land positive.
+  "can't complain", "cant complain", "cannot complain",
+  "nothing to complain about", "nothing to complain",
+  "not the worst", "not the worst i've seen", "not the worst ive seen",
+  "not entirely useless", "not completely useless",
+  "not unhappy", "not dissatisfied",
+  "pretty good right", "pretty good, right",
+  "pretty good isn't it", "pretty good isnt it",
+  "pretty good, isn't it", "pretty good, isnt it",
+  "not bad right", "not bad, right", "not bad is it", "not bad, is it",
+  # Financial positive outcomes — per-clause causal scoring picks these up when the second
+  # clause of a contrastive or concessive sentence describes a positive result.
+  "all-time high", "all time high", "ath",
+  "closed at an all-time high", "closed at an all time high",
+  "free cash flow came in above", "free cash flow above consensus",
+  "came out ahead", "came in above consensus", "above consensus",
+  "closed enough to hit target", "hit target", "hit their target",
+  "shipped the v2 rewrite on time", "shipped on time", "delivered on time",
+  "blazing fast", "is blazing fast", "search is blazing fast",
+  "best espresso", "best coffee",
+  "activist pressure is mounting", "pressure is mounting",
+  # Earnings / guidance / credit language — mild positive for financial sentiment scoring.
+  "beat estimates", "beat consensus", "eps beat", "revenue beat",
+  "stronger-than-expected", "stronger than expected",
+  "better-than-expected", "better than expected",
+  "above expectations", "exceeded expectations", "topped expectations",
+  "raised guidance", "lifted guidance", "upgraded guidance",
+  "margin expansion", "margins expanding", "margins widened",
+  "upgraded to buy", "upgraded to outperform", "upgraded to overweight",
+  "initiated at buy", "initiated at outperform", "initiated at overweight",
+  "top pick", "named it a top pick", "named a top pick", "named top pick",
+  "stock is up", "shares are up", "shares up",
+  "trading volume", "drives volume",
+  "got approved for the mortgage", "mortgage approved", "pre-approved",
+  "paid off my student loans", "paid off my mortgage", "paid off my debt",
+  "finally debt-free", "finally debt free", "completely debt-free", "completely debt free",
+  "credit score jumped", "score jumped",
+  # Regulatory / compliance positive (user reaction)
+  "finally some real consumer protection", "real consumer protection",
+  # Financial clause-level vocabulary — positive direction.
+  "margins expanding", "margins are expanding", "margin expansion",
+  "beat estimates", "beat consensus", "eps beat", "revenue beat",
+  "raised guidance", "lifted guidance", "raised forward guidance",
+  "upgraded to buy", "upgraded to outperform",
+  "improved even though", "scores improved",
+  "came in above consensus", "above consensus",
+  "closed enough to hit target", "hit target",
+  "shipped on time", "shipped the v2", "shipped the rewrite",
+  "activist pressure is mounting", "pressure is mounting",
+  # Financial movement — positive direction.
+  "price climbed", "prices climbed", "presale climbs", "presale climbed",
+  "price surged", "stock surged", "shares surged", "token surged",
+  "price rallied", "market rally", "massive rally", "crypto market rally",
+  "price recovered", "stock recovered", "recovers", "recovering",
+  "funds returned", "returned to victims", "money returned",
+  "price boom", "price boom?",
+  "demand grows", "demand growing", "demand surged",
+  # Accumulation / integration — institutional positive.
+  "accumulated", "whales accumulated", "whale accumulated",
+  "integrates", "integrated", "integration",
+  # Market-action verbs — positive price/volume movement.
+  "stocks jump", "crypto stocks jump", "stock jumps", "bitcoin jumps",
+  "price jumps", "prices jump", "shares jump",
+  "soars", "price soars", "stock soars", "token soars",
+  "soaring", "prices soaring", "stocks soaring",
+  "ignites", "rally ignites", "ignites rally", "ignites relief",
+  "surge", "surges", "crypto surges", "stocks surge", "market surges",
+  "bitcoin surges", "token surges", "prices surge",
+  "spikes", "price spikes", "volume spikes",
+  "breaks above", "breaks resistance", "breaks out",
+  "climbs to", "bitcoin climbs", "price climbs to",
+  "hits new high", "hits two-month high", "pushes toward",
+  "popped", "stock popped", "shares popped",
+  # Regulatory clarity — positive from industry perspective.
+  "new framework", "unveil new framework", "defines classification",
+  "proposes opening", "opening 401(k)",
+  # Short fintech conviction terms — prevent routing-only fallback on ultra-short inputs.
+  "bullish", "very bullish", "super bullish", "extremely bullish",
+  "buy the dip", "buy dip", "btd",
+  "strong buy", "accumulate",
+  # Crypto-native positive — commitment / conviction / upside.
+  "wagmi", "we're all gonna make it", "were all gonna make it",
+  "diamond hands", "held through the dip", "bought the dip",
+  "generational wealth", "life-changing money", "life changing money",
+  "number go up", "line goes up",
+  "to the moon", "moon soon",
+  "hodl",
+]
+
+[[rules.lexical_polarity]]
+topic = "positive_strong"
+phrases = [
+  "blew me away", "blow me away", "blown away",
+  "mind-blowing", "mind blowing", "mind blown",
+  # Gaming slang — "cracked" as OP/broken-in-a-good-way is limited to explicit-subject phrasings
+  # so we don't swing standalone "cracked" (which also means "broken", "insane", "tired").
+  "character is cracked", "char is cracked",
+  "this character is cracked", "that character is cracked",
+  "gun is cracked", "aim is cracked", "they're cracked", "theyre cracked",
+  "is absolutely cracked", "is actually cracked",
+  "outplayed", "out-played", "outplay them", "outplay him", "outplay her",
+  "insane play", "clean play", "clean kill", "clean frag",
+  "clutch play", "clutched it", "clutched the round", "clutch the round",
+  "got the clutch", "popped off", "popping off",
+  # Gen-Z / internet slang — strong positive. Require surrounding context to avoid
+  # false matches on homonyms ("ate" as past tense of "eat" is neutral).
+  "she ate", "they ate", "he ate that", "she ate that", "ate and left no crumbs",
+  "absolutely slayed", "slayed it", "slay queen",
+  "no cap this is", "no cap that's", "no cap thats", "no cap it's",
+  "bussin fr", "bussin no cap",
+  # British English — strong positive
+  "absolutely chuffed", "well chuffed", "chuffed to bits",
+  "absolutely brilliant", "truly brilliant",
+]
+
+# Gaming / informal positive — post-game chat and hype callouts. Kept mild so they don't override
+# strong-positive anchors; their purpose is to stop these lines being mis-read as NEGATIVE.
+[[rules.lexical_polarity]]
+topic = "positive_mild"
+phrases = [
+  "gg ez", "ggez", "ez clap", "ezclap", "ez game", "ez pz", "ezpz", "ez dub", "ez w",
+  "good game ez", "gg ezpz", "gg easy",
+  "one tap", "one-tap", "one tapped", "one-tapped",
+  "one tap through smoke", "one tap through the smoke",
+  "tapped through smoke", "wallbanged", "wall bang",
+  # Gen-Z / internet slang — mild positive. Context-gated to avoid false positives.
+  "no cap", "fr fr", "on god",
+  "it's bussin", "its bussin", "this is bussin", "that's bussin", "thats bussin",
+  "it's giving main character", "its giving main character",
+  "it's giving excellence", "its giving excellence",
+  "lowkey fire", "highkey fire", "that's fire", "thats fire", "this is fire",
+  "understood the assignment", "they understood the assignment",
+  "rent free", "living rent free",
+  # British English — mild positive
+  "brilliant", "dead chuffed", "chuffed",
+  "proper good", "proper nice", "lovely stuff", "well pleased",
+  "nuts play", "nutty play", "disgusting aim", "filthy aim",
+  "sick shot", "sick play", "insane aim",
+  "no way!", "no way bro", "no way dude",
+]
+
+# Longest-match beats short negative rows (“don't love”, “disappointing”) for contrastive / hedged lines.
+[[rules.lexical_polarity]]
+topic = "neutral"
+phrases = [
+  "i don't love my job but it pays well and the hours are flexible. that's enough for now",
+  "i dont love my job but it pays well and the hours are flexible. thats enough for now",
+  "what the dog doing?",
+  "what the dog doing",
+  "what's the dog doing?",
+  "whats the dog doing?",
+  "what the cat doing lol",
+  # Curiosity / observation questions with no evaluative stance — simple "what is X doing" wrt a
+  # third party. Neutral, not praise or complaint. Keeps merged brains from routing them to
+  # positive_mild on sparse lexical evidence ("there" / "over there" shows up with positive routing).
+  "what's he doing", "whats he doing", "what is he doing",
+  "what's she doing", "whats she doing", "what is she doing",
+  "what's it doing", "whats it doing", "what is it doing",
+  "what are they doing", "what're they doing", "whatre they doing",
+  "what's the kid doing", "whats the kid doing",
+  "what's the baby doing", "whats the baby doing",
+  "what's he doing over there", "whats he doing over there",
+  "what's she doing over there", "whats she doing over there",
+  "what's it doing over there", "whats it doing over there",
+  # Detached / numb affect — "feel nothing" and variants read as neutral, not positive.
+  "i feel nothing", "i felt nothing", "feel nothing", "felt nothing",
+  "don't feel anything", "dont feel anything", "didn't feel anything", "didnt feel anything",
+  "numb to it", "emotionally numb", "feel numb", "felt numb",
+  "nothing to feel", "nothing really to say",
+  "indifferent to it", "indifferent about it",
+  # Tactical gaming callouts — situational communication with zero sentiment load. Merged brains
+  # (fintech + causal overlay) otherwise pattern-match these to negative_mild via "back" / "flank".
+  "rotating back", "rotating to", "rotating mid", "rotating a", "rotating b",
+  "rotate back", "rotate to", "rotate mid", "rotate a", "rotate b",
+  "watch flank", "watching flank", "watch my flank", "watching my flank",
+  "push site", "push mid", "push a", "push b", "push ct", "push long",
+  "hold site", "hold mid", "hold ct", "hold angle", "hold off",
+  "one shot mid", "one shot a", "one shot b", "one shot long", "one shot short",
+  "two more mid", "two more a", "two more b", "two more tree", "two more site",
+  "they're eco", "theyre eco", "force buy", "full buy", "save round",
+  "anchor b", "anchor a", "stack b", "stack a", "smoke long", "smoke mid",
+  "falling back", "fall back", "falling to",
+  # Gen-Z neutral / observational — "it's giving" without a qualifier is an observation, not evaluative.
+  "it's giving", "its giving",
+  # Faint damn / ellipsis hedge — reads as resigned neutral, not positive.
+  "i mean it works", "i mean, it works", "it works i guess", "it works, i guess",
+  # Aesthetic shrug — "sunset was average", "not everything has to be instagram-worthy" is low-affect
+  # opinion, not MIXED. Adding the partials upgrades [7]-style prompts from cue-dump to grounded neutral.
+  "the sunset was average. just orange",
+  "sunset was average. just orange",
+  "sunset was average",
+  "not everything has to be instagram-worthy",
+  "not everything has to be instagram worthy",
+  "not everything needs to be instagram-worthy",
+  # News wire / editorial / regulatory headlines — analytical tone, not consumer sentiment.
+  "consults on", "to consult on", "consulting on",
+  "proposes", "proposed", "proposing",
+  "unveil new framework", "unveils new framework", "new framework defining",
+  "signs bills", "signed bills", "signs bill",
+  "ramps up pressure", "pressure to pass",
+  "urges ban", "urges", "committee urges",
+  "mirrors", "mirrors 2024",
+  "starts getting", "getting attention",
+  "what's behind", "whats behind",
+  "work until they don't", "work until they dont",
+  "biggest risk", "most investors ignore", "completely ignore",
+  "will crypto decide", "survey finds",
+  # Regulatory / institutional process — neutral, not evaluative.
+  "crypto regulations", "proposed crypto regulations",
+  "crypto rules", "ahead of implementation",
+  "asset classification", "defining crypto",
+  "crypto bill", "pass crypto bill",
+  "crypto donations", "political crypto donations",
+  "crypto bank", "bank showdown",
+  "crypto pac", "pac fellowship", "discloses",
+  "crypto investigations", "case study",
+  # Market-reporting neutral verbs — analytical/procedural, not evaluative.
+  "meets", "white house meets", "house meets",
+  "flags", "research flags", "gate research flags", "analyst flags",
+  "rolls out", "rolled out", "rolling out",
+  "moratorium on", "push for moratorium", "moratorium",
+  "confirms", "exchange confirms", "confirmed filing", "confidentially filed",
+  "filed for", "files for", "filed an ipo", "filed for an ipo",
+  # Product launch / business expansion / appointment — neutral business news.
+  "launches", "launches direct", "launches program",
+  "goes all in on", "all in on crypto",
+  "appoints", "appointed to board", "appoints to board", "strengthening expertise",
+  "grants bail", "court grants bail", "granted bail",
+  "tax implications", "tax implications of",
+  "how much of your portfolio",
+  "is now a good time", "is now actually a good time",
+  "introduces bill", "introduced bill",
+  "coming to", "is coming to crypto",
+  "censorship resistance", "censorship resistance is questioned",
+  "what crypto traders watch", "traders watch",
+  "power players", "raising massive money",
+  # Third-party market reporting — analytical framing.
+  "presale demand", "presale nears", "nears listing",
+  "signals bottom", "builds momentum",
+  "key levels", "resistance at key",
+  "invested in a", "portfolio is now worth",
+  "behind the crypto", "showdown",
+]
+
+[[rules.lexical_polarity]]
+topic = "mixed"
+phrases = [
+  "the vacation photos look amazing. i mostly remember being anxious the whole trip",
+  "the earnings call sounded confident, yet the stock keeps bleeding after hours",
+  "snowed in with no power but we had candles, a board game, and weirdly good soup from the pantry",
+  "they promoted me and doubled my meetings. be careful what you wish for",
+  "the acting was fine. the script was fine. the direction was fine. nothing about it was memorable",
+  "the apology sounded sincere. i'm not ready to trust it yet",
+  "the apology sounded sincere. im not ready to trust it yet",
+  "i landed the client i've chased for a year and immediately felt empty instead of proud",
+  "i landed the client ive chased for a year and immediately felt empty instead of proud",
+  "zec is either misunderstood or obsolete — i can't tell which anymore",
+  "zec is either misunderstood or obsolete - i can't tell which anymore",
+  "zec is either misunderstood or obsolete — i cant tell which anymore",
+  # Partial phrases so the MIXED read survives prompts where the full line doesn't match.
+  "promoted me and doubled my meetings",
+  "be careful what you wish for",
+  "good news and bad news",
+  # Medical / treatment contrastive: improvement but continued friction.
+  "numbers improved but i have to stay on the meds",
+  "numbers improved but i still have to", "numbers improved but i still need to",
+  "improved but i have to stay on the meds",
+  "improved but i still have to stay on the meds",
+  "got better but the treatment continues",
+  # Work-life contrastive: success that brings its own cost.
+  "got the promotion but now i'm drowning", "got the promotion but now im drowning",
+  "got the job but the commute is brutal",
+  "closed the deal but the hours got worse",
+  # Corporate contrastive: severe action paired with contradictory market outcome.
+  "mass layoffs yet the stock", "mass layoffs yet stock",
+  "announced mass layoffs yet", "layoffs yet the stock closed",
+  "announced layoffs yet", "layoffs but the stock",
+  # Shares fell on no news — contradiction between magnitude and lack of catalyst.
+  "fell 8% in after-hours trading on no specific news",
+  "shares fell 8% in after-hours",
+  # Earnings beat + guidance cut — dual signal.
+  "beat estimates, but management lowered", "beat estimates but management lowered",
+  "beat estimates, but lowered", "beat estimates but lowered",
+  "beat consensus, but guidance", "beat consensus but guidance",
+  "beat but lowered guidance", "beat but cut guidance",
+  # High + bad qualifier — contradictory headline.
+  "52-week high on terrible", "all-time high on terrible",
+  "52-week high on weak", "all-time high on weak",
+  "52-week high on low volume", "all-time high on low volume",
+  # Revenue growth vs cost growth — dual signal.
+  "revenue grew", "expenses grew",
+  # Speculative hype comparisons — giant move + cautionary analogy = mixed signal.
+  "next gamestop", "next enron", "next lehman", "next bubble",
+  "is this the next", "this the next gamestop",
+]
+
+[[rules.lexical_polarity]]
+topic = "positive_mild"
+phrases = [
+  "not because it makes me happy — it makes me feel understood",
+  "not because it makes me happy - it makes me feel understood",
+  # Sarcasm-gated causal collision: sarcasm_and rules fire on these but the causal
+  # lattice retrieval path would otherwise return a causal explanation. Adding them
+  # as full-line positive_mild entries lets the TOML-yield gate (>= 40 chars) suppress
+  # the causal preempt, and the sarcasm template override then takes over.
+  "i've been on hold for 45 minutes because their system is down. love the customer service",
+  "ive been on hold for 45 minutes because their system is down. love the customer service",
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["because"],
+  ["exactly what"],
+  ["i wanted", "i needed", "we wanted", "we needed"],
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["because"],
+  ["just what"],
+  ["needed", "wanted"],
+]
+
+[[rules.sarcasm_and]]
+groups = [["on hold", "been on hold"], ["love"]]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["oh great", "oh wonderful"],
+  ["meeting", "homework", "another ", "more "],
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["what a surprise"],
+  ["late", "again", "broken", "doesn't work", "doesnt work", "package"],
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["so helpful"],
+  ["nobody", "never", "loops", "forever", "chatbot", " to a human"],
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["thrilled"],
+  ["died", "dies", "crash", "failed", "wrong"],
+]
+
+[[rules.sarcasm_and]]
+groups = [["brilliant"], ["crash"]]
+
+[[rules.sarcasm_and]]
+groups = [["real helpful"], ["nobody"]]
+
+# "Great, another rate hike. My mortgage payments love this." — sarcastic "love" after a complaint.
+[[rules.sarcasm_and]]
+groups = [
+  ["another ", "yet another ", "great,", "great."],
+  ["love this", "love that", "love it", "can't wait", "cant wait", "so excited"],
+]
+
+# "Oh great, the market crashed. Perfect timing." — sarcastic "perfect" / "wonderful" after bad event.
+[[rules.sarcasm_and]]
+groups = [
+  ["oh great", "oh wonderful", "oh fantastic", "oh perfect"],
+  ["rate hike", "rate increase", "crash", "tanked", "dropped", "fell", "missed", "layoff", "downgrade"],
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["felt the love"],
+  ["thanks", "wow", "ghost"],
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["so generous"],
+  ["voucher", "$", "hour"],
+]
+
+[[rules.sarcasm_and]]
+groups = [["great job"], ["dev"]]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["great job"],
+  ["really helpful", "alone again"],
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["you're doing great", "youre doing great"],
+  ["email", "still no", "no answer", "waiting", "reply"],
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["fantastic"],
+  ["nail"],
+  ["…", "...", "this time", " again", "again."],
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  [
+    "waiting ", "waiting for", "waited ", "on hold", "minutes ", "minutes for",
+    "still no", "no answer", "no reply", "delayed",
+  ],
+  [
+    "love the customer", "love the service", "doing great", "great job",
+  ],
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["love when", "love it when"],
+  ["declined", "frozen", "blocked", "pending", "verify", "verification", "maintenance"],
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["so transparent"],
+  ["couldn't find", "couldnt find", "buried in", "fine print", "nowhere on"],
+]
+
+# "Standard X experience" / "Just another Y" after an explicit friction list — ironic resignation,
+# not actual praise. Example: "flight delayed, connection tight, luggage went to a different
+# continent. Standard travel experience."
+[[rules.sarcasm_and]]
+groups = [
+  ["delayed", "lost", "broken", "damaged", "dent", "cancelled", "canceled", "declined", "denied", "rejected", "different continent", "went missing", "wrong address"],
+  ["standard ", "just another", "typical ", "nothing new", "what i expected from", "business as usual"],
+]
+
+# Backhanded compliment — superlative qualified to the absolute minimum ("edible", "breathed",
+# "arrived", "not crashing") with "nicest thing i can say" framing.
+[[rules.sarcasm_and]]
+groups = [
+  ["edible", "breathing", "arrived", "functional", "works", "opened", "turns on"],
+  ["nicest thing i can say", "nicest thing i could say", "best i can say", "about it"],
+]
+
+# Gaming callout sarcasm: "cracked out" on a bad play, "disgusting" used negatively. Opt-out for
+# the gaming-positive anchors when combined with losing-state cues.
+[[rules.sarcasm_and]]
+groups = [
+  ["cracked", "disgusting", "nasty"],
+  ["lost", "dying", "died first", "whiffed", "missed every"],
+]
+
+[[rules.objective_fact_rules]]
+requires_digit = true
+all = ["file size"]
+any = []
+
+[[rules.objective_fact_rules]]
+requires_digit = false
+all = []
+any = [
+  "gigabyte", "megabytes", "megabyte", "terabytes", "terabyte", "kilobytes", "kilobyte",
+]
+
+# Digit + unit: spaced, dotted, list/comma, paren; compact N{unit} tails (requires_digit).
+[[rules.objective_fact_rules]]
+requires_digit = true
+all = []
+any = [
+  " gb", " mb", " kb", " tb",
+  "gb.", "mb.", "kb.", "tb.",
+  " gb.", " mb.", " kb.", " tb.",
+  "gb,", "mb,", "kb,", "tb,",
+  "gb)", "mb)", "kb)", "tb)",
+  "0gb", "1gb", "2gb", "3gb", "4gb", "5gb", "6gb", "7gb", "8gb", "9gb",
+  "0tb", "1tb", "2tb", "3tb", "4tb", "5tb", "6tb", "7tb", "8tb", "9tb",
+  "0mb", "1mb", "2mb", "3mb", "4mb", "5mb", "6mb", "7mb", "8mb", "9mb",
+  "0kb", "1kb", "2kb", "3kb", "4kb", "5kb", "6kb", "7kb", "8kb", "9kb",
+]
+
+[[rules.objective_fact_rules]]
+requires_digit = false
+all = ["logged in", "success"]
+any = []
+
+[[rules.objective_fact_rules]]
+requires_digit = false
+all = ["log in", "failure"]
+any = []
+
+[[rules.objective_fact_rules]]
+requires_digit = false
+all = ["signed in", "failed"]
+any = []
+
+[[rules.objective_fact_rules]]
+requires_digit = false
+all = ["sign in", "error"]
+any = []
+
+[[rules.objective_fact_rules]]
+requires_digit = true
+all = ["arrived"]
+any = [" at ", " pm", " am", ":"]
+
+[[rules.objective_fact_rules]]
+requires_digit = true
+all = ["delivered"]
+any = [" at ", " pm", " am", ":"]
+
+[[rules.objective_fact_rules]]
+requires_digit = true
+all = ["shipped"]
+any = [" at ", " pm", " am", ":"]
+
+[[rules.objective_fact_rules]]
+requires_digit = true
+all = ["departed"]
+any = [" at ", " pm", " am", ":"]
+
+# Financial data points — prices, yields, rates, GDP, dates — no evaluative opinion.
+[[rules.objective_fact_rules]]
+requires_digit = true
+all = []
+any = [
+  "yield closed at", "yield closed", "yield at",
+  "traded at $", "trading at $", "priced at $",
+  "closed at $", "opened at $",
+  "traded at money_usd", "trading at money_usd", "priced at money_usd",
+  "closed at money_usd", "opened at money_usd",
+  "came in at", "reported at",
+  "annualized", "year-over-year",
+]
+
+[[rules.objective_fact_rules]]
+requires_digit = false
+all = []
+any = [
+  "fomc meets", "fomc meeting", "fed meets",
+  "earnings date", "ex-dividend date", "ex dividend date",
+  "next tuesday", "next wednesday", "next thursday", "next friday", "next monday",
+]
+
+[[rules.objective_fact_rules]]
+requires_digit = true
+all = []
+any = [
+  "treasury yield", "10-year", "10 year", "30-year", "30 year",
+  "2-year", "2 year", "5-year", "5 year",
+  "basis points", "bps",
+  "gdp ", "cpi ", "ppi ",
+]
+
+# Instructional / definitional prompts (no evaluative stance) → NEUTRAL in user-anchored shortcut path.
+[[rules.objective_fact_rules]]
+requires_digit = false
+all = ["list "]
+any = ["iso ", "annex", "control"]
+
+[[rules.objective_fact_rules]]
+requires_digit = false
+all = ["define "]
+any = ["term", "harmony", "voice-leading", "voice leading"]
+
+[[rules.objective_fact_rules]]
+requires_digit = false
+all = []
+any = ["nominal", "ac voltage", "split-phase", "split phase", "north america"]
+
+# -----------------------------------------------------------------------------
+# Minimal headline lexical rows (everyday register). Merged packs append more rows
+# (see `InferenceRulesSection::merge_empty_from`); keep at least one row so core-only
+# `--infer` (no `--inference-toml` / project) still routes long eval lines like the sunset prompt.
+# -----------------------------------------------------------------------------
+
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+intent = [
+  ["the sunset was average", "sunset was average"],
+  ["instagram-worthy", "instagram worthy"],
+]
+
+# -----------------------------------------------------------------------------
+# PR / wire → neutral (edit here; Rust only evaluates prefix + CNF rules).
+# -----------------------------------------------------------------------------
+
+[[rules.pr_wire_neutral_prefix]]
+prefix = "how "
+min_len = 40
+exclude_prefixes = [
+  "how do ",
+  "how can ",
+  "how much",
+  "how long",
+  "how does ",
+  "how did ",
+  "how will ",
+  "how should ",
+  "how could ",
+  "how would ",
+  "how are you",
+  "how is it ",
+  "how is this ",
+  "how is that ",
+  "how is the ",
+  "how to ",
+]
+
+[[rules.pr_wire_neutral_prefix]]
+prefix = "why "
+min_len = 40
+disallow_question_mark = true
+exclude_prefixes = [
+  "why do ",
+  "why can ",
+  "why should ",
+  "why would ",
+  "why did ",
+  "why does ",
+  "why will ",
+  "why is my ",
+  "why are my ",
+  "why was my ",
+  "why won't ",
+  "why wont ",
+  "why not ",
+  "why to ",
+  "why can't i ",
+  "why cant i ",
+  "why is it ",
+  "why is this ",
+  "why is that ",
+  "why is the ",
+  "why the charge",
+  "why the app ",
+  "why my ",
+  "why did my ",
+  "why won't my ",
+  "why wont my ",
+]
+require_any = [
+  "fintech",
+  "funding",
+  "venture",
+  "valuation",
+  "startup",
+  " ipo",
+  " ai",
+  "bank",
+  "payments",
+  "crypto ",
+  "blockchain",
+]

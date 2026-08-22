@@ -1,0 +1,1006 @@
+# Traditional Fintech world grounding — domain-specific concept nodes.
+# Loaded alongside shared world_grounding.toml at runtime.
+#
+# Target: ~100 nodes covering equities, banking, corporate finance,
+# payment infrastructure, macro/rates, analyst vocabulary, fraud,
+# personal finance, and regulatory/legal.
+
+version = 1
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 1 — Company events & corporate actions
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "earnings"
+aliases = ["earnings_report", "quarterly_earnings", "eps", "earnings_beat", "earnings_miss"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "corporate_finance"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "revenue"
+weight = 0.9
+
+[[nodes]]
+id = "revenue"
+aliases = ["revenues", "top_line", "sales"]
+magnitude_sensitive = true
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "corporate_finance"
+weight = 1.0
+
+[[nodes]]
+id = "profit_margin"
+aliases = ["margin", "margins", "gross_margin", "operating_margin", "net_margin"]
+magnitude_sensitive = true
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "earnings"
+weight = 0.9
+
+[[nodes]]
+id = "ipo"
+aliases = ["ipos", "initial_public_offering", "public_listing", "going_public"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "listing"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "public_markets"
+weight = 0.85
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.6
+
+[[nodes]]
+id = "acquisition"
+aliases = ["acquires", "acquired", "merger", "m_and_a", "takeover", "buyout"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "corporate_action"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "due_diligence"
+weight = 0.6
+
+[[nodes]]
+id = "board_appointment"
+aliases = ["appoints", "appointed", "names_to_board", "board_of_directors", "ceo_appointment"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "corporate_governance"
+weight = 1.0
+
+[[nodes]]
+id = "executive_departure"
+aliases = ["ceo_resigns", "cfo_leaves", "steps_down", "ousted"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.5
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "corporate_governance"
+weight = 0.9
+
+[[nodes]]
+id = "restructuring"
+aliases = ["layoffs", "downsizing", "cost_cutting", "redundancies", "headcount"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "corporate_action"
+weight = 1.0
+
+[[nodes]]
+id = "stock_buyback"
+aliases = ["buyback", "share_repurchase", "repurchase_program"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.5
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "shareholder_return"
+weight = 1.0
+
+[[nodes]]
+id = "dividend"
+aliases = ["dividends", "dividend_yield", "payout", "special_dividend"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.5
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "shareholder_return"
+weight = 1.0
+
+[[nodes]]
+id = "stock_split"
+aliases = ["split", "reverse_split"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "corporate_action"
+weight = 1.0
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.6
+
+[[nodes]]
+id = "bankruptcy"
+aliases = ["chapter_11", "chapter_7", "insolvent", "insolvency", "filing_for_bankruptcy"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "corporate_distress"
+weight = 1.0
+
+[[nodes]]
+id = "spin_off"
+aliases = ["spinoff", "divestiture", "carve_out"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "corporate_action"
+weight = 1.0
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.6
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 2 — Fundraising & venture capital
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "fundraising"
+aliases = [
+  "raises", "raised", "funding_round", "series_a", "series_b",
+  "series_c", "seed_round", "led_by", "round",
+]
+magnitude_sensitive = true
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.65
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "venture_capital"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "startup_growth"
+weight = 0.85
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "ipo"
+weight = 0.75
+[[nodes.edges]]
+kind = "is_a"
+target = "financial_gain"
+weight = 0.8
+
+[[nodes]]
+id = "valuation"
+aliases = ["market_cap", "unicorn", "decacorn"]
+magnitude_sensitive = true
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "corporate_finance"
+weight = 0.9
+
+[[nodes]]
+id = "venture_capital"
+aliases = ["vc", "venture", "growth_equity", "private_equity", "pe"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "fundraising"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "startup"
+weight = 0.8
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 3 — Equity markets & analyst vocabulary
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "analyst_upgrade"
+aliases = ["upgrade", "upgraded", "outperform", "buy_rating", "overweight"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "equity_research"
+weight = 1.0
+
+[[nodes]]
+id = "analyst_downgrade"
+aliases = ["downgrade", "downgraded", "underperform", "sell_rating", "underweight"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "equity_research"
+weight = 1.0
+
+[[nodes]]
+id = "price_target"
+aliases = ["pt", "target_price", "raises_target", "cuts_target"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "equity_research"
+weight = 1.0
+
+[[nodes]]
+id = "guidance"
+aliases = ["outlook", "forecast", "raises_guidance", "lowers_guidance", "forward_guidance"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "earnings"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "corporate_finance"
+weight = 0.8
+
+[[nodes]]
+id = "short_squeeze"
+aliases = ["short_squeeze_risk", "short_positions", "short_selling", "short_interest"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.6
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "trading_strategy"
+weight = 0.9
+
+[[nodes]]
+id = "insider_trading"
+aliases = ["insider_buying", "insider_selling", "form_4"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "equity_research"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "corporate_governance"
+weight = 0.6
+
+[[nodes]]
+id = "market_index"
+aliases = ["sp500", "s_and_p", "nasdaq", "dow_jones", "russell_2000", "ftse", "dax"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "equity_markets"
+weight = 1.0
+
+[[nodes]]
+id = "sector_rotation"
+aliases = ["rotation", "growth_to_value", "risk_on", "risk_off"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "equity_markets"
+weight = 0.9
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 4 — Banking & payment infrastructure
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "payment"
+aliases = ["payments", "payment_rails"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "rails"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "merchant"
+weight = 0.6
+
+[[nodes]]
+id = "payment_processor"
+aliases = ["visa", "mastercard", "stripe", "adyen", "square"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "payment"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "fintech_company"
+weight = 0.8
+
+[[nodes]]
+id = "digital_bank"
+aliases = ["neobank", "challenger_bank", "chime", "revolut", "n26"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "banking"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "fintech_company"
+weight = 0.9
+
+[[nodes]]
+id = "banking"
+aliases = ["bank", "banks", "banking_sector"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "financial_services"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "deposit"
+weight = 0.7
+
+[[nodes]]
+id = "swift"
+aliases = ["swift_network", "cross_border"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "payment"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "international_transfer"
+weight = 1.0
+
+[[nodes]]
+id = "bnpl"
+aliases = ["buy_now_pay_later", "affirm", "klarna", "afterpay"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "consumer_credit"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "fintech_company"
+weight = 0.8
+
+[[nodes]]
+id = "open_banking"
+aliases = ["psd2", "api_banking", "banking_as_a_service", "baas"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "banking"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "fintech_company"
+weight = 0.8
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 5 — Macro & rates
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "interest_rate"
+aliases = ["rate_hike", "rate_cut", "fed_funds", "basis_points", "bps"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "monetary_policy"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "federal_reserve"
+weight = 0.9
+
+[[nodes]]
+id = "federal_reserve"
+aliases = ["fed", "fomc", "powell", "central_bank"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "monetary_policy"
+weight = 1.0
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.7
+
+[[nodes]]
+id = "inflation"
+aliases = ["cpi", "pce", "deflation", "disinflation", "stagflation"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "macro"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "monetary_policy"
+weight = 0.8
+
+[[nodes]]
+id = "unemployment"
+aliases = ["jobless_claims", "nonfarm_payrolls", "labor_market"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "macro"
+weight = 1.0
+
+[[nodes]]
+id = "gdp"
+aliases = ["gross_domestic_product", "economic_growth", "recession"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "macro"
+weight = 1.0
+
+[[nodes]]
+id = "yield_curve"
+aliases = ["inverted_yield_curve", "2y10y", "treasury_yield", "10_year"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "bond_market"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "recession_indicator"
+weight = 0.7
+
+[[nodes]]
+id = "bond"
+aliases = ["bonds", "treasury", "treasuries", "fixed_income", "corporate_bond"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "bond_market"
+weight = 1.0
+
+[[nodes]]
+id = "tariff"
+aliases = ["tariffs", "trade_war", "import_duty", "customs"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "trade_policy"
+weight = 1.0
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.4
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 6 — Regulatory & legal
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "sec_enforcement"
+aliases = ["sec_action", "sec_probe", "sec_investigation", "sec_fine"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "enforcement"
+weight = 1.0
+
+[[nodes]]
+id = "compliance"
+aliases = ["compliant", "regulatory_compliance"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "corporate_conduct"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "regulatory_oversight"
+weight = 0.9
+
+[[nodes]]
+id = "license"
+aliases = ["licence", "licensing", "licensed", "banking_license"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "regulatory_approval"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "issuer"
+weight = 0.8
+
+[[nodes]]
+id = "antitrust"
+aliases = ["monopoly", "anticompetitive", "ftc_probe"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.6
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "enforcement"
+weight = 0.9
+
+[[nodes]]
+id = "class_action"
+aliases = ["class_action_lawsuit", "class_action_suit", "securities_litigation", "shareholder_lawsuit"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "legal_proceeding"
+weight = 1.0
+
+[[nodes]]
+id = "consent_order"
+aliases = ["consent_decree", "settlement", "regulatory_fine", "penalty"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.6
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "enforcement"
+weight = 0.9
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 7 — Fraud & financial crime
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "embezzlement"
+aliases = ["embezzled", "misappropriation", "misappropriated"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.95
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "crime"
+weight = 1.0
+
+[[nodes]]
+id = "wire_fraud"
+aliases = ["wire_transfer_fraud", "bank_fraud"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.95
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "crime"
+weight = 1.0
+
+[[nodes]]
+id = "insider_fraud"
+aliases = ["accounting_fraud", "financial_statement_fraud", "cooking_the_books"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.95
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "crime"
+weight = 1.0
+
+[[nodes]]
+id = "whistleblower"
+aliases = ["whistleblowers", "tipster", "sec_whistleblower"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "enforcement"
+weight = 0.8
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.4
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 8 — Personal finance
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "social_security"
+aliases = ["pension", "retirement_benefit", "social_security_check"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "government_benefit"
+weight = 0.9
+
+[[nodes]]
+id = "mortgage"
+aliases = ["mortgages", "home_loan", "housing_loan", "refinance"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "consumer_credit"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "interest_rate"
+weight = 0.8
+
+[[nodes]]
+id = "credit_score"
+aliases = ["fico", "credit_rating", "creditworthiness"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "consumer_credit"
+weight = 1.0
+
+[[nodes]]
+id = "student_loan"
+aliases = ["student_loans", "student_debt", "loan_forgiveness"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "consumer_credit"
+weight = 1.0
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.3
+
+[[nodes]]
+id = "retirement"
+aliases = ["401k", "ira", "pension_fund", "retirement_savings"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "personal_finance"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "investment"
+weight = 0.7
+
+[[nodes]]
+id = "insurance"
+aliases = ["insurtech", "underwriting", "premium", "claims"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "financial_services"
+weight = 1.0
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 9 — Fintech-specific companies & products
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "fintech_hub"
+aliases = ["fintech_hubs", "fintech_center", "innovation_hub"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "financial_technology"
+weight = 1.0
+
+[[nodes]]
+id = "fintech_company"
+aliases = ["paypal", "sofi", "robinhood", "block", "marqeta", "plaid"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "financial_technology"
+weight = 1.0
+
+[[nodes]]
+id = "robo_advisor"
+aliases = ["automated_investing", "betterment", "wealthfront"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "investment"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "fintech_company"
+weight = 0.7
+
+[[nodes]]
+id = "embedded_finance"
+aliases = ["embedded_payments", "financial_api", "platform_finance"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "fintech_company"
+weight = 0.9
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 10 — Risk & distress signals
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "default"
+aliases = ["defaults", "defaulted", "credit_default", "loan_default"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "credit_risk"
+weight = 1.0
+
+[[nodes]]
+id = "downgrade_credit"
+aliases = ["credit_downgrade", "junk_status", "below_investment_grade"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "credit_risk"
+weight = 1.0
+
+[[nodes]]
+id = "bank_run"
+aliases = ["deposit_flight", "svb_collapse", "bank_failure"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "banking"
+weight = 1.0
+
+[[nodes]]
+id = "contagion"
+aliases = ["systemic_risk", "spillover", "domino_effect"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.85
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "financial_crisis"
+weight = 1.0
+
+[[nodes]]
+id = "recession"
+aliases = ["economic_downturn", "contraction", "hard_landing", "soft_landing"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "macro"
+weight = 1.0
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.7
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 11 — Positive corporate signals
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "earnings_beat"
+aliases = ["beat_expectations", "stronger_than_expected", "exceeds_estimates", "tops_estimates"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "earnings"
+weight = 1.0
+
+[[nodes]]
+id = "earnings_miss"
+aliases = ["missed_expectations", "weaker_than_expected", "falls_short", "disappoints"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "earnings"
+weight = 1.0
+
+[[nodes]]
+id = "market_expansion"
+aliases = ["enters_market", "expands_into", "new_market", "geographic_expansion"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.5
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "business_expansion"
+weight = 1.0
+
+[[nodes]]
+id = "contract_win"
+aliases = ["wins_contract", "awarded_contract", "new_deal", "partnership_deal"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "revenue"
+weight = 0.8
+
+[[nodes]]
+id = "profitability"
+aliases = ["turns_profitable", "profitable", "break_even", "ebitda_positive"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "earnings"
+weight = 0.9
+
+[[nodes]]
+id = "user_growth"
+aliases = ["customer_growth", "subscriber_growth", "mau", "dau", "active_users"]
+magnitude_sensitive = true
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.5
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "business_expansion"
+weight = 0.9
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 9 — Macro signals, auction weakness, total loss, superlatives, relief-neutral
+# ═══════════════════════════════════════════════════════════════════
+
+# Yield-curve un-inversion — 2s10s normalizing after inversion historically precedes recession.
+# Strong negative world signal even without explicit loss language.
+[[nodes]]
+id = "yield_curve_un_inversion"
+aliases = [
+  "two_ten_un_inverted", "2_10_un_inverted", "2y10y_un_inverted",
+  "spread_un_inverted", "curve_un_inverted", "un_inverted_after",
+  "longest_inversion_on_record", "recession_signal_is_loud",
+  "nobody_celebrated",
+]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "yield_curve"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "recession"
+weight = 1.0
+
+# Recession signal — standalone concept linking macro indicators to recession probability.
+[[nodes]]
+id = "recession_signal"
+aliases = [
+  "recession_odds_climbing", "recession_indicator", "recession_warning",
+  "distress_signal", "leading_indicator_negative",
+]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "recession"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "yield_curve"
+weight = 0.9
+
+# Bond auction weakness — tailed auction, stuck duration, weak demand.
+[[nodes]]
+id = "bond_auction_weakness"
+aliases = [
+  "auction_tailed", "tailed_by_bps", "tailed_by_basis_points",
+  "eating_too_much_duration", "long_duration_unwanted",
+  "paper_nobody_wants", "stuck_with_paper", "dealers_sitting_on",
+  "weak_auction", "poor_bid_to_cover",
+]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "bond"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "yield_curve"
+weight = 0.5
+
+# Total loss — terminal personal-finance outcome, anchors strong negative.
+[[nodes]]
+id = "total_loss"
+aliases = [
+  "lost_everything", "lost_entire_savings", "lost_life_savings",
+  "lost_entire_position", "wiped_out_portfolio", "cleaned_out",
+  "nothing_left", "nothing_recoverable", "lost_every_cent",
+]
+magnitude_sensitive = true
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "wire_fraud"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "bankruptcy"
+weight = 0.6
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "embezzlement"
+weight = 0.7
+
+# Superlative praise — "best X in Y years" / "best I've ever" with explicit personal endorsement.
+[[nodes]]
+id = "superlative_praise"
+aliases = [
+  "best_quarter_in_years", "best_in_five_years", "best_in_ten_years",
+  "best_in_a_decade", "best_experience_ever", "best_i_have_ever_had",
+  "best_lending_experience", "best_banking_experience",
+  "printed_money_on_every",
+]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "profitability"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "earnings_beat"
+weight = 0.6
+
+# Relief-neutral — "for once" / "for a change" / "zero surprises" marks expected outcome finally met.
+[[nodes]]
+id = "relief_neutral"
+aliases = [
+  "for_once", "for_a_change", "zero_drama_for_once",
+  "without_a_hitch_for_a_change", "this_time",
+  "no_surprises_this_time",
+]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "banking"
+weight = 0.3

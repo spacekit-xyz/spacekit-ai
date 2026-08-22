@@ -1,0 +1,1675 @@
+# Traditional Fintech inference TOML — domain-specific rules for equities, banking, corporate finance.
+# Merged with inference_sentiment_core.toml at runtime via merge_empty_from.
+# -----------------------------------------------------------------------------
+
+meta_gk_margin = 0.05
+meta_gk_confidence = 0.55
+min_meta_confidence_user_anchored = 0.28
+mixed_override_confidence = 0.88
+default_line_confidence = 0.92
+ambiguous_line_confidence = 0.58
+
+[rules]
+contrastive_markers = [
+  " but ", ", but ", ". but ", " although ", " even though ", " however ", "; but ",
+  " on the other hand ", " on the flip side ", " that said ", " having said that ",
+  " with that said ", " at the same time ", " then again ", " still, ", " all that said ",
+  " even so ", " mind you ", " in the same breath ",
+  # Surprise / skepticism bridge (ellipsis or comma before “which”)
+  " which is weird", " weird because", " strange that", " odd that",
+  " though ", ", though ", ". though ",
+  " shame that", " shame ",
+]
+
+sarcasm_simple = [
+  "yeah, because", "sure, because", "right, because",
+  "gotta love when", "meritocracy at its finest", "genius move", "living the dream",
+  "isn't it just perfect", "isnt it just perfect",
+  "thanks for ghosting", "thanks for the zero notice",
+  "clearly i'm the problem", "clearly im the problem",
+  "thanks for the overdraft", "thanks for the fee", "great time to freeze my account",
+  "love when my card gets declined", "perfect timing on that maintenance window",
+  "oh great, another", "oh great, another maintenance", "exactly what i needed today",
+]
+
+positive_anchor_tokens = [
+  "love", "adore", "treasure", "obsessed", "enjoy", "like", "prefer", "best", "great",
+  "amazing", "wonderful", "fantastic", "excellent", "happy", "glad", "good", "nice",
+  "fine", "better", "beautiful", "incredible", "perfect",
+  # UX / product praise (common in fintech copy; anchors topic-lex override vs mixed retrieval)
+  "slick", "seamless", "snappy", "polished", "nifty",
+]
+
+negative_anchor_tokens = [
+  "hate", "despise", "loathe", "awful", "terrible", "worst", "horrible", "bad",
+  "sucks", "disgusting", "dislike", "miserable", "depressing",
+]
+
+bipolar_positive_tokens = [
+  "love", "adore", "enjoy", "like", "prefer", "great", "good", "incredible", "amazing",
+  "wonderful", "fantastic", "excellent", "beautiful", "best", "nice", "fine", "glad", "happy",
+  "perfect", "flawless",
+  "refunded", "reimbursed", "waived", "cleared", "approved", "resolved", "reversed",
+  "slick", "seamless", "snappy", "polished", "nifty",
+]
+
+bipolar_negative_tokens = [
+  "hate", "despise", "awful", "terrible", "worst", "horrible", "bad", "sucks", "slow",
+  "sloppy", "mediocre", "disappointing", "disappointed", "poor", "worse", "weak", "crash",
+  "crashes", "crashed", "broken", "bug", "bugs", "ugly",
+  "declined", "overdraft", "frozen", "blocked", "bounced", "penalty", "nsf",
+]
+
+like_perception_verbs = [
+  "feel", "feels", "look", "looks", "sound", "sounds", "seem", "seems", "smell", "smells",
+]
+like_intensity_exception_phrases = ["like crazy", "like mad"]
+strong_positive_tokens = ["love", "adore", "treasure", "obsessed"]
+
+ambiguous_disappointment_phrases = [
+  "thought it would be better", "thought it'd be better", "expected it to be better",
+  "expected more", "hoped for better", "hoped it would be", "could have been better", "was hoping for",
+  "not what i hoped", "not what i expected", "wasn't what i expected", "wasnt what i expected",
+  "lower than i expected", "not what the rate said", "not what they advertised",
+]
+
+ambiguous_neutral_hedge_phrases = [
+  "i guess", "i suppose", "nothing special", "nothing great", "mediocre",
+  "so-so", "so so", "could be worse", "not great", "not amazing",
+]
+
+evaluative_words = [
+  "hate", "love", "terrible", "awful", "amazing", "horrible", "fantastic", "disappointed",
+  "disappointing", "thrilled", "annoyed", "frustrated", "excited", "worried", "anxious",
+  "regret", "ashamed", "proud", "grateful", "annoying", "wonderful", "sucks", "best ever",
+  "worst", "ridiculous", "outraged", "relieved", "stressed", "furious", "ripped off",
+  "slick", "seamless", "polished",
+  "jailed", "prison", "sentenced", "convicted", "indicted", "arrested",
+  "scam", "scammed", "fraud", "hacked", "kidnapped", "busted",
+  "horror", "horrific", "slumped", "struggling", "surging",
+]
+
+disappointment_words = ["disappointed", "disappointing"]
+
+# First match wins: negation / rejection before positive idioms.
+#
+# English edges: common litotes get a tight positive_mild lexical row below; contrast still leans on
+# contrastive_markers + bipolar tokens + training (MIXED / dominant-clause labels).
+# Remaining: sarcasm, questions, hypotheticals, domain jargon, multilingual code-switching.
+
+
+
+# First match wins: negation / rejection before positive idioms.
+#
+# English edges: common litotes get a tight positive_mild lexical row below; contrast still leans on
+# contrastive_markers + bipolar tokens + training (MIXED / dominant-clause labels).
+# Remaining: sarcasm, questions, hypotheticals, domain jargon, multilingual code-switching.
+[[rules.lexical_polarity]]
+topic = "negative_mild"
+phrases = [
+  "don't like", "dont like", "do not like",
+  "doesn't like", "doesnt like", "didn't like", "didnt like", "did not like",
+  "don't love", "dont love", "don't enjoy", "dont enjoy", "don't prefer", "dont prefer",
+  "not a fan", "not a big fan", "no fan of",
+  "not happy", "not glad", "not satisfied", "not impressed",
+  "not fond of", "am not fond", "i'm not fond", "im not fond",
+  "not good enough", "not good at", "nowhere near as good",
+  "wouldn't use", "wouldnt use", "won't use", "wont use", "will not use",
+  "don't use", "dont use", "do not use", "doesn't use", "doesnt use",
+  "shouldn't use", "shouldnt use", "should not use",
+  "wouldn't touch", "wouldnt touch", "won't touch", "wont touch",
+  "can't stand", "cant stand", "cannot stand",
+  "wouldn't recommend", "wouldnt recommend", "won't recommend", "wont recommend",
+  "don't recommend", "dont recommend", "don't trust", "dont trust",
+  "hardly recommend", "can't recommend", "cant recommend", "cannot recommend",
+  "not interested in using", "don't want to use", "dont want to use",
+  "prefer not to", "rather not", "no thanks",
+  "not going to use", "stopped using", "quit using", "switching away from",
+  "never use again", "never using again",
+  "avoid using", "stay away from",
+  "could do without", "can do without",
+  "wish i hadn't", "wish i had not", "wish i never",
+  "regret using", "regret buying", "regret trying",
+  "waste of money", "waste of time", "waste of ",
+  "rip off", "rip-off",
+  "overrated", "underwhelmed", "underwhelming",
+  "dissatisfied", "unhappy with", "frustrated with", "annoyed with",
+  "sick of", "tired of", "fed up", "fed up with", "had enough of",
+  "not for me", "not my thing", "not what i expected", "not what i hoped",
+  "not worth it", "not worth the", "not worth using",
+  "falls short", "left a lot to be desired", "leaves a lot to be desired",
+  "wouldn't buy", "wouldnt buy", "won't buy again", "wont buy again",
+  "never buying again", "not buying again", "won't purchase again", "wouldn't purchase again",
+  "will not buy again", "won't be buying", "wont be buying", "not worth buying",
+  "duplicate charge", "charged twice", "double charged", "double-charged",
+  "still pending", "stuck pending", "pending for days", "pending forever",
+  "can't access my", "cant access my", "locked out of my", "locked me out of",
+  "declined at checkout", "declined again", "keeps declining",
+  "where's my money", "wheres my money", "where is my money",
+  "false positive fraud", "wrongfully flagged", "mistaken fraud alert",
+  "misled investors", "misled customers", "misleading", "deceived investors",
+]
+
+# Longer, high-precision phrases only — avoid short tokens that appear in neutral finance text.
+
+
+
+# Longer, high-precision phrases only — avoid short tokens that appear in neutral finance text.
+
+[[rules.lexical_polarity]]
+topic = "sarcastic"
+phrases = [
+  "oh great, another maintenance window during trading hours. exactly what i needed",
+]
+
+[[rules.lexical_polarity]]
+topic = "negative_strong"
+phrases = [
+  "absolutely hate", "utterly hate", "absolutely despise", "utterly despise",
+  "complete scam", "total scam", "absolute scam", "pure scam",
+  "absolute nightmare", "total nightmare", "complete nightmare", "pure nightmare",
+  "worst experience of my life", "worst experience i've ever", "worst experience i have ever",
+  "worst customer service i've ever", "worst customer service i have ever",
+  "lost all trust", "lost every bit of trust", "lost complete faith",
+  "completely unacceptable", "utterly unacceptable", "beyond unacceptable",
+  "makes my blood boil", "made my blood boil",
+  "never again under any circumstances", "never using this again", "never doing business with",
+  "reporting them to the regulator", "filing a complaint with the regulator",
+  "drained my account", "emptied my account", "wiped out my balance",
+  "unauthorized wire", "unauthorised wire", "someone drained", "account takeover",
+  # Wire / cross-border field errors — outrank generic “horrible + desk” mild.
+  "ended up in the wrong country", "in the wrong country for a week", "payment in the wrong country",
+  "botched the swift", "the swift code was wrong", "swift field", " wrong swift",
+  # Terminal total-loss markers — veto any mild calibration.
+  "lost their entire savings", "lost my entire savings", "lost his entire savings", "lost her entire savings",
+  "lost the entire position", "lost my entire position",
+  "lost everything to", "lost everything in", "lost all my", "lost every cent",
+  "lost my life savings", "lost their life savings",
+  "wiped out my portfolio", "wiped out thousands",
+  "nothing left", "there is nothing left", "there's nothing left",
+  # Yield-curve un-inversion / recession-signal framing — world-grounded negative.
+  "two-ten un-inverted", "two ten un-inverted", "2-10 un-inverted", "2/10 un-inverted",
+  "two-ten spread un-inverted", "two ten spread un-inverted",
+  "2-10 spread un-inverted", "2/10 spread un-inverted",
+  "spread un-inverted",
+  "curve un-inverted", "un-inverted after", "un-inverted for the first",
+  "recession signal is loud", "recession odds are climbing",
+  "longest inversion on record",
+  "nobody celebrated",
+]
+
+# Fixed-income / auction weakness — mild negative desk framing.
+[[rules.lexical_polarity]]
+topic = "negative_mild"
+phrases = [
+  "tailed by", "auction tailed", "tailed the auction",
+  "eating too much duration", "eating way too much duration", "long duration they do not want",
+  "paper nobody wants", "stuck with paper",
+]
+
+# Litotes / understatement — longest match must beat stray "not …" negatives where both apply.
+
+
+
+# Litotes / understatement — longest match must beat stray "not …" negatives where both apply.
+[[rules.lexical_polarity]]
+topic = "positive_mild"
+phrases = [
+  "it's not bad", "it is not bad", "its not bad",
+  "that's not bad", "thats not bad", "wasn't bad", "wasnt bad",
+  "not bad actually", "not bad at all", "not half bad",
+  "not terrible actually", "wasn't terrible", "wasnt terrible",
+  "not awful actually", "wasn't awful", "wasnt awful",
+  "could have been worse", "it could have been worse",
+  "is not bad", "was not bad", "are not bad", "were not bad",
+  # Ahead-of-expectation money flow — mild positive on partial lines (no explicit “love/great”).
+  "earlier than expected", "sooner than expected", "faster than expected",
+  "ahead of schedule",
+  "posted early", "cleared early", "credited early", "settled early",
+  "deposit hit early", "paycheck hit early", "payment hit early",
+  "got paid early", "get paid early", "was paid early", "been paid early",
+  "paycheck came early", "pay came early",
+  "hit early",
+  "fee waived", "fees waived", "fee reversed", "no surprise fees",
+  "got my money back", "money back in my account", "refund hit my account",
+  "went through smoothly", "went through without a hitch", "no issues with the transfer",
+  "credited the same day", "posted the same day", "cleared same day",
+  # Tokenization / wallet UX (substring; complements anchor token "slick")
+  "is slick", "feels slick", "feels seamless", "tokenization is slick",
+  # Earnings / financial results
+  "stronger-than-expected", "stronger than expected",
+  "better-than-expected", "better than expected",
+  "above expectations", "exceeded expectations", "topped expectations",
+  "reported stronger", "reported better",
+]
+
+[[rules.lexical_polarity]]
+topic = "positive_strong"
+phrases = [
+  "blew me away", "blow me away", "blown away",
+  "mind-blowing", "mind blowing", "mind blown",
+  # Superlatives — "best X in Y" / "best I've ever" patterns with explicit endorsement anchor strong.
+  "best quarter in five years", "best quarter in ten years", "best quarter in a decade",
+  "best quarter since", "best year in a decade", "best year since",
+  "best lending experience", "best banking experience", "best trading experience",
+  "best experience i've ever", "best experience i have ever", "best experience ive ever",
+  "best i've ever had", "best i have ever had", "best ive ever had",
+  "printed money on every",
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["because"],
+  ["exactly what"],
+  ["i wanted", "i needed", "we wanted", "we needed"],
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["because"],
+  ["just what"],
+  ["needed", "wanted"],
+]
+
+[[rules.sarcasm_and]]
+groups = [["on hold", "been on hold"], ["love"]]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["oh great", "oh wonderful"],
+  ["meeting", "homework", "another ", "more "],
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["what a surprise"],
+  ["late", "again", "broken", "doesn't work", "doesnt work", "package"],
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["so helpful"],
+  ["nobody", "never", "loops", "forever", "chatbot", " to a human"],
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["thrilled"],
+  ["died", "dies", "crash", "failed", "wrong"],
+]
+
+[[rules.sarcasm_and]]
+groups = [["brilliant"], ["crash"]]
+
+[[rules.sarcasm_and]]
+groups = [["real helpful"], ["nobody"]]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["felt the love"],
+  ["thanks", "wow", "ghost"],
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["so generous"],
+  ["voucher", "$", "hour"],
+]
+
+[[rules.sarcasm_and]]
+groups = [["great job"], ["dev"]]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["great job"],
+  ["really helpful", "alone again"],
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["you're doing great", "youre doing great"],
+  ["email", "still no", "no answer", "waiting", "reply"],
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["fantastic"],
+  ["nail"],
+  ["…", "...", "this time", " again", "again."],
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  [
+    "waiting ", "waiting for", "waited ", "on hold", "minutes ", "minutes for",
+    "still no", "no answer", "no reply", "delayed",
+  ],
+  [
+    "love the customer", "love the service", "doing great", "great job",
+  ],
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["love when", "love it when"],
+  ["declined", "frozen", "blocked", "pending", "verify", "verification", "maintenance"],
+]
+
+[[rules.sarcasm_and]]
+groups = [
+  ["so transparent"],
+  ["couldn't find", "couldnt find", "buried in", "fine print", "nowhere on"],
+]
+
+[[rules.objective_fact_rules]]
+requires_digit = true
+all = ["file size"]
+any = []
+
+[[rules.objective_fact_rules]]
+requires_digit = false
+all = ["logged in", "success"]
+any = []
+
+[[rules.objective_fact_rules]]
+requires_digit = false
+all = ["log in", "failure"]
+any = []
+
+[[rules.objective_fact_rules]]
+requires_digit = false
+all = ["signed in", "failed"]
+any = []
+
+[[rules.objective_fact_rules]]
+requires_digit = false
+all = ["sign in", "error"]
+any = []
+
+[[rules.objective_fact_rules]]
+requires_digit = true
+all = ["arrived"]
+any = [" at ", " pm", " am", ":"]
+
+[[rules.objective_fact_rules]]
+requires_digit = true
+all = ["delivered"]
+any = [" at ", " pm", " am", ":"]
+
+[[rules.objective_fact_rules]]
+requires_digit = true
+all = ["shipped"]
+any = [" at ", " pm", " am", ":"]
+
+[[rules.objective_fact_rules]]
+requires_digit = true
+all = ["departed"]
+any = [" at ", " pm", " am", ":"]
+
+# Financial data points — prices, yields, rates, GDP, dates — no evaluative opinion.
+
+
+
+# Financial data points — prices, yields, rates, GDP, dates — no evaluative opinion.
+[[rules.objective_fact_rules]]
+requires_digit = true
+all = []
+any = [
+  "yield closed at", "yield closed", "yield at",
+  "traded at $", "trading at $", "priced at $",
+  "closed at $", "opened at $",
+  "traded at money_usd", "trading at money_usd", "priced at money_usd",
+  "closed at money_usd", "opened at money_usd",
+  "came in at", "reported at",
+  "annualized", "year-over-year",
+]
+
+[[rules.objective_fact_rules]]
+requires_digit = false
+all = []
+any = [
+  "fomc meets", "fomc meeting", "fed meets",
+  "earnings date", "ex-dividend date", "ex dividend date",
+  "next tuesday", "next wednesday", "next thursday", "next friday", "next monday",
+]
+
+[[rules.objective_fact_rules]]
+requires_digit = true
+all = []
+any = [
+  "treasury yield", "10-year", "10 year", "30-year", "30 year",
+  "2-year", "2 year", "5-year", "5 year",
+  "basis points", "bps",
+  "gdp ", "cpi ", "ppi ",
+]
+
+# -----------------------------------------------------------------------------
+# Headline lexical + lattice misfire (aligned with `data/sentiment/inference_sentiment.toml`).
+# Fintech training / `--project` should point `[inference].toml` here; discovery also tries this
+# path when `GROWFORMER_INFERENCE_TOML` / CLI primary are unset (see `inference_toml_rel_search_order`).
+# -----------------------------------------------------------------------------
+#
+# High-priority wire rules (first match wins within after_pr_wire=false): place before generic buckets.
+
+
+
+# -----------------------------------------------------------------------------
+# Headline lexical + lattice misfire (aligned with `data/sentiment/inference_sentiment.toml`).
+# Fintech training / `--project` should point `[inference].toml` here; discovery also tries this
+# path when `GROWFORMER_INFERENCE_TOML` / CLI primary are unset (see `inference_toml_rel_search_order`).
+# -----------------------------------------------------------------------------
+#
+# High-priority wire rules (first match wins within after_pr_wire=false): place before generic buckets.
+#
+# Clifford + CATA: first-person / desk tape lines where routing drifts to NEUTRAL or MIXED.
+[[rules.headline_lexical_topic]]
+topic = "negative_strong"
+min_trim_len = 20
+intent = [
+  [" three separate", "separate fees", "separate fee"],
+  [" same transaction", " for the same transaction", " for the same "],
+  [" customer service", " nothing they", " can do "],
+]
+
+[[rules.headline_lexical_topic]]
+topic = "negative_strong"
+min_trim_len = 20
+intent = [
+  [" my account "],
+  [" without warning", " no warning "],
+  [" closed ", " branch ", " took three week", "get my money"],
+]
+
+[[rules.headline_lexical_topic]]
+topic = "negative_strong"
+min_trim_len = 32
+exclude_first_person = true
+intent = [
+  ["restatement", "accounting "],
+  [" lost half", " value after "],
+  ["auditor", " under investigation", "investigat "],
+]
+
+[[rules.headline_lexical_topic]]
+topic = "negative_strong"
+min_trim_len = 24
+exclude_first_person = true
+intent = [
+  ["gapped", "gapped "],
+  ["vwap", "bounced off vwap", "bounced off vwap,"],
+  ["bled", " bled "],
+]
+
+[[rules.headline_lexical_topic]]
+topic = "sarcastic"
+min_trim_len = 20
+intent = [
+  ["oh great, another", "oh great, "],
+  ["maintenance", "trading hours "],
+  ["exactly what i", "i needed "],
+]
+# Wire / SWIFT misrouted to another jurisdiction — escalation beyond mild “horrible” alone.
+[[rules.headline_lexical_topic]]
+topic = "negative_strong"
+min_trim_len = 20
+intent = [
+  ["horrible experience", "horrible ", "dreadful ", "dreadful day"],
+  [" wire ", " swift", "swift "],
+  [
+    "wrong country",
+    "in the wrong country",
+    "ended up in the wrong",
+    "ended up in",
+    "wrong coun",
+    "botched the swift",
+  ],
+]
+
+[[rules.headline_lexical_topic]]
+topic = "negative_strong"
+exclude_first_person = true
+min_trim_len = 20
+intent = [["deplatform", "debanking", "debank"], ["banned", "ban wave", "mass ban", "users get banned"]]
+
+# Outcome beats print: strong fundamentals / beat but price action negative (headline + tape tension).
+[[rules.headline_lexical_topic]]
+topic = "negative_strong"
+min_trim_len = 20
+intent = [
+  ["earnings", "revenue", "eps", "ebitda", "guidance", "crushed", "topped", "outperform", " beat "],
+  [" but ", "despite", "anyway", " even though "],
+  ["red", "down", "fell", "selling", "sank", "dumped", "tanked", " sell-off", "selloff", "weaker"],
+]
+
+# User grievance at a venue / counterparty (prime broker, margin, clearing).
+[[rules.headline_lexical_topic]]
+topic = "negative_strong"
+min_trim_len = 10
+intent = [
+  ["hate", "despise", "loathe", "despise this", "despise the"],
+  [" prime broker", " margin call", " prime brokerage", "clearing "],
+]
+
+# Mass cardholder / PII loss (scale cue + event type).
+[[rules.headline_lexical_topic]]
+topic = "negative_strong"
+exclude_first_person = true
+min_trim_len = 12
+intent = [
+  ["data breach", "card data", "cardholder", "pii "],
+  [" million", "million ", "m cards", "m customers", "m records", "affected", "stolen", "leaked", "exposed", "compromised"],
+]
+
+# Political / celebrity crypto venture + public criticism (third-party allegiance shift).
+
+
+
+# Regulator policy / open-finance vision (avoid embedding drift into negative_strong on benign policy copy).
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+exclude_first_person = true
+min_trim_len = 20
+intent = [["fca", "eba ", "cfpb", "consumer duty"], ["open finance", "open banking", "open data"]]
+
+# Tape up-move + cautious / bear-market framing (Wall Street not convinced rally is durable).
+
+
+
+# Tape up-move + cautious / bear-market framing (Wall Street not convinced rally is durable).
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+exclude_first_person = true
+min_trim_len = 28
+intent = [
+  ["jump", "jumps", "jumped", "soared", "rally", "rallied"],
+  ["cautious", "caution", "careful", "wary"],
+  ["bear market", "isn't over", "isnt over", "not over", "still bear"],
+]
+
+# Crypto venue enables stock trading against BTC/ETH collateral (ByBit-style product wire).
+
+
+
+# Crypto venue enables stock trading against BTC/ETH collateral (ByBit-style product wire).
+[[rules.headline_lexical_topic]]
+topic = "positive_mild"
+exclude_first_person = true
+min_trim_len = 28
+intent = [
+  ["bybit", "by bit"],
+  ["bitcoin", "btc", "ethereum", "eth"],
+  ["trade", "trading", "stocks", "equities", "ibit", "spot etf", "etf"],
+]
+
+# Exchange listing / IPO pipeline wires (Kraken-style).
+
+
+
+# Exchange listing / IPO pipeline wires (Kraken-style).
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+exclude_first_person = true
+min_trim_len = 20
+intent = [["ipo"], ["filed", "filing", "prepares", "confidential", "plans for"], ["kraken", "coinbase", "exchange", "crypto"]]
+
+# Strategic stake / M&A into a crypto venue (Börse / bank takes stake).
+
+
+
+# Strategic stake / M&A into a crypto venue (Börse / bank takes stake).
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+exclude_first_person = true
+min_trim_len = 20
+intent = [["stake", "takes a", "takes $", "takes €"], ["million", "billion", "$", "€"], ["kraken", "coinbase", "exchange", "crypto"]]
+
+# Retail crypto kiosk / local scam victim (avoid knowledge-floor decline on short harm headlines).
+
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+exclude_first_person = true
+min_trim_len = 20
+intent = [["short-seller", "short seller"], ["enron", "wirecard", "accounting fraud"]]
+
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+exclude_first_person = true
+min_trim_len = 20
+intent = [["better "], ["stock"], [" vs", " vs.", "versus"]]
+
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+exclude_first_person = true
+min_trim_len = 24
+intent = [["resurrected", "resurrection", "rebuilt", "rebounded"], ["superrich", "ultra-rich", "ultra rich", "uhnw", "ultra-wealthy"]]
+
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+exclude_first_person = true
+min_trim_len = 20
+intent = [["shorted", "short interest", "short-sell", "short sell", "short selling"]]
+
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+exclude_first_person = true
+min_trim_len = 24
+intent = [["inequality", "underrepresentation", "under-representation"], ["funding", "vc", "venture", "raise", "raising", "capital"]]
+
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+exclude_first_person = true
+min_trim_len = 24
+intent = [["female-led", "female led", "women-led", "women led"], ["funding", "raise", "raising"], ["only ", "only.", "only,"]]
+
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+exclude_first_person = true
+min_trim_len = 24
+intent = [["highlights inequality", "gender gap", "pay gap"]]
+
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+exclude_first_person = true
+min_trim_len = 24
+intent = [["struggling", "struggles", "struggle"], ["paypal", "stripe", "fintech", "payments", "payment"]]
+
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+exclude_first_person = true
+min_trim_len = 24
+intent = [[" vs", " vs.", "versus"], ["stock", "stocks", "buy", "long-term", "investor", "investors"]]
+
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+exclude_first_person = true
+min_trim_len = 20
+intent = [["seeks"], ["license", "licence"]]
+
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+exclude_first_person = true
+min_trim_len = 24
+intent = [["growth rate"], ["indicates", "signal", "signals", "means", "about"]]
+
+[[rules.headline_lexical_topic]]
+topic = "confused"
+require_question_mark = true
+intent = [
+  ["is it normal", "is this normal", "should i worry", "should i be worried", "is that normal"],
+  ["jump", "jumps", "went up", "gone up", "increased", "increase "],
+]
+unless_any_cnf = [[["drop", "dropped", "fell", "plummet", "decrease", "went down", "lower "]]]
+
+[[rules.headline_lexical_topic]]
+topic = "confused"
+require_question_mark = true
+intent = [["am i missing", "am i crazy"]]
+
+[[rules.headline_lexical_topic]]
+topic = "confused"
+intent = [["not sure what to make"]]
+
+[[rules.headline_lexical_topic]]
+topic = "confused"
+intent = [["two different numbers"]]
+
+[[rules.headline_lexical_topic]]
+topic = "confused"
+intent = [["two different"], ["balance"]]
+
+[[rules.headline_lexical_topic]]
+topic = "confused"
+intent = [["merchant", "vendor"], ["pending"], ["complete", "says"]]
+
+[[rules.headline_lexical_topic]]
+topic = "cautiously_positive"
+exclude_first_person = true
+min_trim_len = 24
+intent = [
+  ["recover", "recovers", "recovered"],
+  ["stolen", "fraud"],
+  ["investigat", "enforcement", "police", "authorities", "resident"],
+]
+
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+exclude_first_person = true
+min_trim_len = 24
+intent = [["fbi", "internet crime", "ic3"], ["scam", "fraud", "billion", "loss"]]
+
+[[rules.headline_lexical_topic]]
+topic = "negative_strong"
+exclude_first_person = true
+min_trim_len = 24
+intent = [["whistleblower"]]
+
+[[rules.headline_lexical_topic]]
+topic = "negative_strong"
+exclude_first_person = true
+min_trim_len = 24
+intent = [["alleged receipts"]]
+
+[[rules.headline_lexical_topic]]
+topic = "negative_strong"
+exclude_first_person = true
+min_trim_len = 24
+intent = [["fake"], ["compliance"]]
+
+[[rules.headline_lexical_topic]]
+topic = "negative_strong"
+exclude_first_person = true
+min_trim_len = 24
+intent = [["data breach"]]
+
+[[rules.headline_lexical_topic]]
+topic = "negative_strong"
+exclude_first_person = true
+min_trim_len = 24
+intent = [["lawsuit"], ["contractor", "hit with"]]
+
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+exclude_first_person = true
+min_trim_len = 24
+intent = [["reputation"], ["worse"]]
+
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+exclude_first_person = true
+min_trim_len = 24
+intent = [["reputation of troubled"]]
+
+[[rules.headline_lexical_topic]]
+topic = "mixed"
+exclude_first_person = true
+min_trim_len = 24
+intent = [["allegations against"], ["startup", "founder"]]
+
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+exclude_first_person = true
+min_trim_len = 24
+intent = [["dormant"], ["wallet"]]
+
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+exclude_first_person = true
+min_trim_len = 24
+intent = [["never a good sign", "never a good "]]
+
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+intent = [
+  ["laundering", "money laundering", "money-laundering"],
+  ["seized", "forfeiture", "seizure", "scheme", "indictment"],
+]
+
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+intent = [
+  ["hmrc", "irs"],
+  ["declare", "declaration", "reporting", "must now", "must now declare"],
+]
+
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+intent = [
+  ["where will", "where would"],
+  ["year", "years", "5 years", "10 years", "decade"],
+]
+
+
+
+# (leap ∧ incl) ∨ (leap ∧ open_fin) ∨ (incl ∧ open_fin) ∨ (incl ∧ drive)
+[[rules.headline_lexical_topic]]
+topic = "positive_mild"
+inclusion_redirect = true
+intent = [["leapfrog"], ["financial inclusion"]]
+
+[[rules.headline_lexical_topic]]
+topic = "positive_mild"
+inclusion_redirect = true
+intent = [["leapfrog"], ["open finance", "open banking"]]
+
+[[rules.headline_lexical_topic]]
+topic = "positive_mild"
+inclusion_redirect = true
+intent = [["financial inclusion"], ["open finance", "open banking"]]
+
+[[rules.headline_lexical_topic]]
+topic = "positive_mild"
+inclusion_redirect = true
+intent = [["financial inclusion"], ["drive"]]
+
+[[rules.headline_lexical_topic]]
+topic = "positive_mild"
+intent = [
+  ["£", "gbp", "billion", "bn", "money_gbp", "money_usd", "money_eur"],
+  ["unlock", "unlocks", "unlocked"],
+  ["economy", "economic", "annually", "analysis", "reveals"],
+]
+
+[[rules.headline_lexical_topic]]
+after_pr_wire = true
+topic = "mixed"
+intent = [["breakdown"], ["funding"], ["positive", "still positive"]]
+
+[[rules.headline_lexical_topic]]
+after_pr_wire = true
+topic = "cautiously_positive"
+intent = [["volume"], ["spiking", "spike"], ["price"], ["isn't moving", "isnt moving", "not moving"]]
+
+[[rules.headline_lexical_topic]]
+after_pr_wire = true
+topic = "cautiously_positive"
+intent = [["volume"], ["spiking", "spike"], ["absorbing"]]
+
+[[rules.headline_lexical_topic]]
+after_pr_wire = true
+topic = "cautiously_negative"
+intent = [["exit liquidity", "liquidity season"]]
+
+[[rules.headline_lexical_topic]]
+after_pr_wire = true
+topic = "cautiously_negative"
+intent = [["top signal"], ["euphoric", "tiny green"]]
+
+[[rules.headline_lexical_topic]]
+after_pr_wire = true
+topic = "negative_mild"
+intent = [["pump"], ["sold"], ["instantly"]]
+
+[[rules.headline_lexical_topic]]
+after_pr_wire = true
+topic = "cautiously_positive"
+requires_mixed_positive_outcome_cue = true
+intent = [["deposit"], ["for once", "not used to"]]
+
+[[rules.headline_lexical_topic]]
+after_pr_wire = true
+topic = "cautiously_positive"
+intent = [["actually worked"], ["unusual"]]
+
+# =============================================================================
+# Corporate events: funding, layoffs, valuations, mega-deals, stock moves
+# Contrastive multi-entity rules MUST precede individual event rules (first-match-wins).
+# =============================================================================
+
+# Multi-entity headline with contrastive corporate events (layoffs + raise).
+
+
+
+# =============================================================================
+# Corporate events: funding, layoffs, valuations, mega-deals, stock moves
+# Contrastive multi-entity rules MUST precede individual event rules (first-match-wins).
+# =============================================================================
+
+# Multi-entity headline with contrastive corporate events (layoffs + raise).
+[[rules.headline_lexical_topic]]
+topic = "mixed"
+exclude_first_person = true
+min_trim_len = 30
+intent = [
+  ["laid off", "lays off", "layoffs", "cuts staff", "workforce reduction", "cut staff"],
+  ["raised", "raises", "secured", "funding", "million", "billion"],
+]
+
+# Multi-entity with regulatory fine + appointment/charter (net mixed).
+
+
+
+# Multi-entity with regulatory fine + appointment/charter (net mixed).
+[[rules.headline_lexical_topic]]
+topic = "mixed"
+exclude_first_person = true
+min_trim_len = 30
+intent = [
+  ["fined", "fine", "penalty", "penalized", "penalised"],
+  ["appointed", "appointment", "hired", "named", "seeking", "charter", "launched", "launches"],
+]
+
+# Funding round / raise — third-party wire, not first-person. Neutral corporate event.
+
+
+
+# Funding round / raise — third-party wire, not first-person. Neutral corporate event.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+exclude_first_person = true
+min_trim_len = 20
+intent = [
+  ["raise", "raises", "raised", "secures", "secured", "closes"],
+  ["million", "billion", "$", "€", "£", "funding", "round", "series a", "series b", "series c", "series d", "seed"],
+]
+unless_any_cnf = [[["scam", "fraud", "ponzi", "laundering"]]]
+
+# Startup / fintech funding with explicit VC / investor names.
+
+
+
+# Startup / fintech funding with explicit VC / investor names.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+exclude_first_person = true
+min_trim_len = 20
+intent = [
+  ["raise", "raises", "raised", "secures", "secured"],
+  ["nea", "sequoia", "a16z", "andreessen", "y combinator", "benchmark", "greylock", "index ventures", "accel", "led series", "led round"],
+]
+
+# Tender offer / valuation — corporate finance event, neutral.
+
+
+
+# Tender offer / valuation — corporate finance event, neutral.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+exclude_first_person = true
+min_trim_len = 20
+intent = [
+  ["tender offer", "valuing", "valued at", "valuation"],
+  ["billion", "million", "$"],
+]
+
+# Mega-deal / partnership signing — neutral corporate wire.
+
+
+
+# Mega-deal / partnership signing — neutral corporate wire.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+exclude_first_person = true
+min_trim_len = 20
+intent = [
+  ["signs", "signed", "announces", "announced", "inks"],
+  ["deal", "partnership", "agreement", "contract"],
+  ["billion", "million", "$", "€", "£"],
+]
+
+# PAC / political fundraising disclosure — neutral reporting.
+
+
+
+# PAC / political fundraising disclosure — neutral reporting.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+exclude_first_person = true
+min_trim_len = 20
+intent = [
+  ["pac", "political action", "fellowship", "discloses", "disclosed"],
+  ["million", "billion", "$"],
+]
+
+# Layoffs / workforce reduction — negative (not neutral).
+
+
+
+# Layoffs / workforce reduction — negative (not neutral).
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+exclude_first_person = true
+min_trim_len = 16
+intent = [
+  ["laid off", "lays off", "laying off", "layoffs", "layoff", "cut staff", "cuts staff", "cutting staff", "workforce reduction", "job cuts"],
+]
+
+# Stock surge as third-party market report — positive mild, not strong.
+
+
+
+# Stock surge as third-party market report — positive mild, not strong.
+[[rules.headline_lexical_topic]]
+topic = "positive_mild"
+exclude_first_person = true
+min_trim_len = 20
+intent = [
+  ["stock", "stocks", "shares"],
+  ["surged", "surge", "soared", "soar", "rallied", "rally", "jumped"],
+  ["investor", "investors", "interest", "oversold", "analyst", "analysts"],
+]
+
+# AI infrastructure / compute deals — neutral corporate wire.
+
+
+
+# AI infrastructure / compute deals — neutral corporate wire.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+exclude_first_person = true
+min_trim_len = 20
+intent = [
+  ["compute", "infrastructure", "data center", "data centre", "gpu", "ai compute"],
+  ["deal", "signs", "signed", "contract", "agreement"],
+  ["billion", "million", "$"],
+]
+
+# Product / platform launch wire — neutral corporate event.
+
+
+
+# Product / platform launch wire — neutral corporate event.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+exclude_first_person = true
+min_trim_len = 20
+intent = [
+  ["launched", "launches", "launch", "unveils", "unveiled", "rolls out", "rolled out"],
+  ["platform", "product", "protocol", "service", "tool", "api"],
+]
+unless_any_cnf = [[["scam", "fraud", "rug pull"]]]
+
+# Fintech Q1/Q2/quarterly report — analytical, neutral.
+
+
+
+# Fintech Q1/Q2/quarterly report — analytical, neutral.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+exclude_first_person = true
+min_trim_len = 24
+intent = [
+  ["q1", "q2", "q3", "q4", "quarter"],
+  ["fintech", "startup", "startups"],
+  ["raising", "raised", "funding", "deals", "investment"],
+]
+
+# Regulatory fine / penalty on named entity — negative mild.
+
+
+
+# Regulatory fine / penalty on named entity — negative mild.
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+exclude_first_person = true
+min_trim_len = 20
+intent = [
+  ["fined", "fine", "penalty", "penalized", "penalised", "sanctioned"],
+  ["regulator", "regulators", "sec", "cftc", "dfs", "california", "new york"],
+]
+
+# Charter / license application — neutral regulatory process.
+
+
+
+# Charter / license application — neutral regulatory process.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+exclude_first_person = true
+min_trim_len = 20
+intent = [
+  ["seeking", "seeks", "applied", "applying"],
+  ["charter", "trust charter", "banking license", "banking licence", "national trust"],
+]
+
+# Lifting / ending bans — positive regulatory shift.
+
+
+
+# Documentary / editorial exposé — neutral editorial framing.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+exclude_first_person = true
+min_trim_len = 20
+intent = [
+  ["documentary", "says"],
+  ["crypto", "money", "lying"],
+]
+
+# Crypto hedge fund winds down — negative_mild business closure.
+
+
+
+# Crypto hedge fund winds down — negative_mild business closure.
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+exclude_first_person = true
+min_trim_len = 20
+intent = [
+  ["winds down", "winding down", "wound down", "shutting down"],
+  ["fund", "capital", "startup"],
+]
+
+# North Korea / state actor infiltration — negative_mild security reporting.
+
+
+
+# Geopolitical catalyst + crypto price surge (Iran/Hormuz, peace deal, trade deal).
+[[rules.headline_lexical_topic]]
+topic = "positive_mild"
+exclude_first_person = true
+min_trim_len = 24
+intent = [
+  ["bitcoin", "btc", "crypto", "crypto stocks"],
+  ["surge", "surges", "surged", "jump", "jumps", "jumped", "rally", "rallied", "ignites", "relief rally"],
+  ["hormuz", "iran", "middle east", "peace", "trade deal", "reopening", "talks"],
+]
+
+# Bitcoin / crypto price move UP as standalone — positive_mild market fact.
+
+
+
+# Crypto platform suspends operations — negative_mild distress signal.
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+exclude_first_person = true
+min_trim_len = 16
+intent = [
+  ["suspends", "suspended", "suspending"],
+  ["operations", "withdrawals", "trading", "platform"],
+]
+
+# Executive / company misled investors (SEC action) — negative_mild.
+
+
+
+# Executive / company misled investors (SEC action) — negative_mild.
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+exclude_first_person = true
+min_trim_len = 20
+intent = [
+  ["misled", "misleading", "deceived"],
+  ["investors", "customers", "users", "sec"],
+]
+
+# Analyst casts doubt / tough sell — negative_mild skepticism.
+
+
+
+# Analyst casts doubt / tough sell — negative_mild skepticism.
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+exclude_first_person = true
+min_trim_len = 20
+intent = [
+  ["tough sell", "casts doubt", "cast doubt", "casting doubt", "skepti"],
+  ["crypto", "schwab", "bitcoin", "push", "analyst"],
+]
+
+# Technology adoption — neutral corporate event.
+
+
+
+# Technology adoption — neutral corporate event.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+exclude_first_person = true
+min_trim_len = 20
+intent = [
+  ["coming to", "rolls out", "rolled out", "rolling out"],
+  ["crypto", "solana", "blockchain", "trading-tech"],
+]
+
+# Corruption / political crypto — negative_mild.
+
+
+
+# Cyberattack / RAT / malware + finance headline — negative_strong.
+[[rules.headline_lexical_topic]]
+topic = "negative_strong"
+exclude_first_person = true
+min_trim_len = 20
+intent = [
+  ["rat", "malware", "ransomware", "phishing", "abuse", "phantompulse"],
+  ["crypto", "finance", "fintech", "attacks"],
+]
+
+# CFTC / SEC staff cuts + AI compensation — neutral regulatory.
+
+
+
+# CFTC / SEC staff cuts + AI compensation — neutral regulatory.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+exclude_first_person = true
+min_trim_len = 20
+intent = [
+  ["cftc", "sec", "regulator"],
+  ["ai ", "compensat", "staff cuts", "cuts at"],
+]
+
+# Pig butchering / romance scam warning — negative_strong.
+
+
+
+# Pig butchering / romance scam warning — negative_strong.
+[[rules.headline_lexical_topic]]
+topic = "negative_strong"
+exclude_first_person = true
+min_trim_len = 16
+intent = [
+  ["pig butchering", "romance scam", "sextortion"],
+  ["crypto", "secret service", "fbi", "warns"],
+]
+
+# Stablecoin / B2B payments — neutral corporate.
+
+
+
+# Stablecoin / B2B payments — neutral corporate.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+exclude_first_person = true
+min_trim_len = 20
+intent = [
+  ["stablecoin", "stablecoins"],
+  ["payments", "banking", "b2b", "processes"],
+]
+
+# Whale / institutional purchase — positive_mild confidence signal.
+
+[[rules.lattice_misfire]]
+intent = [["privacy"], ["network", "midnight"]]
+response_any = ["retail filers", "tape read", "tighter filing"]
+response = [["filing"], ["compliance"]]
+
+[[rules.lattice_misfire]]
+intent = [["tokenis", "tokeniz"], ["deposit"], ["banking", "retail"]]
+response = [["reliability appreciated"], ["expectation being met"]]
+
+# Identity / crypto-recovery lattice rows on infra or tokenised-deposit PR (not IRS / support blurb).
+
+
+
+# Investor-selectivity headlines often retrieve growth-rate + resilience training rows; drop the wrong witness.
+[[rules.lattice_misfire]]
+intent = [["selective"], ["investor", "investors"]]
+response_any = ["macro growth statistic", "growth statistic + interpretation"]
+
+# IPO / listing headlines must not surface enforcement-penalty or M&A-stake lattice rows.
+
+
+
+# IPO / listing headlines must not surface enforcement-penalty or M&A-stake lattice rows.
+[[rules.lattice_misfire]]
+intent = [["kraken"], ["ipo"]]
+response_any = [
+  "enforcement penalty",
+  "compliance failure",
+  "institutional misconduct",
+  "strategic exchange stake",
+  "m&a headline",
+  "ma headline",
+  "not consumer praise",
+]
+
+# Tape / token “why up today” must not retrieve HR / identity boilerplate.
+
+
+
+# Tape / token “why up today” must not retrieve HR / identity boilerplate.
+[[rules.lattice_misfire]]
+intent = [["why"], ["xrp", "btc", "bitcoin"]]
+response_any = ["corporate/ hr", "hr pr headline", "rising strategy"]
+
+# Crime / scam / theft crypto headlines must not retrieve enforcement-positive or recovery rows.
+
+
+
+# Geopolitical-catalyst price surge must not retrieve negative tape reads.
+[[rules.lattice_misfire]]
+intent = [["hormuz", "iran", "middle east", "peace deal"]]
+response_any = ["bear-market skepticism", "cautious institutional", "enforcement recovery"]
+
+# Trading-tech/infrastructure adoption headlines must not retrieve enforcement.
+
+
+
+# Trading-tech/infrastructure adoption headlines must not retrieve enforcement.
+[[rules.lattice_misfire]]
+intent = [["rolls out", "coming to", "high-speed", "trading-tech"]]
+response_any = ["enforcement penalty", "compliance failure"]
+
+# Cyberattack / RAT headlines must not retrieve positive or neutral-product rows.
+
+
+
+# Stablecoin B2B / institutional deal must not retrieve consumer-product feedback.
+[[rules.lattice_misfire]]
+intent = [["stablecoin", "stablecoins"], ["b2b", "payments", "banking"]]
+response_any = ["consumer satisfaction", "retail filers", "reliability appreciated"]
+
+# Quantum computing threat to crypto must not retrieve positive innovation framing.
+
+
+
+# Quantum computing threat to crypto must not retrieve positive innovation framing.
+[[rules.lattice_misfire]]
+intent = [["quantum"], ["bitcoin", "crypto"]]
+response_any = ["innovation", "positive adoption", "bullish signal"]
+
+# --- Specific false-label corrections (F2 battery) ---
+
+# Earnings beats / above-expectations headlines: positive even in crypto context.
+
+
+
+# --- Specific false-label corrections (F2 battery) ---
+
+# Earnings beats / above-expectations headlines: positive even in crypto context.
+[[rules.headline_lexical_topic]]
+topic = "positive_mild"
+intent = [["earnings", "revenue", "profit", "eps"], ["beat", "stronger-than-expected", "better-than-expected", "above expectations", "exceeded", "topped", "surpassed"]]
+
+# Explicit loss / write-down paired with a positive framing should resolve mixed, not positive.
+
+
+
+# Explicit loss / write-down paired with a positive framing should resolve mixed, not positive.
+[[rules.headline_lexical_topic]]
+topic = "mixed"
+intent = [["loss", "write-down", "writedown", "impairment"], ["end of", "recovery", "rebound", "comeback", "winter"]]
+
+# Elon / celebrity attention without evaluative content defaults to neutral, not sarcastic.
+
+
+
+# Elon / celebrity attention without evaluative content defaults to neutral, not sarcastic.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+intent = [["elon", "musk"], ["attention", "tweet", "tweeted", "posted", "mentions"]]
+
+# M&A / acquisition of regulated entities is neutral business news.
+
+
+
+# M&A / acquisition of regulated entities is neutral business news.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+intent = [["acquire", "acquires", "acquisition", "acquiring"], ["exchange", "platform", "firm", "company"]]
+
+# Social Security / pension factual reporting.
+
+
+
+# Social Security / pension factual reporting.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+intent = [["social security", "pension", "retirement benefit"], ["check", "amount", "average", "covers"]]
+
+# Lawsuit / legal action over hacks or fraud is clearly negative.
+
+
+
+# Lawsuit / legal action over hacks or fraud is clearly negative.
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+intent = [["lawsuit", "class-action", "class action", "sued", "suing"], ["hack", "breach", "fraud", "scam", "theft"]]
+
+# Speculative hype headlines ("Next GameStop?", "Is This the Next X?") — mixed, not sarcastic.
+
+
+
+# Speculative hype headlines ("Next GameStop?", "Is This the Next X?") — mixed, not sarcastic.
+[[rules.headline_lexical_topic]]
+topic = "mixed"
+intent = [["next gamestop", "next enron", "next lehman", "next bubble"]]
+
+# "X has a solution for Y threat" — solution offsets threat, resolve neutral.
+
+
+
+# "X has a solution for Y threat" — solution offsets threat, resolve neutral.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+intent = [["solution", "answer", "fix"], ["threat", "risk", "danger", "crisis"]]
+
+# Trust / verification framework pieces are analytical, not evaluative.
+
+
+
+# Court / bail / legal procedural — factual, not evaluative.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+intent = [["court", "judge", "magistrate"], ["grants bail", "bail granted", "granted bail", "bail hearing"]]
+
+# Board appointments / corporate governance — business process, neutral.
+
+
+
+# Board appointments / corporate governance — business process, neutral.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+intent = [["appoints", "appointed", "appointment", "names to board", "strengthening expertise"]]
+
+# Product / platform launches — neutral business activity.
+
+
+
+# Product / platform launches — neutral business activity.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+intent = [["launches", "launch", "launches direct", "launches program", "launches level-up"]]
+exclude_first_person = true
+
+# Goes all in / major institutional commitment — neutral or mild positive, not negative.
+
+
+
+# "Is now a good time to buy" — question form, neutral.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+intent = [["is now a good time", "is now actually a good time", "is this the best time"]]
+require_question_mark = false
+
+# Tax implications / educational finance — factual, neutral.
+
+
+
+# Tax implications / educational finance — factual, neutral.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+intent = [["tax implications", "tax treatment", "tax rules"]]
+
+# "How much of your portfolio" — advice/question framing, neutral.
+
+
+
+# "How much of your portfolio" — advice/question framing, neutral.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+intent = [["how much of your portfolio", "portfolio should be"]]
+
+# "Where will X be in N years?" — speculative question, neutral.
+
+
+
+# Fragile recovery / risk-focused technical analysis — cautionary, not sarcastic.
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+intent = [["fragile recovery", "short-squeeze risk", "short squeeze risk"]]
+
+# Stock up / named top pick — positive signal.
+
+
+
+# Stock up / named top pick — positive signal.
+[[rules.headline_lexical_topic]]
+topic = "positive_mild"
+intent = [["stock is up", "shares up", "named it a top pick", "top pick"]]
+
+# Hacked platform relaunch — mixed (hack is negative, relaunch/securing funding is positive recovery).
+
+
+
+# Hacked platform relaunch — mixed (hack is negative, relaunch/securing funding is positive recovery).
+[[rules.headline_lexical_topic]]
+topic = "mixed"
+intent = [["hacked", "hack"], ["relaunch", "relaunching", "securing new funding", "secured funding"]]
+
+# "Funds returned to victims" — positive recovery from negative situation, mixed.
+
+
+
+# "Funds returned to victims" — positive recovery from negative situation, mixed.
+[[rules.headline_lexical_topic]]
+topic = "mixed"
+intent = [["funds returned", "money returned", "refunded"], ["victims", "victim", "fraud", "scam"]]
+
+# Market crash + buying opportunity — mixed signal.
+
+
+
+# Market crash + buying opportunity — mixed signal.
+[[rules.headline_lexical_topic]]
+topic = "mixed"
+intent = [["market crash", "crash"], ["best time", "load up", "buying opportunity"]]
+
+# Online influencers / political backing — neutral unless clearly evaluative.
+
+
+
+# Online influencers / political backing — neutral unless clearly evaluative.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+intent = [["influencers back", "influencers backing", "endorses", "endorsing"]]
+exclude_first_person = true
+
+# Law / regulation requiring licenses — factual regulatory, neutral.
+
+
+
+# Law / regulation requiring licenses — factual regulatory, neutral.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+intent = [["requires", "law requires", "new law", "digital financial assets law", "requires application"]]
+
+# Building / construction — neutral or positive business news, not negative.
+
+
+
+# Building / construction — neutral or positive business news, not negative.
+[[rules.headline_lexical_topic]]
+topic = "neutral"
+intent = [["building a city", "building a", "is now building"]]
+after_pr_wire = true
+
+# "Stock slumped" / "stock plunged" — explicit negative direction.
+
+
+
+# "Stock slumped" / "stock plunged" — explicit negative direction.
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+intent = [["slumped", "slumps", "plunged", "plunges", "tanked"]]
+
+# Profit / massive gain patterns — positive direction.
+
+
+
+# Surging fraud / surging scams — the word "surging" modifies a negative, result is negative.
+[[rules.headline_lexical_topic]]
+topic = "negative_strong"
+intent = [["surging", "surge in", "surge of"], ["fraud", "scam", "scams", "crime", "cybercrime", "kidnapping", "kidnappings", "theft"]]
+
+# FBI / AG warns of scams — negative public-safety warning.
+
+
+
+# FBI / AG warns of scams — negative public-safety warning.
+[[rules.headline_lexical_topic]]
+topic = "negative_mild"
+intent = [["warns", "warning", "warn"], ["scam", "scams", "fraud", "cybercrime"]]
+
+# Gang / criminal jailed — negative crime story.
+
+# -----------------------------------------------------------------------------
+# PR / wire / press headline → neutral
+#
+# Third-person, no evaluative adjective, no first-person pronouns.
+# These patterns route factual fintech-news headlines to NEUTRAL before
+# the lattice (trained on first-person desk chatter) can return a wrong
+# positive or negative neighbor.
+#
+# Intent format (CNF): every inner array is an OR-group; ALL groups must match.
+# e.g. [["launches", "launch"], ["platform", "card", "wallet"]]
+#   → text must contain (launches OR launch) AND (platform OR card OR wallet).
+# -----------------------------------------------------------------------------
+
+# --- Product / feature launches ---
+[[rules.pr_wire_neutral_intent]]
+intent = [["launches", "launch", "launched", "launching", "debuts", "debuted", "unveils", "unveiled", "rolls out", "rolled out", "introduces", "introduced"]]
+
+# --- Appointments / personnel moves ---
+[[rules.pr_wire_neutral_intent]]
+intent = [["appoint", "appoints", "appointed", "names", "named", "naming", "hires", "hired", "taps", "tapped", "promotes", "promoted"]]
+
+# --- Executive departures (factual, not evaluative) ---
+[[rules.pr_wire_neutral_intent]]
+intent = [["steps down", "stepped down", "retires", "retired", "departs", "departed", "resigns", "resigned", "exits", "exited"]]
+
+# --- Fundraising / valuation ---
+[[rules.pr_wire_neutral_intent]]
+intent = [["raises", "raised", "secures", "secured", "closes", "closed", "lands"], ["series", "funding", "round", "investment", "capital", "million", "billion", "mln", "bln"]]
+
+# --- Valuation / IPO ---
+[[rules.pr_wire_neutral_intent]]
+intent = [["valuation", "ipo", "listing", "public offering", "confidential filing"]]
+
+# --- Licensing / regulatory approval ---
+[[rules.pr_wire_neutral_intent]]
+intent = [["obtains", "obtained", "secures", "secured", "receives", "received", "granted", "awarded"], ["licence", "license", "approval", "authorisation", "authorization", "charter", "permit"]]
+
+# --- Partnership / integration ---
+[[rules.pr_wire_neutral_intent]]
+intent = [["partners", "partnered", "partnering", "partner with", "teaming up", "team up", "teams up", "teamed up", "integrate", "integrates", "integrated", "integrating", "collaborates", "collaborated"]]
+
+# --- Modernisation / expansion / upgrade ---
+[[rules.pr_wire_neutral_intent]]
+intent = [["modernises", "modernizes", "modernising", "modernizing", "upgrades", "upgraded", "expands", "expanded", "extending", "extends", "extended", "enhances", "enhanced", "advances", "advanced", "boosts", "boosted"]]
+
+# --- Acquisition / deal ---
+[[rules.pr_wire_neutral_intent]]
+intent = [["acquires", "acquired", "acquiring", "acquisition", "to acquire", "buys", "bought", "to buy", "to pay"]]
+
+# --- Conference / event ---
+[[rules.pr_wire_neutral_intent]]
+intent = [["convene", "convenes", "summit", "conference", "forum", "to welcome"]]
+
+# --- Milestone / record ---
+[[rules.pr_wire_neutral_intent]]
+intent = [["milestone", "record year", "record quarter", "hits", "hit", "reaches", "reached", "surpasses", "surpassed"], ["million", "billion", "mln", "bln", "100m", "100b", "1bn", "5bn"]]
+
+# --- Overview / landscape / ecosystem report titles ---
+[[rules.pr_wire_neutral_intent]]
+intent = [["overview", "landscape", "ecosystem"], ["fintech", "digital", "banking", "payments"]]
+
+# --- Prefix-style rules ---
+
+# "How is X Ensuring / Boosting / Driving" — magazine feature title, not question
+[[rules.pr_wire_neutral_prefix]]
+prefix = "how "
+min_len = 40
+exclude_prefixes = [
+  "how do ", "how can ", "how much", "how long",
+  "how does ", "how did ", "how will ", "how should ",
+  "how could ", "how would ", "how are you",
+  "how is it ", "how is this ", "how is that ", "how is the ",
+  "how to ",
+]
+
+# "Who is X, Lloyds' New Chief" — profile feature title
+[[rules.pr_wire_neutral_prefix]]
+prefix = "who is "
+min_len = 20
+
+# "Why is eToro Acquiring…" — editorial question headline
+[[rules.pr_wire_neutral_prefix]]
+prefix = "why "
+min_len = 40
+disallow_question_mark = true
+exclude_prefixes = [
+  "why do ", "why can ", "why should ", "why would ",
+  "why did ", "why does ", "why will ",
+  "why is my ", "why are my ", "why was my ",
+  "why won't ", "why wont ", "why not ", "why to ",
+  "why can't i ", "why cant i ",
+  "why is it ", "why is this ", "why is that ", "why is the ",
+  "why the charge", "why the app ", "why my ", "why did my ",
+  "why won't my ", "why wont my ",
+]
+require_any = [
+  "fintech", "funding", "venture", "valuation", "startup",
+  " ipo", " ai", "bank", "payments", "crypto ", "blockchain",
+  "acquiring", "acquisition",
+]

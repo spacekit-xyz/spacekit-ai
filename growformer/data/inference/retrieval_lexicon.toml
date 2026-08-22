@@ -1,0 +1,49 @@
+# Natural-language retrieval helpers (stopwords, intent names, code markers).
+# Add `locales.fr`, `locales.es`, … and load by `language_channel` / brain manifest later.
+# See `inference::retrieval_lexicon` and `docs/RETRIEVAL_EXTENSIBILITY.md`.
+
+version = 1
+default_locale = "en"
+
+[locales.en]
+graph_stopwords = [
+  "the", "is", "are", "was", "were", "be", "been", "being",
+  "have", "has", "had", "do", "does", "did", "will", "would",
+  "could", "should", "may", "might", "can", "shall",
+  "not", "but", "and", "or", "for", "nor", "so", "yet",
+  "a", "an", "of", "in", "to", "on", "at", "by", "with",
+  "from", "that", "this", "it", "its", "as", "if", "than",
+  "then", "too", "very", "just", "about", "into", "through",
+  "during", "before", "after", "above", "below", "between",
+  "under", "over", "such", "each", "every", "all", "any",
+  "both", "few", "more", "most", "other", "some", "also",
+  "which", "who", "whom", "what", "when", "where", "how", "why",
+  "one", "two", "used", "using", "use", "like", "example",
+]
+
+# Stricter filter for forced-topic lexical alignment (content words only).
+lex_align_stopwords = [
+  "the", "a", "an", "is", "are", "was", "were", "and", "or", "but",
+  "in", "on", "at", "to", "for", "of", "with", "by", "from", "as",
+  "it", "this", "that", "i", "you", "we", "they", "my", "your",
+  "me", "not", "no", "do", "does", "did", "have", "has", "had",
+  "love", "like", "likes", "hate", "good", "bad", "really", "very",
+  "just", "so", "too", "get", "got",
+]
+
+# `intent_action` strings from the query pipeline (English today; mirror in other locales).
+intent_implement = ["implement", "code", "write"]
+intent_explain = ["explain", "define", "describe"]
+
+# Substrings suggesting a program body is source code (BM25 blend bump).
+code_markers_bm25 = [
+  "fn ", "def ", "class ", "impl ", "return ", "pub fn", "struct ", "let ",
+]
+
+# `lang_hint == "rust"` — extend per locale only if you add non-Latin Rust docs.
+code_markers_rust = ["fn ", "-> ", "let ", "i32", "f64", "impl "]
+
+# `lang_hint == "python"` — `def` OR (`return` without Rust arrow).
+code_markers_python = ["def "]
+code_python_return = "return "
+code_python_exclude_arrow = "->"

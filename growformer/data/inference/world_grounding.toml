@@ -1,0 +1,892 @@
+# Layer 0 — typed world grounding graph (MVP scaffold)
+# Versioned, read-only at inference. Expands subject keywords for BM25 / witness alignment
+# (see GROWFORMER_CAUSAL_AI.md — World grounding; inference::world_grounding).
+#
+# ---------------------------------------------------------------------------
+# Edge kinds (auditable; traversal scales weight by kind — see Rust `kind_multiplier`)
+# ---------------------------------------------------------------------------
+#   is_a                 — taxonomic parent; strongest propagation (×1.25)
+#   adjacent_to          — domain co-occurrence / soft association (×1.0)
+#   sentiment_bearing    — valence bucket token (e.g. positive, negative); BM25 expansion + retrieval
+#                          conditioning nudge (Stage‑1 cosine) when an empirical axis is available
+#   causal_type          — target names a causal frame (aligns with causal JSONL / gfcausal_*)
+#   domain               — assigns a domain bucket token for retrieval
+#   disambiguated_by     — no hop by itself; marks context cues. If any match the query,
+#                          zero-weight `adjacent_to` edges on the *same* node may unlock
+#                          (see `requires_context` on those edges).
+#
+# ---------------------------------------------------------------------------
+# Node fields
+# ---------------------------------------------------------------------------
+#   magnitude_sensitive = true — loss/gain/currency-style nodes; logged for future conditioning
+#   causal_anchor       = true — optional hint for tooling (reserved; not required for traversal)
+#
+# Zero-weight `adjacent_to` + `requires_context = "<id>"`:
+#   Unlocks only when that context id matched (token, activated root, or substring on padded intent).
+
+version = 1
+
+# --- Finance / markets (existing + leaves for BFS) ---
+
+
+[[nodes]]
+id = "etf"
+aliases = ["etfs"]
+[[nodes.edges]]
+kind = "is_a"
+target = "exchange_traded_product"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "listing"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "securities"
+weight = 0.7
+
+
+[[nodes]]
+id = "launch"
+aliases = ["launches", "launched", "launching"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "product_release"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "go_live"
+weight = 0.8
+
+
+[[nodes]]
+id = "offer"
+aliases = ["offers", "offering", "offered"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "commercial_agreement"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "product_release"
+weight = 0.5
+
+
+[[nodes]]
+id = "prediction_market"
+aliases = ["prediction_markets"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "exchange_feature"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "event_contracts"
+weight = 0.9
+
+
+[[nodes]]
+id = "partnership"
+aliases = ["partnerships"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "b2b"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "commercial_agreement"
+weight = 0.85
+
+
+# --- Magnitude / loss–gain (bearing for “I lost $5000” class queries) ---
+
+[[nodes]]
+id = "loss"
+aliases = ["lost", "losing", "losses"]
+magnitude_sensitive = true
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "financial_loss"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "gambling"
+weight = 0.6
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "investment"
+weight = 0.7
+
+
+[[nodes]]
+id = "gain"
+aliases = ["gained", "gains", "profit", "profits"]
+magnitude_sensitive = true
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "financial_gain"
+weight = 0.9
+
+
+[[nodes]]
+id = "money"
+aliases = ["cash", "funds"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "financial_transaction"
+weight = 1.0
+
+# Disambiguates “money” in laundering / seizure headlines from generic transaction positivity.
+
+# Disambiguates “money” in laundering / seizure headlines from generic transaction positivity.
+[[nodes]]
+id = "financial_crime"
+aliases = [
+  "money laundering",
+  "laundering scheme",
+  "laundering",
+  "accounts seized",
+  "seized in",
+  "forfeiture",
+  "illicit",
+  "indictment",
+  "money laundering scheme",
+]
+magnitude_sensitive = true
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "compliance"
+weight = 0.75
+
+
+[[nodes]]
+id = "compliance_obligation"
+aliases = [
+  "must declare",
+  "must now declare",
+  "required to declare",
+  "mandatory disclosure",
+  "declare investments",
+]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.55
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "compliance"
+weight = 1.0
+
+
+[[nodes]]
+id = "speculative_forward"
+aliases = [
+  "where will",
+  "where would",
+  "in 5 years",
+  "in 10 years",
+  "years from now",
+  "could reach",
+  "might become",
+]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "compliance"
+weight = 0.35
+
+
+[[nodes]]
+id = "currency_amount"
+aliases = ["usd", "eur", "gbp", "dollar", "dollars", "euro", "euros", "pounds", "£", "€"]
+magnitude_sensitive = true
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "financial_transaction"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "loss"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "gain"
+weight = 0.8
+
+# --- Causal connector anchors (aligns with causal JSONL / gfcausal vocabulary) ---
+
+
+# --- Causal connector anchors (aligns with causal JSONL / gfcausal vocabulary) ---
+
+[[nodes]]
+id = "because"
+aliases = ["since", "therefore", "thus"]
+causal_anchor = true
+[[nodes.edges]]
+kind = "causal_type"
+target = "direct_cause"
+weight = 1.0
+
+
+[[nodes]]
+id = "despite"
+aliases = ["although", "nevertheless"]
+causal_anchor = true
+[[nodes.edges]]
+kind = "causal_type"
+target = "concessive"
+weight = 1.0
+[[nodes.edges]]
+kind = "causal_type"
+target = "retrospective_framing"
+weight = 0.7
+
+
+# --- Cross-domain anchors (light; extend per training domains) ---
+
+[[nodes]]
+id = "match"
+aliases = ["round", "ranked"]
+[[nodes.edges]]
+kind = "domain"
+target = "esports"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "win"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "loss"
+weight = 0.85
+
+
+[[nodes]]
+id = "gesture"
+aliases = ["remembered", "noticed"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "care"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "disproportionate_weight"
+weight = 0.9
+
+# --- Professional / workplace ---
+
+
+# --- Professional / workplace ---
+
+[[nodes]]
+id = "sprint"
+aliases = ["retro", "retrospective", "standup", "scrum"]
+[[nodes.edges]]
+kind = "domain"
+target = "professional"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "meeting"
+weight = 0.8
+
+# Company / cap-table funding (distinct from personal “raise” / promotion).
+
+[[nodes]]
+id = "promotion"
+aliases = ["promoted", "passed_over", "raise"]
+magnitude_sensitive = true
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "career"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "recognition"
+weight = 0.8
+
+
+[[nodes]]
+id = "meeting"
+aliases = ["meetings"]
+[[nodes.edges]]
+kind = "domain"
+target = "professional"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "sprint"
+weight = 0.75
+
+# --- Relationships ---
+
+
+# --- Relationships ---
+
+[[nodes]]
+id = "absence"
+aliases = ["gone", "left", "drifted", "distance"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.6
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "relationships"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "retrospective_framing"
+weight = 0.7
+
+
+[[nodes]]
+id = "reunion"
+aliases = ["reunited", "saw_again", "back_together"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.85
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "relationships"
+weight = 1.0
+
+
+[[nodes]]
+id = "ban"
+aliases = ["bans", "banned", "banning", "prohibit", "prohibited"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "regulation"
+weight = 1.0
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.6
+
+
+[[nodes]]
+id = "scam"
+aliases = ["scams", "scammed", "scammer", "scammers", "fraud", "fraudulent", "swindle"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "crime"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "enforcement"
+weight = 0.7
+
+
+[[nodes]]
+id = "hack"
+aliases = ["hacked", "hacking", "hackers", "cyberattack", "exploit", "exploited"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.85
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "security_breach"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "crime"
+weight = 0.8
+
+
+[[nodes]]
+id = "theft"
+aliases = ["stolen", "stealing", "stole"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "crime"
+weight = 1.0
+
+
+[[nodes]]
+id = "ponzi"
+aliases = ["ponzi_scheme", "pyramid_scheme"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.95
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "scam"
+weight = 1.0
+
+
+[[nodes]]
+id = "listing"
+aliases = ["listed", "lists", "delisted", "delisting"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "exchange"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "liquidity"
+weight = 0.7
+
+
+[[nodes]]
+id = "rally"
+aliases = ["rallied", "rallies", "rallying"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "price_action"
+weight = 1.0
+
+
+[[nodes]]
+id = "indicted"
+aliases = ["indictment", "indictments", "arraigned"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.85
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "crime"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "enforcement"
+weight = 0.9
+
+
+[[nodes]]
+id = "integrate"
+aliases = ["integrates", "integrated", "integration", "integrating"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "partnership"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "product_release"
+weight = 0.7
+
+
+[[nodes]]
+id = "pressure"
+aliases = ["pressured", "pressuring"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "political_action"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "regulation"
+weight = 0.6
+
+
+[[nodes]]
+id = "winds_down"
+aliases = ["wound_down", "winding_down", "shutting_down", "shuts_down"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "business_closure"
+weight = 1.0
+
+
+[[nodes]]
+id = "product_launch"
+aliases = ["launches", "launch", "rolled_out", "debuts", "goes_live"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "business_expansion"
+weight = 0.9
+
+
+[[nodes]]
+id = "bail"
+aliases = ["grants_bail", "bail_granted", "released_on_bail"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "legal_proceeding"
+weight = 0.9
+
+
+[[nodes]]
+id = "kidnapping"
+aliases = ["kidnapped", "kidnappings", "abduction", "ransom"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "crime"
+weight = 1.0
+
+
+[[nodes]]
+id = "cybercrime"
+aliases = ["cybercriminals", "online_fraud", "digital_crime", "phishing"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "crime"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "hack"
+weight = 0.8
+
+
+[[nodes]]
+id = "price_surge"
+aliases = ["surges", "soars", "rallies", "jumps", "spikes"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "market_movement"
+weight = 1.0
+
+
+[[nodes]]
+id = "price_decline"
+aliases = ["slumped", "plunged", "crashed", "tanked", "fell"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "market_movement"
+weight = 1.0
+
+
+[[nodes]]
+id = "geopolitical_catalyst"
+aliases = ["iran_deal", "middle_east_deal", "strait_of_hormuz", "trade_deal", "sanctions"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.5
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "geopolitics"
+weight = 1.0
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Enforcement / restitution / outcome concepts
+#  (BFS creates dual paths for fraud+recovery headlines → MIXED)
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "crackdown"
+aliases = ["crackdowns", "cracks_down", "cracked_down"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "enforcement"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "crime"
+weight = 0.8
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.5
+
+[[nodes]]
+id = "enforcement"
+aliases = ["law_enforcement", "authorities", "investigators", "prosecution"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "crime"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "compliance"
+weight = 0.7
+
+[[nodes]]
+id = "restitution"
+aliases = ["recovered", "recovery", "reimbursed", "returned_to_victims", "refunded_to"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "enforcement"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "victim"
+weight = 0.9
+
+[[nodes]]
+id = "victim"
+aliases = ["victims", "victimized", "defrauded", "scam_victim"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "crime"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "restitution"
+weight = 0.6
+
+[[nodes]]
+id = "seized"
+aliases = ["seizure", "forfeited", "confiscated", "asset_seizure"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "enforcement"
+weight = 1.0
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.5
+
+[[nodes]]
+id = "conviction"
+aliases = ["convicted", "sentenced", "jailed", "imprisoned", "guilty_plea"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "crime"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "enforcement"
+weight = 0.9
+
+# ═══════════════════════════════════════════════════════════════════
+#  Failure / negative outcome modifiers
+#  (BFS creates negative path when combined with neutral processes)
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "failed"
+aliases = ["failure", "fails", "fell_through", "collapsed"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "disappointment"
+weight = 0.7
+
+[[nodes]]
+id = "negotiations"
+aliases = ["talks", "summit", "diplomatic_talks", "ceasefire", "peace_talks"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "geopolitics"
+weight = 1.0
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.7
+
+[[nodes]]
+id = "geopolitics"
+aliases = ["geopolitical", "international_relations", "foreign_policy"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "geopolitical_catalyst"
+weight = 0.8
+
+[[nodes]]
+id = "warning"
+aliases = ["warns", "warned", "caution", "cautioned", "advisory"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.5
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "risk"
+weight = 0.8
+
+[[nodes]]
+id = "risk"
+aliases = ["risks", "risky", "at_risk", "billions_at_risk"]
+magnitude_sensitive = true
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.6
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "exposure"
+weight = 0.8
+
+[[nodes]]
+id = "misled"
+aliases = ["misleading", "deceived", "deceptive", "false_claims"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.85
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "scam"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "enforcement"
+weight = 0.6
+
+[[nodes]]
+id = "dodging"
+aliases = ["evading", "evasion", "avoiding_taxes", "tax_evasion"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "compliance"
+weight = 0.8
+
+[[nodes]]
+id = "record_setting"
+aliases = ["record_breaking", "all_time_record", "unprecedented"]
+magnitude_sensitive = true
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "magnitude"
+weight = 1.0
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Polarity reversal / positive transformation concepts
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "lifts_ban"
+aliases = ["ends_ban", "ends ban", "lifts ban", "reverses ban", "overturns ban", "repeals ban", "abolishes ban"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.75
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "ban"
+weight = 1.0
+
+[[nodes]]
+id = "advocacy"
+aliases = ["advocate", "advocates", "turns into advocacy", "survivor advocacy", "awareness campaign"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.6
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "resilience"
+weight = 0.9
+
+[[nodes]]
+id = "resilience"
+aliases = ["resilient", "overcame", "turns around", "turns_into", "bounced_back"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.6
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "recovery"
+weight = 0.7
+
+[[nodes]]
+id = "product_breakthrough"
+aliases = ["apple_pay_moment", "breakthrough", "milestone", "game_changer", "paradigm_shift"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "product_launch"
+weight = 0.9
+
+[[nodes]]
+id = "integration"
+aliases = ["integrates", "integrated", "integration", "fiat_to_crypto", "on_ramp", "onramp"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "partnership"
+weight = 1.0
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.4
+
+[[nodes]]
+id = "faster"
+aliases = ["faster_than", "quicker", "instant", "real_time", "real-time"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.4
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "product_breakthrough"
+weight = 0.6

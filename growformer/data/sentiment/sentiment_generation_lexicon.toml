@@ -1,0 +1,193 @@
+# English strings for sentiment lattice generation (witness gates, OOD fallback, hard-reject).
+# Loaded at runtime from embed; extend [locales.en] for other locales later.
+# See `inference::sentiment_generation_lexicon`.
+
+version = 1
+default_locale = "en"
+
+[locales.en]
+# Shown in prompt-anchored fallback and matched by `LanguageService` for fast-path / metacog skip.
+prompt_anchor_marker = "No witness-matched lattice row for this wording"
+
+# Excluded from witness keyword overlap (too generic; false positives vs unrelated rows).
+witness_weak_forms = [
+  "even", "again", "still", "just", "also", "then", "very", "most", "some", "well",
+  "back", "long", "high", "fast", "late", "last", "next", "first", "same", "such",
+  "much", "many", "less", "more", "here", "there", "only", "once", "ever", "never",
+]
+
+# Stopwords for prompt-anchored cue excerpt (subject + intent tokens).
+excerpt_stopwords = [
+  "the", "and", "with", "that", "this", "from", "into", "your", "were", "have", "has",
+  "been", "about", "their", "they", "what", "when", "where", "will", "would", "could",
+  "for", "are", "was", "but", "not", "out", "over", "than", "then", "some", "such",
+  # Generic valence tokens: label already states POSITIVE/NEGATIVE; keeps wire excerpts honest.
+  "positive", "negative",
+]
+
+# Cue tokens containing or starting with these are dropped from excerpts.
+internal_cue_prefixes = ["gfcausal", "growformer", "money_usd_"]
+
+# Topic keys that may use sentiment sub-lattice + prompt-anchored fallback (not identity / coding).
+sentiment_lattice_topic_hints = [
+  "negative_mild", "negative_strong", "positive_mild", "positive_strong",
+  "neutral_chop", "neutral", "mixed", "confused", "sarcastic", "euphoric",
+  "copium", "hopium", "capitulation", "cautiously_positive", "cautiously_negative",
+  "cautiously_optimistic", "grateful_but_cautious", "formal_complaint", "dry_humor",
+  "impressed_but_skeptical", "resigned_annoyance", "polite_negative", "disappointed", "resigned",
+  # Scenario retrieval buckets (narrower than polarity-only negative_mild).
+  "etf_delay_bearish", "mortgage_rate_complaint", "fee_complaint",
+]
+
+# If decoded lattice text contains any of these (ASCII-lowercased), hard-reject the program.
+# Structural / repetition checks stay in Rust (`hard_reject_repeated_bigram`, etc.).
+hard_reject_substrings = [
+  "[mask]", "mask]", "mask][", "][", "[]",
+  "growformer agent", "growformer companion", "companion agent", "i am growformer",
+  "specialized ai agent", "built by swtch", "swtch.ai",
+  "biologically-inspired neural", "biologically inspired neural",
+  "neurons exist in 3d", "synapses grow and prune",
+  "self-organizing neural", "self organizing neural",
+  "drawn to curiosity",
+  "knowledge is encoded as physical neural structure",
+  "people their people", "their people their",
+  "details people details", "people details people", "people share people",
+  "headline snack",
+  "my intelligence comes from structure", "not weight optimization", "friendly companion",
+  "share a moment of curiosity", "i was created to be",
+  "about. about",
+  "taxpayer friction",
+  "poor pressure messaging",
+  "pressure messaging non confusion",
+  "not a consumer- win story",
+  "not a consumer-win story",
+  # Broken lattice / training fragments (identity group bleed + garbled decode)
+  "direct upward link",
+  "aggressive adoption",
+  "lack of enthusiasm that sentiment",
+  "corporate/ hr pr headline",
+  "corporate- hr",
+  "corporate-hr",
+  "corporate- hr funding",
+  "balance- a by",
+  "offset third not a full won",
+  "repeated- short",
+  "mid industry",
+  "celebrity neutral",
+  # Paxos-company / bridge near distributed-systems training: Hopf fragment soup (extend as new garble appears).
+  "consensus algorithms —",
+  "consensus algorithms",
+  "consensus algorithms — bitcoin jumps",
+  "consensus algorithms — investors",
+  "consensus algorithms — mildly",
+  "investors upward knocking",
+  "knocking a flat pullback",
+  "victim aggressive catalysts",
+  "optimistic enforcement",
+  "law optimistic enforcement",
+  "catalysts plus law",
+  "tape from recovery print",
+  "selective' in attempt",
+  "are$ in selective",
+  # Hopf soup variants (Paxos / company name near consensus training; extend in TOML only).
+  "consensus algorithms — slow",
+  "slow came link",
+  "enforcement teaser",
+  "stolen aggressive",
+  "tape law policy",
+  "comparative,. clearing",
+  "one title cues",
+  # Lattice-decode soup (garbled “operation / grievance” tails on sentiment shortcuts).
+  "classic stop of public grievance",
+  "pragmatic not fulfillment",
+  "public grievance usability",
+  "rhetorical wait callout",
+  "average operation —",
+  "power operation —",
+  # Garble observed in sentiment/fintech v3 brain inference (soup tails).
+  "found crypto exchange collapse media",
+  "brilliant my coffee funds gone",
+  "catastrophic institutional failure",
+  "set theory —",
+  "internet failure overshadowed",
+  "timing offset emotion",
+  "packaging unreliable system mid",
+  "we had( t take in",
+  "total mixed of grief assets",
+  "the media of discovery adds kindness",
+]
+
+# Bodies for [`lattice_shortcuts::try_user_anchored_line`] when `lexical_polarity_override` fires
+# (topic key from longest `[[rules.lexical_polarity]]` match). Keeps product-litotes vs rejection copy honest.
+[locales.en.lattice_lexical_override_bodies]
+positive_strong = "Strong positive idiom (e.g. 'blew me away') — read as enthusiastic praise despite weak topic scores"
+positive_mild = "Understated or litotic approval — read as POSITIVE (mild); not a commerce-rejection read"
+negative_mild = "Clear non-repeat / rejection stance (e.g. wouldn't buy again) — negative on the product or experience, not praise"
+negative_strong = "Strong rejection or harm — read as clearly negative on the product or experience, not praise"
+etf_delay_bearish = "Spot ETF delay or approval slip driving a Bitcoin/crypto sell-off — bearish headline, not counterfactual rally skepticism"
+mortgage_rate_complaint = "First-person mortgage or home-loan rate hike without adequate notice — consumer complaint, not custody-fee desk copy"
+fee_complaint = "Recurring bank or custody fee grievance — not a mortgage-rate hike"
+neutral = "Compensating factors or hedged stance without a single emotional pole — read as NEUTRAL"
+mixed = "Contrastive or dual-valence wording — read as MIXED when both relief and friction (or similar poles) appear in the same line; not a single clean pole"
+
+# Fine-grained topic → coarse bucket when emitting routing-only copy (no lattice witness).
+[locales.en.routing_coarse]
+# Wire headlines misclassified as identity still use sentiment lattice copy — coarse header only.
+identity = "neutral"
+copium = "mixed"
+hopium = "mixed"
+dry_humor = "mixed"
+sarcastic = "mixed"
+cautiously_positive = "positive_mild"
+cautiously_optimistic = "positive_mild"
+grateful_but_cautious = "positive_mild"
+impressed_but_skeptical = "positive_mild"
+cautiously_negative = "negative_mild"
+capitulation = "negative_strong"
+formal_complaint = "negative_strong"
+euphoric = "positive_strong"
+polite_negative = "negative_mild"
+resigned_annoyance = "negative_mild"
+disappointed = "negative_mild"
+resigned = "negative_mild"
+neutral_chop = "neutral_chop"
+neutral = "neutral"
+mixed = "mixed"
+confused = "confused"
+positive_mild = "positive_mild"
+positive_strong = "positive_strong"
+negative_mild = "negative_mild"
+negative_strong = "negative_strong"
+etf_delay_bearish = "negative_mild"
+mortgage_rate_complaint = "negative_mild"
+fee_complaint = "negative_mild"
+
+# semantic_intent / topic key → display header (English UI).
+[locales.en.display_labels]
+negative_mild = "NEGATIVE (mild)"
+negative_strong = "NEGATIVE (strong)"
+positive_mild = "POSITIVE (mild)"
+positive_strong = "POSITIVE (strong)"
+neutral_chop = "NEUTRAL (chop)"
+neutral = "NEUTRAL"
+mixed = "MIXED"
+confused = "CONFUSED"
+sarcastic = "SARCASTIC"
+euphoric = "EUPHORIC"
+copium = "COPIUM"
+hopium = "HOPIUM"
+capitulation = "CAPITULATION"
+cautiously_positive = "CAUTIOUSLY POSITIVE"
+cautiously_negative = "CAUTIOUSLY NEGATIVE"
+cautiously_optimistic = "CAUTIOUSLY OPTIMISTIC"
+grateful_but_cautious = "GRATEFUL BUT CAUTIOUS"
+formal_complaint = "FORMAL COMPLAINT"
+dry_humor = "DRY HUMOR"
+impressed_but_skeptical = "IMPRESSED BUT SKEPTICAL"
+resigned_annoyance = "RESIGNED ANNOYANCE"
+polite_negative = "POLITE NEGATIVE"
+disappointed = "DISAPPOINTED"
+resigned = "RESIGNED"
+etf_delay_bearish = "NEGATIVE (mild) — ETF delay / approval slip"
+mortgage_rate_complaint = "NEGATIVE (mild) — mortgage rate hike complaint"
+fee_complaint = "NEGATIVE (mild) — fee complaint"

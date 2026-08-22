@@ -1,0 +1,1497 @@
+# Crypto / DeFi world grounding — domain-specific concept nodes.
+# Loaded alongside shared world_grounding.toml at runtime.
+#
+# Target: ~100 nodes covering tokens, exchanges, protocols, market
+# microstructure, regulation, community sentiment, attack vectors,
+# and crypto-native financial concepts.
+
+version = 1
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 1 — Major tokens & token categories
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "bitcoin"
+aliases = ["btc", "₿", "sats", "satoshis"]
+[[nodes.edges]]
+kind = "is_a"
+target = "cryptocurrency"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "etf"
+weight = 0.6
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "store_of_value"
+weight = 0.8
+
+[[nodes]]
+id = "ethereum"
+aliases = ["eth", "ether"]
+[[nodes.edges]]
+kind = "is_a"
+target = "cryptocurrency"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "smart_contract"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "defi"
+weight = 0.8
+
+[[nodes]]
+id = "solana"
+aliases = ["sol"]
+[[nodes.edges]]
+kind = "is_a"
+target = "cryptocurrency"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "layer_1"
+weight = 0.9
+
+[[nodes]]
+id = "xrp"
+aliases = ["ripple"]
+[[nodes.edges]]
+kind = "is_a"
+target = "cryptocurrency"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "cross_border_payments"
+weight = 0.8
+
+[[nodes]]
+id = "dogecoin"
+aliases = ["doge"]
+[[nodes.edges]]
+kind = "is_a"
+target = "memecoin"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "community_sentiment"
+weight = 0.7
+
+[[nodes]]
+id = "stablecoin"
+aliases = ["stablecoins", "usdt", "usdc", "dai", "tether"]
+[[nodes.edges]]
+kind = "is_a"
+target = "cryptocurrency"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "peg"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "issuer"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "regulatory_approval"
+weight = 0.7
+
+[[nodes]]
+id = "memecoin"
+aliases = ["memecoins", "meme_coin", "meme_coins", "shitcoin", "shitcoins"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "community_sentiment"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "speculative_risk"
+weight = 0.9
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.5
+
+[[nodes]]
+id = "altcoin"
+aliases = ["altcoins", "alt"]
+[[nodes.edges]]
+kind = "is_a"
+target = "cryptocurrency"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "altseason"
+weight = 0.7
+
+[[nodes]]
+id = "nft"
+aliases = ["nfts", "non_fungible_token", "non_fungible_tokens", "digital_collectible"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "digital_asset"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "marketplace"
+weight = 0.7
+
+[[nodes]]
+id = "wrapped_token"
+aliases = ["wrapped", "wbtc", "weth"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "bridge"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "defi"
+weight = 0.7
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 2 — Exchanges & infrastructure
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "crypto_exchange"
+aliases = ["exchange", "cex", "centralized_exchange"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "trading"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "listing"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "custody"
+weight = 0.7
+
+[[nodes]]
+id = "binance"
+aliases = []
+[[nodes.edges]]
+kind = "is_a"
+target = "crypto_exchange"
+weight = 1.0
+
+[[nodes]]
+id = "coinbase"
+aliases = ["coin"]
+[[nodes.edges]]
+kind = "is_a"
+target = "crypto_exchange"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "ipo"
+weight = 0.5
+
+[[nodes]]
+id = "kraken"
+aliases = []
+[[nodes.edges]]
+kind = "is_a"
+target = "crypto_exchange"
+weight = 1.0
+
+[[nodes]]
+id = "dex"
+aliases = ["decentralized_exchange", "uniswap", "sushiswap", "raydium"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "defi"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "liquidity_pool"
+weight = 0.9
+
+[[nodes]]
+id = "bridge"
+aliases = ["bridges", "cross_chain", "cross-chain"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "interoperability"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "hack"
+weight = 0.6
+
+[[nodes]]
+id = "wallet"
+aliases = ["wallets", "cold_wallet", "hot_wallet", "hardware_wallet", "ledger"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "custody"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "self_custody"
+weight = 0.9
+
+[[nodes]]
+id = "mining"
+aliases = ["miner", "miners", "mining_pool", "hash_rate", "hashrate"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "proof_of_work"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "energy_consumption"
+weight = 0.7
+
+[[nodes]]
+id = "staking"
+aliases = ["staked", "validator", "validators", "delegator", "slashing"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "proof_of_stake"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "yield"
+weight = 0.8
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 3 — DeFi protocols & primitives
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "defi"
+aliases = ["decentralized_finance"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "protocol"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "smart_contract"
+weight = 0.9
+
+[[nodes]]
+id = "smart_contract"
+aliases = ["smart_contracts", "contract"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "ethereum"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "audit"
+weight = 0.6
+
+[[nodes]]
+id = "liquidity_pool"
+aliases = ["liquidity_pools", "lp", "pool", "pools", "amm"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "defi"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "impermanent_loss"
+weight = 0.7
+
+[[nodes]]
+id = "yield_farming"
+aliases = ["yield_farm", "farming", "yield_aggregator"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "defi"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "reward"
+weight = 0.8
+
+[[nodes]]
+id = "lending_protocol"
+aliases = ["lending", "borrowing", "aave", "compound", "collateral"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "defi"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "liquidation"
+weight = 0.7
+
+[[nodes]]
+id = "dao"
+aliases = ["daos", "decentralized_autonomous", "governance_token"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "governance"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "defi"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "treasury"
+weight = 0.6
+
+[[nodes]]
+id = "layer_1"
+aliases = ["l1", "base_layer", "layer_one"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "blockchain"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "scalability"
+weight = 0.7
+
+[[nodes]]
+id = "layer_2"
+aliases = ["l2", "layer_two", "rollup", "rollups", "optimism", "arbitrum", "zk_rollup"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "scalability"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "ethereum"
+weight = 0.8
+
+[[nodes]]
+id = "blockchain"
+aliases = ["chain", "on_chain", "on-chain", "mainnet", "testnet"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "distributed_ledger"
+weight = 1.0
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 4 — Market microstructure
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "range_compression"
+aliases = ["coiling", "compression", "compressing", "coiled", "tightening"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "bitcoin"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "volatility"
+weight = 0.85
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "breakout"
+weight = 0.7
+
+[[nodes]]
+id = "liquidation"
+aliases = ["liquidated", "liquidations", "cascade", "margin_call"]
+magnitude_sensitive = true
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "leverage"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "price_decline"
+weight = 0.7
+
+[[nodes]]
+id = "open_interest"
+aliases = ["oi", "futures_oi"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "derivatives"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "leverage"
+weight = 0.7
+
+[[nodes]]
+id = "funding_rate"
+aliases = ["funding", "perp_funding", "perpetual_funding"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "derivatives"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "sentiment_indicator"
+weight = 0.7
+
+[[nodes]]
+id = "whale"
+aliases = ["whales", "crypto_whale", "crypto_whales", "large_holder"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "accumulation"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "market_impact"
+weight = 0.8
+
+[[nodes]]
+id = "accumulated"
+aliases = ["accumulating", "accumulation", "accumulate"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "whale"
+weight = 0.9
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.5
+
+[[nodes]]
+id = "dominance"
+aliases = ["btc_dominance", "bitcoin_dominance", "market_dominance"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "market_share"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "altseason"
+weight = 0.6
+
+[[nodes]]
+id = "altseason"
+aliases = ["alt_season"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "altcoin"
+weight = 1.0
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.6
+
+[[nodes]]
+id = "halving"
+aliases = ["halvening", "block_reward_halving", "supply_shock"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "bitcoin"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "supply_reduction"
+weight = 0.9
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.5
+
+[[nodes]]
+id = "spot_etf"
+aliases = ["bitcoin_etf", "crypto_etf", "etf_approval", "etf_filing", "etf_warning"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "bitcoin"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "institutional_adoption"
+weight = 0.8
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.7
+
+[[nodes]]
+id = "inflow"
+aliases = ["inflows", "net_inflow", "capital_inflow"]
+magnitude_sensitive = true
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "institutional_adoption"
+weight = 0.8
+
+[[nodes]]
+id = "outflow"
+aliases = ["outflows", "net_outflow", "capital_outflow", "redemption"]
+magnitude_sensitive = true
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "risk_off"
+weight = 0.8
+
+[[nodes]]
+id = "breakout"
+aliases = ["breaks_out", "broke_out", "break_above"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "price_surge"
+weight = 0.9
+
+[[nodes]]
+id = "support_level"
+aliases = ["support", "floor", "holds_support"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "technical_analysis"
+weight = 1.0
+
+[[nodes]]
+id = "resistance_level"
+aliases = ["resistance", "ceiling", "rejection"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "technical_analysis"
+weight = 1.0
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 5 — Crypto regulation & enforcement
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "crypto_regulation"
+aliases = ["regulations", "regulatory", "regulators", "watchdog", "crypto_policy"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "compliance"
+weight = 1.0
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.7
+
+[[nodes]]
+id = "sec_crypto"
+aliases = ["sec_enforcement", "sec_lawsuit", "gensler", "sec_action"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "crypto_regulation"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "enforcement"
+weight = 0.9
+
+[[nodes]]
+id = "mica"
+aliases = ["markets_in_crypto_assets", "eu_crypto_regulation"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "crypto_regulation"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "compliance"
+weight = 0.8
+
+[[nodes]]
+id = "crypto_ban"
+aliases = ["crypto_crackdown", "mining_ban"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "crypto_regulation"
+weight = 1.0
+
+[[nodes]]
+id = "sanctions"
+aliases = ["sanctioned", "ofac", "tornado_cash"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "enforcement"
+weight = 1.0
+
+[[nodes]]
+id = "aml_kyc"
+aliases = ["anti_money_laundering", "know_your_customer", "kyc", "aml", "travel_rule"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "compliance"
+weight = 1.0
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.6
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 6 — Attack vectors & security
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "rug_pull"
+aliases = ["rug_pulled", "rug", "rugged", "exit_scam"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "scam"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "defi"
+weight = 0.6
+
+[[nodes]]
+id = "pump_and_dump"
+aliases = ["pump-and-dump", "pump_dump", "coordinated_pump"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "market_manipulation"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "enforcement"
+weight = 0.7
+
+[[nodes]]
+id = "flash_loan_attack"
+aliases = ["flash_loan", "flash_loan_exploit"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "defi"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "hack"
+weight = 0.8
+
+[[nodes]]
+id = "exploit"
+aliases = ["exploited", "vulnerability", "bug_bounty"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "smart_contract"
+weight = 0.9
+
+[[nodes]]
+id = "audit"
+aliases = ["audited", "security_audit", "code_audit"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.4
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "security"
+weight = 1.0
+
+[[nodes]]
+id = "investment_scam"
+aliases = ["investment_scams", "investment_fraud", "crypto_scam", "crypto_scams", "ponzi_scheme"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "scam"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "crime"
+weight = 0.9
+
+[[nodes]]
+id = "phishing_attack"
+aliases = ["phishing_link", "fake_exchange_portal", "fake_wallet_site", "seed_phrase_scam", "verify_wallet_scam"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.95
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "scam"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "wallet"
+weight = 0.95
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "cybercrime"
+weight = 0.85
+
+[[nodes]]
+id = "wallet_drainer"
+aliases = ["wallet_drained", "malicious_approval", "permit_scam", "setapprovalforall", "drainer_contract"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "scam"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "wallet"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "exploit"
+weight = 0.7
+
+[[nodes]]
+id = "fake_airdrop"
+aliases = ["fake_airdrops", "airdrop_scam", "claim_scam", "connect_wallet_airdrop_scam"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.95
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "scam"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "investment_scam"
+weight = 0.75
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "airdrop"
+weight = 0.85
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "phishing_attack"
+weight = 0.9
+
+[[nodes]]
+id = "impersonation_scam"
+aliases = ["fake_support", "fake_coinbase_support", "fake_binance_security", "ceo_wire_transfer_scam", "government_crypto_scam"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.95
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "scam"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "crypto_exchange"
+weight = 0.6
+
+[[nodes]]
+id = "sim_swap"
+aliases = ["sim_swap_attack", "sim_swapped", "simswap"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.95
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "scam"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "wallet"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "cybercrime"
+weight = 0.85
+
+[[nodes]]
+id = "staking_scam"
+aliases = ["fake_staking", "fake_staking_site", "staking_drainer", "phantom_staking"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.95
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "scam"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "staking"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "investment_scam"
+weight = 0.85
+
+[[nodes]]
+id = "dusting_attack"
+aliases = ["dust_attack", "crypto_dusting", "dust_transactions"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.35
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "wallet"
+weight = 0.85
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "blockchain"
+weight = 0.7
+
+[[nodes]]
+id = "invoice_redirect_scam"
+aliases = ["bec_crypto", "vendor_wallet_swap", "fake_invoice_usdt", "payroll_crypto_redirect"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.95
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "scam"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "stablecoin"
+weight = 0.65
+
+[[nodes]]
+id = "ai_impersonation_scam"
+aliases = ["voice_clone_scam", "deepfake_scam", "ai_voice_scam", "synthetic_voice_extortion"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.95
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "scam"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "cryptocurrency"
+weight = 0.55
+
+[[nodes]]
+id = "recovery_scam"
+aliases = ["fake_wallet_recovery", "seed_recovery_service", "crypto_recovery_scam"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.95
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "scam"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "wallet"
+weight = 0.95
+
+[[nodes]]
+id = "malicious_smart_contract"
+aliases = ["honeypot_contract", "rug_contract", "approval_scam_contract"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.95
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "scam"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "smart_contract"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "wallet_drainer"
+weight = 0.85
+
+[[nodes]]
+id = "quantum_threat"
+aliases = ["quantum_computing_threat", "quantum_risk", "post_quantum"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.6
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "technology_risk"
+weight = 0.8
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 7 — Community & sentiment markers
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "wagmi"
+aliases = ["we_are_gonna_make_it"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "community_sentiment"
+weight = 1.0
+
+[[nodes]]
+id = "ngmi"
+aliases = ["not_gonna_make_it"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "community_sentiment"
+weight = 1.0
+
+[[nodes]]
+id = "diamond_hands"
+aliases = ["hodl", "hodler", "hodling"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.6
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "conviction"
+weight = 1.0
+
+[[nodes]]
+id = "fud"
+aliases = ["fear_uncertainty_doubt"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.6
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "market_manipulation"
+weight = 0.5
+
+[[nodes]]
+id = "degen"
+aliases = ["degens", "degen_play"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "speculative_risk"
+weight = 1.0
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.5
+
+[[nodes]]
+id = "to_the_moon"
+aliases = ["mooning", "moon", "moonshot"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "speculative_hype"
+weight = 1.0
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 8 — Crypto cycle & macro
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "crypto_winter"
+aliases = ["bear_market", "crypto_bear"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "cryptocurrency"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "price_decline"
+weight = 0.7
+
+[[nodes]]
+id = "bull_run"
+aliases = ["bull_market", "crypto_bull", "supercycle"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "price_surge"
+weight = 0.9
+
+[[nodes]]
+id = "institutional_adoption"
+aliases = ["institutional_investors", "institutional_inflow", "wall_street"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.6
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "mainstream"
+weight = 0.9
+
+[[nodes]]
+id = "presale"
+aliases = ["presales", "pre-sale", "ico", "ido", "ieo", "token_sale"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "token_launch"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "fundraising"
+weight = 0.8
+
+[[nodes]]
+id = "airdrop"
+aliases = ["airdrops", "token_distribution"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "community_reward"
+weight = 1.0
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.4
+
+[[nodes]]
+id = "token_launch"
+aliases = ["token_listing", "token_generation_event", "tge", "fair_launch"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "listing"
+weight = 1.0
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.6
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 9 — Ambiguity & context-dependent nodes
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "if_counterfactual"
+aliases = ["if_only", "would_have", "could_have"]
+causal_anchor = true
+[[nodes.edges]]
+kind = "causal_type"
+target = "interventional_counterfactual"
+weight = 1.0
+
+[[nodes]]
+id = "game"
+aliases = ["games"]
+[[nodes.edges]]
+kind = "disambiguated_by"
+target = "money"
+weight = 1.0
+[[nodes.edges]]
+kind = "disambiguated_by"
+target = "loss"
+weight = 1.0
+[[nodes.edges]]
+kind = "disambiguated_by"
+target = "cryptocurrency"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "gambling"
+weight = 0.0
+requires_context = "money"
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "gambling"
+weight = 0.0
+requires_context = "loss"
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "trading_speculation"
+weight = 0.0
+requires_context = "cryptocurrency"
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "esports"
+weight = 0.55
+
+[[nodes]]
+id = "betrayal"
+aliases = ["betrayed", "cheated"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "relationships"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "trust_break"
+weight = 0.95
+
+[[nodes]]
+id = "web3"
+aliases = ["web_3", "decentralized_web"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "blockchain"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "defi"
+weight = 0.6
+
+[[nodes]]
+id = "metaverse"
+aliases = ["virtual_world", "virtual_land"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "nft"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "gaming"
+weight = 0.6
+
+[[nodes]]
+id = "cbdc"
+aliases = ["central_bank_digital_currency", "digital_dollar", "digital_yuan", "digital_euro"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "stablecoin"
+weight = 0.6
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "central_bank"
+weight = 1.0
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.7
+
+[[nodes]]
+id = "fork"
+aliases = ["hard_fork", "soft_fork", "chain_split"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "blockchain"
+weight = 1.0
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.5
+
+[[nodes]]
+id = "gas_fee"
+aliases = ["gas", "gas_fees", "transaction_fee", "network_fee"]
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "ethereum"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "network_congestion"
+weight = 0.7
+
+[[nodes]]
+id = "tvl"
+aliases = ["total_value_locked"]
+magnitude_sensitive = true
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "defi"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "protocol_health"
+weight = 0.8
+
+[[nodes]]
+id = "depeg"
+aliases = ["depegged", "lost_peg", "peg_break"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "stablecoin"
+weight = 1.0
+
+[[nodes]]
+id = "exchange_collapse"
+aliases = ["insolvency", "bankrupt", "ftx", "celsius", "terra_luna", "luna_crash", "mt. gox"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "crypto_exchange"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "contagion"
+weight = 0.7
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Regulatory reversal / positive access expansion
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "ban_lifted"
+aliases = ["ends_ban", "lifts_ban", "reverses_ban", "overturns_ban", "ends_8_year_ban", "drops_ban"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.75
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "crypto_regulation"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "market_access"
+weight = 0.8
+
+[[nodes]]
+id = "market_access"
+aliases = ["opens_market", "market_entry", "institutional_access", "retail_access", "onboarding"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.6
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "adoption"
+weight = 0.9
+
+# ═══════════════════════════════════════════════════════════════════
+#  Product integration / infrastructure milestones
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "product_integration"
+aliases = ["integrates", "integrated", "integration", "onramp", "on_ramp", "fiat_to_crypto", "crypto_to_fiat"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.5
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "partnership"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "adoption"
+weight = 0.7
+
+[[nodes]]
+id = "product_milestone"
+aliases = ["apple_pay_moment", "stripe_moment", "breakthrough", "game_changer", "milestone"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "product_integration"
+weight = 0.9
+
+[[nodes]]
+id = "speed_advantage"
+aliases = ["faster_than", "instant", "real_time", "seamless", "frictionless"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.4
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "product_integration"
+weight = 0.7
+
+# ═══════════════════════════════════════════════════════════════════
+#  Victim resilience / advocacy transformation
+# ═══════════════════════════════════════════════════════════════════
+
+[[nodes]]
+id = "advocacy_transformation"
+aliases = ["turns_into_advocacy", "awareness_campaign", "reform_movement", "fraud_prevention"]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "positive"
+weight = 0.6
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "victim"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "resilience"
+weight = 0.9
+
+# ═══════════════════════════════════════════════════════════════════
+#  LAYER 9 — Total loss, insider exit, governance capture, community frustration, relief-neutral
+# ═══════════════════════════════════════════════════════════════════
+
+# Terminal loss — catastrophic personal outcome. Always strong negative regardless of context.
+[[nodes]]
+id = "total_loss"
+aliases = [
+  "lost_everything", "lost_entire_savings", "lost_life_savings",
+  "drained_every_wallet", "wiped_out_portfolio", "cleaned_out",
+  "nothing_left", "nothing_recoverable", "every_token_gone", "every_stake_drained",
+]
+magnitude_sensitive = true
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "exploit"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "rug_pull"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "investment_scam"
+weight = 0.8
+
+# Insider exit — team / admin wallet movement immediately preceding an exploit. Strong fraud signal.
+[[nodes]]
+id = "insider_exit"
+aliases = [
+  "pre_exploit_movement", "insider_movement", "exit_scam_pattern",
+  "founder_dumped", "dev_team_drained", "admin_wallet_moved",
+  "before_the_exploit", "before_the_hack", "before_the_rug",
+  "classic_exit_scam", "textbook_exit_scam",
+]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "rug_pull"
+weight = 1.0
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "exploit"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "investment_scam"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "whale"
+weight = 0.5
+
+# Governance capture — concentration of voting power defeats the decentralization premise.
+[[nodes]]
+id = "governance_capture"
+aliases = [
+  "governance_concentration", "whale_governance", "captured_dao",
+  "not_decentralized", "so_much_for_decentralization",
+  "twelve_wallets_control", "three_wallets_control",
+]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "dao"
+weight = 0.9
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "whale"
+weight = 0.7
+
+# Community frustration — wen/ngl/ser register + restless holders + broken promises.
+[[nodes]]
+id = "community_frustration"
+aliases = [
+  "wen_airdrop", "wen_listing", "wen_mainnet", "wen_token",
+  "restless_holders", "community_restless", "getting_restless",
+  "keeps_teasing", "broken_promises", "same_soon_answer",
+  "ngl_frustration", "ser_cooked",
+]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "negative"
+weight = 0.8
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "airdrop"
+weight = 0.6
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "presale"
+weight = 0.5
+
+# Relief-neutral — "for once" / "for a change" / "zero drama" marks expected outcome finally met, not praise.
+[[nodes]]
+id = "relief_neutral"
+aliases = [
+  "for_once", "for_a_change", "zero_drama", "zero_drama_for_once",
+  "finally_worked", "this_time", "without_a_hitch_for_a_change",
+  "no_surprises_this_time",
+]
+[[nodes.edges]]
+kind = "sentiment_bearing"
+target = "neutral"
+weight = 0.7
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "fork"
+weight = 0.3
+[[nodes.edges]]
+kind = "adjacent_to"
+target = "bridge"
+weight = 0.3
