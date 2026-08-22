@@ -1,0 +1,14 @@
+/target
+.DS_Store
+**/.DS_Store
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*_secret*
+*_private*
+*.log
+*.jsonl
+.idea/
+.vscode/

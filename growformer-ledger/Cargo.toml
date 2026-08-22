@@ -1,0 +1,17 @@
+[package]
+name = "growformer-ledger"
+version = "0.1.0"
+edition = "2021"
+description = "Append-only hash-chained eval ledger with paired-SE Bet B verdict tables"
+authors = ["Astor Rivera-Carcamo"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/spacekit-xyz/growformer-ledger"
+homepage = "https://github.com/spacekit-xyz/growformer-ledger"
+keywords = ["evaluation", "machine-learning", "reproducibility", "ledger"]
+categories = ["science", "development-tools"]
+
+[dependencies]
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
