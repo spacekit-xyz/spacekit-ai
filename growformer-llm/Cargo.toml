@@ -1,0 +1,57 @@
+[package]
+name    = "growformer-llm"
+version = "0.2.0"
+edition = "2021"
+description = "Growformer LLM — vanilla transformer core (Bet B) + optional Clifford research + brain-memory"
+authors = ["Astor Rivera-Carcamo"]
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/spacekit-xyz/growformer-llm"
+homepage = "https://github.com/spacekit-xyz/growformer-llm"
+keywords = ["language-model", "transformer", "continual-learning", "research"]
+categories = ["science", "algorithms"]
+
+[lib]
+name = "growformer_llm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tinystories"
+path = "src/bin/tinystories.rs"
+
+# Alias for chatbot / product docs (same binary as tinystories).
+[[bin]]
+name = "gf-llm"
+path = "src/bin/tinystories.rs"
+
+[[bin]]
+name = "growformer-llm"
+path = "src/main.rs"
+required-features = ["clifford-lm"]
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+growformer-ledger = { version = "0.1.0", path = "../growformer-ledger" }
+growformer = { version = "0.1.0", path = "../growformer", default-features = false, optional = true }
+flate2 = "1"
+lzma-rs = "0.3"
+
+[features]
+default = ["vanilla-lm", "brain-memory", "clifford-lm"]
+# Product LM core (always implied; marker for docs / slim builds).
+vanilla-lm = []
+# Path A: growformer lattice memory unit.
+brain-memory = ["dep:growformer"]
+# Research / historical Clifford Cl(1,3) LM (Bet B closed — not the product path).
+clifford-lm = []
+
+[dev-dependencies]
+
+[profile.release]
+opt-level     = 3
+lto           = true
+codegen-units = 1
