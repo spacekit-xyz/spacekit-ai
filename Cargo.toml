@@ -1,0 +1,17 @@
+[package]
+name = "growformer-nca"
+version = "0.1.0"
+edition = "2021"
+description = "Experimental neural cellular automata and Clifford-algebra language-model components"
+authors = ["Astor Rivera-Carcamo"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/spacekit-xyz/growformer-nca"
+homepage = "https://github.com/spacekit-xyz/growformer-nca"
+keywords = ["neural-cellular-automata", "clifford-algebra", "machine-learning"]
+categories = ["science", "algorithms"]
+
+[dependencies]
+
+[lib]
+path = "src/lib.rs"
