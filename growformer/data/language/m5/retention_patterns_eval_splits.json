@@ -1,0 +1,23 @@
+{
+  "version": "m5_patterns_retention_v1",
+  "description": "Sequential retention evaluation for design patterns and architectural patterns.",
+  "train_sequence": [
+    {
+      "phase": 1,
+      "domain": "design_patterns",
+      "train_file": "data/language/m5/train_design_patterns.jsonl",
+      "post_phase_eval_files": [
+        "data/language/m5/eval_design_patterns_holdout.jsonl"
+      ]
+    },
+    {
+      "phase": 2,
+      "domain": "architectural_patterns",
+      "train_file": "data/language/m5/train_architectural_patterns.jsonl",
+      "post_phase_eval_files": [
+        "data/language/m5/eval_design_patterns_holdout.jsonl",
+        "data/language/m5/eval_architectural_patterns_holdout.jsonl"
+      ]
+    }
+  ]
+}

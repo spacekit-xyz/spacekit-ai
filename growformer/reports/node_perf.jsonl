@@ -1,0 +1,3 @@
+{"latency_ms":1517,"message_chars":31,"mode":"codegen","perf":{"child_max_rss_kb":9453568,"child_sys_s":0.20000000298023224,"child_user_s":1.5700000524520874},"session_id":"268d7eb4-e4d4-476c-b012-b5e391f28915","ts_unix_ms":1773167055792}
+{"latency_ms":1506,"message_chars":31,"mode":"codegen","perf":{"child_max_rss_kb":9453568,"child_sys_s":0.18000000715255737,"child_user_s":1.5499999523162842},"session_id":"3688cc72-7da1-45c1-98e9-252b9b095937","ts_unix_ms":1773167104917}
+{"latency_ms":1495,"message_chars":31,"mode":"codegen","perf":{"child_max_rss_bytes":9519104,"child_sys_s":0.17000000178813934,"child_user_s":1.5399999618530273},"session_id":"550a89ea-d1f6-4c02-b053-9789b12b9161","ts_unix_ms":1773167145159}

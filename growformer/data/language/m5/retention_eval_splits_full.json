@@ -1,0 +1,88 @@
+{
+  "version": "m5_retention_v2",
+  "description": "Full sequential retention evaluation across all M5 domains: coding (Python/Rust/JS), design patterns, architectural patterns, multi-turn (Stage C), and adversarial (Stage D).",
+  "train_sequence": [
+    {
+      "phase": 1,
+      "domain": "coding_python",
+      "train_file": "data/language/m5/train_python_coding.jsonl",
+      "post_phase_eval_files": [
+        "data/language/m5/eval_python_holdout.jsonl"
+      ]
+    },
+    {
+      "phase": 2,
+      "domain": "coding_rust",
+      "train_file": "data/language/m5/train_rust_coding.jsonl",
+      "post_phase_eval_files": [
+        "data/language/m5/eval_python_holdout.jsonl",
+        "data/language/m5/eval_rust_holdout.jsonl"
+      ]
+    },
+    {
+      "phase": 3,
+      "domain": "coding_javascript",
+      "train_file": "data/language/m5/train_javascript_coding.jsonl",
+      "post_phase_eval_files": [
+        "data/language/m5/eval_python_holdout.jsonl",
+        "data/language/m5/eval_rust_holdout.jsonl",
+        "data/language/m5/eval_javascript_holdout.jsonl"
+      ]
+    },
+    {
+      "phase": 4,
+      "domain": "design_patterns",
+      "train_file": "data/language/m5/train_design_patterns.jsonl",
+      "post_phase_eval_files": [
+        "data/language/m5/eval_python_holdout.jsonl",
+        "data/language/m5/eval_rust_holdout.jsonl",
+        "data/language/m5/eval_javascript_holdout.jsonl",
+        "data/language/m5/eval_design_patterns_holdout.jsonl"
+      ]
+    },
+    {
+      "phase": 5,
+      "domain": "architectural_patterns",
+      "train_file": "data/language/m5/train_architectural_patterns.jsonl",
+      "post_phase_eval_files": [
+        "data/language/m5/eval_python_holdout.jsonl",
+        "data/language/m5/eval_rust_holdout.jsonl",
+        "data/language/m5/eval_javascript_holdout.jsonl",
+        "data/language/m5/eval_design_patterns_holdout.jsonl",
+        "data/language/m5/eval_architectural_patterns_holdout.jsonl"
+      ]
+    },
+    {
+      "phase": 6,
+      "domain": "multi_turn_followup",
+      "train_file": "data/language/m5/train_multi_turn.jsonl",
+      "post_phase_eval_files": [
+        "data/language/m5/eval_python_holdout.jsonl",
+        "data/language/m5/eval_rust_holdout.jsonl",
+        "data/language/m5/eval_javascript_holdout.jsonl",
+        "data/language/m5/eval_design_patterns_holdout.jsonl",
+        "data/language/m5/eval_architectural_patterns_holdout.jsonl",
+        "data/language/m5/eval_multi_turn_holdout.jsonl"
+      ]
+    },
+    {
+      "phase": 7,
+      "domain": "adversarial_noisy",
+      "train_file": "data/language/m5/train_adversarial.jsonl",
+      "post_phase_eval_files": [
+        "data/language/m5/eval_python_holdout.jsonl",
+        "data/language/m5/eval_rust_holdout.jsonl",
+        "data/language/m5/eval_javascript_holdout.jsonl",
+        "data/language/m5/eval_design_patterns_holdout.jsonl",
+        "data/language/m5/eval_architectural_patterns_holdout.jsonl",
+        "data/language/m5/eval_multi_turn_holdout.jsonl",
+        "data/language/m5/eval_adversarial_holdout.jsonl"
+      ]
+    }
+  ],
+  "retention_metric": {
+    "name": "post_sequence_retention_ratio",
+    "definition": "final_eval_score_per_domain / pre_sequence_eval_score_per_domain",
+    "target_min": 0.97
+  }
+}

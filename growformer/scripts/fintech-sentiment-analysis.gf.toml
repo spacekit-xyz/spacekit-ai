@@ -1,0 +1,28 @@
+# Sentiment lattice micro-brain — run from the growformer crate root, or adjust paths.
+# Example train:
+#   cargo run --release -- --train-brain --project scripts/fintech-sentiment-analysis.gf.toml
+# Example infer (uses [infer].brain if you omit --brain):
+#   cargo run --release -- --infer --project scripts/fintech-sentiment-analysis.gf.toml --prompt 'I love it'
+# Unknown headline queue (batch): data/fintech/unknown_inbox.txt — see comments inside that file.
+
+schema_version = 1
+
+[project]
+name = "Fintech Sentiment Analysis"
+author = "Astor Rivera"
+description = "Traditional fintech (TradFi) sentiment analysis micro-brain. Classifies equities, banking, corporate finance, and traditional financial services text into positive (strong/mild), negative (strong/mild), neutral, mixed, and sarcastic with reasoning."
+
+[train]
+auto = true
+data_dir = "../data/fintech"
+brain_output = "../agent-data/fintech-analysis/fintech-brain.bin"
+brain_plugins_toml = "../data/plugins/example-brain-plugins.toml"
+encoder = "clifford_e8"
+brain_gen_epochs = 3000
+
+[inference]
+toml = "../data/fintech/inference_fintech.toml"
+guardrails_jsonl = "../data/fintech/inference_guardrails.jsonl"
+
+[infer]
+brain = "../agent-data/fintech-analysis/fintech-brain.bin"

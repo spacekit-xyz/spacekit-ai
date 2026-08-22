@@ -1,0 +1,38 @@
+{
+  "version": "m5_retention_v1",
+  "description": "Sequential coding-domain retention evaluation for Python, Rust, and JavaScript.",
+  "train_sequence": [
+    {
+      "phase": 1,
+      "domain": "coding_python",
+      "train_file": "data/language/m5/train_python_coding.jsonl",
+      "post_phase_eval_files": [
+        "data/language/m5/eval_python_holdout.jsonl"
+      ]
+    },
+    {
+      "phase": 2,
+      "domain": "coding_rust",
+      "train_file": "data/language/m5/train_rust_coding.jsonl",
+      "post_phase_eval_files": [
+        "data/language/m5/eval_python_holdout.jsonl",
+        "data/language/m5/eval_rust_holdout.jsonl"
+      ]
+    },
+    {
+      "phase": 3,
+      "domain": "coding_javascript",
+      "train_file": "data/language/m5/train_javascript_coding.jsonl",
+      "post_phase_eval_files": [
+        "data/language/m5/eval_python_holdout.jsonl",
+        "data/language/m5/eval_rust_holdout.jsonl",
+        "data/language/m5/eval_javascript_holdout.jsonl"
+      ]
+    }
+  ],
+  "retention_metric": {
+    "name": "post_sequence_retention_ratio",
+    "definition": "final_eval_score_per_domain / pre_sequence_eval_score_per_domain",
+    "target_min": 0.97
+  }
+}

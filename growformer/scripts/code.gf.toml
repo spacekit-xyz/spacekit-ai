@@ -1,0 +1,30 @@
+# Standalone code-generation brain: enables MetaCodebook during training (Stage 2b) and
+# trains per-group code lattices from `expected_code` in JSONL.
+#
+# Default training does NOT set code_brain — sentiment / support / general brains skip
+# code lattice + MetaCodebook build even if stray expected_code fields exist in data.
+#
+# Example:
+#   cargo run --release -- --train-brain --project scripts/code.gf.toml --data-dir path/to/code-jsonl
+
+schema_version = 1
+
+[project]
+name = "CodeAssist"
+author = "Your Team"
+description = "Dedicated code generation / coding-assist micro-brain."
+
+[train]
+code_brain = true
+auto = true
+# Point at a data directory whose train_*.jsonl rows include expected_code for coding samples.
+data_dir = "../data/your-code-corpus"
+brain_output = "../agent-data/code-brain/code-brain.bin"
+brain_plugins_toml = "../data/plugins/example-brain-plugins.toml"
+
+[inference]
+# Optional: same inference TOML pattern as other brains if you use lattice shortcuts.
+# toml = "../data/sentiment/inference_sentiment_core.toml"
+
+[infer]
+brain = "../agent-data/code-brain/code-brain.bin"

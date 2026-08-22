@@ -1,0 +1,1390 @@
+# Growformer Topic Knowledge Graph
+#
+# Replaces hardcoded if-else chains in growformer_lang.rs with a declarative
+# knowledge graph. Each node maps keyword patterns to a topic (for forced-topic
+# routing) and a concept (for MetaConcept routing).
+#
+# Rule matching (only these three fields are supported):
+#   any  = at least one keyword/phrase must appear (OR)  — substrings OK
+#   all  = every keyword/phrase must appear (AND)        — substrings OK
+#   not  = none of these may appear (NOT)
+#
+# If a query matches multiple nodes, the highest priority wins.
+# Within equal priority, the most specific rule (most `all` terms) wins.
+
+# ==========================================================================
+# Arithmetic operations
+# ==========================================================================
+
+[[nodes]]
+topic = "addition_operation"
+concept = "BinaryArithmetic"
+category = "arithmetic"
+priority = 20
+[[nodes.rules]]
+any = ["addition", "add two", "sum function", "sum of", "compute the sum", "adds "]
+[[nodes.rules]]
+all = ["add ", "number"]
+[[nodes.rules]]
+any = ["plus "]
+
+[[nodes]]
+topic = "subtraction_operation"
+concept = "BinaryArithmetic"
+category = "arithmetic"
+priority = 20
+[[nodes.rules]]
+any = ["subtraction", "subtract", "minus", "difference function", "a - b"]
+not = ["solve", "equation", "quadratic", "squared", "x minus"]
+
+[[nodes]]
+topic = "multiplication_operation"
+concept = "BinaryArithmetic"
+category = "arithmetic"
+priority = 20
+[[nodes.rules]]
+any = ["multiplication", "multiply", "product function", "a * b"]
+[[nodes.rules]]
+all = ["times", "two numbers"]
+
+[[nodes]]
+topic = "division_operation"
+concept = "BinaryArithmetic"
+category = "arithmetic"
+priority = 20
+[[nodes.rules]]
+any = ["division", "divide", "quotient", "a / b"]
+
+[[nodes]]
+topic = "modulo_operation"
+concept = "BinaryArithmetic"
+category = "arithmetic"
+priority = 20
+[[nodes.rules]]
+any = ["modulo", "remainder"]
+
+[[nodes]]
+topic = "power_operation"
+concept = "BinaryArithmetic"
+category = "arithmetic"
+priority = 20
+[[nodes.rules]]
+any = ["power", "exponent", "pow"]
+not = ["power set", "power series", "power rule", "compute power", "ai compute power", "processing power", "power grid", "power plant", "power supply"]
+
+[[nodes]]
+topic = "absolute_value_operation"
+concept = "UnaryOperation"
+category = "arithmetic"
+priority = 20
+[[nodes.rules]]
+any = ["absolute value", "abs(", "abs_"]
+
+[[nodes]]
+topic = "calculator_operation"
+concept = "BinaryArithmetic"
+category = "arithmetic"
+priority = 20
+[[nodes.rules]]
+any = ["calculator", "basic calc"]
+
+[[nodes]]
+topic = "average_operation"
+concept = "BinaryArithmetic"
+category = "arithmetic"
+priority = 20
+[[nodes.rules]]
+any = ["average", "mean"]
+
+[[nodes]]
+topic = "minmax_operation"
+concept = "BinaryArithmetic"
+category = "arithmetic"
+priority = 20
+[[nodes.rules]]
+all = ["min ", "max "]
+[[nodes.rules]]
+any = ["min_val", "max_val"]
+
+[[nodes]]
+topic = "clamp_operation"
+concept = "BinaryArithmetic"
+category = "arithmetic"
+priority = 20
+[[nodes.rules]]
+any = ["clamp", "restrict"]
+
+[[nodes]]
+topic = "safe_arithmetic_operation"
+concept = "BinaryArithmetic"
+category = "arithmetic"
+priority = 20
+[[nodes.rules]]
+any = ["checked", "wrapping", "saturating", "overflow"]
+
+# ==========================================================================
+# Data structures
+# ==========================================================================
+
+[[nodes]]
+topic = "coding_implementation"
+concept = "DataStructure"
+category = "data_structure"
+priority = 15
+[[nodes.rules]]
+any = ["linked list", "stack", "queue", "hash map", "hashmap", "binary tree", "bst", "heap", "priority queue", "deque", "vector", "array list"]
+
+[[nodes]]
+topic = "lru_cache_operation"
+concept = "DataStructure"
+category = "data_structure"
+priority = 18
+[[nodes.rules]]
+any = ["lru cache"]
+[[nodes.rules]]
+all = ["lru", "cache"]
+
+# ==========================================================================
+# Algorithms (mapped to brain sub-lattice names)
+# ==========================================================================
+
+[[nodes]]
+topic = "coding_implementation"
+concept = "SearchAlgorithm"
+category = "algorithm"
+priority = 15
+[[nodes.rules]]
+any = ["binary search", "linear search", "search algorithm", "bfs", "dfs", "breadth-first", "depth-first", "dijkstra", "a-star"]
+[[nodes.rules]]
+any = ["sort", "quicksort", "mergesort", "bubble sort", "insertion sort", "heap sort", "radix sort"]
+[[nodes.rules]]
+any = ["implement a graph", "implement a tree", "implement a trie", "dynamic programming"]
+
+# ==========================================================================
+# Design patterns — behavioral
+# ==========================================================================
+
+[[nodes]]
+topic = "behavioral"
+concept = "TraitInterface"
+category = "design_pattern"
+priority = 15
+[[nodes.rules]]
+any = ["observer pattern", "template method", "chain of responsibility", "memento", "visitor pattern"]
+[[nodes.rules]]
+all = ["observer", "event"]
+[[nodes.rules]]
+all = ["observer", "subscri"]
+[[nodes.rules]]
+all = ["observer", "notif"]
+[[nodes.rules]]
+any = ["strategy pattern"]
+[[nodes.rules]]
+all = ["strategy", "algorithm"]
+[[nodes.rules]]
+any = ["swap algorithm"]
+[[nodes.rules]]
+all = ["strategy", "state"]
+[[nodes.rules]]
+any = ["command pattern"]
+[[nodes.rules]]
+all = ["undo", "redo"]
+[[nodes.rules]]
+any = ["state pattern"]
+[[nodes.rules]]
+all = ["state machine", "pattern"]
+[[nodes.rules]]
+all = ["mediator", "coupl"]
+
+# ==========================================================================
+# Design patterns — creational
+# ==========================================================================
+
+[[nodes]]
+topic = "creational"
+concept = "TraitInterface"
+category = "design_pattern"
+priority = 15
+[[nodes.rules]]
+any = ["factory pattern", "factory method", "abstract factory", "singleton"]
+[[nodes.rules]]
+all = ["factory", "creat"]
+[[nodes.rules]]
+all = ["factory", "instantiat"]
+[[nodes.rules]]
+all = ["factory", "construct"]
+[[nodes.rules]]
+all = ["builder", "construct"]
+[[nodes.rules]]
+any = ["builder pattern"]
+[[nodes.rules]]
+all = ["prototype", "clon"]
+[[nodes.rules]]
+any = ["prototype pattern"]
+
+# ==========================================================================
+# Design patterns — structural
+# ==========================================================================
+
+[[nodes]]
+topic = "structural"
+concept = "TraitInterface"
+category = "design_pattern"
+priority = 15
+[[nodes.rules]]
+any = ["adapter pattern", "facade pattern", "bridge pattern", "composite pattern", "flyweight", "decorator pattern"]
+[[nodes.rules]]
+all = ["adapter", "interface"]
+[[nodes.rules]]
+all = ["decorator"]
+not = ["python"]
+[[nodes.rules]]
+all = ["facade", "simplif"]
+[[nodes.rules]]
+all = ["bridge", "abstraction"]
+[[nodes.rules]]
+all = ["composite", "tree"]
+[[nodes.rules]]
+all = ["subclass", "extensib"]
+[[nodes.rules]]
+all = ["subclass", "decorator"]
+[[nodes.rules]]
+all = ["subclass", "composition"]
+
+# ==========================================================================
+# Architectural patterns
+# ==========================================================================
+
+[[nodes]]
+topic = "microservices"
+concept = "TraitInterface"
+category = "architecture"
+priority = 15
+[[nodes.rules]]
+any = ["microservice"]
+
+[[nodes]]
+topic = "hexagonal"
+concept = "TraitInterface"
+category = "architecture"
+priority = 15
+[[nodes.rules]]
+any = ["hexagonal architecture"]
+[[nodes.rules]]
+all = ["hexagonal", "port"]
+[[nodes.rules]]
+any = ["ports and adapter"]
+
+[[nodes]]
+topic = "cqrs"
+concept = "TraitInterface"
+category = "architecture"
+priority = 15
+[[nodes.rules]]
+any = ["cqrs"]
+[[nodes.rules]]
+all = ["command query", "segregat"]
+
+[[nodes]]
+topic = "event_sourcing"
+concept = "TraitInterface"
+category = "architecture"
+priority = 15
+[[nodes.rules]]
+any = ["event sourcing", "event-sourc", "event sourc"]
+
+[[nodes]]
+topic = "event_driven"
+concept = "TraitInterface"
+category = "architecture"
+priority = 15
+[[nodes.rules]]
+any = ["event-driven", "event driven", "pub/sub", "pub sub"]
+
+[[nodes]]
+topic = "saga_pattern"
+concept = "TraitInterface"
+category = "architecture"
+priority = 15
+[[nodes.rules]]
+all = ["saga", "pattern"]
+[[nodes.rules]]
+all = ["saga", "compensat"]
+[[nodes.rules]]
+all = ["saga", "distributed"]
+
+[[nodes]]
+topic = "resilience_patterns"
+concept = "TraitInterface"
+category = "architecture"
+priority = 15
+[[nodes.rules]]
+any = ["circuit breaker", "bulkhead", "resilience pattern"]
+
+[[nodes]]
+topic = "consensus_algorithms"
+concept = "TraitInterface"
+category = "architecture"
+priority = 15
+# Bare "paxos" matches Paxos Labs (fintech). Prefer phrases; use `not` for company / product disambiguators.
+[[nodes.rules]]
+any = ["raft", "zab", "distributed consensus", "consensus protocol", "consensus algorithm", "multi-paxos", "viewstamped replication", "byzantine fault", "pbft"]
+[[nodes.rules]]
+any = ["consensus", "raft", "paxos", "zab"]
+not = ["paxos labs", "paxos trust", "paxos global", "paxos stablecoin", "paxos dollar", "paxos usd", "paxos inc", "paxos pax", "paxos gold"]
+[[nodes.rules]]
+all = ["paxos", "protocol"]
+[[nodes.rules]]
+all = ["paxos", "algorithm"]
+[[nodes.rules]]
+all = ["paxos", "replication"]
+[[nodes.rules]]
+all = ["paxos", "distributed"]
+[[nodes.rules]]
+all = ["paxos", "leader"]
+[[nodes.rules]]
+all = ["paxos", "quorum"]
+[[nodes.rules]]
+all = ["explain", "paxos"]
+
+[[nodes]]
+topic = "multi_tenancy"
+concept = "TraitInterface"
+category = "architecture"
+priority = 15
+[[nodes.rules]]
+any = ["multi-tenant", "multi tenant", "tenancy"]
+
+[[nodes]]
+topic = "stream_processing"
+concept = "TraitInterface"
+category = "architecture"
+priority = 15
+[[nodes.rules]]
+any = ["stream process"]
+[[nodes.rules]]
+all = ["streaming", "pipeline"]
+[[nodes.rules]]
+all = ["streaming", "data"]
+
+[[nodes]]
+topic = "crdt_conflict_resolution"
+concept = "TraitInterface"
+category = "architecture"
+priority = 15
+[[nodes.rules]]
+any = ["crdt", "conflict-free", "conflict free"]
+
+# ==========================================================================
+# Coding — general patterns
+# ==========================================================================
+
+[[nodes]]
+topic = "iterator_error_handling"
+concept = "ErrorHandling"
+category = "coding"
+priority = 18
+[[nodes.rules]]
+all = ["iterator", "error"]
+[[nodes.rules]]
+all = ["combine", "iterator"]
+
+[[nodes]]
+topic = "struct_methods"
+concept = "StructDefinition"
+category = "coding"
+priority = 18
+[[nodes.rules]]
+all = ["struct", "method"]
+[[nodes.rules]]
+any = ["impl block"]
+[[nodes.rules]]
+all = ["impl ", "struct"]
+
+[[nodes]]
+topic = "error_handling"
+concept = "ErrorHandling"
+category = "coding"
+priority = 12
+[[nodes.rules]]
+any = ["error handling", "unwrap", "expect"]
+[[nodes.rules]]
+all = ["result", "error"]
+
+[[nodes]]
+topic = "decorator_operation"
+concept = "FunctionDefinition"
+category = "coding"
+priority = 18
+[[nodes.rules]]
+all = ["decorator", "python"]
+[[nodes.rules]]
+any = ["write a decorator"]
+
+[[nodes]]
+topic = "async_pattern"
+concept = "AsyncConcurrency"
+category = "coding"
+priority = 18
+[[nodes.rules]]
+any = ["async/await"]
+[[nodes.rules]]
+all = ["async", "await"]
+[[nodes.rules]]
+all = ["async", "future"]
+[[nodes.rules]]
+all = ["async", "tokio"]
+
+[[nodes]]
+topic = "async_operation"
+concept = "AsyncConcurrency"
+category = "coding"
+priority = 16
+[[nodes.rules]]
+all = ["async", "handler"]
+[[nodes.rules]]
+all = ["async", "timeout"]
+[[nodes.rules]]
+all = ["async", "retry"]
+
+[[nodes]]
+topic = "coding_refactor"
+concept = "Refactoring"
+category = "coding"
+priority = 15
+[[nodes.rules]]
+all = ["refactor", "module"]
+[[nodes.rules]]
+any = ["es module"]
+
+[[nodes]]
+topic = "lifetime_pattern"
+concept = "FunctionDefinition"
+category = "coding"
+priority = 18
+[[nodes.rules]]
+all = ["lifetime", "annotation"]
+[[nodes.rules]]
+all = ["lifetime", "pattern"]
+[[nodes.rules]]
+all = ["lifetime", "rust"]
+[[nodes.rules]]
+all = ["lifetime", "elision"]
+
+[[nodes]]
+topic = "coding_debug"
+concept = "Debugging"
+category = "coding"
+priority = 14
+[[nodes.rules]]
+all = ["borrow", "debug"]
+[[nodes.rules]]
+all = ["borrow", "error"]
+[[nodes.rules]]
+any = ["borrow checker"]
+[[nodes.rules]]
+all = ["recursion", "debug"]
+[[nodes.rules]]
+all = ["recursion", "depth"]
+[[nodes.rules]]
+all = ["recursion", "error"]
+[[nodes.rules]]
+all = ["recursion", "infinite"]
+
+[[nodes]]
+topic = "python_debug"
+concept = "Debugging"
+category = "coding"
+priority = 19
+[[nodes.rules]]
+all = ["recursion", "python"]
+[[nodes.rules]]
+all = ["python", "depth"]
+[[nodes.rules]]
+all = ["python", "recursionerror"]
+
+[[nodes]]
+topic = "debounce_throttle"
+concept = "FunctionDefinition"
+category = "coding"
+priority = 15
+[[nodes.rules]]
+any = ["debounce", "throttle"]
+
+[[nodes]]
+topic = "middleware_operation"
+concept = "FunctionDefinition"
+category = "coding"
+priority = 15
+[[nodes.rules]]
+any = ["middleware"]
+
+# ==========================================================================
+# General knowledge (mapped to brain sub-lattice names in group 9)
+# ==========================================================================
+
+[[nodes]]
+topic = "physics"
+concept = "GeneralKnowledge"
+category = "general_knowledge"
+priority = 12
+[[nodes.rules]]
+any = ["relativity", "einstein", "quantum mechanics", "thermodynamics", "newton", "gravity", "electromagnetic", "optics", "waves", "force", "acceleration", "momentum", "kinetic energy", "potential energy"]
+
+[[nodes]]
+topic = "cs_fundamentals"
+concept = "GeneralKnowledge"
+category = "general_knowledge"
+priority = 12
+[[nodes.rules]]
+any = ["halting problem", "computab", "decidab", "big-o", "big o", "time complexity", "space complexity", "np-hard", "np-complete", "cap theorem", "data structure", "algorithm complexity", "recursion", "dynamic programming"]
+[[nodes.rules]]
+all = ["turing", "machine"]
+
+[[nodes]]
+topic = "biology"
+concept = "GeneralKnowledge"
+category = "general_knowledge"
+priority = 12
+[[nodes.rules]]
+any = ["photosynthesis", "natural selection", "dna", "rna", "cell biology", "genetics", "mitosis", "meiosis", "ecosystem"]
+[[nodes.rules]]
+all = ["evolution", "darwin"]
+
+[[nodes]]
+topic = "economics"
+concept = "GeneralKnowledge"
+category = "general_knowledge"
+priority = 12
+[[nodes.rules]]
+any = ["supply and demand", "gdp", "monetary policy", "fiscal policy"]
+[[nodes.rules]]
+all = ["inflation", "econom"]
+
+[[nodes]]
+topic = "networking"
+concept = "GeneralKnowledge"
+category = "general_knowledge"
+priority = 14
+[[nodes.rules]]
+any = ["tcp", "udp", "http", "dns", "ip address", "routing protocol", "congestion", "packet", "socket", "tls", "ssl", "vpn", "firewall", "load balancer", "osi model", "ethernet", "bandwidth"]
+[[nodes.rules]]
+all = ["network", "protocol"]
+
+[[nodes]]
+topic = "chemistry"
+concept = "GeneralKnowledge"
+category = "general_knowledge"
+priority = 12
+[[nodes.rules]]
+any = ["chemical bond", "covalent bond", "ionic bond", "periodic table", "molecule", "organic chemistry", "reaction rate", "catalyst", "electrochemistry", "atom", "element"]
+
+[[nodes]]
+topic = "history"
+concept = "GeneralKnowledge"
+category = "general_knowledge"
+priority = 12
+[[nodes.rules]]
+any = ["world war", "renaissance", "industrial revolution", "ancient rome", "ancient greece", "cold war"]
+
+[[nodes]]
+topic = "computing"
+concept = "GeneralKnowledge"
+category = "general_knowledge"
+priority = 12
+[[nodes.rules]]
+any = ["operating system", "cpu", "memory management", "file system", "process scheduling", "virtual memory", "compiler", "interpreter"]
+
+# ==========================================================================
+# Mathematics (mapped to brain sub-lattice names in group 10)
+# ==========================================================================
+
+[[nodes]]
+topic = "geometry"
+concept = "GeneralKnowledge"
+category = "mathematics"
+priority = 14
+[[nodes.rules]]
+any = ["pythagorean", "triangle", "circle", "polygon", "euclidean", "trigonometry", "sine", "cosine", "tangent", "angle", "area of", "perimeter", "congruent", "similar triangles"]
+
+[[nodes]]
+topic = "calculus"
+concept = "GeneralKnowledge"
+category = "mathematics"
+priority = 14
+[[nodes.rules]]
+any = ["derivative", "integral", "limit", "differential equation", "l'hopital", "taylor series", "fourier", "laplace transform", "gradient"]
+not = ["gradient descent", "gradient memory"]
+
+[[nodes]]
+topic = "algebra"
+concept = "GeneralKnowledge"
+category = "mathematics"
+priority = 13
+[[nodes.rules]]
+any = ["quadratic", "polynomial", "linear equation", "system of equations", "factoring", "logarithm", "solve", "equation", "equals"]
+not = ["differential equation"]
+
+[[nodes]]
+topic = "linear_algebra"
+concept = "GeneralKnowledge"
+category = "mathematics"
+priority = 14
+[[nodes.rules]]
+any = ["matrix", "eigenvalue", "eigenvector", "determinant", "vector space", "linear transformation", "singular value"]
+
+[[nodes]]
+topic = "probability"
+concept = "GeneralKnowledge"
+category = "mathematics"
+priority = 13
+[[nodes.rules]]
+any = ["bayes theorem", "conditional probability", "random variable", "expected value", "normal distribution", "poisson"]
+
+[[nodes]]
+topic = "statistics"
+concept = "GeneralKnowledge"
+category = "mathematics"
+priority = 14
+[[nodes.rules]]
+any = ["standard deviation", "variance", "hypothesis test", "confidence interval", "regression", "correlation", "p-value", "chi-square", "t-test", "anova", "mean and median", "sample size"]
+
+[[nodes]]
+topic = "combinatorics"
+concept = "GeneralKnowledge"
+category = "mathematics"
+priority = 13
+[[nodes.rules]]
+any = ["permutation", "combination", "binomial coefficient", "pigeonhole", "inclusion-exclusion", "choose", "ways to", "how many ways", "counting"]
+
+[[nodes]]
+topic = "number_theory"
+concept = "GeneralKnowledge"
+category = "mathematics"
+priority = 13
+[[nodes.rules]]
+any = ["prime number", "modular arithmetic", "greatest common divisor", "fermat", "euler totient", "diophantine"]
+
+[[nodes]]
+topic = "set_theory"
+concept = "GeneralKnowledge"
+category = "mathematics"
+priority = 12
+[[nodes.rules]]
+any = ["set theory", "cardinality", "countable", "uncountable", "cantor diagonal", "cantor set", "cantor's theorem", "power set", "subset", "union", "intersection", "complement"]
+not = ["cantor fitzgerald", "cantor exchange"]
+
+# ==========================================================================
+# Support intents
+# ==========================================================================
+
+[[nodes]]
+topic = "account_recovery"
+concept = "Support"
+category = "support"
+priority = 15
+[[nodes.rules]]
+any = ["locked out", "can't log in", "cannot log in", "can't login", "login attempt", "account recover", "regain access", "password reset"]
+[[nodes.rules]]
+all = ["lock", "account"]
+[[nodes.rules]]
+all = ["compromised", "account"]
+[[nodes.rules]]
+all = ["reset", "password"]
+[[nodes.rules]]
+all = ["forgot", "password"]
+
+[[nodes]]
+topic = "cancellation"
+concept = "Support"
+category = "support"
+priority = 15
+[[nodes.rules]]
+all = ["cancel", "subscri"]
+[[nodes.rules]]
+all = ["cancel", "account"]
+[[nodes.rules]]
+all = ["cancel", "plan"]
+[[nodes.rules]]
+all = ["downgrade", "plan"]
+
+[[nodes]]
+topic = "billing_issue"
+concept = "Support"
+category = "support"
+priority = 15
+[[nodes.rules]]
+any = ["charged twice", "duplicate charge", "billing", "refund", "overcharged", "wrong charge"]
+
+[[nodes]]
+topic = "onboarding_help"
+concept = "Support"
+category = "support"
+priority = 15
+[[nodes.rules]]
+any = ["api key", "get started", "onboard", "new account"]
+[[nodes.rules]]
+all = ["setup", "account"]
+
+[[nodes]]
+topic = "service_outage"
+concept = "Support"
+category = "support"
+priority = 15
+[[nodes.rules]]
+any = ["outage", "not working", "server error"]
+[[nodes.rules]]
+all = ["down", "service"]
+
+[[nodes]]
+topic = "feature_request"
+concept = "Support"
+category = "support"
+priority = 15
+[[nodes.rules]]
+any = ["feature request"]
+[[nodes.rules]]
+all = ["suggest", "feature"]
+[[nodes.rules]]
+all = ["wish", "could"]
+
+[[nodes]]
+topic = "data_privacy"
+concept = "Support"
+category = "support"
+priority = 15
+[[nodes.rules]]
+any = ["privacy", "gdpr", "data deletion", "opt out", "tracking"]
+
+# ==========================================================================
+# Information theory
+# ==========================================================================
+
+[[nodes]]
+topic = "entropy"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["shannon entropy"]
+[[nodes.rules]]
+all = ["entropy", "measure"]
+[[nodes.rules]]
+all = ["entropy", "uncertainty"]
+[[nodes.rules]]
+all = ["entropy", "discrete"]
+[[nodes.rules]]
+all = ["entropy", "random variable"]
+
+[[nodes]]
+topic = "differential_entropy"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 16
+[[nodes.rules]]
+any = ["differential entropy"]
+[[nodes.rules]]
+all = ["entropy", "continuous"]
+
+[[nodes]]
+topic = "conditional_entropy"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 16
+[[nodes.rules]]
+any = ["conditional entropy"]
+
+[[nodes]]
+topic = "joint_entropy"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 16
+[[nodes.rules]]
+any = ["joint entropy"]
+
+[[nodes]]
+topic = "entropy_rate"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 16
+[[nodes.rules]]
+any = ["entropy rate", "stationary stochastic"]
+
+[[nodes]]
+topic = "mutual_information"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["mutual information"]
+not = ["conditional", "algorithmic"]
+
+[[nodes]]
+topic = "conditional_mutual_information"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 17
+[[nodes.rules]]
+all = ["mutual information", "conditional"]
+
+[[nodes]]
+topic = "algorithmic_mutual_information"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 17
+[[nodes.rules]]
+all = ["mutual information", "algorithmic"]
+
+[[nodes]]
+topic = "multi_information"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["multi-information", "total correlation"]
+
+[[nodes]]
+topic = "interaction_information"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["interaction information"]
+
+[[nodes]]
+topic = "kl_divergence"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["kl divergence", "kullback"]
+
+[[nodes]]
+topic = "jensen_shannon"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["jensen-shannon", "jensen shannon"]
+
+[[nodes]]
+topic = "total_variation"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["total variation"]
+
+[[nodes]]
+topic = "hellinger_distance"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["hellinger"]
+
+[[nodes]]
+topic = "renyi_divergence"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["renyi"]
+
+[[nodes]]
+topic = "cross_entropy"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["cross-entropy", "cross entropy"]
+
+[[nodes]]
+topic = "rate_distortion"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["rate-distortion", "rate distortion"]
+
+[[nodes]]
+topic = "channel_capacity"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["channel capacity"]
+
+[[nodes]]
+topic = "source_coding"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["source coding"]
+[[nodes.rules]]
+all = ["shannon", "coding"]
+
+[[nodes]]
+topic = "shannon_hartley"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["shannon-hartley", "shannon hartley", "bandlimited"]
+
+[[nodes]]
+topic = "huffman_coding"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["huffman"]
+
+[[nodes]]
+topic = "arithmetic_coding"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["arithmetic coding"]
+
+[[nodes]]
+topic = "lempel_ziv"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["lempel-ziv", "lempel ziv", "lz77", "lz78"]
+
+[[nodes]]
+topic = "universal_coding"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["universal coding"]
+[[nodes.rules]]
+all = ["universal", "compression"]
+
+[[nodes]]
+topic = "binary_symmetric_channel"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["binary symmetric channel", "bsc"]
+
+[[nodes]]
+topic = "binary_erasure_channel"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["binary erasure channel"]
+
+[[nodes]]
+topic = "awgn_channel"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["awgn", "additive white gaussian"]
+
+[[nodes]]
+topic = "error_correcting_codes"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["error-correcting", "error correcting code"]
+
+[[nodes]]
+topic = "linear_block_codes"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 16
+[[nodes.rules]]
+any = ["linear block code"]
+
+[[nodes]]
+topic = "convolutional_codes"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 16
+[[nodes.rules]]
+any = ["convolutional code"]
+
+[[nodes]]
+topic = "turbo_codes"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 16
+[[nodes.rules]]
+any = ["turbo code"]
+
+[[nodes]]
+topic = "ldpc_codes"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 16
+[[nodes.rules]]
+any = ["ldpc", "low-density parity"]
+
+[[nodes]]
+topic = "fisher_information"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["fisher information"]
+
+[[nodes]]
+topic = "cramer_rao"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["cramer-rao", "cramer rao", "cramér-rao"]
+
+[[nodes]]
+topic = "fano"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+all = ["fano", "inequality"]
+
+[[nodes]]
+topic = "data_processing"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["data processing inequality"]
+
+[[nodes]]
+topic = "information_bottleneck"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["information bottleneck"]
+
+[[nodes]]
+topic = "minimum_description_length"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["minimum description length", "mdl principle"]
+
+[[nodes]]
+topic = "kolmogorov_complexity"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["kolmogorov complexity", "algorithmic complexity"]
+
+[[nodes]]
+topic = "sufficient_statistic"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["sufficient statistic"]
+
+[[nodes]]
+topic = "asymptotic_equipartition"
+concept = "InformationTheory"
+category = "information_theory"
+priority = 15
+[[nodes.rules]]
+any = ["typical set", "asymptotic equipartition", "aep"]
+
+# ==========================================================================
+# Causal reasoning — connectors that signal cause/effect relationships.
+# Topic names match the causal overlay lattice (Brain B) to avoid topic-miss.
+# ==========================================================================
+
+[[nodes]]
+topic = "direct"
+concept = "CausalReasoning"
+category = "causal"
+priority = 16
+[[nodes.rules]]
+any = ["crashed, so", "spiked, pushing", "triggered a", "led to", "caused a", ", so "]
+[[nodes.rules]]
+any = ["triggered", "caused", "resulted in", "pushing"]
+
+[[nodes]]
+topic = "compensatory"
+concept = "CausalReasoning"
+category = "causal"
+priority = 16
+[[nodes.rules]]
+any = ["but at least", "though the", "at least the"]
+[[nodes.rules]]
+all = ["but", "at least"]
+
+[[nodes]]
+topic = "contrastive"
+concept = "CausalReasoning"
+category = "causal"
+priority = 16
+[[nodes.rules]]
+any = ["even though", "even as"]
+[[nodes.rules]]
+any = ["despite", "although", "nevertheless", "however"]
+not = ["gdpr", "privacy", "data deletion"]
+
+[[nodes]]
+topic = "explanatory"
+concept = "CausalReasoning"
+category = "causal"
+priority = 16
+[[nodes.rules]]
+any = ["because the", "because of", "since the"]
+[[nodes.rules]]
+all = ["because", "confused"]
+[[nodes.rules]]
+all = ["because", "withdrew"]
+[[nodes.rules]]
+all = ["since", "breach"]
+[[nodes.rules]]
+all = ["since", "disclosed"]
+
+[[nodes]]
+topic = "concessive"
+concept = "CausalReasoning"
+category = "causal"
+priority = 16
+[[nodes.rules]]
+any = ["yet somehow", "but still", "still, nobody"]
+[[nodes.rules]]
+all = ["yet", "somehow"]
+[[nodes.rules]]
+all = ["still", "nobody"]
+
+[[nodes]]
+topic = "inferential"
+concept = "CausalReasoning"
+category = "causal"
+priority = 16
+[[nodes.rules]]
+any = ["which suggests", "which implies", "meaning the", "implying", "suggests"]
+
+[[nodes]]
+topic = "retrospective_framing"
+concept = "CausalReasoning"
+category = "causal"
+priority = 17
+[[nodes.rules]]
+any = ["in retrospect", "looking back", "it turned out"]
+
+[[nodes]]
+topic = "interventional_counterfactual"
+concept = "CausalReasoning"
+category = "causal"
+priority = 17
+[[nodes.rules]]
+any = ["if the regulator", "without the emergency", "had they"]
+[[nodes.rules]]
+all = ["if", "would have"]
+[[nodes.rules]]
+all = ["without", "would have"]
+[[nodes.rules]]
+all = ["had", "wouldn't"]
+not = ["password", "account", "login"]
+
+# ==========================================================================
+# Concept-only nodes (for infer_concept, no topic routing)
+# These have topic = "" meaning they only affect MetaConcept classification
+# ==========================================================================
+
+[[nodes]]
+topic = ""
+concept = "Support"
+category = "concept_only"
+priority = 10
+[[nodes.rules]]
+any = ["password", "account", "subscription", "refund", "ticket"]
+
+[[nodes]]
+topic = ""
+concept = "Conversation"
+category = "concept_only"
+priority = 10
+[[nodes.rules]]
+any = ["hello", "hi ", "who are"]
+
+[[nodes]]
+topic = ""
+concept = "PatternMatching"
+category = "concept_only"
+priority = 12
+[[nodes.rules]]
+any = ["pattern match", "match expression"]
+[[nodes.rules]]
+all = ["enum", "match"]
+
+[[nodes]]
+topic = ""
+concept = "EnumAlgebraic"
+category = "concept_only"
+priority = 11
+[[nodes.rules]]
+any = ["enum", "algebraic data type", "variant", "tagged union"]
+
+[[nodes]]
+topic = ""
+concept = "StructDefinition"
+category = "concept_only"
+priority = 11
+[[nodes.rules]]
+any = ["struct ", "class ", "struct with", "data class", "with methods"]
+
+[[nodes]]
+topic = ""
+concept = "TraitInterface"
+category = "concept_only"
+priority = 11
+[[nodes.rules]]
+any = ["trait", "interface", "polymorphism", "impl ", "implement display", "implement debug"]
+
+[[nodes]]
+topic = ""
+concept = "Iteration"
+category = "concept_only"
+priority = 11
+[[nodes.rules]]
+any = ["iterator", "map(", "filter(", "fold(", "collect", "for_each", "method chain", "list comprehension"]
+
+[[nodes]]
+topic = ""
+concept = "AsyncConcurrency"
+category = "concept_only"
+priority = 11
+[[nodes.rules]]
+any = ["async", "await", "future", "promise", "tokio", "concurrent"]
+
+[[nodes]]
+topic = ""
+concept = "FunctionDefinition"
+category = "concept_only"
+priority = 10
+[[nodes.rules]]
+any = ["closure", "higher-order", "lambda", "function definition", "lifetime", "borrow", "ownership"]
+
+[[nodes]]
+topic = ""
+concept = "Composition"
+category = "concept_only"
+priority = 10
+[[nodes.rules]]
+any = ["combin", "composit", "blend", "integrate"]
+
+[[nodes]]
+topic = ""
+concept = "Testing"
+category = "concept_only"
+priority = 10
+[[nodes.rules]]
+any = ["test", "assert", "mock", "benchmark"]
+
+[[nodes]]
+topic = ""
+concept = "Debugging"
+category = "concept_only"
+priority = 10
+[[nodes.rules]]
+any = ["debug", "stack trace", "breakpoint"]
+
+[[nodes]]
+topic = ""
+concept = "Refactoring"
+category = "concept_only"
+priority = 10
+[[nodes.rules]]
+any = ["refactor", "clean up", "redesign"]
+
+[[nodes]]
+topic = ""
+concept = "TraitInterface"
+category = "concept_only"
+priority = 11
+[[nodes.rules]]
+any = ["design pattern", "architecture", "microservice", "system design"]
+
+[[nodes]]
+topic = ""
+concept = "CausalReasoning"
+category = "concept_only"
+priority = 11
+[[nodes.rules]]
+any = ["even though", "in retrospect", "looking back", "it turned out"]
+[[nodes.rules]]
+any = ["therefore", "nevertheless", "despite"]
+
+# ==========================================================================
+# action_target → concept mappings (used during training)
+# ==========================================================================
+
+[action_target_concepts]
+arithmetic = "BinaryArithmetic"
+data_structure = "DataStructure"
+algorithm = "SearchAlgorithm"
+patterns = "TraitInterface"
+architecture = "TraitInterface"
+refactoring = "Refactoring"
+refactor = "Refactoring"
+debugging = "Debugging"
+debug = "Debugging"
+support = "Support"
+conversation = "Conversation"
+identity = "Conversation"
+general_knowledge = "GeneralKnowledge"
+reasoning = "Composition"
+concepts = "InformationTheory"
+math = "GeneralKnowledge"
+safety = "Conversation"
+causal = "CausalReasoning"
+
+# ==========================================================================
+# Concept keywords for infer_concept (broad classification from text)
+# These are keyword arrays per concept, checked via any-match
+# ==========================================================================
+
+[concept_keywords]
+InformationTheory = [
+    "entropy", "mutual information", "kl divergence", "kullback",
+    "channel capacity", "source coding", "shannon", "huffman",
+    "arithmetic coding", "lempel-ziv", "rate-distortion", "rate distortion",
+    "fisher information", "cramer-rao", "fano", "data processing inequality",
+    "cross-entropy", "cross entropy", "information bottleneck",
+    "error-correcting code", "error correcting code", "ldpc", "turbo code",
+    "binary symmetric channel", "awgn", "gaussian noise",
+    "kolmogorov complexity", "minimum description length", "mdl",
+    "typical set", "equipartition", "jensen-shannon", "hellinger",
+    "total variation", "renyi", "convolutional code", "linear block code",
+    "differential entropy", "conditional entropy", "joint entropy",
+    "entropy rate", "sufficient statistic", "information theory",
+]
+CausalReasoning = [
+    "because", "therefore", "so that", "triggered", "caused",
+    "despite", "although", "even though", "nevertheless",
+    "yet somehow", "but at least", "which suggests", "implying",
+    "in retrospect", "looking back", "it turned out",
+    "would have", "had they", "without the",
+    "led to", "resulted in", "pushed", "meaning the",
+]
+BinaryArithmetic = [
+    "addition function", "subtraction function", "multiplication function",
+    "division function", "modulo function", "add function", "subtract function",
+    "multiply function", "divide function", "calculator",
+    "absolute value", "power function", "sum of a list", "compute the average",
+    "min and max", "clamp function", "checked_add", "checked arithmetic",
+    "saturating", "wrapping", "integer overflow",
+    "add two", "two integers", "two numbers", "arithmetic operation",
+]

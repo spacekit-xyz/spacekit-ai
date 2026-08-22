@@ -1,0 +1,680 @@
+//! MetaCognition — reflective inference loop (System 1.5).
+//!
+//! After the primary generation pass (System 1) produces a candidate response,
+//! MetaCognition evaluates it through a generate-reflect-decide loop:
+//!
+//! 1. **Encode** the candidate: embed [prompt ⊕ response] as a joint vector
+//! 2. **Reflect**: score coherence (semantic overlap), relevance (topic match),
+//!    and completeness (response adequacy) using a Reflection MicroBrain
+//! 3. **Decide**: accept if scores exceed thresholds, otherwise re-condition
+//!    and retry (max retries configurable, default 2)
+//! 4. **Degrade gracefully**: if all retries fail, emit a structured
+//!    "I don't have knowledge about this topic" message instead of returning
+//!    low-quality output
+//!
+//! The Reflection MicroBrain is an InfraciliaryLattice trained on
+//! (prompt+response, quality_label) pairs during the main training pass.
+//! It learns what "good response to this kind of prompt" looks like in
+//! embedding space, without backpropagation.
+//!
+//! Biological analog: anterior cingulate cortex error monitoring —
+//! the "that doesn't seem right" signal that triggers re-evaluation.
+
+use serde::{Deserialize, Serialize};
+
+use crate::infer_trace;
+
+fn default_min_relevance_for_accept_field() -> f32 {
+    0.06
+}
+
+/// Reflection scores from the MetaCognition evaluation.
+#[derive(Clone, Debug)]
+pub struct ReflectionScores {
+    /// Semantic overlap between prompt embedding and response embedding.
+    /// High = response talks about the same thing as the prompt.
+    pub coherence: f32,
+    /// Topic-specific match: does the response address the specific topic
+    /// inferred from the prompt (e.g., "observer_pattern" not "factory_pattern")?
+    pub relevance: f32,
+    /// Response adequacy: length, specificity, and structural completeness.
+    pub completeness: f32,
+    /// Combined quality score (weighted blend of the three).
+    pub quality: f32,
+}
+
+/// The outcome of a MetaCognition evaluation cycle.
+#[derive(Clone, Debug)]
+pub enum ReflectionOutcome {
+    /// Response passes quality gate — return it.
+    Accept { scores: ReflectionScores },
+    /// Response failed quality gate — retry with adjusted conditioning.
+    /// The adjustment vector should be blended into the conditioning for retry.
+    Retry {
+        scores: ReflectionScores,
+        adjustment: Vec<f32>,
+        attempt: usize,
+    },
+    /// All retries exhausted — degrade gracefully with a structured message.
+    Degrade {
+        scores: ReflectionScores,
+        message: String,
+        attempts_exhausted: usize,
+    },
+}
+
+/// Configuration for the MetaCognition module.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MetaCognitionConfig {
+    /// Minimum quality score to accept a response (0.0–1.0).
+    pub accept_threshold: f32,
+    /// Minimum [`ReflectionScores::relevance`] to accept; blocks coherence-only
+    /// overrides when the response is unrelated to the prompt in topic space.
+    #[serde(default = "default_min_relevance_for_accept_field")]
+    pub min_relevance_for_accept: f32,
+    /// Maximum retry attempts before graceful degradation.
+    pub max_retries: usize,
+    /// Weight of coherence in the combined quality score.
+    pub coherence_weight: f32,
+    /// Weight of relevance in the combined quality score.
+    pub relevance_weight: f32,
+    /// Weight of completeness in the combined quality score.
+    pub completeness_weight: f32,
+    /// Minimum response length (chars) to consider "complete".
+    pub min_response_length: usize,
+    /// Adjustment strength: how much the reflection signal perturbs conditioning.
+    pub adjustment_strength: f32,
+}
+
+impl Default for MetaCognitionConfig {
+    fn default() -> Self {
+        Self {
+            accept_threshold: 0.35,
+            min_relevance_for_accept: 0.06,
+            max_retries: 2,
+            coherence_weight: 0.45,
+            relevance_weight: 0.35,
+            completeness_weight: 0.20,
+            min_response_length: 20,
+            adjustment_strength: 0.25,
+        }
+    }
+}
+
+/// The MetaCognition engine: reflective quality gate on System 1 output.
+///
+/// Operates entirely in embedding space — no token-level analysis, no
+/// autoregressive decoding. Each evaluation is a single geometric operation:
+/// project the (prompt, response) pair into the reflection lattice and
+/// measure distance from known-good attractors.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MetaCognition {
+    pub config: MetaCognitionConfig,
+    /// Coherence reference vectors: centroids of known-good (prompt, response) pairs
+    /// per topic, learned during training. Each entry is (topic_key, centroid).
+    reference_centroids: Vec<(String, Vec<f32>)>,
+    /// Global centroid of all training pairs (fallback when topic is unknown).
+    global_centroid: Vec<f32>,
+    /// Number of training pairs absorbed.
+    pair_count: u64,
+    /// Per-topic pair counts for weighted averaging.
+    topic_counts: Vec<(String, u64)>,
+}
+
+impl MetaCognition {
+    pub fn new(config: MetaCognitionConfig) -> Self {
+        Self {
+            config,
+            reference_centroids: Vec::new(),
+            global_centroid: Vec::new(),
+            pair_count: 0,
+            topic_counts: Vec::new(),
+        }
+    }
+
+    pub fn with_defaults() -> Self {
+        Self::new(MetaCognitionConfig::default())
+    }
+
+    /// Train the reflection brain: absorb a known-good (prompt_emb, response_emb)
+    /// pair with its topic label. Builds reference centroids via EMA.
+    pub fn absorb_pair(&mut self, prompt_emb: &[f32], response_emb: &[f32], topic: &str) {
+        let joint = Self::joint_embedding(prompt_emb, response_emb);
+        let alpha = 0.05_f32;
+
+        // Update global centroid
+        if self.global_centroid.is_empty() {
+            self.global_centroid = joint.clone();
+        } else {
+            for (i, v) in joint.iter().enumerate() {
+                if i < self.global_centroid.len() {
+                    self.global_centroid[i] = self.global_centroid[i] * (1.0 - alpha) + v * alpha;
+                }
+            }
+        }
+        self.pair_count += 1;
+
+        // Update or create topic-specific centroid
+        if let Some(pos) = self
+            .reference_centroids
+            .iter()
+            .position(|(t, _)| t == topic)
+        {
+            let centroid = &mut self.reference_centroids[pos].1;
+            for (i, v) in joint.iter().enumerate() {
+                if i < centroid.len() {
+                    centroid[i] = centroid[i] * (1.0 - alpha) + v * alpha;
+                }
+            }
+            if let Some(tc) = self.topic_counts.iter_mut().find(|(t, _)| t == topic) {
+                tc.1 += 1;
+            }
+        } else {
+            self.reference_centroids.push((topic.to_string(), joint));
+            self.topic_counts.push((topic.to_string(), 1));
+        }
+    }
+
+    /// Evaluate a candidate response against the prompt.
+    ///
+    /// Returns `ReflectionScores` with coherence, relevance, and completeness.
+    /// The caller decides whether to accept, retry, or degrade based on the
+    /// combined quality score.
+    pub fn evaluate(
+        &self,
+        prompt_emb: &[f32],
+        response_emb: &[f32],
+        response_text: &str,
+        topic_hint: Option<&str>,
+    ) -> ReflectionScores {
+        let coherence = self.score_coherence(prompt_emb, response_emb);
+        let relevance = self.score_relevance(prompt_emb, response_emb, topic_hint);
+        let completeness = self.score_completeness(response_text);
+
+        let surface = Self::surface_coherence(response_text);
+
+        let quality = (self.config.coherence_weight * coherence
+            + self.config.relevance_weight * relevance
+            + self.config.completeness_weight * completeness)
+            * surface;
+
+        ReflectionScores {
+            coherence,
+            relevance,
+            completeness,
+            quality,
+        }
+    }
+
+    /// Full reflection cycle: evaluate → decide → (retry adjustment | accept | degrade).
+    pub fn reflect(
+        &self,
+        prompt_emb: &[f32],
+        response_emb: &[f32],
+        response_text: &str,
+        topic_hint: Option<&str>,
+        attempt: usize,
+    ) -> ReflectionOutcome {
+        let scores = self.evaluate(prompt_emb, response_emb, response_text, topic_hint);
+
+        infer_trace!(
+            "  [metacog] attempt={}, coherence={:.3}, relevance={:.3}, completeness={:.3}, quality={:.3} (threshold={:.3})",
+            attempt, scores.coherence, scores.relevance, scores.completeness,
+            scores.quality, self.config.accept_threshold
+        );
+
+        // Two-gate acceptance: quality above threshold AND coherence above floor.
+        // The lowered threshold (0.35) recovers correct paraphrase responses that
+        // score low on relevance but are linguistically sound. The coherence floor
+        // (0.95) prevents garbled generation from slipping through the lower gate.
+        const COHERENCE_FLOOR: f32 = 0.95;
+        let rel_ok = scores.relevance >= self.config.min_relevance_for_accept;
+        if scores.quality >= self.config.accept_threshold
+            && scores.coherence >= COHERENCE_FLOOR
+            && rel_ok
+        {
+            return ReflectionOutcome::Accept { scores };
+        }
+        if scores.quality >= self.config.accept_threshold
+            && scores.coherence >= COHERENCE_FLOOR
+            && !rel_ok
+        {
+            infer_trace!(
+                "  [metacog] REJECT: relevance {:.3} < min {:.3} (topic mismatch)",
+                scores.relevance,
+                self.config.min_relevance_for_accept
+            );
+        }
+        // High coherence with marginal quality: accept if clearly above a
+        // soft floor — catches correct responses dragged down by one sub-metric.
+        if scores.coherence >= COHERENCE_FLOOR && scores.quality >= 0.20 && rel_ok {
+            infer_trace!(
+                "  [metacog] ACCEPT (coherence-floor override): quality={:.3}, coherence={:.3}",
+                scores.quality,
+                scores.coherence
+            );
+            return ReflectionOutcome::Accept { scores };
+        }
+        if scores.coherence >= COHERENCE_FLOOR && scores.quality >= 0.20 && !rel_ok {
+            infer_trace!(
+                "  [metacog] REJECT coherence override: relevance {:.3} < min {:.3}",
+                scores.relevance,
+                self.config.min_relevance_for_accept
+            );
+        }
+
+        if attempt >= self.config.max_retries {
+            let message = self.degradation_message(topic_hint);
+            return ReflectionOutcome::Degrade {
+                scores,
+                message,
+                attempts_exhausted: attempt,
+            };
+        }
+
+        // Compute adjustment vector: push conditioning away from the bad response
+        // and toward the reference centroid for this topic.
+        let adjustment = self.compute_adjustment(prompt_emb, response_emb, topic_hint);
+        ReflectionOutcome::Retry {
+            scores,
+            adjustment,
+            attempt,
+        }
+    }
+
+    /// Whether the reflection brain has enough training data to be useful.
+    pub fn is_ready(&self) -> bool {
+        self.pair_count >= 10 && !self.reference_centroids.is_empty()
+    }
+
+    pub fn pair_count(&self) -> u64 {
+        self.pair_count
+    }
+
+    pub fn topic_count(&self) -> usize {
+        self.reference_centroids.len()
+    }
+
+    // --- Internal scoring functions ---
+
+    /// Coherence: cosine similarity between prompt and response embeddings,
+    /// gated by surface-level linguistic coherence to catch generation collapse.
+    ///
+    /// Pure embedding similarity misses word salad that lands near the right
+    /// region of embedding space but is linguistically incoherent.
+    fn score_coherence(&self, prompt_emb: &[f32], response_emb: &[f32]) -> f32 {
+        cosine_sim(prompt_emb, response_emb).max(0.0)
+    }
+
+    /// Surface-level coherence: catches generation collapse that embedding
+    /// similarity misses. Penalizes repetition loops, fragmented tokens,
+    /// and low lexical diversity — all signatures of propagator/decoder failure.
+    fn surface_coherence(text: &str) -> f32 {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let wc = words.len();
+        if wc < 3 {
+            return 0.5;
+        }
+
+        let unique: std::collections::HashSet<&str> = words.iter().copied().collect();
+        let unique_ratio = unique.len() as f32 / wc as f32;
+
+        // All single alphabetic chars (no exclusion list)
+        let all_single_alpha = words
+            .iter()
+            .filter(|w| w.len() == 1 && w.chars().next().map_or(false, |c| c.is_alphabetic()))
+            .count();
+        let fragment_ratio = all_single_alpha as f32 / wc as f32;
+
+        // Consecutive identical words
+        let mut max_repeat = 1u32;
+        let mut cur_repeat = 1u32;
+        for pair in words.windows(2) {
+            if pair[0] == pair[1] {
+                cur_repeat += 1;
+                max_repeat = max_repeat.max(cur_repeat);
+            } else {
+                cur_repeat = 1;
+            }
+        }
+
+        // Non-consecutive repetition: any content word appearing 3+ times
+        let mut word_counts: std::collections::HashMap<&str, u32> =
+            std::collections::HashMap::new();
+        let stop_words: std::collections::HashSet<&str> = [
+            "a", "an", "the", "is", "are", "was", "were", "in", "on", "at", "to", "for", "of",
+            "and", "or", "but", "with", "by", "from", "as", "it", "its", "that", "this", "be",
+            "not", "no", "can", "do", "if",
+        ]
+        .iter()
+        .copied()
+        .collect();
+        for &w in &words {
+            let lower = w.to_ascii_lowercase();
+            if !stop_words.contains(lower.as_str()) && w.len() > 1 {
+                *word_counts.entry(w).or_default() += 1;
+            }
+        }
+        let content_repeat_count = word_counts.values().filter(|&&c| c >= 3).count();
+
+        let repeat_penalty = if max_repeat >= 3 {
+            0.0
+        } else if max_repeat >= 2 {
+            0.6
+        } else {
+            1.0
+        };
+
+        let scatter_repeat_penalty = if content_repeat_count >= 3 {
+            0.1
+        } else if content_repeat_count >= 2 {
+            0.3
+        } else if content_repeat_count >= 1 {
+            0.6
+        } else {
+            1.0
+        };
+
+        let diversity_score = if unique_ratio < 0.30 {
+            0.1
+        } else if unique_ratio < 0.50 {
+            0.4
+        } else {
+            1.0
+        };
+
+        let fragment_penalty = if fragment_ratio > 0.20 {
+            0.1
+        } else if fragment_ratio > 0.10 {
+            0.3
+        } else {
+            1.0
+        };
+
+        // Propositional coherence: sentences must connect to neighbors.
+        // Broken semantic trajectories (domain words in random order) score low.
+        let prop_penalty = if wc >= 15 {
+            let sentences: Vec<std::collections::HashSet<&str>> = text
+                .split(|c: char| c == '.' || c == '!' || c == '?')
+                .map(|s| {
+                    s.split_whitespace()
+                        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+                        .filter(|w| w.len() > 3)
+                        .collect::<std::collections::HashSet<&str>>()
+                })
+                .filter(|s| !s.is_empty())
+                .collect();
+            if sentences.len() >= 3 {
+                let mut connected = 0usize;
+                for i in 0..sentences.len() {
+                    let has_prev =
+                        i == 0 || sentences[i - 1].intersection(&sentences[i]).count() > 0;
+                    let has_next = i == sentences.len() - 1
+                        || sentences[i].intersection(&sentences[i + 1]).count() > 0;
+                    if has_prev || has_next {
+                        connected += 1;
+                    }
+                }
+                let connectivity = connected as f32 / sentences.len() as f32;
+                if connectivity < 0.4 {
+                    0.1
+                } else if connectivity < 0.6 {
+                    0.4
+                } else {
+                    1.0
+                }
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        };
+
+        let raw = diversity_score
+            * repeat_penalty
+            * scatter_repeat_penalty
+            * fragment_penalty
+            * prop_penalty;
+        if raw < 0.0 {
+            0.0f32
+        } else if raw > 1.0 {
+            1.0f32
+        } else {
+            raw
+        }
+    }
+
+    /// Relevance: how close the (prompt, response) joint embedding is to
+    /// the reference centroid for the given topic. Falls back to global
+    /// centroid when topic is unknown or missing.
+    fn score_relevance(
+        &self,
+        prompt_emb: &[f32],
+        response_emb: &[f32],
+        topic_hint: Option<&str>,
+    ) -> f32 {
+        let joint = Self::joint_embedding(prompt_emb, response_emb);
+
+        // Try topic-specific centroid first
+        if let Some(topic) = topic_hint {
+            if let Some((_, centroid)) = self.reference_centroids.iter().find(|(t, _)| t == topic) {
+                return cosine_sim(&joint, centroid).max(0.0);
+            }
+        }
+
+        // Fallback: global centroid
+        if !self.global_centroid.is_empty() {
+            cosine_sim(&joint, &self.global_centroid).max(0.0)
+        } else {
+            0.5 // no training data yet — neutral score
+        }
+    }
+
+    /// Completeness: embedding-based structural adequacy with heuristic floor.
+    ///
+    /// Three signals blended:
+    /// 1. Embedding spread: response centroid distance from the global centroid
+    ///    (responses that land near a real training region score higher)
+    /// 2. Length adequacy: sigmoid on character count
+    /// 3. Structural markers: sentences, lists, paragraphs
+    fn score_completeness(&self, response_text: &str) -> f32 {
+        let len = response_text.len();
+        if len < 5 {
+            return 0.0;
+        }
+        if len < self.config.min_response_length {
+            return 0.15;
+        }
+
+        // Length score: sigmoid that saturates around 250 chars
+        let length_score = 1.0 / (1.0 + (-0.02 * (len as f32 - 80.0)).exp());
+
+        let has_sentences = response_text.contains(". ") || response_text.contains(".\n");
+        let sentence_bonus = if has_sentences { 0.15 } else { 0.0 };
+
+        let has_structure = response_text.contains('\n')
+            || response_text.contains("- ")
+            || response_text.contains("1.");
+        let structure_bonus = if has_structure { 0.1 } else { 0.0 };
+
+        // Embedding adequacy: if we have reference centroids, check whether
+        // the response text length is consistent with training data norms.
+        // Short responses to prompts that typically produce long answers are suspect.
+        let embedding_bonus = if !self.reference_centroids.is_empty() {
+            let avg_topic_count = self
+                .topic_counts
+                .iter()
+                .map(|(_, c)| *c as f32)
+                .sum::<f32>()
+                / self.topic_counts.len().max(1) as f32;
+            // Well-covered topics (many training pairs) expect richer responses
+            if avg_topic_count > 5.0 && len > 100 {
+                0.15
+            } else if avg_topic_count > 2.0 && len > 50 {
+                0.08
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        (length_score + sentence_bonus + structure_bonus + embedding_bonus).clamp(0.0, 1.0)
+    }
+
+    /// Compute an adjustment vector that steers conditioning away from the
+    /// failed response and toward the reference centroid for this topic.
+    ///
+    /// Geometric interpretation: the adjustment is a vector in embedding space
+    /// pointing from the bad joint embedding toward the reference attractor,
+    /// scaled by `adjustment_strength`. Blending this into conditioning shifts
+    /// the next generation attempt toward the known-good region.
+    fn compute_adjustment(
+        &self,
+        prompt_emb: &[f32],
+        response_emb: &[f32],
+        topic_hint: Option<&str>,
+    ) -> Vec<f32> {
+        let joint = Self::joint_embedding(prompt_emb, response_emb);
+
+        let reference = if let Some(topic) = topic_hint {
+            self.reference_centroids
+                .iter()
+                .find(|(t, _)| t == topic)
+                .map(|(_, c)| c.as_slice())
+        } else {
+            None
+        }
+        .unwrap_or(&self.global_centroid);
+
+        if reference.is_empty() || joint.len() != reference.len() {
+            return vec![0.0; prompt_emb.len()];
+        }
+
+        // Direction: reference − joint (points toward known-good)
+        let dim = prompt_emb.len().min(joint.len()).min(reference.len());
+        let mut adjustment = vec![0.0f32; dim];
+        for i in 0..dim {
+            adjustment[i] = (reference[i] - joint[i]) * self.config.adjustment_strength;
+        }
+
+        adjustment
+    }
+
+    /// Create a joint embedding from prompt and response by element-wise
+    /// averaging. This captures the "semantic midpoint" between question
+    /// and answer — good pairs cluster tightly, bad pairs scatter.
+    fn joint_embedding(prompt_emb: &[f32], response_emb: &[f32]) -> Vec<f32> {
+        let dim = prompt_emb.len().max(response_emb.len());
+        let mut joint = vec![0.0f32; dim];
+        for i in 0..dim {
+            let p = if i < prompt_emb.len() {
+                prompt_emb[i]
+            } else {
+                0.0
+            };
+            let r = if i < response_emb.len() {
+                response_emb[i]
+            } else {
+                0.0
+            };
+            joint[i] = (p + r) * 0.5;
+        }
+        joint
+    }
+
+    /// Produce a structured degradation message when all retries are exhausted.
+    fn degradation_message(&self, topic_hint: Option<&str>) -> String {
+        match topic_hint {
+            Some(topic) => format!(
+                "I don't have enough information about '{}' to give you a confident answer. \
+                 I'd rather be honest than guess. Could you rephrase, or ask about a related topic?",
+                topic.replace('_', " ")
+            ),
+            None => "I don't have enough information to answer this confidently. \
+                     I'd rather be honest than guess. Could you rephrase or ask about something more specific?"
+                .to_string(),
+        }
+    }
+}
+
+fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
+    let len = a.len().min(b.len());
+    if len == 0 {
+        return 0.0;
+    }
+    let dot: f64 = a[..len]
+        .iter()
+        .zip(b[..len].iter())
+        .map(|(&x, &y)| (x as f64) * (y as f64))
+        .sum();
+    let na = a[..len]
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        .sqrt();
+    let nb = b[..len]
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        .sqrt();
+    if na < 1e-20 || nb < 1e-20 {
+        return 0.0;
+    }
+    (dot / (na * nb)) as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_reflection_accept() {
+        let mut mc = MetaCognition::with_defaults();
+
+        let prompt = vec![1.0, 0.0, 0.5, 0.3];
+        let good_response = vec![0.9, 0.1, 0.4, 0.35];
+
+        for _ in 0..20 {
+            mc.absorb_pair(&prompt, &good_response, "test_topic");
+        }
+
+        assert!(mc.is_ready());
+        let scores = mc.evaluate(
+            &prompt,
+            &good_response,
+            "This is a good detailed response.",
+            Some("test_topic"),
+        );
+        assert!(
+            scores.quality > 0.2,
+            "Good pair should score reasonably: {:.3}",
+            scores.quality
+        );
+    }
+
+    #[test]
+    fn test_reflection_degrade() {
+        let mc = MetaCognition::with_defaults();
+        let prompt = vec![1.0, 0.0, 0.5];
+        let bad_response = vec![-1.0, 0.0, -0.5]; // opposite direction
+
+        let outcome = mc.reflect(&prompt, &bad_response, "", None, 3);
+        match outcome {
+            ReflectionOutcome::Degrade { message, .. } => {
+                assert!(message.contains("don't have enough") || message.contains("honest"));
+            }
+            _ => panic!("Expected degradation for bad response after max retries"),
+        }
+    }
+
+    #[test]
+    fn test_joint_embedding_symmetry() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![4.0, 5.0, 6.0];
+        let j1 = MetaCognition::joint_embedding(&a, &b);
+        let j2 = MetaCognition::joint_embedding(&b, &a);
+        assert_eq!(j1, j2);
+        assert_eq!(j1, vec![2.5, 3.5, 4.5]);
+    }
+}

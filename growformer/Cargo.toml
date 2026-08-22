@@ -1,0 +1,149 @@
+[package]
+name = "growformer"
+version = "0.1.0"
+edition = "2021"
+authors = ["Astor Rivera-Carcamo"]
+description = "A promote-freeze neural substrate for deterministic specialist routing and local inference"
+license = "Apache-2.0"
+readme = "README.md"
+documentation = "https://docs.rs/growformer"
+repository = "https://github.com/spacekit-xyz/growformer"
+homepage = "https://github.com/spacekit-xyz/growformer"
+keywords = ["continual-learning", "routing", "neural-networks", "wasm", "inference"]
+categories = ["science", "algorithms"]
+include = [
+    "/src/**",
+    "/tests/**",
+    "/examples/**",
+    "/benches/**",
+    "/scripts/*.sh",
+    "/scripts/*.py",
+    "/scripts/*.gf.toml",
+    "/docs/*.md",
+    "/data/inference/*.toml",
+    "/data/sentiment/*.toml",
+    "/data/fintech/*.toml",
+    "/data/crypto/*.toml",
+    "/data/linguistics/frame_lexicon.toml",
+    "/build.rs",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/LICENSE",
+]
+build = "build.rs"
+default-run = "growformer"
+
+[lib]
+name = "growformer"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "growformer"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "growformer-cli"
+path = "src/bin/growformer_cli.rs"
+required-features = ["standalone_cli"]
+
+[[bin]]
+name = "growformer-demos"
+path = "src/demos.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "growformer-node"
+path = "src/server.rs"
+required-features = ["server"]
+
+# Inference-only runtime — builds with --no-default-features (no clap, rayon, etc.)
+[[bin]]
+name = "growformer-runtime"
+path = "src/runtime_main.rs"
+
+[[bin]]
+name = "growformer-arc"
+path = "src/arc_brain_main.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "growformer-arc-agi-2x2"
+path = "src/arc_agi_2x2.rs"
+required-features = ["cli"]
+
+[[example]]
+name = "categorical_sentiment_train"
+path = "examples/categorical_sentiment_train.rs"
+required-features = ["categorical"]
+
+[[example]]
+name = "drive_field_ab"
+path = "examples/drive_field_ab.rs"
+
+[[example]]
+name = "reflective_field_ab"
+path = "examples/reflective_field_ab.rs"
+
+[[example]]
+name = "basal_ganglia_ab"
+path = "examples/basal_ganglia_ab.rs"
+
+[features]
+default = ["native", "server", "parallel", "cli", "brain-compression"]
+native = ["reqwest"]
+server = ["axum", "tokio", "tower-http", "async-stream", "futures-core", "uuid"]
+parallel = ["rayon"]
+training = []
+brain-compression = ["dep:flate2"]
+# Categorical DAG + Pythagoras sentiment trainer (disable with --no-default-features for lean builds).
+categorical = []
+cli = ["clap", "indicatif", "mnist", "kiddo", "training"]
+standalone_cli = ["cli"]
+wasm-bindgen = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:console_error_panic_hook"]
+wasm-debug = ["wasm-bindgen"]
+mnist = ["dep:mnist"]
+
+[dependencies]
+clap = { version = "4.5.60", features = ["derive"], optional = true }
+indicatif = { version = "0.17", optional = true }
+kiddo = { version = "5.2.4", optional = true }
+mnist = { version = "0.6", optional = true }
+rand = "0.8"
+instant = "0.1"
+rayon = { version = "1.8", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+# Single-pass multi-pattern substring match for inference TOML phrase lists (vs O(n) `contains` loops).
+aho-corasick = "1.1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
+uuid = { version = "1", features = ["v4", "serde"], optional = true }
+axum = { version = "0.7", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util"], optional = true }
+tower-http = { version = "0.5", features = ["cors"], optional = true }
+async-stream = { version = "0.3", optional = true }
+futures-core = { version = "0.3", optional = true }
+flate2 = { version = "1", optional = true }
+
+# Pin to match `wasm-bindgen-cli` (schema versions must match exactly).
+wasm-bindgen = { version = "=0.2.115", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+http-body-util = "0.1"
+
+[[bench]]
+name = "cosine_similarity"
+harness = false
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+instant = { version = "0.1", features = ["wasm-bindgen"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tempfile = "3"

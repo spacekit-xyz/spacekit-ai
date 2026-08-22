@@ -1,0 +1,8 @@
+{
+  "m3_action_target_accuracy_valid": 1.0,
+  "m4_task_success_rate": 1.0,
+  "task_success_drop_abs": 0.0,
+  "template_hallucination_rate": 0.0,
+  "stage_a_samples": 8,
+  "stage_b_samples": 16
+}
