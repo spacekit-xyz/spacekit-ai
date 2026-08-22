@@ -133,10 +133,7 @@ impl BpeTokenizer {
             let mut out = Vec::with_capacity(tokens.len());
             let mut i = 0;
             while i < tokens.len() {
-                if i + 1 < tokens.len()
-                    && tokens[i] == merge.left
-                    && tokens[i + 1] == merge.right
-                {
+                if i + 1 < tokens.len() && tokens[i] == merge.left && tokens[i + 1] == merge.right {
                     out.push(merge.new_id);
                     i += 2;
                 } else {
@@ -186,9 +183,9 @@ impl BpeTokenizer {
         let f = File::open(path)?;
         let mut lines = BufReader::new(f).lines();
 
-        let header = lines
-            .next()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing header"))??;
+        let header = lines.next().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "missing header")
+        })??;
         if !header.starts_with("BPE v1") {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -330,7 +327,10 @@ mod tests {
         let before = tok.encode("the").len();
         tok.train(&texts, N_SPECIAL as u32 + 256 + 10, 2);
         let after = tok.encode("the").len();
-        assert!(after < before, "after BPE, 'the' should encode as fewer tokens");
+        assert!(
+            after < before,
+            "after BPE, 'the' should encode as fewer tokens"
+        );
     }
 
     #[test]

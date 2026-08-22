@@ -1,20 +1,61 @@
-# Growformer Clifford LLM
+# Growformer LLM
 
-A Rust language model built on **Space-Time Algebra**, Clifford algebra **Cl(1,3)**,
-signature `(+,−,−,−)`. Linear layers and attention scores use the **geometric
-product** of multivectors rather than scalar dot products and dense matmuls.
+A Rust language model crate for **small domain chatbots**: vanilla transformer
+core (Bet B winner), chat train/infer format, optional Path A brain memory, and
+optional Clifford research behind `clifford-lm`.
 
-- Crate (lib): `growformer_llm` — `use growformer_llm::*;`
-- Binary: `tinystories` — BPE → train → eval (bits/byte) → generate
+## Repository dependencies
 
-> **Headline (2026-07-03).** At matched scalar budget (~737k), a standard transformer
-> reaches **8.15 bits/token** vs the best Clifford stack **9.62** (row 3b) and corrected
-> Clifford **9.74** (row 1b-v2) — **−1.5 to −1.6 bpt**, cleanly measured on the same
-> held-out shard. **Bet B is closed:** Cl(1,3) geo-linear LM does not earn its complexity
-> on TinyStories at this scale. FFN geometry and width are neutral; the gap is elsewhere
-> in the architecture. **Product read:** use the transformer. **Research read:** honest
-> negative result with component ablation. Bet A routing (CL-A/B) runs downstream of this
-> foundation — report when done, do not lead with it.
+This repository currently uses sibling path dependencies. Clone these
+repositories into one parent directory:
+
+```text
+workspace/
+├── growformer/
+├── growformer-ledger/
+└── growformer-llm/
+```
+
+Publish or tag `growformer` and `growformer-ledger` before publishing
+`growformer-llm`. Replace sibling paths with pinned release dependencies once
+those releases exist; do not substitute machine-specific absolute paths.
+
+- **Start here (chatbots):** [`DEVELOPER.md`](DEVELOPER.md)
+- Binary: `gf-llm` (alias of `tinystories`) — tokenize → train → **chat** / generate
+- Path A: `brain-memory` — lattice retrieve + label (recommended for grounded domain answers)
+
+> **Product default:** vanilla train/eval/chat (no `--vanilla` flag). Clifford is
+> research-only (`--clifford`). **Bet B closed:** matched vanilla beats Clifford
+> (~8.15 vs ~9.6–9.7 bpt on TinyStories). For portable domain *answers*, ship Path A
+> first; use the LM for fluent chat turns after a domain checkpoint.
+
+---
+
+## Features
+
+| Feature | Default | Role |
+| --- | --- | --- |
+| `vanilla-lm` | yes | Product LM core marker |
+| `brain-memory` | yes | Path A lattice memory (independent of LM algebra) |
+| `clifford-lm` | yes* | Historical Bet B stack + CL-1; omit for slim product builds |
+
+\* Kept on by default so old Clifford checkpoints still load. Slim chatbot build:
+
+```bash
+cargo build --release --no-default-features --features vanilla-lm,brain-memory --bin gf-llm
+```
+
+Quick chat (Path A compose — no LM required):
+
+```bash
+cargo run --release --no-default-features --features vanilla-lm,brain-memory --bin gf-llm -- \
+  chat --compose brain \
+  --brain ../../spacekit/spacekit-projects/sentiment/crypto/agent/crypto-brain.bin \
+  --project ../../spacekit/spacekit-projects/sentiment/crypto/crypto-sentiment-analysis.gf.toml \
+  --message "Bitcoin crashed after the ETF delay"
+```
+
+See [`DEVELOPER.md`](DEVELOPER.md) for clean chat retrain + `compose=polish`.
 
 ---
 
@@ -191,8 +232,9 @@ reference** width; `param_budget::matched_vanilla_d_model` picks the vanilla
 cargo run --release --bin tinystories -- train \
   data/tinystories.tok data/tinystories-train.bin data/tinystories-heldout.bin \
   --checkpoint-out agent-data/tinystories-row2-seed0.json \
-  --vanilla --d-model 16 --d-ff 64 --n-blocks 4 --n-heads 4 \
+  --d-model 16 --d-ff 64 --n-blocks 4 --n-heads 4 \
   --steps 4000 --tie-embeddings --grad-accum 2 --init-seed 0
+# (legacy: --vanilla is now default / no-op; use --clifford for Bet B research)
 
 # Row 2 held-out eval (vanilla auto-detected from checkpoint cfg)
 cargo run --release --bin tinystories -- eval \
@@ -456,47 +498,67 @@ checkpoint. (The training loop in `v2` does this for you.)
 
 
 
-## Quick start
+## Quick start (vanilla product core)
+
+```rust
+use growformer_llm::{vanilla_forward_logits, VanillaLLM, TrainConfigV2};
+use growformer_llm::v2::vanilla_train::VanillaModelState;
+
+let cfg = TrainConfigV2::small(2048); // vanilla: true by default
+let state = VanillaModelState::new(cfg);
+let logits = vanilla_forward_logits(&state.model, &[1, 42, 7], true);
+```
+
+```bash
+# Train vanilla (default — no --vanilla flag)
+cargo run --release --bin tinystories -- train \
+  data/tinystories.tok data/tinystories-train.bin data/tinystories-heldout.bin \
+  --checkpoint-out agent-data/tinystories-vanilla.json \
+  --d-model 16 --d-ff 64 --n-blocks 4 --n-heads 4 \
+  --tie-embeddings --steps 4000 --init-seed 1000
+
+# Historical Clifford research train
+cargo run --release --bin tinystories -- train \
+  ... --clifford --d-model 16 ...
+```
+
+### Domain corpus (crypto / fintech) on vanilla
+
+Do **not** use TinyStories as finance generative copy. For optional domain LM
+continuation experiments (Path A brain remains the portable response path):
+
+```bash
+# JSONL dirs → txt → BPE → pack → split → vanilla train → eval
+bash scripts/train_domain_vanilla.sh                 # crypto+fintech
+DOMAIN=crypto STEPS=2000 bash scripts/train_domain_vanilla.sh
+```
+
+Or step by step:
+
+```bash
+cargo run --release --bin tinystories -- jsonl-to-txt \
+  ../growformer/data/crypto ../growformer/data/fintech \
+  --out data/domain/both.txt
+# then tokenize / encode / split / train (vanilla default)
+```
+
+Clifford algebra API (research only, needs `clifford-lm`):
 
 ```rust
 use growformer_llm::*;
 use std::sync::Arc;
 
 let algebra = Arc::new(CliffordAlgebra::sta());
-
-let d_model = 16;
-let n_heads = 4;
-let d_ff    = 64;
-let vocab   = 2048;
-
-let blocks: Vec<CliffordBlock> = (0..4).map(|_| CliffordBlock {
-    attn:  CliffordAttention::new(d_model, n_heads, algebra.clone()),
-    ffn:   CliffordFFN::new(d_model, d_ff, algebra.clone()),
-    norm1: CliffordLayerNorm::new(d_model),
-    norm2: CliffordLayerNorm::new(d_model),
-}).collect();
-
-let model = CliffordLLM {
-    embedding:  vec![vec![Multivector::scalar(0.01); d_model]; vocab],
-    blocks,
-    final_norm: CliffordLayerNorm::new(d_model),
-    head:       LinearReal::new(d_model, vocab),   // 16·d_model reals → vocab
-    algebra,
-};
-
-let logits = model.forward(&[1, 42, 7, 0]);  // → Vec<Vec<f32>> [seq][vocab]
+// … see archived Clifford quick-start below / src/v2/README.md
 ```
 
-For real training you must first break symmetry (random init) and, in practice,
-use the `v2` pipeline — see `[src/v2/README.md](src/v2/README.md)`.
+For real training use the `tinystories` pipeline — see `[src/v2/README.md](src/v2/README.md)`.
 
 ---
 
-
-
 ## Inference cost
 
-At default size (`d_model=16`, `n_blocks=4`, `vocab=2048`, ~0.7M params),
+At default Clifford research size (`d_model=16`, `n_blocks=4`, `vocab=2048`, ~0.7M params),
 forward-only generation is fast for mundane reasons: tiny model, no backward tape,
 const-folded Cayley table, stack-allocated `[f32;16]` math, release LTO. That is
 expected, not surprising.

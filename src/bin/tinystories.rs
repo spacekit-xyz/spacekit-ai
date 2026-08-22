@@ -1,38 +1,47 @@
-//! TinyStories pipeline: BPE (`tokenize`), packed corpus (`encode`), v2 LM (`train`), sampling (`generate`).
+//! TinyStories / domain LM pipeline: BPE (`tokenize`), packed corpus (`encode`),
+//! vanilla LM by default (`train` / `generate` / `eval`), optional Clifford (`--clifford`).
 //!
 //! Checkpoints from `train` omit the word tokenizer JSON list — keep the `.tok` next to the `.json`
 //! and pass both to `generate`.
 
-use std::io::Write;
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
+use flate2::{write::GzEncoder, Compression};
 
-use growformer_llm::backprop::cross_entropy;
 use growformer_llm::bpe::BpeTokenizer;
-use growformer_llm::tinystories::{chunk_to_example, encode_corpus, load_tinystories_txt, PackedDataset};
+use growformer_llm::cross_entropy;
 use growformer_llm::param_budget::{log_param_match, matched_vanilla_d_model};
-use growformer_llm::v2::checkpoint::{load_lm_state, save_lm_state};
+use growformer_llm::tinystories::{
+    chunk_to_example, encode_corpus, load_tinystories_txt, PackedDataset,
+};
 use growformer_llm::v2::data::{special, TrainExample, N_SPECIAL};
 use growformer_llm::v2::sample::{sample_next, softmax as logits_softmax, SampleConfig, SimpleRng};
-use growformer_llm::v2::inference::InferenceCache;
-use growformer_llm::v2::tape::model_forward_logits;
-use growformer_llm::v2::train_v2::{
-    corpus_semantic_init, train_step_v2, train_step_v2_accum, train_step_v2_head_only, ModelStateV2,
-    TrainConfigV2,
-};
 use growformer_llm::v2::vanilla_checkpoint::{load_vanilla_state, save_vanilla_state};
 use growformer_llm::v2::vanilla_train::{
-    corpus_semantic_init_vanilla, eval_vanilla_lm_loss, train_step_vanilla_accum,
-    VanillaModelState,
+    corpus_semantic_init_vanilla, eval_vanilla_lm_loss, train_step_vanilla_accum, VanillaModelState,
 };
-use growformer_llm::cl1::{append_cl1_ledger, load_frozen_specialist, load_heldout_tokens, run_cl1};
 use growformer_llm::vanilla_llm::vanilla_forward_logits;
+use growformer_llm::TrainConfigV2;
+
+#[cfg(feature = "clifford-lm")]
+use growformer_llm::cl1::{
+    append_cl1_ledger, load_frozen_specialist, load_heldout_tokens, run_cl1,
+};
+#[cfg(feature = "clifford-lm")]
+use growformer_llm::v2::checkpoint::{load_lm_state, save_lm_state};
+#[cfg(feature = "clifford-lm")]
+use growformer_llm::v2::inference::InferenceCache;
+#[cfg(feature = "clifford-lm")]
+use growformer_llm::v2::tape::model_forward_logits;
+#[cfg(feature = "clifford-lm")]
+use growformer_llm::v2::train_v2::{
+    corpus_semantic_init, train_step_v2, train_step_v2_accum, train_step_v2_head_only, ModelStateV2,
+};
 
 #[cfg(feature = "brain-memory")]
-use growformer_llm::brain_infer_config::{
-    battery_cases, heldout_battery_cases, BrainInferConfig,
-};
+use growformer_llm::brain_infer_config::{battery_cases, heldout_battery_cases, BrainInferConfig};
 #[cfg(feature = "brain-memory")]
 use growformer_llm::brain_memory::{
     brain_router_features, format_lm_memory_prefix_with_source, raw_lattice_report_json,
@@ -41,11 +50,24 @@ use growformer_llm::brain_memory::{
 
 use growformer_ledger::results_ledger as ledger;
 
-use spacekit_compressor::binary::{BinaryAlgorithm, BinaryCompressor};
+fn gzip_bytes(input: &[u8]) -> Result<Vec<u8>, String> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+    encoder
+        .write_all(input)
+        .map_err(|error| error.to_string())?;
+    encoder.finish().map_err(|error| error.to_string())
+}
+
+fn lzma_bytes(input: &[u8]) -> Result<Vec<u8>, String> {
+    let mut output = Vec::new();
+    lzma_rs::lzma_compress(&mut Cursor::new(input), &mut output)
+        .map_err(|error| error.to_string())?;
+    Ok(output)
+}
 
 #[derive(Parser)]
 #[command(name = "tinystories")]
-#[command(about = "TinyStories BPE + packed bin + v2 LM train/generate", long_about = None)]
+#[command(about = "Growformer LM: train / eval / generate / chat (vanilla default)", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -66,7 +88,68 @@ enum Commands {
         tok: PathBuf,
         out_bin: PathBuf,
     },
-    /// Random-chunk v2 training on packed bins (CPU-oriented defaults: d_model=16, n_blocks=4).
+    /// Convert Growformer JSONL dir(s) (`text` field) → TinyStories-style `.txt`.
+    JsonlToTxt {
+        /// One or more dirs containing `train_*.jsonl` (crypto/fintech/sentiment).
+        #[arg(required = true, num_args = 1..)]
+        dirs: Vec<PathBuf>,
+        #[arg(long, short)]
+        out: PathBuf,
+        /// Emit `### User:` / `### Assistant:` turns (`expected_response` or polarity fallback).
+        #[arg(long, default_value_t = false)]
+        chat: bool,
+        /// Clean assistant lines (strip meta rationales). Default on; pass `--chat-clean false` for raw.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        chat_clean: bool,
+        /// Soft cap on cleaned assistant characters.
+        #[arg(long, default_value_t = 160)]
+        max_assistant_chars: usize,
+        /// Optional system prompt prepended to each chat turn (implies --chat). Prefer omit for train.
+        #[arg(long)]
+        system: Option<String>,
+    },
+    /// Interactive chatbot REPL (vanilla LM; optional brain compose / polish).
+    Chat {
+        /// LM checkpoint (required for compose=lm|polish).
+        #[arg(long)]
+        checkpoint: Option<PathBuf>,
+        #[arg(long)]
+        tokenizer: Option<PathBuf>,
+        /// System prompt (default: concise domain assistant).
+        #[arg(long)]
+        system: Option<String>,
+        #[arg(long, default_value_t = 64)]
+        max_new_tokens: usize,
+        #[arg(long, default_value_t = 0.4)]
+        temperature: f32,
+        /// Greedy decoding (default). Pass `--greedy false` to sample.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        greedy: bool,
+        #[arg(long)]
+        seed: Option<u64>,
+        #[arg(long, default_value_t = 1.2)]
+        repetition_penalty: f32,
+        /// Leave room under checkpoint max_seq for the reply.
+        #[arg(long, default_value_t = 48)]
+        reply_reserve: usize,
+        /// `brain` = Path A memory as answer (default); `polish` = LM rewrites memory; `lm` = experimental LM chat.
+        #[arg(long, default_value = "brain")]
+        compose: String,
+        /// Optional brain.bin — required for compose=brain|polish; optional for lm hybrid.
+        #[cfg(feature = "brain-memory")]
+        #[arg(long)]
+        brain: Option<PathBuf>,
+        #[cfg(feature = "brain-memory")]
+        #[arg(long, value_name = "PATH")]
+        project: Option<PathBuf>,
+        #[cfg(feature = "brain-memory")]
+        #[arg(long, default_value_t = true)]
+        hybrid: bool,
+        /// Single-shot user message (no REPL). Useful for scripts.
+        #[arg(long)]
+        message: Option<String>,
+    },
+    /// Random-chunk / turn-aligned training on packed bins (CPU defaults: d_model=16, n_blocks=4).
     Train {
         tok: PathBuf,
         train_bin: PathBuf,
@@ -133,9 +216,16 @@ enum Commands {
         /// Weight/init RNG seed (vary across ablation seeds).
         #[arg(long)]
         init_seed: Option<u64>,
-        /// Row 2: param-matched vanilla transformer (real dot-attention baseline).
+        /// Train Clifford Cl(1,3) LM (Bet B research — requires feature clifford-lm).
+        /// Default is vanilla transformer (product core).
+        #[arg(long, default_value_t = false)]
+        clifford: bool,
+        /// Alias kept for older scripts; same as default (vanilla). Ignored if --clifford.
         #[arg(long, default_value_t = false)]
         vanilla: bool,
+        /// Sample whole BOS→EOS documents (chat turns), PAD-pad to seq_len. Prefer for chat corpora.
+        #[arg(long, default_value_t = false)]
+        turn_aligned: bool,
     },
     /// Split a packed bin into train + held-out shards (chronological 90/10 default).
     Split {
@@ -202,6 +292,7 @@ enum Commands {
         gate: f64,
     },
     /// CL-1 (Bet A): adjustable-cone routing over two frozen LM specialists.
+    #[cfg(feature = "clifford-lm")]
     Cl1 {
         #[arg(long)]
         checkpoint_a: PathBuf,
@@ -328,6 +419,7 @@ enum Commands {
     },
 }
 
+#[cfg(feature = "clifford-lm")]
 fn eval_lm_loss(state: &ModelStateV2, ex: &TrainExample) -> f32 {
     let logits = model_forward_logits(
         &state.alg,
@@ -430,13 +522,17 @@ fn ensure_parent_dir(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                format!("could not create output directory {}: {e}", parent.display())
+                format!(
+                    "could not create output directory {}: {e}",
+                    parent.display()
+                )
             })?;
         }
     }
     Ok(())
 }
 
+#[cfg(feature = "clifford-lm")]
 fn sample_prompt(state: &ModelStateV2, bpe: &BpeTokenizer, cfg: &SampleConfig, seed: u64) {
     let mut ids: Vec<usize> = vec![special::BOS];
     ids.extend(bpe.encode("Once upon a time").iter().map(|&x| x as usize));
@@ -479,7 +575,11 @@ fn main() -> Result<(), String> {
             ensure_parent_dir(&out_tok)?;
             tok.save(&out_tok)
                 .map_err(|e| format!("write BPE tokenizer {}: {e}", out_tok.display()))?;
-            eprintln!("[tokenize] wrote {} (vocab={})", out_tok.display(), tok.vocab_size());
+            eprintln!(
+                "[tokenize] wrote {} (vocab={})",
+                out_tok.display(),
+                tok.vocab_size()
+            );
         }
         Commands::Encode { txt, tok, out_bin } => {
             let stories = load_tinystories_txt(&txt).map_err(|e| e.to_string())?;
@@ -493,14 +593,47 @@ fn main() -> Result<(), String> {
                     tok.display()
                 ));
             }
-            let tokenizer = BpeTokenizer::load(&tok).map_err(|e| {
-                format!("read BPE tokenizer {}: {e}", tok.display())
-            })?;
+            let tokenizer = BpeTokenizer::load(&tok)
+                .map_err(|e| format!("read BPE tokenizer {}: {e}", tok.display()))?;
             ensure_parent_dir(&out_bin)?;
-            encode_corpus(&stories, &tokenizer, &out_bin).map_err(|e| {
-                format!("write packed corpus {}: {e}", out_bin.display())
-            })?;
+            encode_corpus(&stories, &tokenizer, &out_bin)
+                .map_err(|e| format!("write packed corpus {}: {e}", out_bin.display()))?;
             eprintln!("[encode] wrote {}", out_bin.display());
+        }
+        Commands::JsonlToTxt {
+            dirs,
+            out,
+            chat,
+            chat_clean,
+            max_assistant_chars,
+            system,
+        } => {
+            ensure_parent_dir(&out)?;
+            let chat = chat || system.is_some();
+            let n = if chat {
+                let opts = growformer_llm::domain_data::ChatWriteOptions {
+                    clean: chat_clean,
+                    max_assistant_chars,
+                };
+                let sys = system.as_deref();
+                growformer_llm::domain_data::jsonl_dirs_to_chat_eot_txt(&dirs, &out, sys, opts)?
+            } else {
+                growformer_llm::domain_data::jsonl_dirs_to_eot_txt(&dirs, &out)?
+            };
+            eprintln!(
+                "[jsonl-to-txt] wrote {} examples ({}) → {}",
+                n,
+                if chat {
+                    if chat_clean {
+                        "chat-clean"
+                    } else {
+                        "chat-raw"
+                    }
+                } else {
+                    "plain"
+                },
+                out.display()
+            );
         }
         Commands::Train {
             tok,
@@ -529,8 +662,18 @@ fn main() -> Result<(), String> {
             dense_ffn,
             dot_attention,
             init_seed,
-            vanilla,
+            clifford,
+            vanilla: _vanilla_alias,
+            turn_aligned,
         } => {
+            let use_vanilla = !clifford;
+            let sample_chunk = |ds: &PackedDataset, seq_len: usize, rng: &mut SimpleRng| {
+                if turn_aligned {
+                    ds.random_turn_chunk(seq_len, rng)
+                } else {
+                    ds.random_chunk(seq_len, rng)
+                }
+            };
             // Corpus-semantic init is the validated default for fresh training
             // (≈37% lower val perplexity at equal steps). Opt out with
             // --no-semantic-init, or pick the random structured init explicitly.
@@ -560,16 +703,27 @@ fn main() -> Result<(), String> {
                 ));
             }
 
-            if vanilla {
+            if use_vanilla {
                 if init_from.is_some() {
-                    return Err("--init-from is not supported with --vanilla (train row 2 fresh)".into());
+                    return Err(
+                        "--init-from is not supported with vanilla train (train fresh)".into(),
+                    );
                 }
                 if dense_ffn || dot_attention || head_only {
-                    return Err("--vanilla row 2 does not use --dense-ffn, --dot-attention, or --head-only".into());
+                    return Err(
+                        "vanilla train does not use --dense-ffn, --dot-attention, or --head-only"
+                            .into(),
+                    );
                 }
                 let clifford_ref = d_model;
                 let matched_d = matched_vanilla_d_model(
-                    vs, clifford_ref, d_ff, n_blocks, n_heads, tie_embeddings, 500,
+                    vs,
+                    clifford_ref,
+                    d_ff,
+                    n_blocks,
+                    n_heads,
+                    tie_embeddings,
+                    500,
                 );
                 log_param_match(vs, clifford_ref, matched_d, d_ff, n_blocks, tie_embeddings);
 
@@ -621,7 +775,7 @@ fn main() -> Result<(), String> {
                 let mut rng = SimpleRng::new(0xC0FFEE);
                 eprintln!(
                     "[train] row 2 vanilla: d_model={matched_d} (matched from clifford_ref={clifford_ref}) \
-                     vocab={vs} train_tokens={} val_tokens={} seq_len={seq_len} steps={steps}",
+                     vocab={vs} train_tokens={} val_tokens={} seq_len={seq_len} steps={steps} turn_aligned={turn_aligned}",
                     train_ds.n_tokens(),
                     val_ds.n_tokens()
                 );
@@ -642,11 +796,11 @@ fn main() -> Result<(), String> {
                 for step in 1u64..=steps {
                     let loss = if grad_accum > 1 {
                         let exs: Vec<TrainExample> = (0..grad_accum)
-                            .map(|_| chunk_to_example(train_ds.random_chunk(seq_len, &mut rng)))
+                            .map(|_| chunk_to_example(sample_chunk(&train_ds, seq_len, &mut rng)))
                             .collect();
                         train_step_vanilla_accum(&mut state, &exs)
                     } else {
-                        let ex = chunk_to_example(train_ds.random_chunk(seq_len, &mut rng));
+                        let ex = chunk_to_example(sample_chunk(&train_ds, seq_len, &mut rng));
                         train_step_vanilla_accum(&mut state, &[ex])
                     };
 
@@ -660,7 +814,7 @@ fn main() -> Result<(), String> {
                     if step % 200 == 0 && val_chunks > 0 {
                         let mut vloss = 0.0f32;
                         for _ in 0..val_chunks {
-                            let chunk = val_ds.random_chunk(seq_len, &mut rng);
+                            let chunk = sample_chunk(&val_ds, seq_len, &mut rng);
                             let ex = chunk_to_example(chunk);
                             vloss += eval_vanilla_lm_loss(&state, &ex);
                         }
@@ -677,193 +831,216 @@ fn main() -> Result<(), String> {
                 return Ok(());
             }
 
-            // Build the model state: either fresh, or inherited from a base
-            // checkpoint (shared tokenizer + embeddings + body + head).
-            let mut state = if let Some(base) = &init_from {
-                let mut st = load_lm_state(base).map_err(|e| format!("init-from: {e}"))?;
-                if st.cfg.vocab_size != vs {
-                    return Err(format!(
+            #[cfg(not(feature = "clifford-lm"))]
+            {
+                return Err(
+                    "--clifford requires cargo feature clifford-lm \
+                     (default build includes it; slim product: --no-default-features --features vanilla-lm,brain-memory)"
+                        .into(),
+                );
+            }
+
+            #[cfg(feature = "clifford-lm")]
+            {
+                // Build the model state: either fresh, or inherited from a base
+                // checkpoint (shared tokenizer + embeddings + body + head).
+                let mut state = if let Some(base) = &init_from {
+                    let mut st = load_lm_state(base).map_err(|e| format!("init-from: {e}"))?;
+                    if st.cfg.vocab_size != vs {
+                        return Err(format!(
                         "base vocab {} != tokenizer {} — base and expert must share the tokenizer",
                         st.cfg.vocab_size, vs
                     ));
-                }
-                // Inherit architecture from the base; override only training knobs.
-                st.cfg.max_seq = seq_len;
-                st.cfg.batch_size = 1;
-                st.cfg.epochs = 1;
-                st.cfg.lr_max = lr_max;
-                st.cfg.lr_min = 1e-5;
-                st.cfg.warmup_steps = (steps / 20).max(50);
-                st.cfg.total_steps = steps;
-                st.cfg.log_every = 10;
-                st.cfg.val_every = usize::MAX;
-                st.cfg.train_embeddings = !head_only;
-                st.cfg.freeze_embeddings = freeze_embeddings;
-                st.cfg.freeze_blocks = freeze_blocks;
-                // Tying is an architectural property of the base; inherit it
-                // unless the operator explicitly turns it on for this run.
-                st.cfg.tie_embeddings = st.cfg.tie_embeddings || tie_embeddings;
-                st.cfg.grad_accum = grad_accum;
-                if dense_ffn != st.cfg.dense_ffn {
-                    return Err(
+                    }
+                    // Inherit architecture from the base; override only training knobs.
+                    st.cfg.max_seq = seq_len;
+                    st.cfg.batch_size = 1;
+                    st.cfg.epochs = 1;
+                    st.cfg.lr_max = lr_max;
+                    st.cfg.lr_min = 1e-5;
+                    st.cfg.warmup_steps = (steps / 20).max(50);
+                    st.cfg.total_steps = steps;
+                    st.cfg.log_every = 10;
+                    st.cfg.val_every = usize::MAX;
+                    st.cfg.train_embeddings = !head_only;
+                    st.cfg.freeze_embeddings = freeze_embeddings;
+                    st.cfg.freeze_blocks = freeze_blocks;
+                    // Tying is an architectural property of the base; inherit it
+                    // unless the operator explicitly turns it on for this run.
+                    st.cfg.tie_embeddings = st.cfg.tie_embeddings || tie_embeddings;
+                    st.cfg.grad_accum = grad_accum;
+                    if dense_ffn != st.cfg.dense_ffn {
+                        return Err(
                         "--dense-ffn must match the base checkpoint (retrain fresh for ablation row)"
                             .into(),
                     );
-                }
-                if dot_attention != st.cfg.dot_attention {
-                    return Err(
+                    }
+                    if dot_attention != st.cfg.dot_attention {
+                        return Err(
                         "--dot-attention must match the base checkpoint (retrain fresh for ablation row)"
                             .into(),
                     );
-                }
-                if st.cfg.tie_embeddings {
-                    st.model.sync_tied_head();
-                }
-                if semantic_init {
-                    eprintln!("[train] note: semantic init ignored with --init-from (inherited embeddings kept)");
-                }
-                st.step = 0; // restart the LR schedule for fine-tuning
-                eprintln!(
-                    "[train] inheriting base {} (d_model={} n_heads={} d_ff={} n_blocks={})",
-                    base.display(), st.cfg.d_model, st.cfg.n_heads, st.cfg.d_ff, st.cfg.n_blocks
-                );
-                st
-            } else {
-                let mut cfg = TrainConfigV2::small(vs);
-                cfg.max_seq = seq_len;
-                cfg.batch_size = 1;
-                cfg.epochs = 1;
-                cfg.d_model = d_model;
-                cfg.n_heads = n_heads;
-                cfg.d_ff = d_ff;
-                cfg.n_blocks = n_blocks;
-                cfg.lr_max = lr_max;
-                cfg.lr_min = 1e-5;
-                cfg.warmup_steps = (steps / 20).max(50);
-                cfg.total_steps = steps;
-                cfg.log_every = 10;
-                cfg.val_every = usize::MAX;
-                cfg.train_embeddings = !head_only;
-                cfg.freeze_embeddings = freeze_embeddings;
-                cfg.freeze_blocks = freeze_blocks;
-                cfg.tie_embeddings = tie_embeddings;
-                // Semantic init seeds embeddings post-construction (it needs the
-                // corpus), so disable the random structured init when it's on.
-                cfg.structured_init = structured_init && !do_semantic;
-                cfg.grad_accum = grad_accum;
-                cfg.dense_ffn = dense_ffn;
-                cfg.dot_attention = dot_attention;
-                if let Some(s) = init_seed {
-                    cfg.init_seed = s;
-                }
-                let mut st = ModelStateV2::new(cfg);
-                if dense_ffn {
-                    use growformer_llm::matched_dense_ffn_hidden;
-                    let h = matched_dense_ffn_hidden(d_model, d_ff);
-                    eprintln!("[train] dense FFN ablation: matched hidden H={h} (d_model={d_model} d_ff={d_ff})");
-                }
-                if dot_attention {
-                    eprintln!("[train] dot-attention ablation (row 3b): Q·K scores; Clifford Q/K/V/O + FFN unchanged");
-                }
-                if do_semantic {
-                    eprintln!(
-                        "[train] corpus-semantic embedding init (random indexing, window=±{semantic_window}; --no-semantic-init to disable)"
-                    );
-                    corpus_semantic_init(&mut st.model, &train_ds.tokens, 0x5EED ^ 0xE8E8, semantic_window, 1.0);
+                    }
                     if st.cfg.tie_embeddings {
                         st.model.sync_tied_head();
                     }
-                }
-                st
-            };
+                    if semantic_init {
+                        eprintln!("[train] note: semantic init ignored with --init-from (inherited embeddings kept)");
+                    }
+                    st.step = 0; // restart the LR schedule for fine-tuning
+                    eprintln!(
+                        "[train] inheriting base {} (d_model={} n_heads={} d_ff={} n_blocks={})",
+                        base.display(),
+                        st.cfg.d_model,
+                        st.cfg.n_heads,
+                        st.cfg.d_ff,
+                        st.cfg.n_blocks
+                    );
+                    st
+                } else {
+                    let mut cfg = TrainConfigV2::small(vs);
+                    cfg.max_seq = seq_len;
+                    cfg.batch_size = 1;
+                    cfg.epochs = 1;
+                    cfg.d_model = d_model;
+                    cfg.n_heads = n_heads;
+                    cfg.d_ff = d_ff;
+                    cfg.n_blocks = n_blocks;
+                    cfg.lr_max = lr_max;
+                    cfg.lr_min = 1e-5;
+                    cfg.warmup_steps = (steps / 20).max(50);
+                    cfg.total_steps = steps;
+                    cfg.log_every = 10;
+                    cfg.val_every = usize::MAX;
+                    cfg.train_embeddings = !head_only;
+                    cfg.freeze_embeddings = freeze_embeddings;
+                    cfg.freeze_blocks = freeze_blocks;
+                    cfg.tie_embeddings = tie_embeddings;
+                    // Semantic init seeds embeddings post-construction (it needs the
+                    // corpus), so disable the random structured init when it's on.
+                    cfg.structured_init = structured_init && !do_semantic;
+                    cfg.grad_accum = grad_accum;
+                    cfg.dense_ffn = dense_ffn;
+                    cfg.dot_attention = dot_attention;
+                    cfg.vanilla = false;
+                    if let Some(s) = init_seed {
+                        cfg.init_seed = s;
+                    }
+                    let mut st = ModelStateV2::new(cfg);
+                    if dense_ffn {
+                        use growformer_llm::matched_dense_ffn_hidden;
+                        let h = matched_dense_ffn_hidden(d_model, d_ff);
+                        eprintln!("[train] dense FFN ablation: matched hidden H={h} (d_model={d_model} d_ff={d_ff})");
+                    }
+                    if dot_attention {
+                        eprintln!("[train] dot-attention ablation (row 3b): Q·K scores; Clifford Q/K/V/O + FFN unchanged");
+                    }
+                    if do_semantic {
+                        eprintln!(
+                        "[train] corpus-semantic embedding init (random indexing, window=±{semantic_window}; --no-semantic-init to disable)"
+                    );
+                        corpus_semantic_init(
+                            &mut st.model,
+                            &train_ds.tokens,
+                            0x5EED ^ 0xE8E8,
+                            semantic_window,
+                            1.0,
+                        );
+                        if st.cfg.tie_embeddings {
+                            st.model.sync_tied_head();
+                        }
+                    }
+                    st
+                };
 
-            if freeze_blocks > state.cfg.n_blocks {
-                return Err(format!(
-                    "freeze_blocks ({freeze_blocks}) > n_blocks ({})",
-                    state.cfg.n_blocks
-                ));
-            }
-            if (freeze_blocks > 0 || freeze_embeddings) && init_from.is_none() {
-                eprintln!("[train] note: freezing requested without --init-from; freezing fresh random weights");
-            }
-            if freeze_blocks > 0 || freeze_embeddings {
-                eprintln!(
+                if freeze_blocks > state.cfg.n_blocks {
+                    return Err(format!(
+                        "freeze_blocks ({freeze_blocks}) > n_blocks ({})",
+                        state.cfg.n_blocks
+                    ));
+                }
+                if (freeze_blocks > 0 || freeze_embeddings) && init_from.is_none() {
+                    eprintln!("[train] note: freezing requested without --init-from; freezing fresh random weights");
+                }
+                if freeze_blocks > 0 || freeze_embeddings {
+                    eprintln!(
                     "[train] freeze: embeddings={freeze_embeddings} blocks=[0..{freeze_blocks}) (adapting blocks [{freeze_blocks}..{}), final_norm, head)",
                     state.cfg.n_blocks
                 );
-            }
-            state.update_lr();
+                }
+                state.update_lr();
 
-            let log_every_u64 = state.cfg.log_every as u64;
-            let mut rng = SimpleRng::new(0xC0FFEE);
+                let log_every_u64 = state.cfg.log_every as u64;
+                let mut rng = SimpleRng::new(0xC0FFEE);
 
-            eprintln!(
-                "[train] vocab={vs} train_tokens={} val_tokens={} seq_len={seq_len} steps={steps} head_only={head_only}",
+                eprintln!(
+                "[train] vocab={vs} train_tokens={} val_tokens={} seq_len={seq_len} steps={steps} head_only={head_only} turn_aligned={turn_aligned}",
                 train_ds.n_tokens(),
                 val_ds.n_tokens()
             );
-            if head_only {
-                eprintln!(
+                if head_only {
+                    eprintln!(
                     "[train] head-only mode: blocks + embeddings frozen; only output head updates (fast sanity run)"
                 );
-            }
+                }
 
-            let sample_cfg = SampleConfig {
-                temperature: 0.85,
-                top_p: Some(0.9),
-                repetition_penalty: 1.15,
-                max_new_tokens: 48,
-                stop_tokens: vec![special::EOS],
-                seed: Some(12345),
-                ..Default::default()
-            };
+                let sample_cfg = SampleConfig {
+                    temperature: 0.85,
+                    top_p: Some(0.9),
+                    repetition_penalty: 1.15,
+                    max_new_tokens: 48,
+                    stop_tokens: vec![special::EOS],
+                    seed: Some(12345),
+                    ..Default::default()
+                };
 
-            if grad_accum > 1 {
-                eprintln!(
+                if grad_accum > 1 {
+                    eprintln!(
                     "[train] gradient accumulation: {grad_accum} microbatches/step (effective batch={grad_accum}, {} chunks total)",
                     steps * grad_accum as u64
                 );
-            }
-            for step in 1u64..=steps {
-                let loss = if head_only {
-                    let ex = chunk_to_example(train_ds.random_chunk(seq_len, &mut rng));
-                    train_step_v2_head_only(&mut state, &ex)
-                } else if grad_accum > 1 {
-                    let exs: Vec<TrainExample> = (0..grad_accum)
-                        .map(|_| chunk_to_example(train_ds.random_chunk(seq_len, &mut rng)))
-                        .collect();
-                    train_step_v2_accum(&mut state, &exs)
-                } else {
-                    let ex = chunk_to_example(train_ds.random_chunk(seq_len, &mut rng));
-                    train_step_v2(&mut state, &ex)
-                };
-
-                if step % log_every_u64 == 0 || step == 1 {
-                    let ppl = (loss.exp()).min(1e6);
-                    eprintln!("[train] step={step} loss={loss:.4} ppl~={ppl:.1}");
                 }
+                for step in 1u64..=steps {
+                    let loss = if head_only {
+                        let ex = chunk_to_example(sample_chunk(&train_ds, seq_len, &mut rng));
+                        train_step_v2_head_only(&mut state, &ex)
+                    } else if grad_accum > 1 {
+                        let exs: Vec<TrainExample> = (0..grad_accum)
+                            .map(|_| chunk_to_example(sample_chunk(&train_ds, seq_len, &mut rng)))
+                            .collect();
+                        train_step_v2_accum(&mut state, &exs)
+                    } else {
+                        let ex = chunk_to_example(sample_chunk(&train_ds, seq_len, &mut rng));
+                        train_step_v2(&mut state, &ex)
+                    };
 
-                if sample_every > 0 && step % sample_every == 0 {
-                    sample_prompt(&state, &bpe, &sample_cfg, step.wrapping_mul(991));
-                }
-
-                if step % 200 == 0 && val_chunks > 0 {
-                    let mut vloss = 0.0f32;
-                    for _ in 0..val_chunks {
-                        let chunk = val_ds.random_chunk(seq_len, &mut rng);
-                        let ex = chunk_to_example(chunk);
-                        vloss += eval_lm_loss(&state, &ex);
+                    if step % log_every_u64 == 0 || step == 1 {
+                        let ppl = (loss.exp()).min(1e6);
+                        eprintln!("[train] step={step} loss={loss:.4} ppl~={ppl:.1}");
                     }
-                    vloss /= val_chunks as f32;
-                    eprintln!(
-                        "[val] step={step} mean_nll={vloss:.4} ppl~={}",
-                        (vloss.exp()).min(1e6)
-                    );
-                }
-            }
 
-            save_lm_state(&checkpoint_out, &state)?;
-            eprintln!("[train] wrote {}", checkpoint_out.display());
+                    if sample_every > 0 && step % sample_every == 0 {
+                        sample_prompt(&state, &bpe, &sample_cfg, step.wrapping_mul(991));
+                    }
+
+                    if step % 200 == 0 && val_chunks > 0 {
+                        let mut vloss = 0.0f32;
+                        for _ in 0..val_chunks {
+                            let chunk = sample_chunk(&val_ds, seq_len, &mut rng);
+                            let ex = chunk_to_example(chunk);
+                            vloss += eval_lm_loss(&state, &ex);
+                        }
+                        vloss /= val_chunks as f32;
+                        eprintln!(
+                            "[val] step={step} mean_nll={vloss:.4} ppl~={}",
+                            (vloss.exp()).min(1e6)
+                        );
+                    }
+                }
+
+                save_lm_state(&checkpoint_out, &state)?;
+                eprintln!("[train] wrote {}", checkpoint_out.display());
+            } // #[cfg(feature = "clifford-lm")]
         }
         Commands::Split {
             src,
@@ -913,7 +1090,10 @@ fn main() -> Result<(), String> {
             let uniform_bpb = (uniform_bpt * n_tok as f64) / uni_bytes as f64;
 
             println!("=== token baselines (full eval shard) ===");
-            println!("train counts: {}  eval tokens: {}  eval bytes: {}", total, n_tok, uni_bytes);
+            println!(
+                "train counts: {}  eval tokens: {}  eval bytes: {}",
+                total, n_tok, uni_bytes
+            );
             println!(
                 "  uniform : ppl {:.1}  {:.3} bits/token  {:.4} bits/byte",
                 (vocab as f64),
@@ -922,9 +1102,7 @@ fn main() -> Result<(), String> {
             );
             println!(
                 "  unigram : ppl {:.1}  {:.3} bits/token  {:.4} bits/byte  (MLE from train shard)",
-                uni_ppl,
-                uni_bpt,
-                uni_bpb
+                uni_ppl, uni_bpt, uni_bpb
             );
         }
         Commands::Eval {
@@ -1013,7 +1191,9 @@ fn main() -> Result<(), String> {
                 }
 
                 if total_bytes == 0 || n_pred == 0 {
-                    return Err("no text tokens evaluated (val bin too small or all special)".into());
+                    return Err(
+                        "no text tokens evaluated (val bin too small or all special)".into(),
+                    );
                 }
 
                 let model_bpb = model_bits / total_bytes as f64;
@@ -1025,12 +1205,8 @@ fn main() -> Result<(), String> {
                 let model_ppl = model_nats_per_tok.exp();
                 let unigram_ppl = (unigram_bpt * std::f64::consts::LN_2).exp();
 
-                let gz = BinaryCompressor::with_settings(BinaryAlgorithm::Gzip, 9)
-                    .compress(&text_bytes)
-                    .map_err(|e| e.to_string())?;
-                let lz = BinaryCompressor::with_settings(BinaryAlgorithm::Lzma, 9)
-                    .compress(&text_bytes)
-                    .map_err(|e| e.to_string())?;
+                let gz = gzip_bytes(&text_bytes)?;
+                let lz = lzma_bytes(&text_bytes)?;
                 let gz_bpb = gz.len() as f64 * 8.0 / total_bytes as f64;
                 let lz_bpb = lz.len() as f64 * 8.0 / total_bytes as f64;
 
@@ -1093,186 +1269,196 @@ fn main() -> Result<(), String> {
                 return Ok(());
             }
 
-            let state = load_lm_state(&checkpoint)?;
-            if state.cfg.vocab_size != bpe.vocab_size() as usize {
-                return Err(format!(
-                    "checkpoint vocab_size {} != BPE {}",
-                    state.cfg.vocab_size,
-                    bpe.vocab_size()
-                ));
-            }
-
-            // Unigram baselines: uniform floor + empirical counts from train shard.
-            let uniform_bpt = (vocab as f64).log2();
-            let (uni_counts, uni_total) = if let Some(train_path) = &train_bin {
-                let train_ds = PackedDataset::load(train_path).map_err(|e| e.to_string())?;
-                train_ds.unigram_counts(vocab)
-            } else {
-                eprintln!("[eval] warning: no --train-bin; empirical unigram uses eval shard (in-sample)");
-                val_ds.unigram_counts(vocab)
-            };
-
-            let mut model_bits = 0.0f64;
-            let mut uniform_bits = 0.0f64;
-            let mut unigram_bits = 0.0f64;
-            let mut total_bytes = 0usize;
-            let mut n_pred = 0usize;
-            let mut text_bytes: Vec<u8> = Vec::new();
-            let mut per_window_bpt: Vec<f64> = Vec::with_capacity(windows);
-
-            for w in 0..windows {
-                let start = w * seq_len;
-                if start + 2 > toks.len() {
-                    break;
-                }
-                let end = (start + seq_len).min(toks.len());
-                let window: Vec<usize> = toks[start..end].iter().map(|&x| x as usize).collect();
-                let logits = model_forward_logits(
-                    &state.alg,
-                    &state.model,
-                    &window,
-                    true,
-                    state.cfg.dot_attention,
+            #[cfg(not(feature = "clifford-lm"))]
+            {
+                return Err(
+                    "checkpoint is Clifford (cfg.vanilla=false); rebuild with feature clifford-lm \
+                     or train a vanilla checkpoint (default)"
+                        .into(),
                 );
-                let mut window_bits = 0.0f64;
-                let mut window_pred = 0usize;
-                for p in 0..window.len().saturating_sub(1) {
-                    let target = window[p + 1];
-                    if target < N_SPECIAL {
-                        continue;
+            }
+
+            #[cfg(feature = "clifford-lm")]
+            {
+                let state = load_lm_state(&checkpoint)?;
+                if state.cfg.vocab_size != bpe.vocab_size() as usize {
+                    return Err(format!(
+                        "checkpoint vocab_size {} != BPE {}",
+                        state.cfg.vocab_size,
+                        bpe.vocab_size()
+                    ));
+                }
+
+                // Unigram baselines: uniform floor + empirical counts from train shard.
+                let uniform_bpt = (vocab as f64).log2();
+                let (uni_counts, uni_total) = if let Some(train_path) = &train_bin {
+                    let train_ds = PackedDataset::load(train_path).map_err(|e| e.to_string())?;
+                    train_ds.unigram_counts(vocab)
+                } else {
+                    eprintln!("[eval] warning: no --train-bin; empirical unigram uses eval shard (in-sample)");
+                    val_ds.unigram_counts(vocab)
+                };
+
+                let mut model_bits = 0.0f64;
+                let mut uniform_bits = 0.0f64;
+                let mut unigram_bits = 0.0f64;
+                let mut total_bytes = 0usize;
+                let mut n_pred = 0usize;
+                let mut text_bytes: Vec<u8> = Vec::new();
+                let mut per_window_bpt: Vec<f64> = Vec::with_capacity(windows);
+
+                for w in 0..windows {
+                    let start = w * seq_len;
+                    if start + 2 > toks.len() {
+                        break;
                     }
-                    let probs = logits_softmax(&logits[p]);
-                    let pr = (probs[target] as f64).max(1e-12);
-                    let bit = -pr.log2();
-                    model_bits += bit;
-                    window_bits += bit;
-                    window_pred += 1;
-                    uniform_bits += uniform_bpt;
-                    let c = uni_counts[target] as f64;
-                    let p_uni = (c / uni_total as f64).max(1e-12);
-                    unigram_bits += -p_uni.log2();
-                    let bytes = &bpe.vocab[target];
-                    total_bytes += bytes.len();
-                    text_bytes.extend_from_slice(bytes);
-                    n_pred += 1;
+                    let end = (start + seq_len).min(toks.len());
+                    let window: Vec<usize> = toks[start..end].iter().map(|&x| x as usize).collect();
+                    let logits = model_forward_logits(
+                        &state.alg,
+                        &state.model,
+                        &window,
+                        true,
+                        state.cfg.dot_attention,
+                    );
+                    let mut window_bits = 0.0f64;
+                    let mut window_pred = 0usize;
+                    for p in 0..window.len().saturating_sub(1) {
+                        let target = window[p + 1];
+                        if target < N_SPECIAL {
+                            continue;
+                        }
+                        let probs = logits_softmax(&logits[p]);
+                        let pr = (probs[target] as f64).max(1e-12);
+                        let bit = -pr.log2();
+                        model_bits += bit;
+                        window_bits += bit;
+                        window_pred += 1;
+                        uniform_bits += uniform_bpt;
+                        let c = uni_counts[target] as f64;
+                        let p_uni = (c / uni_total as f64).max(1e-12);
+                        unigram_bits += -p_uni.log2();
+                        let bytes = &bpe.vocab[target];
+                        total_bytes += bytes.len();
+                        text_bytes.extend_from_slice(bytes);
+                        n_pred += 1;
+                    }
+                    if window_pred > 0 {
+                        per_window_bpt.push(window_bits / window_pred as f64);
+                    }
                 }
-                if window_pred > 0 {
-                    per_window_bpt.push(window_bits / window_pred as f64);
+
+                if total_bytes == 0 || n_pred == 0 {
+                    return Err(
+                        "no text tokens evaluated (val bin too small or all special)".into(),
+                    );
                 }
-            }
 
-            if total_bytes == 0 || n_pred == 0 {
-                return Err("no text tokens evaluated (val bin too small or all special)".into());
-            }
+                let model_bpb = model_bits / total_bytes as f64;
+                let model_bpt = model_bits / n_pred as f64;
+                let uniform_bpb = uniform_bits / total_bytes as f64;
+                let unigram_bpb = unigram_bits / total_bytes as f64;
+                let unigram_bpt = unigram_bits / n_pred as f64;
+                let model_nats_per_tok = model_bpt * std::f64::consts::LN_2;
+                let model_ppl = model_nats_per_tok.exp();
+                let unigram_ppl = (unigram_bpt * std::f64::consts::LN_2).exp();
 
-            let model_bpb = model_bits / total_bytes as f64;
-            let model_bpt = model_bits / n_pred as f64;
-            let uniform_bpb = uniform_bits / total_bytes as f64;
-            let unigram_bpb = unigram_bits / total_bytes as f64;
-            let unigram_bpt = unigram_bits / n_pred as f64;
-            let model_nats_per_tok = model_bpt * std::f64::consts::LN_2;
-            let model_ppl = model_nats_per_tok.exp();
-            let unigram_ppl = (unigram_bpt * std::f64::consts::LN_2).exp();
+                // Classical baselines on the exact same byte stream.
+                let gz = gzip_bytes(&text_bytes)?;
+                let lz = lzma_bytes(&text_bytes)?;
+                let gz_bpb = gz.len() as f64 * 8.0 / total_bytes as f64;
+                let lz_bpb = lz.len() as f64 * 8.0 / total_bytes as f64;
 
-            // Classical baselines on the exact same byte stream (spacekit-compressor).
-            let gz = BinaryCompressor::with_settings(BinaryAlgorithm::Gzip, 9)
-                .compress(&text_bytes)
-                .map_err(|e| e.to_string())?;
-            let lz = BinaryCompressor::with_settings(BinaryAlgorithm::Lzma, 9)
-                .compress(&text_bytes)
-                .map_err(|e| e.to_string())?;
-            let gz_bpb = gz.len() as f64 * 8.0 / total_bytes as f64;
-            let lz_bpb = lz.len() as f64 * 8.0 / total_bytes as f64;
-
-            println!("=== prediction ⇄ compression eval ===");
-            println!(
-                "text: {} tokens, {} bytes ({} windows × {} tokens)",
-                n_pred, total_bytes, windows, seq_len
-            );
-            println!();
-            println!("model (conditional CE; weights not amortized):");
-            println!("  cross-entropy : {model_nats_per_tok:.4} nats/token");
-            println!("  perplexity    : {model_ppl:.1}");
-            println!("  bits/token    : {model_bpt:.4}");
-            println!("  bits/byte     : {model_bpb:.4}");
-            println!();
-            println!("token baselines (same predicted tokens):");
-            println!(
+                println!("=== prediction ⇄ compression eval ===");
+                println!(
+                    "text: {} tokens, {} bytes ({} windows × {} tokens)",
+                    n_pred, total_bytes, windows, seq_len
+                );
+                println!();
+                println!("model (conditional CE; weights not amortized):");
+                println!("  cross-entropy : {model_nats_per_tok:.4} nats/token");
+                println!("  perplexity    : {model_ppl:.1}");
+                println!("  bits/token    : {model_bpt:.4}");
+                println!("  bits/byte     : {model_bpb:.4}");
+                println!();
+                println!("token baselines (same predicted tokens):");
+                println!(
                 "  uniform       : {uniform_bpb:.4} bits/byte  ({uniform_bpt:.2} bits/token; floor log2({vocab}))"
             );
-            println!(
+                println!(
                 "  unigram       : {unigram_bpb:.4} bits/byte  ({unigram_bpt:.2} bits/token; ppl {unigram_ppl:.1})"
             );
-            println!();
-            println!("byte baselines (same bytes; not token-aligned):");
-            println!("  gzip -9       : {gz_bpb:.4} bits/byte");
-            println!("  lzma -9       : {lz_bpb:.4} bits/byte");
-            println!();
-            let vs_uniform = model_bpt - uniform_bpt;
-            let vs_unigram = model_bpt - unigram_bpt;
-            println!(
+                println!();
+                println!("byte baselines (same bytes; not token-aligned):");
+                println!("  gzip -9       : {gz_bpb:.4} bits/byte");
+                println!("  lzma -9       : {lz_bpb:.4} bits/byte");
+                println!();
+                let vs_uniform = model_bpt - uniform_bpt;
+                let vs_unigram = model_bpt - unigram_bpt;
+                println!(
                 "vs uniform floor: {:+.2} bits/token ({:+.1}%); vs unigram: {:+.2} bits/token ({:+.1}%)",
                 vs_uniform,
                 100.0 * vs_uniform / uniform_bpt,
                 vs_unigram,
                 100.0 * vs_unigram / unigram_bpt
             );
-            println!("headline metric: ppl {model_ppl:.0} (not bpb vs gzip)");
-            if train_bin.is_some() {
-                let (uni_nats, n_full) =
-                    PackedDataset::unigram_nll_nats(&uni_counts, uni_total, toks, vocab);
-                if n_full > 0 {
-                    let full_uni_ppl = uni_nats.exp();
-                    let full_uni_bpt = uni_nats / std::f64::consts::LN_2;
-                    println!();
-                    println!(
+                println!("headline metric: ppl {model_ppl:.0} (not bpb vs gzip)");
+                if train_bin.is_some() {
+                    let (uni_nats, n_full) =
+                        PackedDataset::unigram_nll_nats(&uni_counts, uni_total, toks, vocab);
+                    if n_full > 0 {
+                        let full_uni_ppl = uni_nats.exp();
+                        let full_uni_bpt = uni_nats / std::f64::consts::LN_2;
+                        println!();
+                        println!(
                         "full held-out shard unigram (MLE, train counts): ppl {full_uni_ppl:.1}  {full_uni_bpt:.3} bits/token"
                     );
-                    println!(
-                        "model vs unigram (ppl): {:.0} vs {:.0} ({:+.1}%)",
-                        model_ppl,
-                        full_uni_ppl,
-                        100.0 * (model_ppl - full_uni_ppl) / full_uni_ppl
+                        println!(
+                            "model vs unigram (ppl): {:.0} vs {:.0} ({:+.1}%)",
+                            model_ppl,
+                            full_uni_ppl,
+                            100.0 * (model_ppl - full_uni_ppl) / full_uni_ppl
+                        );
+                    }
+                }
+                println!(
+                    "Note: conditional model CE only — checkpoint weights excluded. \
+                 gzip/lzma include codec overhead. Small corpora make gzip unreliable."
+                );
+
+                if !no_ledger && train_bin.is_some() && !per_window_bpt.is_empty() {
+                    let split_hash = ledger::compute_split_hash(
+                        &val_bin,
+                        seq_len,
+                        per_window_bpt.len(),
+                        &selection_tag,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    let rid = run_id.unwrap_or_else(|| default_run_id(&checkpoint));
+                    ensure_parent_dir(&ledger)?;
+                    let rec = ledger::append_eval_record(
+                        &ledger,
+                        &rid,
+                        'B',
+                        &ledger_config_hash(&state.cfg),
+                        state.cfg.init_seed,
+                        &checkpoint.display().to_string(),
+                        &split_hash,
+                        seq_len,
+                        per_window_bpt,
+                        "held-out eval",
+                        &git_sha_short(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    eprintln!(
+                        "[ledger] appended run_id={} mean_bpt={:.4} n_windows={} → {}",
+                        rec.run_id,
+                        rec.mean_bpt,
+                        rec.n_windows,
+                        ledger.display()
                     );
                 }
-            }
-            println!(
-                "Note: conditional model CE only — checkpoint weights excluded. \
-                 gzip/lzma include codec overhead. Small corpora make gzip unreliable."
-            );
-
-            if !no_ledger && train_bin.is_some() && !per_window_bpt.is_empty() {
-                let split_hash = ledger::compute_split_hash(
-                    &val_bin,
-                    seq_len,
-                    per_window_bpt.len(),
-                    &selection_tag,
-                )
-                .map_err(|e| e.to_string())?;
-                let rid = run_id.unwrap_or_else(|| default_run_id(&checkpoint));
-                ensure_parent_dir(&ledger)?;
-                let rec = ledger::append_eval_record(
-                    &ledger,
-                    &rid,
-                    'B',
-                    &ledger_config_hash(&state.cfg),
-                    state.cfg.init_seed,
-                    &checkpoint.display().to_string(),
-                    &split_hash,
-                    seq_len,
-                    per_window_bpt,
-                    "held-out eval",
-                    &git_sha_short(),
-                )
-                .map_err(|e| e.to_string())?;
-                eprintln!(
-                    "[ledger] appended run_id={} mean_bpt={:.4} n_windows={} → {}",
-                    rec.run_id,
-                    rec.mean_bpt,
-                    rec.n_windows,
-                    ledger.display()
-                );
-            }
+            } // #[cfg(feature = "clifford-lm")]
         }
         Commands::LedgerVerify { ledger } => {
             match ledger::verify_chain(&ledger).map_err(|e| e.to_string())? {
@@ -1300,6 +1486,7 @@ fn main() -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
             print!("{table}");
         }
+        #[cfg(feature = "clifford-lm")]
         Commands::Cl1 {
             checkpoint_a,
             checkpoint_b,
@@ -1348,7 +1535,11 @@ fn main() -> Result<(), String> {
                 "specialist gap: {:.4} bpt  peer parity (≤{:.2}): {}",
                 result.specialist_gap_bpt,
                 growformer_llm::cl1::CL1_SPECIALIST_PARITY_BPT,
-                if result.peer_specialists { "PASS" } else { "FAIL — imbalanced" }
+                if result.peer_specialists {
+                    "PASS"
+                } else {
+                    "FAIL — imbalanced"
+                }
             );
             println!(
                 "per-window wins: A={} B={} / {}",
@@ -1357,8 +1548,7 @@ fn main() -> Result<(), String> {
             println!("best single specialist: {:.4}", result.mean_bpt_best_single);
             println!(
                 "oracle per-window min: {:.4}  (gap vs best single: {:.4} bpt)",
-                result.mean_bpt_oracle,
-                result.oracle_gap_bpt
+                result.mean_bpt_oracle, result.oracle_gap_bpt
             );
             if result.no_complementarity {
                 println!(
@@ -1373,15 +1563,17 @@ fn main() -> Result<(), String> {
             }
             println!();
             println!("=== CL-1 routed composite (Bet A) ===");
-            println!("cal windows: {}  eval windows: {}", result.cal_n, result.eval_n);
+            println!(
+                "cal windows: {}  eval windows: {}",
+                result.cal_n, result.eval_n
+            );
             println!("routed composite:      {:.4}", result.mean_bpt_routed);
             println!("route A fraction: {:.3}", result.route_a_frac);
             println!(
                 "degenerate (constant route): {}",
                 if result.degenerate { "YES" } else { "no" }
             );
-            let routing_interpretable =
-                result.peer_specialists && result.complementarity_possible;
+            let routing_interpretable = result.peer_specialists && result.complementarity_possible;
             println!(
                 "routing interpretable: {} ({})",
                 if routing_interpretable { "YES" } else { "NO" },
@@ -1434,12 +1626,12 @@ fn main() -> Result<(), String> {
             seed,
             repetition_penalty,
         } => {
-            let state = load_lm_state(&checkpoint)?;
+            let peek_cfg = peek_checkpoint_cfg(&checkpoint)?;
             let bpe = BpeTokenizer::load(&tokenizer).map_err(|e| e.to_string())?;
-            if state.cfg.vocab_size != bpe.vocab_size() as usize {
+            if peek_cfg.vocab_size != bpe.vocab_size() as usize {
                 return Err(format!(
                     "checkpoint vocab_size {} != BPE {}",
-                    state.cfg.vocab_size,
+                    peek_cfg.vocab_size,
                     bpe.vocab_size()
                 ));
             }
@@ -1467,26 +1659,92 @@ fn main() -> Result<(), String> {
             };
 
             let mut rng = SimpleRng::new(seed.unwrap_or(0xDECAFBAD));
-            let mut cache = InferenceCache::new(
-                state.cfg.n_blocks,
-                state.cfg.max_seq,
-                state.cfg.d_model,
-                state.cfg.dot_attention,
-            );
-            for _ in 0..sample_cfg.max_new_tokens {
-                let logits_rows = cache.forward_extend(&state.alg, &state.model, &ids);
-                let Some(last) = logits_rows.last() else {
-                    break;
-                };
-                let next = sample_next(last, &ids, &sample_cfg, &mut rng);
-                if sample_cfg.stop_tokens.contains(&next) {
-                    break;
+            if peek_cfg.vanilla {
+                let state = load_vanilla_state(&checkpoint)?;
+                for _ in 0..sample_cfg.max_new_tokens {
+                    let logits_rows = vanilla_forward_logits(&state.model, &ids, true);
+                    let Some(last) = logits_rows.last() else {
+                        break;
+                    };
+                    let next = sample_next(last, &ids, &sample_cfg, &mut rng);
+                    if sample_cfg.stop_tokens.contains(&next) {
+                        break;
+                    }
+                    print!("{}", bpe.decode_one(next as u32));
+                    let _ = std::io::stdout().flush();
+                    ids.push(next);
                 }
-                print!("{}", bpe.decode_one(next as u32));
-                let _ = std::io::stdout().flush();
-                ids.push(next);
+            } else {
+                #[cfg(not(feature = "clifford-lm"))]
+                {
+                    return Err("checkpoint is Clifford; rebuild with feature clifford-lm \
+                         or use a vanilla checkpoint"
+                        .into());
+                }
+                #[cfg(feature = "clifford-lm")]
+                {
+                    let state = load_lm_state(&checkpoint)?;
+                    let mut cache = InferenceCache::new(
+                        state.cfg.n_blocks,
+                        state.cfg.max_seq,
+                        state.cfg.d_model,
+                        state.cfg.dot_attention,
+                    );
+                    for _ in 0..sample_cfg.max_new_tokens {
+                        let logits_rows = cache.forward_extend(&state.alg, &state.model, &ids);
+                        let Some(last) = logits_rows.last() else {
+                            break;
+                        };
+                        let next = sample_next(last, &ids, &sample_cfg, &mut rng);
+                        if sample_cfg.stop_tokens.contains(&next) {
+                            break;
+                        }
+                        print!("{}", bpe.decode_one(next as u32));
+                        let _ = std::io::stdout().flush();
+                        ids.push(next);
+                    }
+                }
             }
             println!();
+        }
+        Commands::Chat {
+            checkpoint,
+            tokenizer,
+            system,
+            max_new_tokens,
+            temperature,
+            greedy,
+            seed,
+            repetition_penalty,
+            reply_reserve,
+            compose,
+            #[cfg(feature = "brain-memory")]
+            brain,
+            #[cfg(feature = "brain-memory")]
+            project,
+            #[cfg(feature = "brain-memory")]
+            hybrid,
+            message,
+        } => {
+            run_chat_repl(ChatReplArgs {
+                checkpoint: checkpoint.as_deref(),
+                tokenizer: tokenizer.as_deref(),
+                system: system.as_deref(),
+                max_new_tokens,
+                temperature,
+                greedy,
+                seed,
+                repetition_penalty,
+                reply_reserve,
+                compose: &compose,
+                #[cfg(feature = "brain-memory")]
+                brain: brain.as_deref(),
+                #[cfg(feature = "brain-memory")]
+                project: project.as_deref(),
+                #[cfg(feature = "brain-memory")]
+                hybrid,
+                message: message.as_deref(),
+            })?;
         }
         #[cfg(feature = "brain-memory")]
         Commands::BrainInfer {
@@ -1656,6 +1914,333 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
+struct ChatReplArgs<'a> {
+    checkpoint: Option<&'a Path>,
+    tokenizer: Option<&'a Path>,
+    system: Option<&'a str>,
+    max_new_tokens: usize,
+    temperature: f32,
+    greedy: bool,
+    seed: Option<u64>,
+    repetition_penalty: f32,
+    reply_reserve: usize,
+    compose: &'a str,
+    #[cfg(feature = "brain-memory")]
+    brain: Option<&'a Path>,
+    #[cfg(feature = "brain-memory")]
+    project: Option<&'a Path>,
+    #[cfg(feature = "brain-memory")]
+    hybrid: bool,
+    message: Option<&'a str>,
+}
+
+fn run_chat_repl(args: ChatReplArgs<'_>) -> Result<(), String> {
+    use growformer_llm::{default_chatbot_system, ChatTranscript};
+
+    let compose = args.compose.trim().to_ascii_lowercase();
+    if !matches!(compose.as_str(), "brain" | "polish" | "lm") {
+        return Err(format!(
+            "unknown --compose {compose:?} (expected brain|polish|lm)"
+        ));
+    }
+
+    #[cfg(not(feature = "brain-memory"))]
+    if matches!(compose.as_str(), "brain" | "polish") {
+        return Err("compose=brain|polish requires feature brain-memory".into());
+    }
+
+    #[cfg(feature = "brain-memory")]
+    if matches!(compose.as_str(), "brain" | "polish") && args.brain.is_none() {
+        return Err("--brain is required for compose=brain|polish".into());
+    }
+
+    let needs_lm = matches!(compose.as_str(), "lm" | "polish");
+    let (state, bpe, ctx_budget) = if needs_lm {
+        let checkpoint = args
+            .checkpoint
+            .ok_or("--checkpoint required for compose=lm|polish")?;
+        let tokenizer = args
+            .tokenizer
+            .ok_or("--tokenizer required for compose=lm|polish")?;
+        let peek_cfg = peek_checkpoint_cfg(checkpoint)?;
+        if !peek_cfg.vanilla {
+            return Err(
+                "chat currently supports vanilla checkpoints only (train without --clifford)"
+                    .into(),
+            );
+        }
+        let state = load_vanilla_state(checkpoint)?;
+        let bpe = BpeTokenizer::load(tokenizer).map_err(|e| e.to_string())?;
+        if state.cfg.vocab_size != bpe.vocab_size() as usize {
+            return Err(format!(
+                "checkpoint vocab {} != BPE {}",
+                state.cfg.vocab_size,
+                bpe.vocab_size()
+            ));
+        }
+        let ctx_budget = state.cfg.max_seq.saturating_sub(args.reply_reserve.max(1));
+        (Some(state), Some(bpe), ctx_budget)
+    } else {
+        (None, None, 0)
+    };
+
+    let sys = args.system.unwrap_or_else(|| default_chatbot_system());
+    let mut transcript = ChatTranscript::with_system(sys);
+
+    #[cfg(feature = "brain-memory")]
+    let mut brain_rt = if let Some(path) = args.brain {
+        let infer_cfg = BrainInferConfig {
+            project: args.project.map(|p| p.to_path_buf()),
+            ..BrainInferConfig::default()
+        };
+        Some(BrainMemoryRuntime::from_path_with_config(path, &infer_cfg)?)
+    } else {
+        None
+    };
+
+    let sample_cfg = if args.greedy {
+        SampleConfig {
+            max_new_tokens: args.max_new_tokens,
+            repetition_penalty: args.repetition_penalty,
+            seed: args.seed,
+            stop_tokens: vec![special::EOS],
+            ..SampleConfig::greedy()
+        }
+    } else {
+        SampleConfig {
+            temperature: args.temperature,
+            max_new_tokens: args.max_new_tokens,
+            repetition_penalty: args.repetition_penalty,
+            seed: args.seed,
+            stop_tokens: vec![special::EOS],
+            ..SampleConfig::focused()
+        }
+    };
+    let mut rng = SimpleRng::new(args.seed.unwrap_or(0xC0FFEE));
+
+    eprintln!(
+        "[chat] compose={compose} greedy={}  (quit / exit / :q)",
+        args.greedy
+    );
+    if let Some(ref st) = state {
+        eprintln!(
+            "[chat] lm d_model={} max_seq={} ctx_budget={}",
+            st.cfg.d_model, st.cfg.max_seq, ctx_budget
+        );
+    }
+    if compose == "brain" {
+        eprintln!("[chat] Path A: assistant reply = retrieved lattice memory (no LM)");
+    } else if compose == "polish" {
+        eprintln!("[chat] polish: LM rewrites brain memory (facts from Path A)");
+    } else {
+        eprintln!("[chat] lm mode is experimental — prefer compose=brain for product answers");
+    }
+
+    let oneshot = args.message.is_some();
+    let mut one_shot = args.message.map(|s| s.to_string());
+    loop {
+        let user_line = if let Some(m) = one_shot.take() {
+            m
+        } else {
+            eprint!("You> ");
+            let _ = std::io::stderr().flush();
+            let mut line = String::new();
+            match std::io::stdin().read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let t = line.trim().to_string();
+                    if t.is_empty() {
+                        continue;
+                    }
+                    if matches!(t.as_str(), "quit" | "exit" | ":q" | "/quit") {
+                        break;
+                    }
+                    t
+                }
+                Err(e) => return Err(format!("stdin: {e}")),
+            }
+        };
+
+        let mut memory_text: Option<String> = None;
+        #[cfg(feature = "brain-memory")]
+        if let Some(rt) = brain_rt.as_mut() {
+            let (q, source) = if args.hybrid {
+                rt.query_hybrid(&user_line)?
+            } else {
+                (rt.query(&user_line)?, MemorySource::FullGeneration)
+            };
+            eprintln!(
+                "[chat] brain memory_source={} chars={}",
+                source.as_str(),
+                q.memory_text.len()
+            );
+            memory_text = Some(q.memory_text.trim().to_string());
+        }
+
+        let reply = match compose.as_str() {
+            "brain" => {
+                let mem = memory_text
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "No lattice memory retrieved for this prompt.".into());
+                print!("Assistant> {mem}\n");
+                mem
+            }
+            "polish" => {
+                let state = state.as_ref().unwrap();
+                let bpe = bpe.as_ref().unwrap();
+                let mem = memory_text.clone().unwrap_or_default();
+                if mem.is_empty() {
+                    let fallback = "No lattice memory retrieved for this prompt.".to_string();
+                    print!("Assistant> {fallback}\n");
+                    fallback
+                } else {
+                    // Facts come from brain; LM only rephrases.
+                    let polish_user = format!(
+                        "Rewrite in one short helpful sentence for the user (do not invent facts):\n{mem}"
+                    );
+                    let mut turn = ChatTranscript::with_system(sys);
+                    turn.push_user(polish_user);
+                    turn.truncate_to_token_budget(bpe, ctx_budget);
+                    let prompt = turn.render_for_completion();
+                    let generated = generate_vanilla_reply(
+                        state,
+                        bpe,
+                        &prompt,
+                        &sample_cfg,
+                        &mut rng,
+                        ctx_budget,
+                    )?;
+                    let out = if generated.trim().is_empty() {
+                        mem
+                    } else {
+                        generated
+                    };
+                    print!("Assistant> {out}\n");
+                    out
+                }
+            }
+            _ => {
+                // lm (experimental)
+                let state = state.as_ref().unwrap();
+                let bpe = bpe.as_ref().unwrap();
+                let mut user_for_lm = user_line.clone();
+                if let Some(ref mem) = memory_text {
+                    if !mem.is_empty() {
+                        user_for_lm = format!("[brain memory]\n{mem}\n\n{user_line}");
+                    }
+                }
+                transcript.push_user(user_for_lm);
+                transcript.truncate_to_token_budget(bpe, ctx_budget);
+                let prompt = transcript.render_for_completion();
+                print!("Assistant> ");
+                let _ = std::io::stdout().flush();
+                let out = generate_vanilla_reply_streaming(
+                    state,
+                    bpe,
+                    &prompt,
+                    &sample_cfg,
+                    &mut rng,
+                    state.cfg.max_seq,
+                )?;
+                println!();
+                out
+            }
+        };
+
+        transcript.push_assistant(reply.trim());
+        if oneshot {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn generate_vanilla_reply(
+    state: &VanillaModelState,
+    bpe: &BpeTokenizer,
+    prompt: &str,
+    sample_cfg: &SampleConfig,
+    rng: &mut SimpleRng,
+    max_seq: usize,
+) -> Result<String, String> {
+    let mut ids: Vec<usize> = vec![special::BOS];
+    ids.extend(bpe.encode(prompt).iter().map(|&x| x as usize));
+    eprintln!("[chat] prompt_tokens={} (max_seq {})", ids.len(), max_seq);
+    if ids.len() >= max_seq {
+        return Err(format!(
+            "prompt tokens {} ≥ max_seq {max_seq} — shorten system/history or raise --seq-len at train",
+            ids.len()
+        ));
+    }
+    let mut reply = String::new();
+    for _ in 0..sample_cfg.max_new_tokens {
+        if ids.len() >= max_seq {
+            break;
+        }
+        let logits_rows = vanilla_forward_logits(&state.model, &ids, true);
+        let Some(last) = logits_rows.last() else {
+            break;
+        };
+        let next = sample_next(last, &ids, sample_cfg, rng);
+        if sample_cfg.stop_tokens.contains(&next) {
+            break;
+        }
+        let piece = bpe.decode_one(next as u32);
+        let mut candidate = reply.clone();
+        candidate.push_str(&piece);
+        if let Some(cut) = growformer_llm::role_marker_cut(&candidate) {
+            reply = candidate[..cut].to_string();
+            break;
+        }
+        reply.push_str(&piece);
+        ids.push(next);
+    }
+    Ok(reply.trim().to_string())
+}
+
+fn generate_vanilla_reply_streaming(
+    state: &VanillaModelState,
+    bpe: &BpeTokenizer,
+    prompt: &str,
+    sample_cfg: &SampleConfig,
+    rng: &mut SimpleRng,
+    max_seq: usize,
+) -> Result<String, String> {
+    let mut ids: Vec<usize> = vec![special::BOS];
+    ids.extend(bpe.encode(prompt).iter().map(|&x| x as usize));
+    eprintln!("[chat] prompt_tokens={} (max_seq {})", ids.len(), max_seq);
+    if ids.len() >= max_seq {
+        return Err(format!("prompt tokens {} ≥ max_seq {max_seq}", ids.len()));
+    }
+    let mut reply = String::new();
+    for _ in 0..sample_cfg.max_new_tokens {
+        if ids.len() >= max_seq {
+            break;
+        }
+        let logits_rows = vanilla_forward_logits(&state.model, &ids, true);
+        let Some(last) = logits_rows.last() else {
+            break;
+        };
+        let next = sample_next(last, &ids, sample_cfg, rng);
+        if sample_cfg.stop_tokens.contains(&next) {
+            break;
+        }
+        let piece = bpe.decode_one(next as u32);
+        let mut candidate = reply.clone();
+        candidate.push_str(&piece);
+        if let Some(cut) = growformer_llm::role_marker_cut(&candidate) {
+            reply = candidate[..cut].to_string();
+            break;
+        }
+        print!("{piece}");
+        let _ = std::io::stdout().flush();
+        reply.push_str(&piece);
+        ids.push(next);
+    }
+    Ok(reply.trim().to_string())
+}
+
 #[cfg(feature = "brain-memory")]
 fn run_brain_infer_case(
     brain: &Path,
@@ -1763,25 +2348,35 @@ fn run_brain_infer_case(
             ids.push(next);
         }
     } else {
-        let state = load_lm_state(checkpoint)?;
-        let mut cache = InferenceCache::new(
-            state.cfg.n_blocks,
-            state.cfg.max_seq,
-            state.cfg.d_model,
-            state.cfg.dot_attention,
-        );
-        for _ in 0..sample_cfg.max_new_tokens {
-            let logits_rows = cache.forward_extend(&state.alg, &state.model, &ids);
-            let Some(last) = logits_rows.last() else {
-                break;
-            };
-            let next = sample_next(last, &ids, &sample_cfg, &mut rng);
-            if sample_cfg.stop_tokens.contains(&next) {
-                break;
+        #[cfg(not(feature = "clifford-lm"))]
+        {
+            return Err(
+                "checkpoint is Clifford; rebuild with feature clifford-lm or use a vanilla checkpoint"
+                    .into(),
+            );
+        }
+        #[cfg(feature = "clifford-lm")]
+        {
+            let state = load_lm_state(checkpoint)?;
+            let mut cache = InferenceCache::new(
+                state.cfg.n_blocks,
+                state.cfg.max_seq,
+                state.cfg.d_model,
+                state.cfg.dot_attention,
+            );
+            for _ in 0..sample_cfg.max_new_tokens {
+                let logits_rows = cache.forward_extend(&state.alg, &state.model, &ids);
+                let Some(last) = logits_rows.last() else {
+                    break;
+                };
+                let next = sample_next(last, &ids, &sample_cfg, &mut rng);
+                if sample_cfg.stop_tokens.contains(&next) {
+                    break;
+                }
+                print!("{}", bpe.decode_one(next as u32));
+                let _ = std::io::stdout().flush();
+                ids.push(next);
             }
-            print!("{}", bpe.decode_one(next as u32));
-            let _ = std::io::stdout().flush();
-            ids.push(next);
         }
     }
     println!();

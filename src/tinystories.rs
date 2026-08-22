@@ -141,6 +141,41 @@ impl PackedDataset {
             .collect()
     }
 
+    /// Indices of `BOS` tokens (document starts from [`encode_corpus`]).
+    pub fn doc_starts(&self) -> Vec<usize> {
+        self.tokens
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &t)| (t as usize == special::BOS).then_some(i))
+            .collect()
+    }
+
+    /// Sample a full document from BOS through EOS (or `seq_len`), left-aligned and
+    /// PAD-padded. Keeps User→Assistant turns intact for chat corpora.
+    pub fn random_turn_chunk(&self, seq_len: usize, rng: &mut SimpleRng) -> Vec<usize> {
+        let starts = self.doc_starts();
+        if starts.is_empty() || seq_len == 0 {
+            return self.random_chunk(seq_len, rng);
+        }
+        let doc_i = (rng.next_u32() as usize) % starts.len();
+        let start = starts[doc_i];
+        let end_lim = starts.get(doc_i + 1).copied().unwrap_or(self.tokens.len());
+        let mut out: Vec<usize> = Vec::with_capacity(seq_len);
+        for &t in &self.tokens[start..end_lim] {
+            if out.len() >= seq_len {
+                break;
+            }
+            out.push(t as usize);
+            if t as usize == special::EOS && out.len() > 1 {
+                break;
+            }
+        }
+        while out.len() < seq_len {
+            out.push(special::PAD);
+        }
+        out
+    }
+
     pub fn n_tokens(&self) -> usize {
         self.tokens.len()
     }
@@ -161,7 +196,12 @@ impl PackedDataset {
     }
 
     /// Mean NLL (nats/token) of `tokens` under an empirical unigram from `counts` / `total`.
-    pub fn unigram_nll_nats(counts: &[u64], total: u64, tokens: &[u32], vocab_size: usize) -> (f64, usize) {
+    pub fn unigram_nll_nats(
+        counts: &[u64],
+        total: u64,
+        tokens: &[u32],
+        vocab_size: usize,
+    ) -> (f64, usize) {
         if total == 0 {
             return (0.0, 0);
         }

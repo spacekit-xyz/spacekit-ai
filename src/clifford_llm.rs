@@ -13,8 +13,8 @@
 //   clifford:  y = W ⊛ x         (geometric product of multivectors)
 //   attention: score = <Q_i · K_j>₀   (grade-0 / scalar part)
 
-use std::sync::Arc;
 use std::ops::{Add, Mul};
+use std::sync::Arc;
 
 // ─── 1. Multivector ───────────────────────────────────────────────────────────
 
@@ -26,8 +26,14 @@ pub struct Multivector {
 }
 
 impl Multivector {
-    pub fn zero() -> Self { Self { c: [0.0; 16] } }
-    pub fn scalar(v: f32) -> Self { let mut m = Self::zero(); m.c[0] = v; m }
+    pub fn zero() -> Self {
+        Self { c: [0.0; 16] }
+    }
+    pub fn scalar(v: f32) -> Self {
+        let mut m = Self::zero();
+        m.c[0] = v;
+        m
+    }
 
     /// Scale every component
     pub fn scale(&self, s: f32) -> Self {
@@ -44,7 +50,9 @@ impl Multivector {
     }
 
     /// Grade-0 (scalar) part — used for attention scores
-    pub fn scalar_part(&self) -> f32 { self.c[0] }
+    pub fn scalar_part(&self) -> f32 {
+        self.c[0]
+    }
 
     /// Squared norm: <M̃ M>₀  (sum of squares with metric signs)
     pub fn norm_sq(&self, alg: &CliffordAlgebra) -> f32 {
@@ -56,7 +64,9 @@ impl Add for Multivector {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
         let mut c = self.c;
-        for i in 0..16 { c[i] += rhs.c[i]; }
+        for i in 0..16 {
+            c[i] += rhs.c[i];
+        }
         Self { c }
     }
 }
@@ -96,9 +106,13 @@ impl CliffordAlgebra {
     pub fn geo_product(&self, a: &Multivector, b: &Multivector) -> Multivector {
         let mut out = [0.0f32; 16];
         for i in 0..16 {
-            if a.c[i] == 0.0 { continue; }
+            if a.c[i] == 0.0 {
+                continue;
+            }
             for j in 0..16 {
-                if b.c[j] == 0.0 { continue; }
+                if b.c[j] == 0.0 {
+                    continue;
+                }
                 let CayleyEntry(sign, k) = self.cayley[i][j];
                 out[k] += sign * a.c[i] * b.c[j];
             }
@@ -110,13 +124,15 @@ impl CliffordAlgebra {
     /// Grade k gets sign (-1)^(k(k-1)/2)
     pub fn reverse(&self, a: &Multivector) -> Multivector {
         let signs: [f32; 16] = [
-            1., 1., 1., 1., 1.,        // grade 0,1
-           -1.,-1.,-1.,-1.,-1.,-1.,   // grade 2
-           -1.,-1.,-1.,-1.,           // grade 3
-            1.,                        // grade 4
+            1., 1., 1., 1., 1., // grade 0,1
+            -1., -1., -1., -1., -1., -1., // grade 2
+            -1., -1., -1., -1., // grade 3
+            1.,  // grade 4
         ];
         let mut c = a.c;
-        for i in 0..16 { c[i] *= signs[i]; }
+        for i in 0..16 {
+            c[i] *= signs[i];
+        }
         Multivector { c }
     }
 
@@ -137,11 +153,13 @@ fn geometric_product_blades(mut a: usize, mut b: usize, metric: &[f32]) -> (f32,
     // Count reorder swaps
     let mut a_bits = blade_a;
     while a_bits != 0 {
-        let bit = a_bits & (!a_bits + 1);      // lowest set bit
+        let bit = a_bits & (!a_bits + 1); // lowest set bit
         let idx = bit.trailing_zeros() as usize;
         // Count bits in blade_b that are less than idx (they pass through)
         let lower = blade_b & (bit - 1);
-        if lower.count_ones() % 2 == 1 { sign = -sign; }
+        if lower.count_ones() % 2 == 1 {
+            sign = -sign;
+        }
         if blade_b & bit != 0 {
             // Two identical basis vectors → apply metric signature
             sign *= metric[idx];
@@ -159,38 +177,53 @@ fn geometric_product_blades(mut a: usize, mut b: usize, metric: &[f32]) -> (f32,
 #[derive(Debug)]
 pub struct CliffordLinear {
     pub out_dim: usize,
-    pub in_dim:  usize,
+    pub in_dim: usize,
     /// weights[out][in]: multivector weight for each (output, input) pair
     pub weights: Vec<Vec<Multivector>>,
-    pub bias:    Vec<Multivector>,
+    pub bias: Vec<Multivector>,
     pub algebra: Arc<CliffordAlgebra>,
 }
 
 impl CliffordLinear {
     pub fn new(in_dim: usize, out_dim: usize, algebra: Arc<CliffordAlgebra>) -> Self {
         // Small uniform noise on all blades (not scalar-only — geo layers mix grades).
-        let weights = (0..out_dim).map(|_| {
-            (0..in_dim).map(|i| {
-                let mut mv = Multivector::zero();
-                let s = 0.01 * (1.0 + (i as f32 * 0.13).sin().abs());
-                for k in 0..16 {
-                    mv.c[k] = s * 0.25;
-                }
-                mv
-            }).collect()
-        }).collect();
+        let weights = (0..out_dim)
+            .map(|_| {
+                (0..in_dim)
+                    .map(|i| {
+                        let mut mv = Multivector::zero();
+                        let s = 0.01 * (1.0 + (i as f32 * 0.13).sin().abs());
+                        for k in 0..16 {
+                            mv.c[k] = s * 0.25;
+                        }
+                        mv
+                    })
+                    .collect()
+            })
+            .collect();
         let bias = vec![Multivector::zero(); out_dim];
-        Self { out_dim, in_dim, weights, bias, algebra }
+        Self {
+            out_dim,
+            in_dim,
+            weights,
+            bias,
+            algebra,
+        }
     }
 
     pub fn forward(&self, x: &[Multivector]) -> Vec<Multivector> {
         assert_eq!(x.len(), self.in_dim);
-        (0..self.out_dim).map(|d| {
-            let sum = x.iter().enumerate().fold(Multivector::zero(), |acc, (i, xi)| {
-                acc + self.algebra.geo_product(&self.weights[d][i], xi)
-            });
-            sum + self.bias[d].clone()
-        }).collect()
+        (0..self.out_dim)
+            .map(|d| {
+                let sum = x
+                    .iter()
+                    .enumerate()
+                    .fold(Multivector::zero(), |acc, (i, xi)| {
+                        acc + self.algebra.geo_product(&self.weights[d][i], xi)
+                    });
+                sum + self.bias[d].clone()
+            })
+            .collect()
     }
 }
 
@@ -201,24 +234,23 @@ impl CliffordLinear {
 pub struct CliffordLayerNorm {
     pub d_model: usize,
     pub eps: f32,
-    pub gamma: Vec<f32>,   // 16 × d_model learnable scales
-    pub beta:  Vec<f32>,   // 16 × d_model learnable biases
+    pub gamma: Vec<f32>, // 16 × d_model learnable scales
+    pub beta: Vec<f32>,  // 16 × d_model learnable biases
 }
 
 impl CliffordLayerNorm {
     pub fn new(d_model: usize) -> Self {
         let n = d_model * 16;
-        Self { d_model, eps: 1e-5, gamma: vec![1.0; n], beta: vec![0.0; n] }
+        Self {
+            d_model,
+            eps: 1e-5,
+            gamma: vec![1.0; n],
+            beta: vec![0.0; n],
+        }
     }
 
     pub fn forward(&self, x: &[Multivector]) -> Vec<Multivector> {
-        crate::clifford_layer_norm::forward_multivectors(
-            &self.gamma,
-            &self.beta,
-            self.eps,
-            x,
-        )
-        .0
+        crate::clifford_layer_norm::forward_multivectors(&self.gamma, &self.beta, self.eps, x).0
     }
 }
 
@@ -240,7 +272,9 @@ impl CliffordAttention {
         let head_dim = d_model / n_heads;
         let alg = algebra.clone();
         Self {
-            d_model, n_heads, head_dim,
+            d_model,
+            n_heads,
+            head_dim,
             w_q: CliffordLinear::new(d_model, d_model, alg.clone()),
             w_k: CliffordLinear::new(d_model, d_model, alg.clone()),
             w_v: CliffordLinear::new(d_model, d_model, alg.clone()),
@@ -254,7 +288,7 @@ impl CliffordAttention {
     /// softmax.  (No causal mask here — this v1 path is for shape/demo use; the
     /// trained LM uses the taped forward in `v2::tape`.)
     pub fn forward(&self, x: &[Vec<Multivector>]) -> Vec<Vec<Multivector>> {
-        let seq   = x.len();
+        let seq = x.len();
         let scale = ((self.head_dim * 16) as f32).sqrt();
 
         let q: Vec<Vec<Multivector>> = x.iter().map(|xi| self.w_q.forward(xi)).collect();
@@ -262,28 +296,36 @@ impl CliffordAttention {
         let v: Vec<Vec<Multivector>> = x.iter().map(|xi| self.w_v.forward(xi)).collect();
 
         // Per-head attention weights.
-        let weights: Vec<Vec<Vec<f32>>> = (0..self.n_heads).map(|h| {
-            let d0 = h * self.head_dim;
-            let d1 = d0 + self.head_dim;
-            (0..seq).map(|i| {
-                let raw: Vec<f32> = (0..seq).map(|j| {
-                    let s: f32 = (d0..d1)
-                        .map(|d| self.algebra.inner_product(&q[i][d], &k[j][d]))
-                        .sum();
-                    s / scale
-                }).collect();
-                softmax(&raw)
-            }).collect()
-        }).collect();
+        let weights: Vec<Vec<Vec<f32>>> = (0..self.n_heads)
+            .map(|h| {
+                let d0 = h * self.head_dim;
+                let d1 = d0 + self.head_dim;
+                (0..seq)
+                    .map(|i| {
+                        let raw: Vec<f32> = (0..seq)
+                            .map(|j| {
+                                let s: f32 = (d0..d1)
+                                    .map(|d| self.algebra.inner_product(&q[i][d], &k[j][d]))
+                                    .sum();
+                                s / scale
+                            })
+                            .collect();
+                        softmax(&raw)
+                    })
+                    .collect()
+            })
+            .collect();
 
         let mut out_seq = Vec::with_capacity(seq);
         for i in 0..seq {
-            let attn_out: Vec<Multivector> = (0..self.d_model).map(|d| {
-                let h = d / self.head_dim;
-                (0..seq).fold(Multivector::zero(), |acc, j| {
-                    acc + v[j][d].scale(weights[h][i][j])
+            let attn_out: Vec<Multivector> = (0..self.d_model)
+                .map(|d| {
+                    let h = d / self.head_dim;
+                    (0..seq).fold(Multivector::zero(), |acc, j| {
+                        acc + v[j][d].scale(weights[h][i][j])
+                    })
                 })
-            }).collect();
+                .collect();
             out_seq.push(self.w_o.forward(&attn_out));
         }
         out_seq
@@ -303,15 +345,17 @@ pub struct CliffordFFN {
 impl CliffordFFN {
     pub fn new(d_model: usize, d_ff: usize, algebra: Arc<CliffordAlgebra>) -> Self {
         Self {
-            fc1: CliffordLinear::new(d_model, d_ff,    algebra.clone()),
-            fc2: CliffordLinear::new(d_ff,    d_model, algebra),
+            fc1: CliffordLinear::new(d_model, d_ff, algebra.clone()),
+            fc2: CliffordLinear::new(d_ff, d_model, algebra),
         }
     }
 
     pub fn forward(&self, x: &[Multivector]) -> Vec<Multivector> {
-        let h: Vec<Multivector> = self.fc1.forward(x)
+        let h: Vec<Multivector> = self
+            .fc1
+            .forward(x)
             .into_iter()
-            .map(|mv| mv.map(|c| c.max(0.0)))   // component-wise ReLU
+            .map(|mv| mv.map(|c| c.max(0.0))) // component-wise ReLU
             .collect();
         self.fc2.forward(&h)
     }
@@ -320,8 +364,8 @@ impl CliffordFFN {
 // ─── 7. Transformer Block ─────────────────────────────────────────────────────
 
 pub struct CliffordBlock {
-    pub attn:  CliffordAttention,
-    pub ffn:   crate::ffn::FfnVariant,
+    pub attn: CliffordAttention,
+    pub ffn: crate::ffn::FfnVariant,
     pub norm1: CliffordLayerNorm,
     pub norm2: CliffordLayerNorm,
 }
@@ -329,81 +373,41 @@ pub struct CliffordBlock {
 impl CliffordBlock {
     pub fn forward(&self, x: &[Vec<Multivector>]) -> Vec<Vec<Multivector>> {
         // Pre-norm + residual (GPT-2 style)
-        let n1: Vec<Vec<Multivector>> = x.iter()
-            .map(|xi| self.norm1.forward(xi))
-            .collect();
+        let n1: Vec<Vec<Multivector>> = x.iter().map(|xi| self.norm1.forward(xi)).collect();
         let a = self.attn.forward(&n1);
         // Residual add (component-wise)
-        let x2: Vec<Vec<Multivector>> = x.iter().zip(a.iter())
-            .map(|(xi, ai)| xi.iter().zip(ai.iter()).map(|(a, b)| a.clone() + b.clone()).collect())
+        let x2: Vec<Vec<Multivector>> = x
+            .iter()
+            .zip(a.iter())
+            .map(|(xi, ai)| {
+                xi.iter()
+                    .zip(ai.iter())
+                    .map(|(a, b)| a.clone() + b.clone())
+                    .collect()
+            })
             .collect();
 
-        let n2: Vec<Vec<Multivector>> = x2.iter()
-            .map(|xi| self.norm2.forward(xi))
-            .collect();
-        let f: Vec<Vec<Multivector>> = n2.iter()
-            .map(|xi| self.ffn.forward(xi))
-            .collect();
-        x2.iter().zip(f.iter())
-            .map(|(xi, fi)| xi.iter().zip(fi.iter()).map(|(a, b)| a.clone() + b.clone()).collect())
+        let n2: Vec<Vec<Multivector>> = x2.iter().map(|xi| self.norm2.forward(xi)).collect();
+        let f: Vec<Vec<Multivector>> = n2.iter().map(|xi| self.ffn.forward(xi)).collect();
+        x2.iter()
+            .zip(f.iter())
+            .map(|(xi, fi)| {
+                xi.iter()
+                    .zip(fi.iter())
+                    .map(|(a, b)| a.clone() + b.clone())
+                    .collect()
+            })
             .collect()
     }
 }
 
 // ─── 7b. Real-valued output head ──────────────────────────────────────────────
+// `LinearReal` lives in `real_linear` (vanilla-first core). Multivector flatten
+// forward is an inherent impl extension below.
 
-/// Output projection from the residual stream to vocabulary logits.
-///
-/// The previous head was a `CliffordLinear` whose 16-component output was then
-/// collapsed to its grade-0 part — meaning 15/16 of the geometric-product
-/// compute (and gradient) was discarded.  This head instead **flattens** the
-/// `d_model` multivectors into `16 · d_model` real features and applies a plain
-/// real matrix.  It is cheaper and strictly more expressive: every blade of
-/// every channel can contribute to every logit.
-#[derive(Debug, Clone)]
-pub struct LinearReal {
-    pub out_dim:     usize,        // vocab_size
-    pub in_features: usize,        // 16 × d_model
-    pub weights:     Vec<Vec<f32>>, // [out_dim][in_features]
-    pub bias:        Vec<f32>,      // [out_dim]
-}
+use crate::real_linear::LinearReal;
 
 impl LinearReal {
-    /// `d_model` multivectors in → `out_dim` logits out.  Zero-initialised;
-    /// call a randomiser before training to break symmetry.
-    pub fn new(d_model: usize, out_dim: usize) -> Self {
-        Self::new_dims(d_model * 16, out_dim, 0)
-    }
-
-    /// General real linear layer: `in_features` → `out_dim`.  `seed` reserved for init helpers.
-    pub fn new_dims(in_features: usize, out_dim: usize, _seed: u64) -> Self {
-        Self {
-            out_dim,
-            in_features,
-            weights: vec![vec![0.0; in_features]; out_dim],
-            bias:    vec![0.0; out_dim],
-        }
-    }
-
-    pub fn weight_scalars(&self) -> usize {
-        self.out_dim * self.in_features + self.out_dim
-    }
-
-    /// Real matmul: `out[o] = bias[o] + Σ_j W[o][j] · x[j]`.
-    pub fn forward_flat(&self, x: &[f32]) -> Vec<f32> {
-        debug_assert_eq!(x.len(), self.in_features);
-        (0..self.out_dim)
-            .map(|o| {
-                let w = &self.weights[o];
-                let mut s = self.bias[o];
-                for j in 0..self.in_features {
-                    s += w[j] * x[j];
-                }
-                s
-            })
-            .collect()
-    }
-
     /// Flatten `x` (d_model multivectors → 16·d_model floats) and project to logits.
     pub fn forward(&self, x: &[Multivector]) -> Vec<f32> {
         debug_assert_eq!(x.len() * 16, self.in_features);
@@ -416,13 +420,13 @@ impl LinearReal {
 pub struct CliffordLLM {
     /// Token embedding table: vocab_size × d_model Multivectors
     /// Your existing STA encoder populates these
-    pub embedding:   Vec<Vec<Multivector>>,
-    pub blocks:      Vec<CliffordBlock>,
+    pub embedding: Vec<Vec<Multivector>>,
+    pub blocks: Vec<CliffordBlock>,
     /// Final layer norm applied to the residual stream before the head (GPT-2
     /// `ln_f`).  Without it the unbounded residual stream makes logits explode.
-    pub final_norm:  CliffordLayerNorm,
-    pub head:        LinearReal,   // residual stream (16·d_model reals) → vocab logits
-    pub algebra:     Arc<CliffordAlgebra>,
+    pub final_norm: CliffordLayerNorm,
+    pub head: LinearReal, // residual stream (16·d_model reals) → vocab logits
+    pub algebra: Arc<CliffordAlgebra>,
 }
 
 impl CliffordLLM {
@@ -451,7 +455,8 @@ impl CliffordLLM {
     /// Single forward pass — returns logits[seq_len][vocab_size]
     pub fn forward(&self, token_ids: &[usize]) -> Vec<Vec<f32>> {
         // 1. Embed tokens using your STA language encoder
-        let mut x: Vec<Vec<Multivector>> = token_ids.iter()
+        let mut x: Vec<Vec<Multivector>> = token_ids
+            .iter()
             .map(|&id| self.embedding[id].clone())
             .collect();
 
@@ -487,16 +492,24 @@ mod tests {
     #[test]
     fn geometric_product_e01_eq_neg_e10() {
         let alg = CliffordAlgebra::sta();
-        let mut e0 = Multivector::zero(); e0.c[1] = 1.0;  // e0 blade
-        let mut e1 = Multivector::zero(); e1.c[2] = 1.0;  // e1 blade
+        let mut e0 = Multivector::zero();
+        e0.c[1] = 1.0; // e0 blade
+        let mut e1 = Multivector::zero();
+        e1.c[2] = 1.0; // e1 blade
 
         let e01 = alg.geo_product(&e0, &e1);
         let e10 = alg.geo_product(&e1, &e0);
 
         // e01 should equal -e10
         for i in 0..16 {
-            assert!((e01.c[i] + e10.c[i]).abs() < 1e-6,
-                "e01[{}]={}, e10[{}]={}", i, e01.c[i], i, e10.c[i]);
+            assert!(
+                (e01.c[i] + e10.c[i]).abs() < 1e-6,
+                "e01[{}]={}, e10[{}]={}",
+                i,
+                e01.c[i],
+                i,
+                e10.c[i]
+            );
         }
     }
 
@@ -504,7 +517,7 @@ mod tests {
     fn forward_pass_shape() {
         let alg = Arc::new(CliffordAlgebra::sta());
         let d_model = 8;
-        let vocab   = 32;
+        let vocab = 32;
         let seq_len = 4;
 
         // Dummy embedding table

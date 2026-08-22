@@ -5,17 +5,19 @@ use std::collections::HashMap;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use crate::backprop::{cross_entropy, real_linear_backward, RealHeadGrad};
-use crate::optim::{AdamConfig, RealHeadOptimizer, cosine_lr_with_warmup};
+use crate::real_linear::LinearReal;
+use crate::real_ops::{
+    cosine_lr_with_warmup, cross_entropy, real_linear_backward, AdamConfig, RealHeadGrad,
+    RealHeadOptimizer,
+};
 use crate::standard_layer_norm::{self, StandardNormStats};
 use crate::vanilla_llm::{
     add_sinusoidal_pe, vanilla_forward_logits, VanillaAttention, VanillaBlock, VanillaFFN,
     VanillaLLM,
 };
-use crate::LinearReal;
 
 use super::data::TrainExample;
-use super::train_v2::TrainConfigV2;
+use crate::lm_config::TrainConfigV2;
 
 const LN_EPS: f32 = 1e-5;
 
@@ -189,7 +191,11 @@ fn softmax_row(scores: &[f32]) -> Vec<f32> {
     exps.iter().map(|&e| e / z).collect()
 }
 
-fn attention_forward_taped(attn: &VanillaAttention, x: &[Vec<f32>], causal: bool) -> (Vec<Vec<f32>>, VanillaAttnTape) {
+fn attention_forward_taped(
+    attn: &VanillaAttention,
+    x: &[Vec<f32>],
+    causal: bool,
+) -> (Vec<Vec<f32>>, VanillaAttnTape) {
     let seq = x.len();
     let d = attn.d_model;
     let scale = (attn.head_dim as f32).sqrt();
@@ -255,7 +261,8 @@ fn block_forward_taped(block: &VanillaBlock, x: &mut [Vec<f32>], causal: bool) -
     let mut norm1_stats = Vec::with_capacity(seq);
     let mut attn_in = Vec::with_capacity(seq);
     for row in x.iter() {
-        let (y, stats) = standard_layer_norm::forward(row, &block.norm1.gamma, &block.norm1.beta, LN_EPS);
+        let (y, stats) =
+            standard_layer_norm::forward(row, &block.norm1.gamma, &block.norm1.beta, LN_EPS);
         norm1_stats.push(stats);
         attn_in.push(y);
     }
@@ -271,7 +278,8 @@ fn block_forward_taped(block: &VanillaBlock, x: &mut [Vec<f32>], causal: bool) -
     let mut ffn_inputs = Vec::with_capacity(seq);
     let mut ffn_hidden_pre = Vec::with_capacity(seq);
     for t in 0..seq {
-        let (y, stats) = standard_layer_norm::forward(&x[t], &block.norm2.gamma, &block.norm2.beta, LN_EPS);
+        let (y, stats) =
+            standard_layer_norm::forward(&x[t], &block.norm2.gamma, &block.norm2.beta, LN_EPS);
         norm2_stats.push(stats);
         let (delta, hpre) = ffn_forward_taped(&block.ffn, &y);
         ffn_inputs.push(y);
@@ -307,8 +315,12 @@ fn model_forward_taped(model: &VanillaLLM, ids: &[usize], causal: bool) -> Vanil
     let mut head_input = Vec::with_capacity(x.len());
     let mut logits = Vec::with_capacity(x.len());
     for row in &x {
-        let (y, stats) =
-            standard_layer_norm::forward(row, &model.final_norm.gamma, &model.final_norm.beta, LN_EPS);
+        let (y, stats) = standard_layer_norm::forward(
+            row,
+            &model.final_norm.gamma,
+            &model.final_norm.beta,
+            LN_EPS,
+        );
         final_norm_stats.push(stats);
         head_input.push(y.clone());
         logits.push(model.head.forward_flat(&y));
@@ -353,7 +365,13 @@ fn attention_backward(
     attn: &VanillaAttention,
     tape: &VanillaAttnTape,
     grad_out: &[Vec<f32>],
-) -> (RealHeadGrad, RealHeadGrad, RealHeadGrad, RealHeadGrad, Vec<Vec<f32>>) {
+) -> (
+    RealHeadGrad,
+    RealHeadGrad,
+    RealHeadGrad,
+    RealHeadGrad,
+    Vec<Vec<f32>>,
+) {
     let seq = tape.input.len();
     let d = attn.d_model;
     let n_heads = attn.n_heads;
@@ -368,12 +386,7 @@ fn attention_backward(
     let mut grad_agg = vec![vec![0.0f32; d]; seq];
 
     for i in 0..seq {
-        let g = real_linear_backward(
-            &attn.w_o.weights,
-            &tape.agg[i],
-            &grad_out[i],
-            &mut grad_wo,
-        );
+        let g = real_linear_backward(&attn.w_o.weights, &tape.agg[i], &grad_out[i], &mut grad_wo);
         for j in 0..d {
             grad_agg[i][j] += g[j];
         }
@@ -406,7 +419,9 @@ fn attention_backward(
     let mut grad_score = vec![vec![vec![0.0f32; seq]; seq]; n_heads];
     for h in 0..n_heads {
         for i in 0..seq {
-            let dot: f32 = (0..seq).map(|l| tape.weights[h][i][l] * grad_w[h][i][l]).sum();
+            let dot: f32 = (0..seq)
+                .map(|l| tape.weights[h][i][l] * grad_w[h][i][l])
+                .sum();
             for j in 0..seq {
                 grad_score[h][i][j] = tape.weights[h][i][j] * (grad_w[h][i][j] - dot);
             }
@@ -435,24 +450,9 @@ fn attention_backward(
 
     let mut grad_input = vec![vec![0.0f32; d]; seq];
     for i in 0..seq {
-        let gq = real_linear_backward(
-            &attn.w_q.weights,
-            &tape.input[i],
-            &grad_q[i],
-            &mut grad_wq,
-        );
-        let gk = real_linear_backward(
-            &attn.w_k.weights,
-            &tape.input[i],
-            &grad_k[i],
-            &mut grad_wk,
-        );
-        let gv = real_linear_backward(
-            &attn.w_v.weights,
-            &tape.input[i],
-            &grad_v[i],
-            &mut grad_wv,
-        );
+        let gq = real_linear_backward(&attn.w_q.weights, &tape.input[i], &grad_q[i], &mut grad_wq);
+        let gk = real_linear_backward(&attn.w_k.weights, &tape.input[i], &grad_k[i], &mut grad_wk);
+        let gv = real_linear_backward(&attn.w_v.weights, &tape.input[i], &grad_v[i], &mut grad_wv);
         for j in 0..d {
             grad_input[i][j] += gq[j] + gk[j] + gv[j];
         }
@@ -475,23 +475,13 @@ fn ffn_backward(
 
     for i in 0..seq {
         let post: Vec<f32> = tape.hidden_pre[i].iter().map(|&v| v.max(0.0)).collect();
-        let g_h = real_linear_backward(
-            &ffn.fc2.weights,
-            &post,
-            &grad_out[i],
-            &mut grad_fc2,
-        );
+        let g_h = real_linear_backward(&ffn.fc2.weights, &post, &grad_out[i], &mut grad_fc2);
         let g_pre: Vec<f32> = g_h
             .iter()
             .zip(&tape.hidden_pre[i])
             .map(|(&g, &h)| if h > 0.0 { g } else { 0.0 })
             .collect();
-        let g_x = real_linear_backward(
-            &ffn.fc1.weights,
-            &tape.inputs[i],
-            &g_pre,
-            &mut grad_fc1,
-        );
+        let g_x = real_linear_backward(&ffn.fc1.weights, &tape.inputs[i], &g_pre, &mut grad_fc1);
         grad_in[i] = g_x;
     }
 
@@ -523,14 +513,10 @@ fn block_backward(
     let grad_ffn_out: Vec<Vec<f32>> = grad_out.to_vec();
     let mut grad_after_res1: Vec<Vec<f32>> = grad_out.to_vec();
 
-    let (grad_fc1, grad_fc2, grad_ffn_in) =
-        ffn_backward(&block.ffn, &tape.ffn, &grad_ffn_out);
+    let (grad_fc1, grad_fc2, grad_ffn_in) = ffn_backward(&block.ffn, &tape.ffn, &grad_ffn_out);
 
-    let (grad_n2_gamma, grad_n2_beta, grad_from_n2) = ln_param_grads_with_gamma(
-        &tape.norm2_stats,
-        &block.norm2.gamma,
-        &grad_ffn_in,
-    );
+    let (grad_n2_gamma, grad_n2_beta, grad_from_n2) =
+        ln_param_grads_with_gamma(&tape.norm2_stats, &block.norm2.gamma, &grad_ffn_in);
     for i in 0..seq {
         for j in 0..d {
             grad_after_res1[i][j] += grad_from_n2[i][j];
@@ -543,11 +529,8 @@ fn block_backward(
     let (grad_wq, grad_wk, grad_wv, grad_wo, grad_from_attn) =
         attention_backward(&block.attn, &tape.attn, &grad_attn_out);
 
-    let (grad_n1_gamma, grad_n1_beta, grad_from_n1) = ln_param_grads_with_gamma(
-        &tape.norm1_stats,
-        &block.norm1.gamma,
-        &grad_from_attn,
-    );
+    let (grad_n1_gamma, grad_n1_beta, grad_from_n1) =
+        ln_param_grads_with_gamma(&tape.norm1_stats, &block.norm1.gamma, &grad_from_attn);
     for i in 0..seq {
         for j in 0..d {
             grad_block_input[i][j] += grad_from_n1[i][j];
@@ -633,11 +616,14 @@ impl VanillaEmbeddingOptimizer {
 
     pub fn step(&mut self, embedding: &mut [Vec<f32>], grad: &VanillaEmbeddingGrad) {
         for (&token_id, token_grad) in &grad.grads {
-            let state = self.states.entry(token_id).or_insert_with(|| VanillaEmbedAdamState {
-                m: vec![0.0; self.d_model],
-                v: vec![0.0; self.d_model],
-                step: 0,
-            });
+            let state = self
+                .states
+                .entry(token_id)
+                .or_insert_with(|| VanillaEmbedAdamState {
+                    m: vec![0.0; self.d_model],
+                    v: vec![0.0; self.d_model],
+                    step: 0,
+                });
             state.step += 1;
             let t = state.step as f32;
             let bc1 = 1.0 - self.cfg.beta1.powf(t);
@@ -648,8 +634,7 @@ impl VanillaEmbeddingOptimizer {
                 state.v[d] = self.cfg.beta2 * state.v[d] + (1.0 - self.cfg.beta2) * g * g;
                 let m_hat = state.m[d] / bc1;
                 let v_hat = state.v[d] / bc2;
-                embedding[token_id][d] -=
-                    self.cfg.lr * m_hat / (v_hat.sqrt() + self.cfg.eps);
+                embedding[token_id][d] -= self.cfg.lr * m_hat / (v_hat.sqrt() + self.cfg.eps);
             }
         }
     }
@@ -1135,13 +1120,17 @@ fn apply_grads_vanilla(state: &mut VanillaModelState, grads: &VanillaStepGrads) 
     }
 
     if tied {
-        state.head_opt.step_bias_only(&mut state.model.head, &grads.head);
+        state
+            .head_opt
+            .step_bias_only(&mut state.model.head, &grads.head);
     } else {
         state.head_opt.step(&mut state.model.head, &grads.head);
     }
 
     if state.cfg.train_embeddings && !state.cfg.freeze_embeddings {
-        state.embed_opt.step(&mut state.model.embedding, &grads.embed);
+        state
+            .embed_opt
+            .step(&mut state.model.embedding, &grads.embed);
     }
 
     if tied {
@@ -1149,10 +1138,7 @@ fn apply_grads_vanilla(state: &mut VanillaModelState, grads: &VanillaStepGrads) 
     }
 }
 
-pub fn train_step_vanilla_accum(
-    state: &mut VanillaModelState,
-    examples: &[TrainExample],
-) -> f32 {
+pub fn train_step_vanilla_accum(state: &mut VanillaModelState, examples: &[TrainExample]) -> f32 {
     if examples.is_empty() {
         return 0.0;
     }

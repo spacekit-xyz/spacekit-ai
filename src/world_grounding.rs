@@ -58,7 +58,9 @@ impl GroundingExtractor {
                     continue;
                 }
                 let canon = n.id.clone();
-                lookup.entry(id_norm.clone()).or_insert_with(|| canon.clone());
+                lookup
+                    .entry(id_norm.clone())
+                    .or_insert_with(|| canon.clone());
                 for a in n.aliases {
                     let an = normalize_key(&a);
                     if !an.is_empty() {

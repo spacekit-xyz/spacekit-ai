@@ -10,24 +10,27 @@
 // For training use an outer loop that calls layer_backward to accumulate
 // GradLinear structs, then pass them to optim::adam_step.
 
+use crate::cayley_const::{CliffordAlgebraConst, CAYLEY_STA};
+use crate::{CliffordLinear, Multivector};
 use std::sync::Arc;
-use crate::{Multivector, CliffordLinear};
-use crate::cayley_const::{CAYLEY_STA, CliffordAlgebraConst};
+
+// Re-export real ops used by Clifford tape/train (canonical defs in real_ops).
+pub use crate::real_ops::{cross_entropy, real_linear_backward, RealHeadGrad};
 
 // ─── Gradient types ───────────────────────────────────────────────────────────
 
 /// Gradient of a single CliffordLinear layer.
 /// Mirrors the weight/bias structure — same dimensions, components are ∂L/∂param.
 pub struct GradLinear {
-    pub d_weights: Vec<Vec<Multivector>>,  // [out_dim][in_dim]
-    pub d_biases:  Vec<Multivector>,       // [out_dim]
+    pub d_weights: Vec<Vec<Multivector>>, // [out_dim][in_dim]
+    pub d_biases: Vec<Multivector>,       // [out_dim]
 }
 
 impl GradLinear {
     pub fn zeros(out_dim: usize, in_dim: usize) -> Self {
         Self {
             d_weights: vec![vec![Multivector::zero(); in_dim]; out_dim],
-            d_biases:  vec![Multivector::zero(); out_dim],
+            d_biases: vec![Multivector::zero(); out_dim],
         }
     }
 
@@ -72,10 +75,10 @@ pub fn geo_product_backward(
 
     for i in 0..16 {
         for j in 0..16 {
-            let cell  = CAYLEY_STA[i][j];
-            let sign  = cell.sign as f32;
-            let k     = cell.blade as usize;
-            let g_k   = grad_c.c[k];
+            let cell = CAYLEY_STA[i][j];
+            let sign = cell.sign as f32;
+            let k = cell.blade as usize;
+            let g_k = grad_c.c[k];
 
             // dL/dA[i] += B[j] * sign * dL/dC[k]
             grad_a[i] += b.c[j] * sign * g_k;
@@ -100,12 +103,12 @@ pub fn geo_product_backward(
 /// `inputs`   — the x slice passed during the forward call  (length in_dim)
 /// `grad_out` — dL/dOut, one multivector per output position (length out_dim)
 pub fn linear_backward(
-    weights:  &[Vec<Multivector>],  // [out_dim][in_dim]
-    inputs:   &[Multivector],       // [in_dim]
-    grad_out: &[Multivector],       // [out_dim]
+    weights: &[Vec<Multivector>], // [out_dim][in_dim]
+    inputs: &[Multivector],       // [in_dim]
+    grad_out: &[Multivector],     // [out_dim]
 ) -> (GradLinear, Vec<Multivector>) {
     let out_dim = weights.len();
-    let in_dim  = inputs.len();
+    let in_dim = inputs.len();
     let mut grad = GradLinear::zeros(out_dim, in_dim);
     let mut grad_x = vec![Multivector::zero(); in_dim];
 
@@ -114,11 +117,7 @@ pub fn linear_backward(
         grad.d_biases[d] = grad_out[d].clone();
 
         for i in 0..in_dim {
-            let (dw, dx) = geo_product_backward(
-                &weights[d][i],
-                &inputs[i],
-                &grad_out[d],
-            );
+            let (dw, dx) = geo_product_backward(&weights[d][i], &inputs[i], &grad_out[d]);
             // Accumulate weight gradient
             for k in 0..16 {
                 grad.d_weights[d][i].c[k] += dw.c[k];
@@ -136,26 +135,7 @@ pub fn linear_backward(
 // ─── Loss: cross-entropy over scalar logits ───────────────────────────────────
 
 /// Computes cross-entropy loss and the gradient of the loss w.r.t. logits.
-///
-/// `logits` — raw (unnormalised) scores, one per vocab token
-/// `target` — the correct token index
-///
-/// Returns (loss: f32, grad_logits: Vec<f32>)  where grad_logits[i] = ∂L/∂logit[i].
-pub fn cross_entropy(logits: &[f32], target: usize) -> (f32, Vec<f32>) {
-    // Numerically stable softmax
-    let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let exps: Vec<f32> = logits.iter().map(|&l| (l - max).exp()).collect();
-    let sum: f32 = exps.iter().sum();
-    let probs: Vec<f32> = exps.iter().map(|&e| e / sum).collect();
-
-    let loss = -probs[target].ln();
-
-    // Gradient of cross-entropy + softmax: dL/dlogit[i] = prob[i] - 1{i==target}
-    let mut grad = probs.clone();
-    grad[target] -= 1.0;
-
-    (loss, grad)
-}
+/// (Canonical definition in `real_ops`; re-exported above.)
 
 /// Scatter scalar logit gradients back into multivector grad_out for the output head.
 /// The head extracts grade-0 (scalar part), so only component 0 of each
@@ -163,110 +143,26 @@ pub fn cross_entropy(logits: &[f32], target: usize) -> (f32, Vec<f32>) {
 ///
 /// `grad_logits` — dL/d(logit[d]) for each output dim d
 pub fn scalar_head_backward(grad_logits: &[f32]) -> Vec<Multivector> {
-    grad_logits.iter().map(|&g| {
-        let mut mv = Multivector::zero();
-        mv.c[0] = g; // grade-0 only
-        mv
-    }).collect()
+    grad_logits
+        .iter()
+        .map(|&g| {
+            let mut mv = Multivector::zero();
+            mv.c[0] = g; // grade-0 only
+            mv
+        })
+        .collect()
 }
 
-// ─── Real output head backward ────────────────────────────────────────────────
+// ─── Real output head backward (Clifford flatten path) ────────────────────────
 
-/// Gradient of a [`crate::LinearReal`] output head.
-pub struct RealHeadGrad {
-    pub d_weights: Vec<Vec<f32>>, // [out_dim][in_features]
-    pub d_bias:    Vec<f32>,      // [out_dim]
-}
-
-impl RealHeadGrad {
-    pub fn zeros(out_dim: usize, in_features: usize) -> Self {
-        Self {
-            d_weights: vec![vec![0.0; in_features]; out_dim],
-            d_bias:    vec![0.0; out_dim],
-        }
-    }
-
-    pub fn accumulate(&mut self, other: &RealHeadGrad) {
-        for o in 0..self.d_weights.len() {
-            for j in 0..self.d_weights[o].len() {
-                self.d_weights[o][j] += other.d_weights[o][j];
-            }
-            self.d_bias[o] += other.d_bias[o];
-        }
-    }
-
-    pub fn scale(&mut self, s: f32) {
-        for row in &mut self.d_weights {
-            for w in row { *w *= s; }
-        }
-        for b in &mut self.d_bias { *b *= s; }
-    }
-
-    pub fn norm(&self) -> f32 {
-        let mut sq = 0.0f32;
-        for row in &self.d_weights {
-            for &w in row { sq += w * w; }
-        }
-        for &b in &self.d_bias { sq += b * b; }
-        sq.sqrt()
-    }
-
-    /// Clip the global gradient norm to `max_norm`.
-    pub fn clip_norm(&mut self, max_norm: f32) {
-        let n = self.norm();
-        if n > max_norm && n > 0.0 {
-            self.scale(max_norm / n);
-        }
-    }
-}
-
-/// Backward through a real linear layer for one position (no multivector edges).
-///
-/// Forward: `out[o] = bias[o] + Σ_j W[o][j] · input[j]`
-///
-/// Returns `grad_input` with length `input.len()`.
-pub fn real_linear_backward(
-    weights:  &[Vec<f32>],
-    input:    &[f32],
-    grad_out: &[f32],
-    grad:     &mut RealHeadGrad,
-) -> Vec<f32> {
-    let out_dim = weights.len();
-    let in_features = input.len();
-    let mut grad_input = vec![0.0f32; in_features];
-
-    for o in 0..out_dim {
-        let g = grad_out[o];
-        if g == 0.0 {
-            continue;
-        }
-        grad.d_bias[o] += g;
-        let w = &weights[o];
-        let dw = &mut grad.d_weights[o];
-        for j in 0..in_features {
-            dw[j] += g * input[j];
-            grad_input[j] += g * w[j];
-        }
-    }
-    grad_input
-}
-
-/// Backward through the real output head for one position.
+/// Backward through the real output head for one position (Clifford flatten path).
 ///
 /// Forward:  logit[o] = bias[o] + Σ_j W[o][j] · flat[j]      (flat = flatten(head_input))
-///
-/// Given `grad_logits` (dL/d logit), accumulates into `grad` and returns
-/// dL/d(head_input) reshaped as `d_model` multivectors.
-///
-/// `weights`     — head weights [out_dim][in_features]
-/// `head_input`  — the d_model multivectors fed to the head this position
-/// `grad_logits` — dL/d logit, length out_dim
-/// `grad`        — accumulator to add this position's weight/bias gradient into
 pub fn real_head_backward(
-    weights:     &[Vec<f32>],
-    head_input:  &[Multivector],
+    weights: &[Vec<f32>],
+    head_input: &[Multivector],
     grad_logits: &[f32],
-    grad:        &mut RealHeadGrad,
+    grad: &mut RealHeadGrad,
 ) -> Vec<Multivector> {
     let flat: Vec<f32> = head_input.iter().flat_map(|mv| mv.c).collect();
     let grad_flat = real_linear_backward(weights, &flat, grad_logits, grad);
@@ -281,12 +177,7 @@ pub fn real_head_backward(
 ///   dx = (1/σ) * (dL/dy * γ − mean(dL/dy * γ) − y_hat * mean(dL/dy * γ * y_hat))
 ///
 /// Returns grad_x as a flat Vec<f32> of length 16 × d_model.
-pub fn layer_norm_backward(
-    x_hat:    &[f32],
-    gamma:    &[f32],
-    grad_out: &[f32],
-    std:      f32,
-) -> Vec<f32> {
+pub fn layer_norm_backward(x_hat: &[f32], gamma: &[f32], grad_out: &[f32], std: f32) -> Vec<f32> {
     crate::clifford_layer_norm::backward_flat(x_hat, gamma, grad_out, std)
 }
 
@@ -304,25 +195,34 @@ mod tests {
         let mut b = Multivector::zero();
         let mut grad_c = Multivector::zero();
         // Arbitrary values
-        a.c[1] = 0.7;  a.c[6] = -0.3;
-        b.c[2] = 1.2;  b.c[5] = 0.4;
-        grad_c.c[0] = 1.0; grad_c.c[3] = -0.5;
+        a.c[1] = 0.7;
+        a.c[6] = -0.3;
+        b.c[2] = 1.2;
+        b.c[5] = 0.4;
+        grad_c.c[0] = 1.0;
+        grad_c.c[3] = -0.5;
 
         let alg = CliffordAlgebraConst::new();
         let (grad_a, _) = geo_product_backward(&a, &b, &grad_c);
 
         let eps = 1e-4;
         for i in 0..16 {
-            let mut a_plus  = a.clone(); a_plus.c[i]  += eps;
-            let mut a_minus = a.clone(); a_minus.c[i] -= eps;
-            let c_plus  = alg.geo_product(&a_plus,  &b);
+            let mut a_plus = a.clone();
+            a_plus.c[i] += eps;
+            let mut a_minus = a.clone();
+            a_minus.c[i] -= eps;
+            let c_plus = alg.geo_product(&a_plus, &b);
             let c_minus = alg.geo_product(&a_minus, &b);
             // Directional loss: L = Σ_k grad_c[k] * C[k]
-            let loss_plus:  f32 = (0..16).map(|k| grad_c.c[k] * c_plus.c[k]).sum();
+            let loss_plus: f32 = (0..16).map(|k| grad_c.c[k] * c_plus.c[k]).sum();
             let loss_minus: f32 = (0..16).map(|k| grad_c.c[k] * c_minus.c[k]).sum();
             let fd = (loss_plus - loss_minus) / (2.0 * eps);
-            assert!((grad_a.c[i] - fd).abs() < 1e-3,
-                "grad_A[{i}]: analytic={:.6}, fd={:.6}", grad_a.c[i], fd);
+            assert!(
+                (grad_a.c[i] - fd).abs() < 1e-3,
+                "grad_A[{i}]: analytic={:.6}, fd={:.6}",
+                grad_a.c[i],
+                fd
+            );
         }
     }
 
@@ -332,6 +232,9 @@ mod tests {
         let (_, grad) = cross_entropy(&logits, 1);
         // Softmax grad sums to 0 except for the +1 shift which we subtracted
         let sum: f32 = grad.iter().sum();
-        assert!(sum.abs() < 1e-6, "cross-entropy grad should sum to 0, got {sum}");
+        assert!(
+            sum.abs() < 1e-6,
+            "cross-entropy grad should sum to 0, got {sum}"
+        );
     }
 }

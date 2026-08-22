@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
-use crate::{CliffordBlock, CliffordLinear, LinearReal, FfnVariant};
+use crate::{CliffordBlock, CliffordLinear, FfnVariant, LinearReal};
 
 use super::data::Tokenizer;
 use super::train_v2::{ModelStateV2, TrainConfigV2};
@@ -111,15 +111,16 @@ fn apply_real_head(h: &mut LinearReal, d: &RealHeadDto) -> Result<(), String> {
 
 fn snap_block(block: &CliffordBlock) -> BlockDto {
     let (fc1, fc2, dense_fc1, dense_fc2) = match &block.ffn {
-        FfnVariant::Clifford(f) => (
-            snap_linear(&f.fc1),
-            snap_linear(&f.fc2),
-            None,
-            None,
-        ),
+        FfnVariant::Clifford(f) => (snap_linear(&f.fc1), snap_linear(&f.fc2), None, None),
         FfnVariant::Dense(f) => (
-            LinearDto { weights: vec![], bias: vec![] },
-            LinearDto { weights: vec![], bias: vec![] },
+            LinearDto {
+                weights: vec![],
+                bias: vec![],
+            },
+            LinearDto {
+                weights: vec![],
+                bias: vec![],
+            },
             Some(snap_real_head(&f.fc1)),
             Some(snap_real_head(&f.fc2)),
         ),
@@ -154,8 +155,14 @@ fn apply_block(block: &mut CliffordBlock, d: &BlockDto, dense_ffn: bool) -> Resu
     block.norm2.beta.clone_from(&d.norm2_beta);
 
     if dense_ffn {
-        let d1 = d.dense_fc1.as_ref().ok_or("dense_ffn checkpoint missing dense_fc1")?;
-        let d2 = d.dense_fc2.as_ref().ok_or("dense_ffn checkpoint missing dense_fc2")?;
+        let d1 = d
+            .dense_fc1
+            .as_ref()
+            .ok_or("dense_ffn checkpoint missing dense_fc1")?;
+        let d2 = d
+            .dense_fc2
+            .as_ref()
+            .ok_or("dense_ffn checkpoint missing dense_fc2")?;
         match &mut block.ffn {
             FfnVariant::Dense(f) => {
                 apply_real_head(&mut f.fc1, d1)?;
@@ -247,7 +254,11 @@ fn build_state_from_ckpt(ckpt: LmCheckpoint) -> Result<ModelStateV2, String> {
 }
 
 /// Write weights, config, optimizer step counter, and tokenizer vocabulary.
-pub fn save_lm_checkpoint(path: &Path, state: &ModelStateV2, tokenizer: &Tokenizer) -> Result<(), String> {
+pub fn save_lm_checkpoint(
+    path: &Path,
+    state: &ModelStateV2,
+    tokenizer: &Tokenizer,
+) -> Result<(), String> {
     if tokenizer.vocab_size() != state.cfg.vocab_size {
         return Err(format!(
             "tokenizer vocab {} != cfg.vocab_size {}",

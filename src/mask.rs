@@ -51,11 +51,16 @@ pub fn apply_causal_mask(scores: &mut Vec<Vec<f32>>) {
 
 /// Functional version: return a new masked score matrix without mutating.
 pub fn causal_masked(scores: &[Vec<f32>]) -> Vec<Vec<f32>> {
-    scores.iter().enumerate().map(|(i, row)| {
-        row.iter().enumerate().map(|(j, &s)| {
-            if j > i { f32::NEG_INFINITY } else { s }
-        }).collect()
-    }).collect()
+    scores
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            row.iter()
+                .enumerate()
+                .map(|(j, &s)| if j > i { f32::NEG_INFINITY } else { s })
+                .collect()
+        })
+        .collect()
 }
 
 // ─── Padding mask ─────────────────────────────────────────────────────────────
@@ -102,7 +107,8 @@ pub fn padding_mask_from_ids(token_ids: &[usize], pad_id: usize) -> Vec<bool> {
 /// Useful when the embedding table was built with a fixed `max_len` but the
 /// actual input is shorter.
 pub fn trim_scores(scores: Vec<Vec<f32>>, actual_len: usize) -> Vec<Vec<f32>> {
-    scores.into_iter()
+    scores
+        .into_iter()
         .take(actual_len)
         .map(|row| row.into_iter().take(actual_len).collect())
         .collect()
@@ -125,7 +131,7 @@ mod tests {
         }
         // Upper triangle should be masked
         for i in 0..4 {
-            for j in (i+1)..4 {
+            for j in (i + 1)..4 {
                 assert!(mask.is_masked(i, j), "({i},{j}) should be masked");
             }
         }

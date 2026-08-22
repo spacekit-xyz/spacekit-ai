@@ -6,10 +6,10 @@
 
 use std::path::{Path, PathBuf};
 
+use growformer::inference::world_grounding::load_grounding_graph_from_str;
 use growformer::inference::{
     inference_toml_loaded, set_inference_guardrails_jsonl_path, set_inference_toml_cli_paths,
 };
-use growformer::inference::world_grounding::load_grounding_graph_from_str;
 use serde::Deserialize;
 
 /// Minimal `*.gf.toml` parse (mirrors `growformer::project_gf` without the CLI feature gate).
@@ -162,18 +162,19 @@ impl BrainInferConfig {
 
         let topic_graph = resolve_knowledge_graph_path(project.as_deref());
         let pet_overlays: Vec<PathBuf> = topic_graph_overlay.into_iter().collect();
-        let topic_graph_loaded = match growformer::growformer_lang::try_init_topic_graph_bundle_with_extras(
-            &topic_graph.to_string_lossy(),
-            &pet_overlays,
-        ) {
-            Ok(()) => growformer::growformer_lang::topic_graph_loaded(),
-            Err(e) => {
-                if self.verbose {
-                    eprintln!("Warning: failed to load topic graph: {e}");
+        let topic_graph_loaded =
+            match growformer::growformer_lang::try_init_topic_graph_bundle_with_extras(
+                &topic_graph.to_string_lossy(),
+                &pet_overlays,
+            ) {
+                Ok(()) => growformer::growformer_lang::topic_graph_loaded(),
+                Err(e) => {
+                    if self.verbose {
+                        eprintln!("Warning: failed to load topic graph: {e}");
+                    }
+                    false
                 }
-                false
-            }
-        };
+            };
 
         if let Some(ref gpath) = grounding_toml {
             if gpath.is_file() {
@@ -186,7 +187,10 @@ impl BrainInferConfig {
                                 e
                             );
                         } else if self.verbose {
-                            println!("Grounding graph: loaded runtime overlay from {}", gpath.display());
+                            println!(
+                                "Grounding graph: loaded runtime overlay from {}",
+                                gpath.display()
+                            );
                         }
                     }
                     Err(e) => eprintln!(

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::domain_data::load_jsonl_dir;
-use crate::optim::{clip_grad_norm, AdamConfig, LayerOptimizer, MvAdamState, adam_step};
+use crate::optim::{adam_step, clip_grad_norm, AdamConfig, LayerOptimizer, MvAdamState};
 use crate::pooled_classifier::PooledClassifier;
 use crate::world_grounding::{GroundingExtractor, GROUND_FEATURE_DIM};
 use crate::{CliffordAlgebra, Multivector};
@@ -63,14 +63,7 @@ fn label_index(labels: &[String], label: &str) -> Option<usize> {
     labels.iter().position(|s| s == label)
 }
 
-fn adam_f32(
-    param: f32,
-    grad: f32,
-    m: &mut f32,
-    v: &mut f32,
-    step: u64,
-    cfg: &AdamConfig,
-) -> f32 {
+fn adam_f32(param: f32, grad: f32, m: &mut f32, v: &mut f32, step: u64, cfg: &AdamConfig) -> f32 {
     let t = step as f32;
     let b1 = cfg.beta1;
     let b2 = cfg.beta2;
@@ -96,16 +89,14 @@ pub fn train_classifier(cfg: TrainConfig) -> Result<(), String> {
     } else {
         Some(GroundingExtractor::from_toml_files(&cfg.grounding_paths)?)
     };
-    let ground_dim = grounding.as_ref().map(|x| x.dim).unwrap_or(GROUND_FEATURE_DIM);
+    let ground_dim = grounding
+        .as_ref()
+        .map(|x| x.dim)
+        .unwrap_or(GROUND_FEATURE_DIM);
     let zero_g = GroundingExtractor::zero_features(ground_dim);
 
-    let mut model = PooledClassifier::new(
-        alg.clone(),
-        BYTE_VOCAB,
-        cfg.d_model,
-        n_classes,
-        ground_dim,
-    );
+    let mut model =
+        PooledClassifier::new(alg.clone(), BYTE_VOCAB, cfg.d_model, n_classes, ground_dim);
 
     let adam_cfg = AdamConfig {
         lr: cfg.lr,
@@ -176,11 +167,7 @@ pub fn train_classifier(cfg: TrainConfig) -> Result<(), String> {
         }
 
         let n = examples.len().max(1) as f32;
-        println!(
-            "epoch {:>4}  loss {:.4}",
-            ep + 1,
-            loss_acc / n
-        );
+        println!("epoch {:>4}  loss {:.4}", ep + 1, loss_acc / n);
     }
 
     save_checkpoint(
@@ -213,8 +200,7 @@ pub fn train_classifier(cfg: TrainConfig) -> Result<(), String> {
 
 fn save_checkpoint(path: &Path, ckpt: &Checkpoint) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create_dir_all: {}", e))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("create_dir_all: {}", e))?;
     }
     let json = serde_json::to_string_pretty(ckpt).map_err(|e| e.to_string())?;
     let mut f = File::create(path).map_err(|e| e.to_string())?;
@@ -235,13 +221,8 @@ fn load_checkpoint_bytes(raw: &str) -> Result<(PooledClassifier, Vec<String>), S
     let labels = ckpt.labels.clone();
     let alg = Arc::new(CliffordAlgebra::sta());
     let n_classes = ckpt.labels.len();
-    let mut model = PooledClassifier::new(
-        alg,
-        BYTE_VOCAB,
-        ckpt.d_model,
-        n_classes,
-        ckpt.ground_dim,
-    );
+    let mut model =
+        PooledClassifier::new(alg, BYTE_VOCAB, ckpt.d_model, n_classes, ckpt.ground_dim);
 
     for (i, row) in ckpt.embedding.into_iter().enumerate() {
         for (d, arr) in row.into_iter().enumerate() {
@@ -317,10 +298,14 @@ mod tests {
             ("good vibes", 0usize),
             ("terrible bad", 1usize),
         ];
-        let adam_cfg = AdamConfig { lr: 0.05, ..Default::default() };
+        let adam_cfg = AdamConfig {
+            lr: 0.05,
+            ..Default::default()
+        };
         let mut head_opt = LayerOptimizer::new(2, 8, adam_cfg.clone());
         let mut emb_state = vec![vec![MvAdamState::zero(); 8]; BYTE_VOCAB];
-        let mut gw_state: Vec<Vec<(f32, f32, u64)>> = vec![vec![(0.0, 0.0, 0); GROUND_FEATURE_DIM]; 8];
+        let mut gw_state: Vec<Vec<(f32, f32, u64)>> =
+            vec![vec![(0.0, 0.0, 0); GROUND_FEATURE_DIM]; 8];
         let mut gb_state: Vec<(f32, f32, u64)> = vec![(0.0, 0.0, 0); 8];
 
         for _ in 0..400 {

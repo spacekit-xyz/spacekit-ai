@@ -10,8 +10,8 @@ use crate::Multivector;
 #[derive(Clone, Debug)]
 pub struct FlatNormStats {
     pub x_hat: Vec<f32>,
-    pub mean:  f32,
-    pub std:   f32,
+    pub mean: f32,
+    pub std: f32,
 }
 
 #[inline]
@@ -26,10 +26,10 @@ fn sum_weights(n: usize) -> f32 {
 
 /// Forward: metric-weighted mean/var over flattened multivectors, then γ/β.
 pub fn forward_flat(
-    flat:  &[f32],
+    flat: &[f32],
     gamma: &[f32],
-    beta:  &[f32],
-    eps:   f32,
+    beta: &[f32],
+    eps: f32,
 ) -> (Vec<f32>, FlatNormStats) {
     debug_assert_eq!(flat.len(), gamma.len());
     debug_assert_eq!(flat.len(), beta.len());
@@ -67,21 +67,14 @@ pub fn forward_flat(
         .map(|(i, &x)| x * gamma[i] + beta[i])
         .collect();
 
-    (
-        output,
-        FlatNormStats {
-            x_hat,
-            mean,
-            std,
-        },
-    )
+    (output, FlatNormStats { x_hat, mean, std })
 }
 
 pub fn forward_multivectors(
     ln_gamma: &[f32],
-    ln_beta:  &[f32],
-    ln_eps:   f32,
-    x:        &[Multivector],
+    ln_beta: &[f32],
+    ln_eps: f32,
+    x: &[Multivector],
 ) -> (Vec<Multivector>, FlatNormStats) {
     let flat: Vec<f32> = x.iter().flat_map(|mv| mv.c).collect();
     let (normalised, stats) = forward_flat(&flat, ln_gamma, ln_beta, ln_eps);
@@ -97,16 +90,15 @@ pub fn forward_multivectors(
 }
 
 /// Backward through metric-weighted layer norm.
-pub fn backward_flat(
-    x_hat:    &[f32],
-    gamma:    &[f32],
-    grad_out: &[f32],
-    std:      f32,
-) -> Vec<f32> {
+pub fn backward_flat(x_hat: &[f32], gamma: &[f32], grad_out: &[f32], std: f32) -> Vec<f32> {
     let n = x_hat.len();
     let sum_w = sum_weights(n);
 
-    let dl_dg: Vec<f32> = grad_out.iter().zip(gamma).map(|(&g, &gam)| g * gam).collect();
+    let dl_dg: Vec<f32> = grad_out
+        .iter()
+        .zip(gamma)
+        .map(|(&g, &gam)| g * gam)
+        .collect();
 
     let mean_dl_dg: f32 = if sum_w > 0.0 {
         dl_dg

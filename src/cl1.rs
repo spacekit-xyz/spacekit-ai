@@ -85,13 +85,9 @@ fn eval_window(spec: &FrozenSpecialist, window: &[usize]) -> WindowStat {
         };
     }
     let logits_rows = match spec {
-        FrozenSpecialist::Clifford(st) => model_forward_logits(
-            &st.alg,
-            &st.model,
-            window,
-            true,
-            st.cfg.dot_attention,
-        ),
+        FrozenSpecialist::Clifford(st) => {
+            model_forward_logits(&st.alg, &st.model, window, true, st.cfg.dot_attention)
+        }
         FrozenSpecialist::Vanilla(st) => vanilla_forward_logits(&st.model, window, true),
     };
     for p in 0..window.len().saturating_sub(1) {

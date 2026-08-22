@@ -1,115 +1,114 @@
-// lib.rs — Clifford LLM crate root
-//
-// Re-exports all public types and functions from each module so users can
-// write `use clifford_llm::*` and get everything.
-//
-// Module layout:
-//   blade        — blade index constants, grade utilities, display
-//   cayley_const — compile-time Cayley table and CliffordAlgebraConst
-//   backprop     — gradient types and backward pass
-//   optim        — Adam optimiser and LR schedule
-//   positional   — rotor-based positional encoding
-//   mask         — causal and padding masks
-//   kv_cache     — KV cache for autoregressive inference
+//! Growformer LLM — vanilla-first language model core (Bet B).
+//!
+//! **Product default:** param-matched vanilla transformer.
+//! Clifford Cl(1,3) LM is behind `feature = "clifford-lm"` (on by default for
+//! historical checkpoints; omit for a slim product build once callers are
+//! migrated).
+//!
+//! **Brain memory** (`feature = "brain-memory"`) is independent of LM algebra.
 
-// ─── Core types (from clifford_llm.rs) ───────────────────────────────────────
-//
-// Include the original clifford_llm.rs as a module.  If you have split it into
-// a separate algebra.rs + layers.rs, adjust these lines accordingly.
+// ─── Vanilla-first core (always on) ───────────────────────────────────────────
 
-mod clifford_llm;
-pub mod ffn;
-pub mod attention_score;
-pub mod cl1;
-pub mod clifford_layer_norm;
-pub mod lm_cone_router;
+pub mod bpe;
+pub mod lm_config;
+pub mod param_budget;
+pub mod real_linear;
+pub mod real_ops;
+pub mod standard_layer_norm;
+pub mod tinystories;
+pub mod vanilla_llm;
+
+pub use lm_config::TrainConfigV2;
+pub use real_linear::LinearReal;
+pub use real_ops::{
+    cosine_lr_with_warmup, cross_entropy, real_linear_backward, AdamConfig, RealHeadGrad,
+    RealHeadOptimizer,
+};
+pub use vanilla_llm::{
+    add_sinusoidal_pe, vanilla_forward_logits, VanillaAttention, VanillaBlock, VanillaFFN,
+    VanillaLLM,
+};
+
+pub mod v2;
 
 #[cfg(feature = "brain-memory")]
 pub mod brain_infer_config;
 #[cfg(feature = "brain-memory")]
 pub mod brain_memory;
 
-pub mod domain_data;
-pub mod pooled_classifier;
-pub mod train;
-pub mod world_grounding;
+// ─── Clifford research stack (`clifford-lm`) ──────────────────────────────────
 
-pub mod bpe;
-pub mod param_budget;
-pub mod standard_layer_norm;
-pub mod vanilla_llm;
-pub mod tinystories;
-
-/// Taped forward, full backward through Clifford blocks, LM training (`train_v2`), sampling.
-pub mod v2;
-pub use clifford_llm::{
-    // Core algebra
-    Multivector,
-    CliffordAlgebra,
-    CayleyEntry,
-    // Layers
-    CliffordLinear,
-    CliffordLayerNorm,
-    CliffordAttention,
-    CliffordFFN,
-    CliffordBlock,
-    CliffordLLM,
-    LinearReal,
-};
-pub use attention_score::{attention_pair_score, AttentionScoreMode};
-pub use ffn::{
-    DenseFFN, FfnVariant, clifford_ffn_scalars, dense_ffn_scalars,
-    flatten_mvs, matched_dense_ffn_hidden, unflatten_mvs,
-};
-
-// ─── Modules ──────────────────────────────────────────────────────────────────
-
-pub mod blade;
-pub mod cayley_const;
+#[cfg(feature = "clifford-lm")]
+pub mod attention_score;
+#[cfg(feature = "clifford-lm")]
 pub mod backprop;
-pub mod optim;
-pub mod positional;
-pub mod mask;
+#[cfg(feature = "clifford-lm")]
+pub mod blade;
+#[cfg(feature = "clifford-lm")]
+pub mod cayley_const;
+#[cfg(feature = "clifford-lm")]
+pub mod cl1;
+#[cfg(feature = "clifford-lm")]
+pub mod clifford_layer_norm;
+#[cfg(feature = "clifford-lm")]
+mod clifford_llm;
+#[cfg(feature = "clifford-lm")]
+pub mod ffn;
+#[cfg(feature = "clifford-lm")]
 pub mod kv_cache;
+#[cfg(feature = "clifford-lm")]
+pub mod lm_cone_router;
+#[cfg(feature = "clifford-lm")]
+pub mod mask;
+#[cfg(feature = "clifford-lm")]
+pub mod optim;
+#[cfg(feature = "clifford-lm")]
+pub mod positional;
 
-// ─── Convenience re-exports ───────────────────────────────────────────────────
-
-// blade
+#[cfg(feature = "clifford-lm")]
+pub use attention_score::{attention_pair_score, AttentionScoreMode};
+#[cfg(feature = "clifford-lm")]
 pub use blade::{
-    SCALAR, E0, E1, E01, E2, E02, E12, E012, E3, E03, E13, E013, E23, E023, E123, E0123,
-    BLADE_NAMES, BLADE_GRADES, REVERSE_SIGNS, BLADE_METRIC_WEIGHT,
-    grade_of, blades_of_grade, project_grade, scalar_part, vector_part, bivector_part,
-    vector, bivector, display,
+    bivector, bivector_part, blades_of_grade, display, grade_of, project_grade, scalar_part,
+    vector, vector_part, BLADE_GRADES, BLADE_METRIC_WEIGHT, BLADE_NAMES, E0, E01, E012, E0123,
+    E013, E02, E023, E03, E1, E12, E123, E13, E2, E23, E3, REVERSE_SIGNS, SCALAR,
 };
-
-// cayley_const
-pub use cayley_const::{CayleyCell, CAYLEY_STA, CliffordAlgebraConst};
-
-// backprop
-pub use backprop::{
-    GradLinear, RealHeadGrad,
-    geo_product_backward, linear_backward,
-    cross_entropy, scalar_head_backward, real_linear_backward, real_head_backward, layer_norm_backward,
+#[cfg(feature = "clifford-lm")]
+pub use cayley_const::{CayleyCell, CliffordAlgebraConst, CAYLEY_STA};
+#[cfg(feature = "clifford-lm")]
+pub use clifford_llm::{
+    CayleyEntry, CliffordAlgebra, CliffordAttention, CliffordBlock, CliffordFFN, CliffordLLM,
+    CliffordLayerNorm, CliffordLinear, Multivector,
 };
-
-// optim
-pub use optim::{
-    AdamConfig, MvAdamState, LayerOptimizer, RealHeadOptimizer,
-    adam_step, cosine_lr_with_warmup, grad_norm, clip_grad_norm,
+#[cfg(feature = "clifford-lm")]
+pub use ffn::{
+    clifford_ffn_scalars, dense_ffn_scalars, flatten_mvs, matched_dense_ffn_hidden, unflatten_mvs,
+    DenseFFN, FfnVariant,
 };
-
-// positional
-pub use positional::{
-    PlaneKind, BivectorPlane, ALL_PLANES,
-    make_rotor, apply_rotor, RotorPositionalEncoding,
-};
-
-// mask
+#[cfg(feature = "clifford-lm")]
+pub use kv_cache::{cached_attention_step, KVCache, LayerKVCache};
+#[cfg(feature = "clifford-lm")]
 pub use mask::{
-    CausalMask,
-    apply_causal_mask, causal_masked, apply_padding_mask,
-    mask_scores, padding_mask_from_ids, trim_scores,
+    apply_causal_mask, apply_padding_mask, causal_masked, mask_scores, padding_mask_from_ids,
+    trim_scores, CausalMask,
+};
+#[cfg(feature = "clifford-lm")]
+pub use positional::{
+    apply_rotor, make_rotor, BivectorPlane, PlaneKind, RotorPositionalEncoding, ALL_PLANES,
 };
 
-// kv_cache
-pub use kv_cache::{LayerKVCache, KVCache, cached_attention_step};
+pub mod chat;
+pub mod domain_data;
+
+pub use chat::{
+    default_chatbot_system, role_marker_cut, ChatMessage, ChatRole, ChatTranscript, MARK_ASSISTANT,
+    MARK_SYSTEM, MARK_USER,
+};
+
+// Legacy classifier (Clifford-dependent).
+#[cfg(feature = "clifford-lm")]
+pub mod pooled_classifier;
+#[cfg(feature = "clifford-lm")]
+pub mod train;
+#[cfg(feature = "clifford-lm")]
+pub mod world_grounding;

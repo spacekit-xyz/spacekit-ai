@@ -5,10 +5,10 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
+use crate::lm_config::TrainConfigV2;
+use crate::real_linear::LinearReal;
 use crate::vanilla_llm::{VanillaBlock, VanillaLLM};
-use crate::LinearReal;
 
-use super::train_v2::TrainConfigV2;
 use super::vanilla_train::VanillaModelState;
 
 const VANILLA_CHECKPOINT_SCHEMA: u32 = 1;
@@ -117,7 +117,10 @@ pub fn load_vanilla_state(path: &Path) -> Result<VanillaModelState, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let ckpt: VanillaCheckpoint = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
     if ckpt.schema != VANILLA_CHECKPOINT_SCHEMA {
-        return Err(format!("unsupported vanilla checkpoint schema {}", ckpt.schema));
+        return Err(format!(
+            "unsupported vanilla checkpoint schema {}",
+            ckpt.schema
+        ));
     }
     if !ckpt.cfg.vanilla {
         return Err("checkpoint cfg.vanilla is false — not a row-2 vanilla checkpoint".into());

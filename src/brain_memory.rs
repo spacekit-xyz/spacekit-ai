@@ -75,7 +75,6 @@ fn raw_candidate_usable(
     false
 }
 
-
 /// Compact oracle-free features derived from a brain query (for routers / diagnostics).
 pub const BRAIN_FEATURE_DIM: usize = 8;
 
@@ -316,6 +315,9 @@ mod tests {
         };
         assert_eq!(brain_router_features(&q).len(), BRAIN_FEATURE_DIM);
         assert!(format_lm_memory_prefix(&q).contains("hello"));
-        assert!(format_lm_memory_prefix_with_source(&q, MemorySource::RawLattice).contains("raw_lattice"));
+        assert!(
+            format_lm_memory_prefix_with_source(&q, MemorySource::RawLattice)
+                .contains("raw_lattice")
+        );
     }
 }

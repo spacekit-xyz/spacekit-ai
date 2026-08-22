@@ -5,8 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::Multivector;
 use crate::cayley_const::CliffordAlgebraConst;
+use crate::Multivector;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AttentionScoreMode {
@@ -51,8 +51,8 @@ pub fn attention_pair_score(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Multivector;
     use crate::cayley_const::CliffordAlgebraConst;
+    use crate::Multivector;
 
     #[test]
     fn inner_product_mode_calls_algebra_inner_product() {

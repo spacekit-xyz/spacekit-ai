@@ -11,11 +11,13 @@
 // Returns those gradients plus dL/d(block input) so the gradient can keep
 // flowing to the layer below (next block, positional encoding, or embedding).
 
-use crate::{Multivector, CliffordBlock};
-use crate::backprop::{GradLinear, RealHeadGrad, linear_backward, real_linear_backward, layer_norm_backward};
-use crate::ffn::{flatten_mvs, unflatten_mvs, FfnVariant};
 use super::attention_backward::{attention_backward, AttentionGrads};
 use super::tape::{BlockTape, FfnHidden};
+use crate::backprop::{
+    layer_norm_backward, linear_backward, real_linear_backward, GradLinear, RealHeadGrad,
+};
+use crate::ffn::{flatten_mvs, unflatten_mvs, FfnVariant};
+use crate::{CliffordBlock, Multivector};
 
 /// FFN parameter gradients (Clifford geo-linear or dense real-linear).
 pub enum FfnGrad {
@@ -26,8 +28,14 @@ pub enum FfnGrad {
 impl FfnGrad {
     pub fn scale(&mut self, s: f32) {
         match self {
-            Self::Clifford(g1, g2) => { g1.scale(s); g2.scale(s); }
-            Self::Dense(g1, g2) => { g1.scale(s); g2.scale(s); }
+            Self::Clifford(g1, g2) => {
+                g1.scale(s);
+                g2.scale(s);
+            }
+            Self::Dense(g1, g2) => {
+                g1.scale(s);
+                g2.scale(s);
+            }
         }
     }
 
@@ -48,22 +56,22 @@ impl FfnGrad {
 /// Full gradient bundle for a single transformer block.
 pub struct BlockGrads {
     pub norm1_gamma: Vec<f32>,
-    pub norm1_beta:  Vec<f32>,
-    pub attn:        AttentionGrads,
+    pub norm1_beta: Vec<f32>,
+    pub attn: AttentionGrads,
     pub norm2_gamma: Vec<f32>,
-    pub norm2_beta:  Vec<f32>,
-    pub ffn:         FfnGrad,
+    pub norm2_beta: Vec<f32>,
+    pub ffn: FfnGrad,
     /// dL/d(block input) — flows to the layer below.   [seq][d_model]
-    pub grad_input:  Vec<Vec<Multivector>>,
+    pub grad_input: Vec<Vec<Multivector>>,
 }
 
 /// Backward through one transformer block.
 pub fn block_backward(
-    block:    &CliffordBlock,
-    tape:     &BlockTape,
+    block: &CliffordBlock,
+    tape: &BlockTape,
     grad_out: &[Vec<Multivector>],
 ) -> BlockGrads {
-    let seq     = tape.block_input.len();
+    let seq = tape.block_input.len();
     let d_model = tape.block_input[0].len();
 
     // ── 1. Residual 2 split ───────────────────────────────────────────────────
@@ -74,13 +82,12 @@ pub fn block_backward(
     let (ffn_grad, grad_ffn_in) = ffn_backward(&block.ffn, &tape.ffn, &grad_ffn_out);
 
     // ── 3. Norm 2 backward ────────────────────────────────────────────────────
-    let (grad_n2_gamma, grad_n2_beta, grad_after_res1_from_norm) =
-        layer_norm_backward_with_params(
-            &tape.norm2_stats,
-            &block.norm2.gamma,
-            &grad_ffn_in,
-            d_model,
-        );
+    let (grad_n2_gamma, grad_n2_beta, grad_after_res1_from_norm) = layer_norm_backward_with_params(
+        &tape.norm2_stats,
+        &block.norm2.gamma,
+        &grad_ffn_in,
+        d_model,
+    );
 
     for i in 0..seq {
         for d in 0..d_model {
@@ -98,13 +105,12 @@ pub fn block_backward(
     let attn_grads = attention_backward(&block.attn, &tape.attn, &grad_attn_out);
 
     // ── 6. Norm 1 backward ────────────────────────────────────────────────────
-    let (grad_n1_gamma, grad_n1_beta, grad_block_input_from_norm) =
-        layer_norm_backward_with_params(
-            &tape.norm1_stats,
-            &block.norm1.gamma,
-            &attn_grads.grad_input,
-            d_model,
-        );
+    let (grad_n1_gamma, grad_n1_beta, grad_block_input_from_norm) = layer_norm_backward_with_params(
+        &tape.norm1_stats,
+        &block.norm1.gamma,
+        &attn_grads.grad_input,
+        d_model,
+    );
 
     for i in 0..seq {
         for d in 0..d_model {
@@ -116,34 +122,36 @@ pub fn block_backward(
 
     BlockGrads {
         norm1_gamma: grad_n1_gamma,
-        norm1_beta:  grad_n1_beta,
-        attn:        attn_grads,
+        norm1_beta: grad_n1_beta,
+        attn: attn_grads,
         norm2_gamma: grad_n2_gamma,
-        norm2_beta:  grad_n2_beta,
-        ffn:         ffn_grad,
-        grad_input:  grad_block_input,
+        norm2_beta: grad_n2_beta,
+        ffn: ffn_grad,
+        grad_input: grad_block_input,
     }
 }
 
 fn ffn_backward(
-    ffn:        &FfnVariant,
-    tape:       &super::tape::FfnTape,
-    grad_out:   &[Vec<Multivector>],
+    ffn: &FfnVariant,
+    tape: &super::tape::FfnTape,
+    grad_out: &[Vec<Multivector>],
 ) -> (FfnGrad, Vec<Vec<Multivector>>) {
     let seq = grad_out.len();
     match (ffn, &tape.hidden) {
-        (FfnVariant::Clifford(f), FfnHidden::Clifford { hidden_pre, hidden_post }) => {
+        (
+            FfnVariant::Clifford(f),
+            FfnHidden::Clifford {
+                hidden_pre,
+                hidden_post,
+            },
+        ) => {
             let d_ff = f.fc2.in_dim;
             let d_model = f.fc1.in_dim;
             let mut grad_fc2 = GradLinear::zeros(d_model, d_ff);
             let mut grad_h_post = vec![vec![Multivector::zero(); d_ff]; seq];
 
             for i in 0..seq {
-                let (g_fc2, g_h) = linear_backward(
-                    &f.fc2.weights,
-                    &hidden_post[i],
-                    &grad_out[i],
-                );
+                let (g_fc2, g_h) = linear_backward(&f.fc2.weights, &hidden_post[i], &grad_out[i]);
                 grad_fc2.accumulate(&g_fc2);
                 for d in 0..d_ff {
                     for k in 0..16 {
@@ -168,11 +176,7 @@ fn ffn_backward(
             let mut grad_fc1 = GradLinear::zeros(d_ff, d_model);
             let mut grad_ffn_in = vec![vec![Multivector::zero(); d_model]; seq];
             for i in 0..seq {
-                let (g_fc1, g_x) = linear_backward(
-                    &f.fc1.weights,
-                    &tape.input[i],
-                    &grad_h_pre[i],
-                );
+                let (g_fc1, g_x) = linear_backward(&f.fc1.weights, &tape.input[i], &grad_h_pre[i]);
                 grad_fc1.accumulate(&g_fc1);
                 for d in 0..d_model {
                     for k in 0..16 {
@@ -190,23 +194,14 @@ fn ffn_backward(
             for i in 0..seq {
                 let g_out_flat = flatten_mvs(&grad_out[i]);
                 let post: Vec<f32> = pre[i].iter().map(|v| v.max(0.0)).collect();
-                let g_h = real_linear_backward(
-                    &f.fc2.weights,
-                    &post,
-                    &g_out_flat,
-                    &mut grad_fc2,
-                );
+                let g_h = real_linear_backward(&f.fc2.weights, &post, &g_out_flat, &mut grad_fc2);
                 let g_pre: Vec<f32> = g_h
                     .iter()
                     .zip(pre[i].iter())
                     .map(|(g, p)| if *p > 0.0 { *g } else { 0.0 })
                     .collect();
-                let g_in_flat = real_linear_backward(
-                    &f.fc1.weights,
-                    &input_flat[i],
-                    &g_pre,
-                    &mut grad_fc1,
-                );
+                let g_in_flat =
+                    real_linear_backward(&f.fc1.weights, &input_flat[i], &g_pre, &mut grad_fc1);
                 grad_ffn_in.push(unflatten_mvs(&g_in_flat, f.d_model));
             }
             (FfnGrad::Dense(grad_fc1, grad_fc2), grad_ffn_in)
@@ -216,16 +211,16 @@ fn ffn_backward(
 }
 
 fn layer_norm_backward_with_params(
-    stats:    &[super::tape::LayerNormStats],
-    gamma:    &[f32],
+    stats: &[super::tape::LayerNormStats],
+    gamma: &[f32],
     grad_out: &[Vec<Multivector>],
-    d_model:  usize,
+    d_model: usize,
 ) -> (Vec<f32>, Vec<f32>, Vec<Vec<Multivector>>) {
-    let seq    = stats.len();
+    let seq = stats.len();
     let n_comp = d_model * 16;
 
     let mut grad_gamma = vec![0.0f32; n_comp];
-    let mut grad_beta  = vec![0.0f32; n_comp];
+    let mut grad_beta = vec![0.0f32; n_comp];
     let mut grad_x = vec![vec![Multivector::zero(); d_model]; seq];
 
     for i in 0..seq {
@@ -233,15 +228,10 @@ fn layer_norm_backward_with_params(
 
         for k in 0..n_comp {
             grad_gamma[k] += g_flat[k] * stats[i].x_hat[k];
-            grad_beta[k]  += g_flat[k];
+            grad_beta[k] += g_flat[k];
         }
 
-        let g_x_flat = layer_norm_backward(
-            &stats[i].x_hat,
-            gamma,
-            &g_flat,
-            stats[i].std,
-        );
+        let g_x_flat = layer_norm_backward(&stats[i].x_hat, gamma, &g_flat, stats[i].std);
 
         for d in 0..d_model {
             for k in 0..16 {
@@ -256,30 +246,36 @@ fn layer_norm_backward_with_params(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use crate::{
-        CliffordAlgebra, CliffordAttention, CliffordLayerNorm,
-    };
     use crate::cayley_const::CliffordAlgebraConst;
     use crate::ffn::FfnVariant;
     use crate::v2::tape::block_forward_taped;
+    use crate::{CliffordAlgebra, CliffordAttention, CliffordLayerNorm};
+    use std::sync::Arc;
 
     fn dummy_loss(out: &[Vec<Multivector>]) -> f32 {
         out.iter().flatten().flat_map(|mv| mv.c).sum()
     }
 
     fn dummy_grad_out(seq: usize, d_model: usize) -> Vec<Vec<Multivector>> {
-        (0..seq).map(|_| (0..d_model).map(|_| {
-            let mut mv = Multivector::zero();
-            for k in 0..16 { mv.c[k] = 1.0; }
-            mv
-        }).collect()).collect()
+        (0..seq)
+            .map(|_| {
+                (0..d_model)
+                    .map(|_| {
+                        let mut mv = Multivector::zero();
+                        for k in 0..16 {
+                            mv.c[k] = 1.0;
+                        }
+                        mv
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     fn build_block(d_model: usize, d_ff: usize, alg_arc: Arc<CliffordAlgebra>) -> CliffordBlock {
         CliffordBlock {
-            attn:  CliffordAttention::new(d_model, 2, alg_arc.clone()),
-            ffn:   FfnVariant::clifford(d_model, d_ff, alg_arc.clone()),
+            attn: CliffordAttention::new(d_model, 2, alg_arc.clone()),
+            ffn: FfnVariant::clifford(d_model, d_ff, alg_arc.clone()),
             norm1: CliffordLayerNorm::new(d_model),
             norm2: CliffordLayerNorm::new(d_model),
         }
@@ -288,21 +284,33 @@ mod tests {
     #[test]
     fn end_to_end_finite_diff_grad_input() {
         let alg_arc = Arc::new(CliffordAlgebra::sta());
-        let alg     = CliffordAlgebraConst::new();
+        let alg = CliffordAlgebraConst::new();
         let d_model = 4;
-        let d_ff    = 8;
-        let seq     = 3;
-        let block   = build_block(d_model, d_ff, alg_arc.clone());
+        let d_ff = 8;
+        let seq = 3;
+        let block = build_block(d_model, d_ff, alg_arc.clone());
 
-        let mut x: Vec<Vec<Multivector>> = (0..seq).map(|i| {
-            (0..d_model).map(|d| {
-                let mut mv = Multivector::zero();
-                for k in 0..16 { mv.c[k] = ((i * d + k) as f32 * 0.07).sin() * 0.5; }
-                mv
-            }).collect()
-        }).collect();
+        let mut x: Vec<Vec<Multivector>> = (0..seq)
+            .map(|i| {
+                (0..d_model)
+                    .map(|d| {
+                        let mut mv = Multivector::zero();
+                        for k in 0..16 {
+                            mv.c[k] = ((i * d + k) as f32 * 0.07).sin() * 0.5;
+                        }
+                        mv
+                    })
+                    .collect()
+            })
+            .collect();
 
-        let tape = block_forward_taped(&alg, &block, &x, true, crate::AttentionScoreMode::InnerProduct);
+        let tape = block_forward_taped(
+            &alg,
+            &block,
+            &x,
+            true,
+            crate::AttentionScoreMode::InnerProduct,
+        );
         let grad_out = dummy_grad_out(seq, d_model);
         let grads = block_backward(&block, &tape, &grad_out);
 
@@ -310,11 +318,23 @@ mod tests {
         let checks = [(0usize, 0usize, 0usize), (1, 1, 3), (2, 2, 7)];
         for (i, d, k) in checks {
             x[i][d].c[k] += eps;
-            let t1 = block_forward_taped(&alg, &block, &x, true, crate::AttentionScoreMode::InnerProduct);
+            let t1 = block_forward_taped(
+                &alg,
+                &block,
+                &x,
+                true,
+                crate::AttentionScoreMode::InnerProduct,
+            );
             let l1 = dummy_loss(&t1.after_res2);
 
             x[i][d].c[k] -= 2.0 * eps;
-            let t2 = block_forward_taped(&alg, &block, &x, true, crate::AttentionScoreMode::InnerProduct);
+            let t2 = block_forward_taped(
+                &alg,
+                &block,
+                &x,
+                true,
+                crate::AttentionScoreMode::InnerProduct,
+            );
             let l2 = dummy_loss(&t2.after_res2);
 
             x[i][d].c[k] += eps;

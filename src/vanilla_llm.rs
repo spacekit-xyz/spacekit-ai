@@ -1,10 +1,14 @@
 //! Param-matched vanilla transformer (row 2): real embeddings, standard LN, dot attention, ReLU FFN.
 
+use crate::real_linear::LinearReal;
 use crate::standard_layer_norm::{self, StandardLayerNorm};
-use crate::LinearReal;
 
 fn relu(x: f32) -> f32 {
-    if x > 0.0 { x } else { 0.0 }
+    if x > 0.0 {
+        x
+    } else {
+        0.0
+    }
 }
 
 fn softmax_row(scores: &[f32]) -> Vec<f32> {
@@ -114,32 +118,39 @@ impl VanillaFFN {
 
 pub struct VanillaBlock {
     pub norm1: StandardLayerNorm,
-    pub attn:  VanillaAttention,
+    pub attn: VanillaAttention,
     pub norm2: StandardLayerNorm,
-    pub ffn:   VanillaFFN,
+    pub ffn: VanillaFFN,
 }
 
 impl VanillaBlock {
     pub fn new(d_model: usize, n_heads: usize, d_ff: usize, seed: u64) -> Self {
         Self {
             norm1: StandardLayerNorm::new(d_model),
-            attn:  VanillaAttention::new(d_model, n_heads, seed),
+            attn: VanillaAttention::new(d_model, n_heads, seed),
             norm2: StandardLayerNorm::new(d_model),
-            ffn:   VanillaFFN::new(d_model, d_ff, seed ^ 0xB10C),
+            ffn: VanillaFFN::new(d_model, d_ff, seed ^ 0xB10C),
         }
     }
 }
 
 pub struct VanillaLLM {
-    pub embedding:  Vec<Vec<f32>>,
-    pub blocks:     Vec<VanillaBlock>,
+    pub embedding: Vec<Vec<f32>>,
+    pub blocks: Vec<VanillaBlock>,
     pub final_norm: StandardLayerNorm,
-    pub head:       LinearReal,
-    pub d_model:    usize,
+    pub head: LinearReal,
+    pub d_model: usize,
 }
 
 impl VanillaLLM {
-    pub fn new(vocab: usize, d_model: usize, n_heads: usize, d_ff: usize, n_blocks: usize, seed: u64) -> Self {
+    pub fn new(
+        vocab: usize,
+        d_model: usize,
+        n_heads: usize,
+        d_ff: usize,
+        n_blocks: usize,
+        seed: u64,
+    ) -> Self {
         let blocks: Vec<_> = (0..n_blocks)
             .map(|b| VanillaBlock::new(d_model, n_heads, d_ff, seed ^ (b as u64 + 1) * 0x9E37))
             .collect();
@@ -169,7 +180,8 @@ pub fn vanilla_forward_logits(model: &VanillaLLM, ids: &[usize], causal: bool) -
     for block in &model.blocks {
         let mut attn_in = Vec::with_capacity(x.len());
         for row in &x {
-            let (y, _) = standard_layer_norm::forward(row, &block.norm1.gamma, &block.norm1.beta, 1e-5);
+            let (y, _) =
+                standard_layer_norm::forward(row, &block.norm1.gamma, &block.norm1.beta, 1e-5);
             attn_in.push(y);
         }
         let attn_out = block.attn.forward(&attn_in, causal);
@@ -179,7 +191,8 @@ pub fn vanilla_forward_logits(model: &VanillaLLM, ids: &[usize], causal: bool) -
             }
         }
         for t in 0..x.len() {
-            let (y, _) = standard_layer_norm::forward(&x[t], &block.norm2.gamma, &block.norm2.beta, 1e-5);
+            let (y, _) =
+                standard_layer_norm::forward(&x[t], &block.norm2.gamma, &block.norm2.beta, 1e-5);
             let delta = block.ffn.forward(&y);
             for i in 0..d {
                 x[t][i] += delta[i];
@@ -189,7 +202,12 @@ pub fn vanilla_forward_logits(model: &VanillaLLM, ids: &[usize], causal: bool) -
 
     x.iter()
         .map(|row| {
-            let (y, _) = standard_layer_norm::forward(row, &model.final_norm.gamma, &model.final_norm.beta, 1e-5);
+            let (y, _) = standard_layer_norm::forward(
+                row,
+                &model.final_norm.gamma,
+                &model.final_norm.beta,
+                1e-5,
+            );
             model.head.forward_flat(&y)
         })
         .collect()

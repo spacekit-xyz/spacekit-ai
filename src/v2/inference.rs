@@ -4,17 +4,17 @@
 // (O(seq²·layers)).  This module processes only *new* suffix tokens, reusing
 // cached K/V per layer — the standard transformer inference optimisation.
 
-use crate::{
-    cayley_const::CliffordAlgebraConst, kv_cache::KVCache, CliffordAttention, CliffordBlock,
-    CliffordLLM, Multivector, AttentionScoreMode, attention_pair_score,
-};
 use crate::positional::RotorPositionalEncoding;
+use crate::{
+    attention_pair_score, cayley_const::CliffordAlgebraConst, kv_cache::KVCache,
+    AttentionScoreMode, CliffordAttention, CliffordBlock, CliffordLLM, Multivector,
+};
 
 /// Stateful KV cache for incremental generation.
 pub struct InferenceCache {
-    kv:       KVCache,
+    kv: KVCache,
     position: usize,
-    pe:       RotorPositionalEncoding,
+    pe: RotorPositionalEncoding,
     dot_scores: bool,
 }
 
@@ -77,7 +77,13 @@ impl InferenceCache {
         let mut h = self.pe.encode_position(alg, &emb, pos);
 
         for (layer_idx, block) in model.blocks.iter().enumerate() {
-            h = block_forward_cached(alg, block, &h, self.kv.layer_mut(layer_idx), self.dot_scores);
+            h = block_forward_cached(
+                alg,
+                block,
+                &h,
+                self.kv.layer_mut(layer_idx),
+                self.dot_scores,
+            );
         }
 
         let normed = model.final_norm.forward(&h);
@@ -156,7 +162,9 @@ fn cached_multihead_attention(
         .map(|d| {
             let h = d / head_dim;
             let w = &head_weights[h];
-            (0..seq).fold(Multivector::zero(), |acc, j| acc + cache.v[j][d].scale(w[j]))
+            (0..seq).fold(Multivector::zero(), |acc, j| {
+                acc + cache.v[j][d].scale(w[j])
+            })
         })
         .collect();
 
@@ -176,8 +184,8 @@ fn softmax(x: &[f32]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v2::train_v2::{randomize_model, TrainConfigV2, ModelStateV2};
     use crate::v2::tape::model_forward_logits;
+    use crate::v2::train_v2::{randomize_model, ModelStateV2, TrainConfigV2};
 
     fn tiny_model(vocab: usize) -> (CliffordAlgebraConst, CliffordLLM) {
         let mut cfg = TrainConfigV2::small(vocab);
@@ -206,10 +214,7 @@ mod tests {
         for (a, b) in cached.iter().zip(full.iter()) {
             assert_eq!(a.len(), b.len());
             for (x, y) in a.iter().zip(b.iter()) {
-                assert!(
-                    (x - y).abs() < 1e-4,
-                    "logit mismatch: cached={x} full={y}"
-                );
+                assert!((x - y).abs() < 1e-4, "logit mismatch: cached={x} full={y}");
             }
         }
     }
@@ -227,10 +232,7 @@ mod tests {
         assert_eq!(batch.len(), full.len());
         for t in 0..full.len() {
             for v in 0..full[t].len() {
-                assert!(
-                    (batch[t][v] - full[t][v]).abs() < 1e-4,
-                    "t={t} v={v}"
-                );
+                assert!((batch[t][v] - full[t][v]).abs() < 1e-4, "t={t} v={v}");
             }
         }
     }

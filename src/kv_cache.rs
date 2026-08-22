@@ -26,7 +26,9 @@ pub struct LayerKVCache {
 }
 
 impl LayerKVCache {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Append K and V for one new token position.
     pub fn push(&mut self, k: Vec<Multivector>, v: Vec<Multivector>) {
@@ -36,16 +38,22 @@ impl LayerKVCache {
 
     /// Number of cached token positions.
     #[inline]
-    pub fn seq_len(&self) -> usize { self.k.len() }
+    pub fn seq_len(&self) -> usize {
+        self.k.len()
+    }
 
     /// Return a slice of all cached K vectors — used as the full key sequence
     /// when computing attention for the new token.
     #[inline]
-    pub fn all_k(&self) -> &[Vec<Multivector>] { &self.k }
+    pub fn all_k(&self) -> &[Vec<Multivector>] {
+        &self.k
+    }
 
     /// Return a slice of all cached V vectors.
     #[inline]
-    pub fn all_v(&self) -> &[Vec<Multivector>] { &self.v }
+    pub fn all_v(&self) -> &[Vec<Multivector>] {
+        &self.v
+    }
 
     /// Truncate the cache to `len` positions (e.g. for sliding-window attention).
     pub fn truncate(&mut self, len: usize) {
@@ -64,8 +72,8 @@ impl LayerKVCache {
 
 /// KV cache for the entire model.  Holds one LayerKVCache per transformer block.
 pub struct KVCache {
-    pub layers:  Vec<LayerKVCache>,
-    pub max_len: usize,   // maximum sequence length before eviction
+    pub layers: Vec<LayerKVCache>,
+    pub max_len: usize, // maximum sequence length before eviction
 }
 
 impl KVCache {
@@ -73,7 +81,7 @@ impl KVCache {
     /// context length of `max_len` tokens.
     pub fn new(n_layers: usize, max_len: usize) -> Self {
         Self {
-            layers:  (0..n_layers).map(|_| LayerKVCache::new()).collect(),
+            layers: (0..n_layers).map(|_| LayerKVCache::new()).collect(),
             max_len,
         }
     }
@@ -82,8 +90,11 @@ impl KVCache {
     ///
     /// `layer_kvs` — Vec of (k, v) pairs, one per layer (length must equal n_layers).
     pub fn push_all(&mut self, layer_kvs: Vec<(Vec<Multivector>, Vec<Multivector>)>) {
-        assert_eq!(layer_kvs.len(), self.layers.len(),
-            "layer_kvs length must match number of cached layers");
+        assert_eq!(
+            layer_kvs.len(),
+            self.layers.len(),
+            "layer_kvs length must match number of cached layers"
+        );
         for (layer, (k, v)) in self.layers.iter_mut().zip(layer_kvs.into_iter()) {
             layer.push(k, v);
         }
@@ -114,11 +125,15 @@ impl KVCache {
 
     /// Access the cache for layer `i`.
     #[inline]
-    pub fn layer(&self, i: usize) -> &LayerKVCache { &self.layers[i] }
+    pub fn layer(&self, i: usize) -> &LayerKVCache {
+        &self.layers[i]
+    }
 
     /// Mutable access to the cache for layer `i`.
     #[inline]
-    pub fn layer_mut(&mut self, i: usize) -> &mut LayerKVCache { &mut self.layers[i] }
+    pub fn layer_mut(&mut self, i: usize) -> &mut LayerKVCache {
+        &mut self.layers[i]
+    }
 }
 
 // ─── Cached attention helper ──────────────────────────────────────────────────
@@ -137,7 +152,7 @@ impl KVCache {
 /// The function appends k_new and v_new to the cache *before* computing
 /// attention so the new token can attend to itself (causal, present = visible).
 pub fn cached_attention_step(
-    alg:   &crate::cayley_const::CliffordAlgebraConst,
+    alg: &crate::cayley_const::CliffordAlgebraConst,
     cache: &mut LayerKVCache,
     q_new: &[Multivector],
     k_new: Vec<Multivector>,
@@ -148,28 +163,34 @@ pub fn cached_attention_step(
     cache.push(k_new, v_new);
 
     let seq = cache.seq_len();
-    let d   = q_new.len();
+    let d = q_new.len();
 
     // Compute attention scores: score[j] = (1/scale) Σ_d ⟨Q[d], K_j[d]⟩
-    let scores: Vec<f32> = (0..seq).map(|j| {
-        let s: f32 = q_new.iter().zip(cache.k[j].iter())
-            .map(|(qi, kj)| alg.inner_product(qi, kj))
-            .sum();
-        s / scale
-    }).collect();
+    let scores: Vec<f32> = (0..seq)
+        .map(|j| {
+            let s: f32 = q_new
+                .iter()
+                .zip(cache.k[j].iter())
+                .map(|(qi, kj)| alg.inner_product(qi, kj))
+                .sum();
+            s / scale
+        })
+        .collect();
 
     // Softmax (no causal mask needed — cache only holds past + present)
     let scores = softmax(&scores);
 
     // Weighted sum of V
-    (0..d).map(|dim| {
-        (0..seq).fold(Multivector::zero(), |acc, j| {
-            let scaled = cache.v[j][dim].scale(scores[j]);
-            Multivector {
-                c: std::array::from_fn(|k| acc.c[k] + scaled.c[k]),
-            }
+    (0..d)
+        .map(|dim| {
+            (0..seq).fold(Multivector::zero(), |acc, j| {
+                let scaled = cache.v[j][dim].scale(scores[j]);
+                Multivector {
+                    c: std::array::from_fn(|k| acc.c[k] + scaled.c[k]),
+                }
+            })
         })
-    }).collect()
+        .collect()
 }
 
 fn softmax(x: &[f32]) -> Vec<f32> {
@@ -215,8 +236,10 @@ mod tests {
         // Should have trimmed to 3
         assert_eq!(cache.seq_len(), 3, "cache should be trimmed to max_len=3");
         // Oldest remaining K scalar should be 2.0 (tokens 0,1 evicted)
-        assert!((cache.layers[0].k[0][0].c[0] - 2.0).abs() < 1e-6,
-            "oldest remaining token should be t=2");
+        assert!(
+            (cache.layers[0].k[0][0].c[0] - 2.0).abs() < 1e-6,
+            "oldest remaining token should be t=2"
+        );
     }
 
     #[test]

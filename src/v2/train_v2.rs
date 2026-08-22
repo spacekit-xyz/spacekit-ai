@@ -14,19 +14,23 @@
 //
 // All gradients are accumulated across the loss positions and scaled by 1/n_loss.
 
-use std::sync::Arc;
-use crate::{Multivector, CliffordLLM, LinearReal, CliffordAlgebra};
-use crate::backprop::{RealHeadGrad, GradLinear, cross_entropy, real_head_backward, layer_norm_backward};
-use crate::optim::{AdamConfig, LayerOptimizer, RealHeadOptimizer, clip_grad_norm, cosine_lr_with_warmup};
-use crate::cayley_const::CliffordAlgebraConst;
-use crate::ffn::{FfnVariant, matched_dense_ffn_hidden};
 use super::block_backward::{block_backward, BlockGrads, FfnGrad};
 use super::data::TrainExample;
 use super::embedding::{EmbeddingGrad, EmbeddingOptimizer};
 use super::tape::model_forward_taped;
+use crate::backprop::{
+    cross_entropy, layer_norm_backward, real_head_backward, GradLinear, RealHeadGrad,
+};
+use crate::cayley_const::CliffordAlgebraConst;
+use crate::ffn::{matched_dense_ffn_hidden, FfnVariant};
+use crate::optim::{
+    clip_grad_norm, cosine_lr_with_warmup, AdamConfig, LayerOptimizer, RealHeadOptimizer,
+};
 use crate::CliffordLinear;
-use rand::{Rng, SeedableRng};
+use crate::{CliffordAlgebra, CliffordLLM, LinearReal, Multivector};
 use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+use std::sync::Arc;
 
 // ─── Random initialisation (symmetry breaking) ───────────────────────────────
 
@@ -133,7 +137,9 @@ fn gaussian_unit_vec(seed: u64, n: usize) -> Vec<f32> {
     }
     let norm: f32 = vals.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 1e-8 {
-        for v in &mut vals { *v /= norm; }
+        for v in &mut vals {
+            *v /= norm;
+        }
     }
     vals
 }
@@ -197,7 +203,9 @@ pub fn corpus_semantic_init(
     let vocab = model.embedding.len();
     let dm = model.embedding.first().map(|r| r.len()).unwrap_or(0);
     let n = dm * 16;
-    if vocab == 0 || n == 0 { return; }
+    if vocab == 0 || n == 0 {
+        return;
+    }
 
     // 1. Random index vectors (token identities).
     let idx: Vec<Vec<f32>> = (0..vocab)
@@ -209,21 +217,27 @@ pub fn corpus_semantic_init(
     let len = tokens.len();
     for i in 0..len {
         let t = tokens[i] as usize;
-        if t >= vocab { continue; }
+        if t >= vocab {
+            continue;
+        }
         for off in 1..=window {
             let w = 1.0 / off as f32; // closer neighbours weigh more
             if i >= off {
                 let nb = tokens[i - off] as usize;
                 if nb < vocab {
                     let (src, dst) = (&idx[nb], &mut ctx[t]);
-                    for k in 0..n { dst[k] += w * src[k]; }
+                    for k in 0..n {
+                        dst[k] += w * src[k];
+                    }
                 }
             }
             if i + off < len {
                 let nb = tokens[i + off] as usize;
                 if nb < vocab {
                     let (src, dst) = (&idx[nb], &mut ctx[t]);
-                    for k in 0..n { dst[k] += w * src[k]; }
+                    for k in 0..n {
+                        dst[k] += w * src[k];
+                    }
                 }
             }
         }
@@ -233,101 +247,18 @@ pub fn corpus_semantic_init(
     const SELF_ANCHOR: f32 = 1.0;
     for v in 0..vocab {
         let mut c = std::mem::take(&mut ctx[v]);
-        for k in 0..n { c[k] += SELF_ANCHOR * idx[v][k]; }
+        for k in 0..n {
+            c[k] += SELF_ANCHOR * idx[v][k];
+        }
         let norm: f32 = c.iter().map(|x| x * x).sum::<f32>().sqrt();
         let s = if norm > 1e-8 { scale / norm } else { 0.0 };
         write_row(&mut model.embedding[v], &c, s);
     }
 }
 
-// ─── Training configuration (carried over from train.rs) ─────────────────────
+// ─── Training configuration (carried in lm_config; re-exported for compat) ───
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TrainConfigV2 {
-    pub vocab_size:   usize,
-    pub d_model:      usize,
-    pub n_heads:      usize,
-    pub d_ff:         usize,
-    pub n_blocks:     usize,
-    pub max_seq:      usize,
-    pub batch_size:   usize,
-    pub epochs:       usize,
-    pub lr_max:       f32,
-    pub lr_min:       f32,
-    pub warmup_steps: u64,
-    pub total_steps:  u64,
-    pub grad_clip:    f32,
-    pub log_every:    usize,
-    pub val_every:    usize,
-    /// If true, also update the embedding table.  Set false to freeze your STA encoder.
-    pub train_embeddings: bool,
-    /// Seed for random weight/embedding initialisation (symmetry breaking).
-    #[serde(default = "default_init_seed")]
-    pub init_seed: u64,
-    /// Inheritance: freeze the embedding table (shared base representation).
-    #[serde(default)]
-    pub freeze_embeddings: bool,
-    /// Inheritance: freeze the first `freeze_blocks` transformer blocks (shared
-    /// base body); only blocks `[freeze_blocks, n_blocks)`, the final norm, and
-    /// the head adapt to the domain.  Gradients still flow through frozen blocks.
-    #[serde(default)]
-    pub freeze_blocks: usize,
-    /// Weight tying: share the embedding table with the output head.  Cuts
-    /// parameters and is a strong prior for small models.  When set, the head
-    /// matrix mirrors the embeddings and is trained via the embedding optimiser.
-    #[serde(default)]
-    pub tie_embeddings: bool,
-    /// Structured embedding init (deterministic unit-norm Gaussian per token,
-    /// ported from growformer) instead of tiny uniform noise.  Gives each token
-    /// a distinct identity from step 0.
-    #[serde(default)]
-    pub structured_init: bool,
-    /// Gradient accumulation: number of microbatches whose gradients are
-    /// averaged before a single optimiser step.  Effective batch size =
-    /// `grad_accum`.  1 = current behaviour (step per microbatch).
-    #[serde(default = "default_grad_accum")]
-    pub grad_accum: usize,
-    /// FFN-only ablation: param-matched dense real FFN instead of Clifford geometric product.
-    #[serde(default)]
-    pub dense_ffn: bool,
-    /// Attention score ablation (row 3b): dot product on 16-scalar Q/K instead of ⟨Q⊛K⟩₀.
-    #[serde(default)]
-    pub dot_attention: bool,
-    /// Row 2: param-matched vanilla transformer (real embeddings, standard LN, dot attention).
-    #[serde(default)]
-    pub vanilla: bool,
-    /// Row 2: Clifford reference `d_model` before param-budget matching (0 if N/A).
-    #[serde(default)]
-    pub clifford_ref_d_model: usize,
-}
-
-fn default_grad_accum() -> usize { 1 }
-
-fn default_init_seed() -> u64 { 0x5EED_1234_ABCD_0001 }
-
-impl TrainConfigV2 {
-    pub fn small(vocab_size: usize) -> Self {
-        Self {
-            vocab_size,
-            d_model:      8, n_heads:  2, d_ff: 32, n_blocks: 2,
-            max_seq:      128, batch_size: 4, epochs: 10,
-            lr_max:       3e-4, lr_min:    1e-5,
-            warmup_steps: 100, total_steps: 2000,
-            grad_clip:    1.0, log_every:   10, val_every: 100,
-            train_embeddings: true,
-            init_seed: default_init_seed(),
-            freeze_embeddings: false,
-            freeze_blocks: 0,
-            tie_embeddings: false,
-            structured_init: false,
-            grad_accum: 1,
-            dense_ffn: false,
-            dot_attention: false,
-            vanilla: false,
-            clifford_ref_d_model: 0,
-        }
-    }
-}
+pub use crate::lm_config::TrainConfigV2;
 
 // ─── Model + optimiser state ─────────────────────────────────────────────────
 
@@ -344,12 +275,7 @@ pub enum FfnBlockOptimizer {
 }
 
 impl FfnBlockOptimizer {
-    fn step_clifford(
-        &mut self,
-        f: &mut crate::CliffordFFN,
-        g1: &GradLinear,
-        g2: &GradLinear,
-    ) {
+    fn step_clifford(&mut self, f: &mut crate::CliffordFFN, g1: &GradLinear, g2: &GradLinear) {
         let Self::Clifford { fc1, fc2 } = self else {
             panic!("FFN optimizer/variant mismatch");
         };
@@ -357,12 +283,7 @@ impl FfnBlockOptimizer {
         fc2.step(&mut f.fc2.weights, &mut f.fc2.bias, g2);
     }
 
-    fn step_dense(
-        &mut self,
-        f: &mut crate::DenseFFN,
-        g1: &RealHeadGrad,
-        g2: &RealHeadGrad,
-    ) {
+    fn step_dense(&mut self, f: &mut crate::DenseFFN, g1: &RealHeadGrad, g2: &RealHeadGrad) {
         let Self::Dense { fc1, fc2 } = self else {
             panic!("FFN optimizer/variant mismatch");
         };
@@ -377,15 +298,15 @@ pub struct BlockOptimizer {
     pub wk: LayerOptimizer,
     pub wv: LayerOptimizer,
     pub wo: LayerOptimizer,
-    pub ffn:  FfnBlockOptimizer,
+    pub ffn: FfnBlockOptimizer,
     pub norm1_gamma_m: Vec<f32>,
     pub norm1_gamma_v: Vec<f32>,
-    pub norm1_beta_m:  Vec<f32>,
-    pub norm1_beta_v:  Vec<f32>,
+    pub norm1_beta_m: Vec<f32>,
+    pub norm1_beta_v: Vec<f32>,
     pub norm2_gamma_m: Vec<f32>,
     pub norm2_gamma_v: Vec<f32>,
-    pub norm2_beta_m:  Vec<f32>,
-    pub norm2_beta_v:  Vec<f32>,
+    pub norm2_beta_m: Vec<f32>,
+    pub norm2_beta_v: Vec<f32>,
     pub step: u64,
 }
 
@@ -405,15 +326,19 @@ impl BlockOptimizer {
             }
         };
         Self {
-            wq:  LayerOptimizer::new(cfg.d_model, cfg.d_model, adam.clone()),
-            wk:  LayerOptimizer::new(cfg.d_model, cfg.d_model, adam.clone()),
-            wv:  LayerOptimizer::new(cfg.d_model, cfg.d_model, adam.clone()),
-            wo:  LayerOptimizer::new(cfg.d_model, cfg.d_model, adam.clone()),
+            wq: LayerOptimizer::new(cfg.d_model, cfg.d_model, adam.clone()),
+            wk: LayerOptimizer::new(cfg.d_model, cfg.d_model, adam.clone()),
+            wv: LayerOptimizer::new(cfg.d_model, cfg.d_model, adam.clone()),
+            wo: LayerOptimizer::new(cfg.d_model, cfg.d_model, adam.clone()),
             ffn,
-            norm1_gamma_m: vec![0.0; n], norm1_gamma_v: vec![0.0; n],
-            norm1_beta_m:  vec![0.0; n], norm1_beta_v:  vec![0.0; n],
-            norm2_gamma_m: vec![0.0; n], norm2_gamma_v: vec![0.0; n],
-            norm2_beta_m:  vec![0.0; n], norm2_beta_v:  vec![0.0; n],
+            norm1_gamma_m: vec![0.0; n],
+            norm1_gamma_v: vec![0.0; n],
+            norm1_beta_m: vec![0.0; n],
+            norm1_beta_v: vec![0.0; n],
+            norm2_gamma_m: vec![0.0; n],
+            norm2_gamma_v: vec![0.0; n],
+            norm2_beta_m: vec![0.0; n],
+            norm2_beta_v: vec![0.0; n],
             step: 0,
         }
     }
@@ -422,13 +347,13 @@ impl BlockOptimizer {
 /// Adam step for a scalar parameter vector (used for layer-norm γ, β).
 fn adam_step_scalar(
     params: &mut [f32],
-    grads:  &[f32],
-    m:      &mut [f32],
-    v:      &mut [f32],
-    step:   u64,
-    cfg:    &AdamConfig,
+    grads: &[f32],
+    m: &mut [f32],
+    v: &mut [f32],
+    step: u64,
+    cfg: &AdamConfig,
 ) {
-    let t   = step as f32;
+    let t = step as f32;
     let bc1 = 1.0 - cfg.beta1.powf(t);
     let bc2 = 1.0 - cfg.beta2.powf(t);
     for i in 0..params.len() {
@@ -442,43 +367,48 @@ fn adam_step_scalar(
 }
 
 pub struct ModelStateV2 {
-    pub model:      CliffordLLM,
-    pub alg:        CliffordAlgebraConst,
+    pub model: CliffordLLM,
+    pub alg: CliffordAlgebraConst,
     pub block_opts: Vec<BlockOptimizer>,
-    pub head_opt:   RealHeadOptimizer,
-    pub embed_opt:  EmbeddingOptimizer,
+    pub head_opt: RealHeadOptimizer,
+    pub embed_opt: EmbeddingOptimizer,
     // Adam state for the final layer-norm γ/β (scalar params, len 16·d_model).
     pub fnorm_gamma_m: Vec<f32>,
     pub fnorm_gamma_v: Vec<f32>,
-    pub fnorm_beta_m:  Vec<f32>,
-    pub fnorm_beta_v:  Vec<f32>,
-    pub fnorm_step:    u64,
-    pub cfg:        TrainConfigV2,
-    pub step:       u64,
+    pub fnorm_beta_m: Vec<f32>,
+    pub fnorm_beta_v: Vec<f32>,
+    pub fnorm_step: u64,
+    pub cfg: TrainConfigV2,
+    pub step: u64,
 }
 
 impl ModelStateV2 {
     pub fn new(cfg: TrainConfigV2) -> Self {
         let alg_arc = Arc::new(CliffordAlgebra::sta());
-        let alg     = CliffordAlgebraConst::new();
-        let adam    = AdamConfig { lr: cfg.lr_max, ..Default::default() };
+        let alg = CliffordAlgebraConst::new();
+        let adam = AdamConfig {
+            lr: cfg.lr_max,
+            ..Default::default()
+        };
 
-        let blocks: Vec<_> = (0..cfg.n_blocks).map(|_| crate::CliffordBlock {
-            attn:  crate::CliffordAttention::new(cfg.d_model, cfg.n_heads, alg_arc.clone()),
-            ffn:   if cfg.dense_ffn {
-                FfnVariant::dense_matched(cfg.d_model, cfg.d_ff, cfg.init_seed ^ 0xDE5EFF10)
-            } else {
-                FfnVariant::clifford(cfg.d_model, cfg.d_ff, alg_arc.clone())
-            },
-            norm1: crate::CliffordLayerNorm::new(cfg.d_model),
-            norm2: crate::CliffordLayerNorm::new(cfg.d_model),
-        }).collect();
+        let blocks: Vec<_> = (0..cfg.n_blocks)
+            .map(|_| crate::CliffordBlock {
+                attn: crate::CliffordAttention::new(cfg.d_model, cfg.n_heads, alg_arc.clone()),
+                ffn: if cfg.dense_ffn {
+                    FfnVariant::dense_matched(cfg.d_model, cfg.d_ff, cfg.init_seed ^ 0xDE5EFF10)
+                } else {
+                    FfnVariant::clifford(cfg.d_model, cfg.d_ff, alg_arc.clone())
+                },
+                norm1: crate::CliffordLayerNorm::new(cfg.d_model),
+                norm2: crate::CliffordLayerNorm::new(cfg.d_model),
+            })
+            .collect();
 
         let block_opts: Vec<_> = (0..cfg.n_blocks)
             .map(|_| BlockOptimizer::new(&cfg, adam.clone()))
             .collect();
 
-        let head     = LinearReal::new(cfg.d_model, cfg.vocab_size);
+        let head = LinearReal::new(cfg.d_model, cfg.vocab_size);
         let head_opt = RealHeadOptimizer::new(cfg.vocab_size, cfg.d_model * 16, adam.clone());
         let embed_opt = EmbeddingOptimizer::new(cfg.d_model, adam);
 
@@ -504,18 +434,28 @@ impl ModelStateV2 {
 
         let n = cfg.d_model * 16;
         Self {
-            model, alg, block_opts, head_opt, embed_opt,
-            fnorm_gamma_m: vec![0.0; n], fnorm_gamma_v: vec![0.0; n],
-            fnorm_beta_m:  vec![0.0; n], fnorm_beta_v:  vec![0.0; n],
+            model,
+            alg,
+            block_opts,
+            head_opt,
+            embed_opt,
+            fnorm_gamma_m: vec![0.0; n],
+            fnorm_gamma_v: vec![0.0; n],
+            fnorm_beta_m: vec![0.0; n],
+            fnorm_beta_v: vec![0.0; n],
             fnorm_step: 0,
-            cfg, step: 0,
+            cfg,
+            step: 0,
         }
     }
 
     pub fn update_lr(&mut self) {
         let lr = cosine_lr_with_warmup(
-            self.step, self.cfg.warmup_steps, self.cfg.total_steps,
-            self.cfg.lr_max, self.cfg.lr_min,
+            self.step,
+            self.cfg.warmup_steps,
+            self.cfg.total_steps,
+            self.cfg.lr_max,
+            self.cfg.lr_min,
         );
         for b in &mut self.block_opts {
             b.wq.cfg.lr = lr;
@@ -533,7 +473,7 @@ impl ModelStateV2 {
                 }
             }
         }
-        self.head_opt.cfg.lr  = lr;
+        self.head_opt.cfg.lr = lr;
         self.embed_opt.cfg.lr = lr;
     }
 }
@@ -542,8 +482,14 @@ impl ModelStateV2 {
 
 /// FFN parameter gradients for one block (variant-specific).
 pub enum FfnParamGrads {
-    Clifford { fc1: GradLinear, fc2: GradLinear },
-    Dense    { fc1: RealHeadGrad, fc2: RealHeadGrad },
+    Clifford {
+        fc1: GradLinear,
+        fc2: GradLinear,
+    },
+    Dense {
+        fc1: RealHeadGrad,
+        fc2: RealHeadGrad,
+    },
 }
 
 impl FfnParamGrads {
@@ -579,8 +525,14 @@ impl FfnParamGrads {
 
     fn scale(&mut self, s: f32) {
         match self {
-            Self::Clifford { fc1, fc2 } => { fc1.scale(s); fc2.scale(s); }
-            Self::Dense { fc1, fc2 } => { fc1.scale(s); fc2.scale(s); }
+            Self::Clifford { fc1, fc2 } => {
+                fc1.scale(s);
+                fc2.scale(s);
+            }
+            Self::Dense { fc1, fc2 } => {
+                fc1.scale(s);
+                fc2.scale(s);
+            }
         }
     }
 }
@@ -589,9 +541,9 @@ impl FfnParamGrads {
 /// summed across microbatches of differing sequence length).
 pub struct BlockParamGrads {
     pub norm1_gamma: Vec<f32>,
-    pub norm1_beta:  Vec<f32>,
+    pub norm1_beta: Vec<f32>,
     pub norm2_gamma: Vec<f32>,
-    pub norm2_beta:  Vec<f32>,
+    pub norm2_beta: Vec<f32>,
     pub w_q: GradLinear,
     pub w_k: GradLinear,
     pub w_v: GradLinear,
@@ -603,8 +555,10 @@ impl BlockParamGrads {
     fn zeros(cfg: &TrainConfigV2) -> Self {
         let n = cfg.d_model * 16;
         Self {
-            norm1_gamma: vec![0.0; n], norm1_beta: vec![0.0; n],
-            norm2_gamma: vec![0.0; n], norm2_beta: vec![0.0; n],
+            norm1_gamma: vec![0.0; n],
+            norm1_beta: vec![0.0; n],
+            norm2_gamma: vec![0.0; n],
+            norm2_beta: vec![0.0; n],
             w_q: GradLinear::zeros(cfg.d_model, cfg.d_model),
             w_k: GradLinear::zeros(cfg.d_model, cfg.d_model),
             w_v: GradLinear::zeros(cfg.d_model, cfg.d_model),
@@ -619,9 +573,14 @@ impl BlockParamGrads {
             FfnGrad::Dense(g1, g2) => FfnParamGrads::Dense { fc1: g1, fc2: g2 },
         };
         Self {
-            norm1_gamma: g.norm1_gamma, norm1_beta: g.norm1_beta,
-            norm2_gamma: g.norm2_gamma, norm2_beta: g.norm2_beta,
-            w_q: g.attn.w_q, w_k: g.attn.w_k, w_v: g.attn.w_v, w_o: g.attn.w_o,
+            norm1_gamma: g.norm1_gamma,
+            norm1_beta: g.norm1_beta,
+            norm2_gamma: g.norm2_gamma,
+            norm2_beta: g.norm2_beta,
+            w_q: g.attn.w_q,
+            w_k: g.attn.w_k,
+            w_v: g.attn.w_v,
+            w_o: g.attn.w_o,
             ffn,
         }
     }
@@ -629,21 +588,34 @@ impl BlockParamGrads {
     fn add(&mut self, o: &BlockParamGrads) {
         for i in 0..self.norm1_gamma.len() {
             self.norm1_gamma[i] += o.norm1_gamma[i];
-            self.norm1_beta[i]  += o.norm1_beta[i];
+            self.norm1_beta[i] += o.norm1_beta[i];
             self.norm2_gamma[i] += o.norm2_gamma[i];
-            self.norm2_beta[i]  += o.norm2_beta[i];
+            self.norm2_beta[i] += o.norm2_beta[i];
         }
-        self.w_q.accumulate(&o.w_q); self.w_k.accumulate(&o.w_k);
-        self.w_v.accumulate(&o.w_v); self.w_o.accumulate(&o.w_o);
+        self.w_q.accumulate(&o.w_q);
+        self.w_k.accumulate(&o.w_k);
+        self.w_v.accumulate(&o.w_v);
+        self.w_o.accumulate(&o.w_o);
         self.ffn.add(&o.ffn);
     }
 
     fn scale(&mut self, s: f32) {
-        for v in self.norm1_gamma.iter_mut() { *v *= s; }
-        for v in self.norm1_beta.iter_mut()  { *v *= s; }
-        for v in self.norm2_gamma.iter_mut() { *v *= s; }
-        for v in self.norm2_beta.iter_mut()  { *v *= s; }
-        self.w_q.scale(s); self.w_k.scale(s); self.w_v.scale(s); self.w_o.scale(s);
+        for v in self.norm1_gamma.iter_mut() {
+            *v *= s;
+        }
+        for v in self.norm1_beta.iter_mut() {
+            *v *= s;
+        }
+        for v in self.norm2_gamma.iter_mut() {
+            *v *= s;
+        }
+        for v in self.norm2_beta.iter_mut() {
+            *v *= s;
+        }
+        self.w_q.scale(s);
+        self.w_k.scale(s);
+        self.w_v.scale(s);
+        self.w_o.scale(s);
         self.ffn.scale(s);
     }
 }
@@ -652,13 +624,13 @@ impl BlockParamGrads {
 /// passes — decoupled from optimiser state so they can be averaged before the
 /// single Adam step that gradient accumulation requires.
 pub struct StepGrads {
-    pub head:         RealHeadGrad,
+    pub head: RealHeadGrad,
     pub fnorm_dgamma: Vec<f32>,
-    pub fnorm_dbeta:  Vec<f32>,
-    pub blocks:       Vec<BlockParamGrads>,
-    pub embed:        EmbeddingGrad,
-    pub loss:         f32,
-    pub valid:        bool,
+    pub fnorm_dbeta: Vec<f32>,
+    pub blocks: Vec<BlockParamGrads>,
+    pub embed: EmbeddingGrad,
+    pub loss: f32,
+    pub valid: bool,
 }
 
 impl StepGrads {
@@ -667,7 +639,7 @@ impl StepGrads {
         Self {
             head: RealHeadGrad::zeros(cfg.vocab_size, cfg.d_model * 16),
             fnorm_dgamma: vec![0.0; n],
-            fnorm_dbeta:  vec![0.0; n],
+            fnorm_dbeta: vec![0.0; n],
             blocks: (0..cfg.n_blocks)
                 .map(|_| BlockParamGrads::zeros(cfg))
                 .collect(),
@@ -682,7 +654,7 @@ impl StepGrads {
         self.head.accumulate(&o.head);
         for i in 0..self.fnorm_dgamma.len() {
             self.fnorm_dgamma[i] += o.fnorm_dgamma[i];
-            self.fnorm_dbeta[i]  += o.fnorm_dbeta[i];
+            self.fnorm_dbeta[i] += o.fnorm_dbeta[i];
         }
         for b in 0..self.blocks.len() {
             self.blocks[b].add(&o.blocks[b]);
@@ -694,9 +666,15 @@ impl StepGrads {
     /// Average over `n` accumulated microbatches.
     fn scale(&mut self, s: f32) {
         self.head.scale(s);
-        for v in self.fnorm_dgamma.iter_mut() { *v *= s; }
-        for v in self.fnorm_dbeta.iter_mut()  { *v *= s; }
-        for b in &mut self.blocks { b.scale(s); }
+        for v in self.fnorm_dgamma.iter_mut() {
+            *v *= s;
+        }
+        for v in self.fnorm_dbeta.iter_mut() {
+            *v *= s;
+        }
+        for b in &mut self.blocks {
+            b.scale(s);
+        }
         self.embed.scale(s);
         self.loss *= s;
     }
@@ -708,8 +686,8 @@ impl StepGrads {
 /// single-step path.  Returns `valid = false` when the example has no loss
 /// positions.
 pub fn compute_grads_v2(state: &ModelStateV2, example: &TrainExample) -> StepGrads {
-    let seq   = example.len();
-    let dm    = state.cfg.d_model;
+    let seq = example.len();
+    let dm = state.cfg.d_model;
     let vocab = state.cfg.vocab_size;
     let mut out = StepGrads::zeros(&state.cfg);
 
@@ -725,32 +703,43 @@ pub fn compute_grads_v2(state: &ModelStateV2, example: &TrainExample) -> StepGra
     // ── 2. Loss + grad_logits at every loss-masked position ───────────────────
     let loss_mask = example.loss_mask();
     let mut total_loss = 0.0f32;
-    let mut n_loss     = 0usize;
+    let mut n_loss = 0usize;
     let mut grad_logits = vec![vec![0.0f32; vocab]; seq];
 
     for t in 0..seq {
-        if !loss_mask[t] || t + 1 >= seq { continue; }
+        if !loss_mask[t] || t + 1 >= seq {
+            continue;
+        }
         let target = example.full_ids[t + 1];
         let (loss, gl) = cross_entropy(&tape.logits[t], target);
         total_loss += loss;
-        n_loss     += 1;
+        n_loss += 1;
         grad_logits[t] = gl;
     }
-    if n_loss == 0 { return out; }
+    if n_loss == 0 {
+        return out;
+    }
     total_loss /= n_loss as f32;
     let scale = 1.0 / n_loss as f32;
 
     // ── 3. Output head backward (real projection) ────────────────────────────
-    let mut grad_head    = out.head; // reuse the pre-zeroed allocation
+    let mut grad_head = out.head; // reuse the pre-zeroed allocation
     let mut grad_x_final = vec![vec![Multivector::zero(); dm]; seq];
 
     for t in 0..seq {
-        if grad_logits[t].iter().all(|&g| g == 0.0) { continue; }
+        if grad_logits[t].iter().all(|&g| g == 0.0) {
+            continue;
+        }
         let gx = real_head_backward(
-            &state.model.head.weights, &tape.head_input[t], &grad_logits[t], &mut grad_head,
+            &state.model.head.weights,
+            &tape.head_input[t],
+            &grad_logits[t],
+            &mut grad_head,
         );
         for d in 0..dm {
-            for k in 0..16 { grad_x_final[t][d].c[k] += gx[d].c[k]; }
+            for k in 0..16 {
+                grad_x_final[t][d].c[k] += gx[d].c[k];
+            }
         }
     }
     grad_head.scale(scale);
@@ -759,23 +748,36 @@ pub fn compute_grads_v2(state: &ModelStateV2, example: &TrainExample) -> StepGra
     // ── 3b. Final layer-norm backward ────────────────────────────────────────
     let n_comp = dm * 16;
     let mut fnorm_dgamma = vec![0.0f32; n_comp];
-    let mut fnorm_dbeta  = vec![0.0f32; n_comp];
+    let mut fnorm_dbeta = vec![0.0f32; n_comp];
     let mut grad_x = vec![vec![Multivector::zero(); dm]; seq];
     for t in 0..seq {
         let g_flat: Vec<f32> = grad_x_final[t].iter().flat_map(|mv| mv.c).collect();
-        if g_flat.iter().all(|&g| g == 0.0) { continue; }
+        if g_flat.iter().all(|&g| g == 0.0) {
+            continue;
+        }
         let stats = &tape.final_norm_stats[t];
         for k in 0..n_comp {
             fnorm_dgamma[k] += g_flat[k] * stats.x_hat[k];
-            fnorm_dbeta[k]  += g_flat[k];
+            fnorm_dbeta[k] += g_flat[k];
         }
-        let g_x = layer_norm_backward(&stats.x_hat, &state.model.final_norm.gamma, &g_flat, stats.std);
+        let g_x = layer_norm_backward(
+            &stats.x_hat,
+            &state.model.final_norm.gamma,
+            &g_flat,
+            stats.std,
+        );
         for d in 0..dm {
-            for k in 0..16 { grad_x[t][d].c[k] = g_x[d * 16 + k]; }
+            for k in 0..16 {
+                grad_x[t][d].c[k] = g_x[d * 16 + k];
+            }
         }
     }
-    for g in &mut fnorm_dgamma { *g *= scale; }
-    for g in &mut fnorm_dbeta  { *g *= scale; }
+    for g in &mut fnorm_dgamma {
+        *g *= scale;
+    }
+    for g in &mut fnorm_dbeta {
+        *g *= scale;
+    }
 
     // ── 4. Each block backward in reverse order ──────────────────────────────
     for b in (0..state.cfg.n_blocks).rev() {
@@ -789,10 +791,18 @@ pub fn compute_grads_v2(state: &ModelStateV2, example: &TrainExample) -> StepGra
         grads.attn.w_v.scale(scale);
         grads.attn.w_o.scale(scale);
         grads.ffn.scale(scale);
-        for g in &mut grads.norm1_gamma { *g *= scale; }
-        for g in &mut grads.norm1_beta  { *g *= scale; }
-        for g in &mut grads.norm2_gamma { *g *= scale; }
-        for g in &mut grads.norm2_beta  { *g *= scale; }
+        for g in &mut grads.norm1_gamma {
+            *g *= scale;
+        }
+        for g in &mut grads.norm1_beta {
+            *g *= scale;
+        }
+        for g in &mut grads.norm2_gamma {
+            *g *= scale;
+        }
+        for g in &mut grads.norm2_beta {
+            *g *= scale;
+        }
 
         // Clip linear gradients (γ/β are small and rarely need clipping).  We
         // clip for every block; frozen ones simply never get applied.
@@ -820,22 +830,26 @@ pub fn compute_grads_v2(state: &ModelStateV2, example: &TrainExample) -> StepGra
             // (already scaled + clipped).  Reshape 16·dm reals → dm multivectors.
             for v in 0..vocab {
                 let row = &grad_head.d_weights[v];
-                if row.iter().all(|&g| g == 0.0) { continue; }
+                if row.iter().all(|&g| g == 0.0) {
+                    continue;
+                }
                 let mut mvs = vec![Multivector::zero(); dm];
                 for d in 0..dm {
-                    for k in 0..16 { mvs[d].c[k] = row[d * 16 + k]; }
+                    for k in 0..16 {
+                        mvs[d].c[k] = row[d * 16 + k];
+                    }
                 }
                 embed_grad.accumulate(v, &mvs);
             }
         }
     }
 
-    out.head         = grad_head;
+    out.head = grad_head;
     out.fnorm_dgamma = fnorm_dgamma;
-    out.fnorm_dbeta  = fnorm_dbeta;
-    out.embed        = embed_grad;
-    out.loss         = total_loss;
-    out.valid        = true;
+    out.fnorm_dbeta = fnorm_dbeta;
+    out.embed = embed_grad;
+    out.loss = total_loss;
+    out.valid = true;
     out
 }
 
@@ -848,19 +862,32 @@ fn apply_grads_v2(state: &mut ModelStateV2, grads: &StepGrads) {
     // ── Final layer-norm ─────────────────────────────────────────────────────
     state.fnorm_step += 1;
     let fnorm_lr = state.head_opt.cfg.lr;
-    let fcfg = AdamConfig { lr: fnorm_lr, ..Default::default() };
+    let fcfg = AdamConfig {
+        lr: fnorm_lr,
+        ..Default::default()
+    };
     adam_step_scalar(
-        &mut state.model.final_norm.gamma, &grads.fnorm_dgamma,
-        &mut state.fnorm_gamma_m, &mut state.fnorm_gamma_v, state.fnorm_step, &fcfg,
+        &mut state.model.final_norm.gamma,
+        &grads.fnorm_dgamma,
+        &mut state.fnorm_gamma_m,
+        &mut state.fnorm_gamma_v,
+        state.fnorm_step,
+        &fcfg,
     );
     adam_step_scalar(
-        &mut state.model.final_norm.beta, &grads.fnorm_dbeta,
-        &mut state.fnorm_beta_m, &mut state.fnorm_beta_v, state.fnorm_step, &fcfg,
+        &mut state.model.final_norm.beta,
+        &grads.fnorm_dbeta,
+        &mut state.fnorm_beta_m,
+        &mut state.fnorm_beta_v,
+        state.fnorm_step,
+        &fcfg,
     );
 
     // ── Blocks (frozen ones are skipped; their Adam clock does not advance) ───
     for b in 0..state.cfg.n_blocks {
-        if b < state.cfg.freeze_blocks { continue; }
+        if b < state.cfg.freeze_blocks {
+            continue;
+        }
         let pg = &grads.blocks[b];
         let opt = &mut state.block_opts[b];
         opt.step += 1;
@@ -868,48 +895,80 @@ fn apply_grads_v2(state: &mut ModelStateV2, grads: &StepGrads) {
         let cfg = opt.wq.cfg.clone();
 
         let bm = &mut state.model.blocks[b];
-        opt.wq.step(&mut bm.attn.w_q.weights, &mut bm.attn.w_q.bias, &pg.w_q);
-        opt.wk.step(&mut bm.attn.w_k.weights, &mut bm.attn.w_k.bias, &pg.w_k);
-        opt.wv.step(&mut bm.attn.w_v.weights, &mut bm.attn.w_v.bias, &pg.w_v);
-        opt.wo.step(&mut bm.attn.w_o.weights, &mut bm.attn.w_o.bias, &pg.w_o);
+        opt.wq
+            .step(&mut bm.attn.w_q.weights, &mut bm.attn.w_q.bias, &pg.w_q);
+        opt.wk
+            .step(&mut bm.attn.w_k.weights, &mut bm.attn.w_k.bias, &pg.w_k);
+        opt.wv
+            .step(&mut bm.attn.w_v.weights, &mut bm.attn.w_v.bias, &pg.w_v);
+        opt.wo
+            .step(&mut bm.attn.w_o.weights, &mut bm.attn.w_o.bias, &pg.w_o);
         match (&mut bm.ffn, &mut opt.ffn, &pg.ffn) {
-            (FfnVariant::Clifford(f), FfnBlockOptimizer::Clifford { .. }, FfnParamGrads::Clifford { fc1, fc2 }) => {
+            (
+                FfnVariant::Clifford(f),
+                FfnBlockOptimizer::Clifford { .. },
+                FfnParamGrads::Clifford { fc1, fc2 },
+            ) => {
                 opt.ffn.step_clifford(f, fc1, fc2);
             }
-            (FfnVariant::Dense(f), FfnBlockOptimizer::Dense { .. }, FfnParamGrads::Dense { fc1, fc2 }) => {
+            (
+                FfnVariant::Dense(f),
+                FfnBlockOptimizer::Dense { .. },
+                FfnParamGrads::Dense { fc1, fc2 },
+            ) => {
                 opt.ffn.step_dense(f, fc1, fc2);
             }
             _ => panic!("FFN variant / optimizer / grad mismatch at block {b}"),
         }
 
         adam_step_scalar(
-            &mut state.model.blocks[b].norm1.gamma, &pg.norm1_gamma,
-            &mut opt.norm1_gamma_m, &mut opt.norm1_gamma_v, lr_step, &cfg,
+            &mut state.model.blocks[b].norm1.gamma,
+            &pg.norm1_gamma,
+            &mut opt.norm1_gamma_m,
+            &mut opt.norm1_gamma_v,
+            lr_step,
+            &cfg,
         );
         adam_step_scalar(
-            &mut state.model.blocks[b].norm1.beta,  &pg.norm1_beta,
-            &mut opt.norm1_beta_m,  &mut opt.norm1_beta_v,  lr_step, &cfg,
+            &mut state.model.blocks[b].norm1.beta,
+            &pg.norm1_beta,
+            &mut opt.norm1_beta_m,
+            &mut opt.norm1_beta_v,
+            lr_step,
+            &cfg,
         );
         adam_step_scalar(
-            &mut state.model.blocks[b].norm2.gamma, &pg.norm2_gamma,
-            &mut opt.norm2_gamma_m, &mut opt.norm2_gamma_v, lr_step, &cfg,
+            &mut state.model.blocks[b].norm2.gamma,
+            &pg.norm2_gamma,
+            &mut opt.norm2_gamma_m,
+            &mut opt.norm2_gamma_v,
+            lr_step,
+            &cfg,
         );
         adam_step_scalar(
-            &mut state.model.blocks[b].norm2.beta,  &pg.norm2_beta,
-            &mut opt.norm2_beta_m,  &mut opt.norm2_beta_v,  lr_step, &cfg,
+            &mut state.model.blocks[b].norm2.beta,
+            &pg.norm2_beta,
+            &mut opt.norm2_beta_m,
+            &mut opt.norm2_beta_v,
+            lr_step,
+            &cfg,
         );
     }
 
     // ── Head ─────────────────────────────────────────────────────────────────
     if tied {
-        state.head_opt.step_bias_only(&mut state.model.head, &grads.head);
+        state
+            .head_opt
+            .step_bias_only(&mut state.model.head, &grads.head);
     } else {
         state.head_opt.step(&mut state.model.head, &grads.head);
     }
 
     // ── Embeddings (sparse) ──────────────────────────────────────────────────
     if state.cfg.train_embeddings && !state.cfg.freeze_embeddings {
-        state.embed_opt.step(&mut state.model.embedding, &grads.embed);
+        state
+            .embed_opt
+            .step(&mut state.model.embedding, &grads.embed);
     }
 
     // Keep the head weight mirror consistent with the updated shared embedding.
@@ -921,7 +980,9 @@ fn apply_grads_v2(state: &mut ModelStateV2, grads: &StepGrads) {
 /// One optimiser step from a single microbatch.
 pub fn train_step_v2(state: &mut ModelStateV2, example: &TrainExample) -> f32 {
     let grads = compute_grads_v2(state, example);
-    if !grads.valid { return 0.0; }
+    if !grads.valid {
+        return 0.0;
+    }
     apply_grads_v2(state, &grads);
     state.step += 1;
     state.update_lr();
@@ -934,16 +995,22 @@ pub fn train_step_v2(state: &mut ModelStateV2, example: &TrainExample) -> f32 {
 /// without the memory cost of a true batched forward pass.  Returns the mean
 /// loss over the valid microbatches.
 pub fn train_step_v2_accum(state: &mut ModelStateV2, examples: &[TrainExample]) -> f32 {
-    if examples.is_empty() { return 0.0; }
+    if examples.is_empty() {
+        return 0.0;
+    }
     let mut acc = StepGrads::zeros(&state.cfg);
     let mut n_valid = 0usize;
     for ex in examples {
         let g = compute_grads_v2(state, ex);
-        if !g.valid { continue; }
+        if !g.valid {
+            continue;
+        }
         acc.add(&g);
         n_valid += 1;
     }
-    if n_valid == 0 { return 0.0; }
+    if n_valid == 0 {
+        return 0.0;
+    }
     acc.scale(1.0 / n_valid as f32);
     apply_grads_v2(state, &acc);
     state.step += 1;
@@ -1032,15 +1099,20 @@ pub fn train_v2(dataset: &super::data::Dataset, state: &mut ModelStateV2) {
         for ex in &shuffled {
             let loss = train_step_v2(state, ex);
             running += loss;
-            step    += 1;
+            step += 1;
 
             if step % cfg.log_every == 0 {
                 eprintln!(
                     "[train_v2] epoch={} step={} loss={:.4} lr={:.2e}",
-                    epoch + 1, step, running / cfg.log_every as f32,
+                    epoch + 1,
+                    step,
+                    running / cfg.log_every as f32,
                     cosine_lr_with_warmup(
-                        state.step, cfg.warmup_steps, cfg.total_steps,
-                        cfg.lr_max, cfg.lr_min,
+                        state.step,
+                        cfg.warmup_steps,
+                        cfg.total_steps,
+                        cfg.lr_max,
+                        cfg.lr_min,
                     ),
                 );
                 running = 0.0;
@@ -1059,11 +1131,16 @@ mod tests {
 
     fn tiny(text: &str, resp: &str) -> RawRecord {
         RawRecord {
-            task_id: "t".into(), text: text.into(),
-            semantic_intent: "p".into(), domain: "d".into(),
-            action_target: "a".into(), policy_regime: "r".into(),
-            language_channel: "english".into(), code_language: None,
-            split: "train".into(), expected_response: resp.into(),
+            task_id: "t".into(),
+            text: text.into(),
+            semantic_intent: "p".into(),
+            domain: "d".into(),
+            action_target: "a".into(),
+            policy_regime: "r".into(),
+            language_channel: "english".into(),
+            code_language: None,
+            split: "train".into(),
+            expected_response: resp.into(),
             expected_code: None,
         }
     }

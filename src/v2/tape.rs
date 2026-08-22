@@ -72,19 +72,19 @@ pub struct AttentionTape {
 #[derive(Clone, Debug)]
 pub enum FfnHidden {
     Clifford {
-        hidden_pre:  Vec<Vec<Multivector>>,
+        hidden_pre: Vec<Vec<Multivector>>,
         hidden_post: Vec<Vec<Multivector>>,
     },
     Dense {
         input_flat: Vec<Vec<f32>>,
-        pre:        Vec<Vec<f32>>,
+        pre: Vec<Vec<f32>>,
     },
 }
 
 #[derive(Clone, Debug)]
 pub struct FfnTape {
     /// Input to FFN (after norm2).               [seq][d_model]
-    pub input:  Vec<Vec<Multivector>>,
+    pub input: Vec<Vec<Multivector>>,
     pub hidden: FfnHidden,
     /// Final FFN output (after fc2).             [seq][d_model]
     pub output: Vec<Vec<Multivector>>,
@@ -98,14 +98,14 @@ pub struct BlockTape {
     pub block_input: Vec<Vec<Multivector>>,
     /// Layer-norm 1 stats, one per position.
     pub norm1_stats: Vec<LayerNormStats>,
-    pub attn:        AttentionTape,
+    pub attn: AttentionTape,
     /// After first residual add.                  [seq][d_model]
-    pub after_res1:  Vec<Vec<Multivector>>,
+    pub after_res1: Vec<Vec<Multivector>>,
     /// Layer-norm 2 stats, one per position.
     pub norm2_stats: Vec<LayerNormStats>,
-    pub ffn:         FfnTape,
+    pub ffn: FfnTape,
     /// After second residual add (= output of block).  [seq][d_model]
-    pub after_res2:  Vec<Vec<Multivector>>,
+    pub after_res2: Vec<Vec<Multivector>>,
 }
 
 // ─── Full forward tape ────────────────────────────────────────────────────────
@@ -130,7 +130,9 @@ pub struct Tape {
 }
 
 impl Tape {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Reserve space for `n_blocks` block tapes.  Call before forward.
     pub fn reserve(&mut self, n_blocks: usize) {
@@ -138,7 +140,9 @@ impl Tape {
     }
 
     /// Sequence length (matches across all tape components).
-    pub fn seq_len(&self) -> usize { self.token_ids.len() }
+    pub fn seq_len(&self) -> usize {
+        self.token_ids.len()
+    }
 }
 
 // ─── Forward-with-tape variants ──────────────────────────────────────────────
@@ -146,25 +150,20 @@ impl Tape {
 // These mirror the operations in clifford_llm.rs but record everything into
 // a Tape as they go.  Called by training code; never used at pure inference.
 
-use crate::{
-    CliffordAttention, CliffordFFN, CliffordLayerNorm, CliffordBlock,
-    CliffordLLM, FfnVariant,
-};
-use crate::ffn::{flatten_mvs, unflatten_mvs};
 use crate::cayley_const::CliffordAlgebraConst;
+use crate::ffn::{flatten_mvs, unflatten_mvs};
 use crate::mask::mask_scores;
+use crate::{
+    CliffordAttention, CliffordBlock, CliffordFFN, CliffordLLM, CliffordLayerNorm, FfnVariant,
+};
 
 /// Layer-norm forward with stats recorded (metric-weighted over blade components).
 pub fn norm_forward_taped(
     ln: &CliffordLayerNorm,
-    x:  &[Multivector],
+    x: &[Multivector],
 ) -> (Vec<Multivector>, LayerNormStats) {
-    let (output, stats) = crate::clifford_layer_norm::forward_multivectors(
-        &ln.gamma,
-        &ln.beta,
-        ln.eps,
-        x,
-    );
+    let (output, stats) =
+        crate::clifford_layer_norm::forward_multivectors(&ln.gamma, &ln.beta, ln.eps, x);
     (
         output,
         LayerNormStats {
@@ -177,16 +176,16 @@ pub fn norm_forward_taped(
 
 /// Attention forward, recording Q/K/V/scores/weights for the backward pass.
 pub fn attention_forward_taped(
-    alg:  &CliffordAlgebraConst,
+    alg: &CliffordAlgebraConst,
     attn: &CliffordAttention,
-    x:    &[Vec<Multivector>],
+    x: &[Vec<Multivector>],
     causal: bool,
     score_mode: crate::AttentionScoreMode,
 ) -> AttentionTape {
-    let seq      = x.len();
-    let n_heads  = attn.n_heads;
+    let seq = x.len();
+    let n_heads = attn.n_heads;
     let head_dim = attn.head_dim;
-    let scale    = ((head_dim * 16) as f32).sqrt();
+    let scale = ((head_dim * 16) as f32).sqrt();
 
     let q: Vec<Vec<Multivector>> = x.iter().map(|xi| attn.w_q.forward(xi)).collect();
     let k: Vec<Vec<Multivector>> = x.iter().map(|xi| attn.w_k.forward(xi)).collect();
@@ -217,39 +216,48 @@ pub fn attention_forward_taped(
         .collect();
 
     // Aggregate V: channel d uses its own head's attention weights.
-    let agg: Vec<Vec<Multivector>> = (0..seq).map(|i| {
-        (0..attn.d_model).map(|d| {
-            let h = d / head_dim;
-            (0..seq).fold(Multivector::zero(), |acc, j| {
-                let scaled = v[j][d].scale(weights[h][i][j]);
-                Multivector { c: std::array::from_fn(|k| acc.c[k] + scaled.c[k]) }
-            })
-        }).collect()
-    }).collect();
+    let agg: Vec<Vec<Multivector>> = (0..seq)
+        .map(|i| {
+            (0..attn.d_model)
+                .map(|d| {
+                    let h = d / head_dim;
+                    (0..seq).fold(Multivector::zero(), |acc, j| {
+                        let scaled = v[j][d].scale(weights[h][i][j]);
+                        Multivector {
+                            c: std::array::from_fn(|k| acc.c[k] + scaled.c[k]),
+                        }
+                    })
+                })
+                .collect()
+        })
+        .collect();
 
     // Final w_o projection
-    let output: Vec<Vec<Multivector>> = agg.iter()
-        .map(|ai| attn.w_o.forward(ai))
-        .collect();
+    let output: Vec<Vec<Multivector>> = agg.iter().map(|ai| attn.w_o.forward(ai)).collect();
 
     AttentionTape {
         input: x.to_vec(),
-        q, k, v,
-        scores, weights, agg, output,
+        q,
+        k,
+        v,
+        scores,
+        weights,
+        agg,
+        output,
         score_mode,
     }
 }
 
 /// FFN forward with intermediate activations recorded.
-pub fn ffn_forward_taped(
-    ffn: &FfnVariant,
-    x:   &[Vec<Multivector>],
-) -> FfnTape {
+pub fn ffn_forward_taped(ffn: &FfnVariant, x: &[Vec<Multivector>]) -> FfnTape {
     match ffn {
         FfnVariant::Clifford(f) => ffn_forward_taped_clifford(f, x),
         FfnVariant::Dense(f) => {
             let input_flat: Vec<Vec<f32>> = x.iter().map(|xi| flatten_mvs(xi)).collect();
-            let pre: Vec<Vec<f32>> = input_flat.iter().map(|flat| f.fc1.forward_flat(flat)).collect();
+            let pre: Vec<Vec<f32>> = input_flat
+                .iter()
+                .map(|flat| f.fc1.forward_flat(flat))
+                .collect();
             let output: Vec<Vec<Multivector>> = pre
                 .iter()
                 .map(|p| {
@@ -266,74 +274,89 @@ pub fn ffn_forward_taped(
     }
 }
 
-fn ffn_forward_taped_clifford(
-    ffn: &CliffordFFN,
-    x:   &[Vec<Multivector>],
-) -> FfnTape {
-    let hidden_pre: Vec<Vec<Multivector>> = x.iter()
-        .map(|xi| ffn.fc1.forward(xi))
-        .collect();
+fn ffn_forward_taped_clifford(ffn: &CliffordFFN, x: &[Vec<Multivector>]) -> FfnTape {
+    let hidden_pre: Vec<Vec<Multivector>> = x.iter().map(|xi| ffn.fc1.forward(xi)).collect();
 
-    let hidden_post: Vec<Vec<Multivector>> = hidden_pre.iter()
+    let hidden_post: Vec<Vec<Multivector>> = hidden_pre
+        .iter()
         .map(|row| row.iter().map(|mv| mv.map(|c| c.max(0.0))).collect())
         .collect();
 
-    let output: Vec<Vec<Multivector>> = hidden_post.iter()
-        .map(|h| ffn.fc2.forward(h))
-        .collect();
+    let output: Vec<Vec<Multivector>> = hidden_post.iter().map(|h| ffn.fc2.forward(h)).collect();
 
     FfnTape {
         input: x.to_vec(),
-        hidden: FfnHidden::Clifford { hidden_pre, hidden_post },
+        hidden: FfnHidden::Clifford {
+            hidden_pre,
+            hidden_post,
+        },
         output,
     }
 }
 
 /// One full block forward producing a BlockTape.
 pub fn block_forward_taped(
-    alg:    &CliffordAlgebraConst,
-    block:  &CliffordBlock,
-    input:  &[Vec<Multivector>],
+    alg: &CliffordAlgebraConst,
+    block: &CliffordBlock,
+    input: &[Vec<Multivector>],
     causal: bool,
     score_mode: crate::AttentionScoreMode,
 ) -> BlockTape {
     // Norm 1
     let mut norm1_stats = Vec::with_capacity(input.len());
-    let n1: Vec<Vec<Multivector>> = input.iter().map(|xi| {
-        let (out, stats) = norm_forward_taped(&block.norm1, xi);
-        norm1_stats.push(stats);
-        out
-    }).collect();
+    let n1: Vec<Vec<Multivector>> = input
+        .iter()
+        .map(|xi| {
+            let (out, stats) = norm_forward_taped(&block.norm1, xi);
+            norm1_stats.push(stats);
+            out
+        })
+        .collect();
 
     // Attention
     let attn = attention_forward_taped(alg, &block.attn, &n1, causal, score_mode);
 
     // Residual 1
-    let after_res1: Vec<Vec<Multivector>> = input.iter().zip(attn.output.iter())
+    let after_res1: Vec<Vec<Multivector>> = input
+        .iter()
+        .zip(attn.output.iter())
         .map(|(xi, ai)| {
-            xi.iter().zip(ai.iter())
-                .map(|(a, b)| Multivector { c: std::array::from_fn(|k| a.c[k] + b.c[k]) })
+            xi.iter()
+                .zip(ai.iter())
+                .map(|(a, b)| Multivector {
+                    c: std::array::from_fn(|k| a.c[k] + b.c[k]),
+                })
                 .collect()
-        }).collect();
+        })
+        .collect();
 
     // Norm 2
     let mut norm2_stats = Vec::with_capacity(after_res1.len());
-    let n2: Vec<Vec<Multivector>> = after_res1.iter().map(|xi| {
-        let (out, stats) = norm_forward_taped(&block.norm2, xi);
-        norm2_stats.push(stats);
-        out
-    }).collect();
+    let n2: Vec<Vec<Multivector>> = after_res1
+        .iter()
+        .map(|xi| {
+            let (out, stats) = norm_forward_taped(&block.norm2, xi);
+            norm2_stats.push(stats);
+            out
+        })
+        .collect();
 
     // FFN
     let ffn = ffn_forward_taped(&block.ffn, &n2);
 
     // Residual 2
-    let after_res2: Vec<Vec<Multivector>> = after_res1.iter().zip(ffn.output.iter())
+    let after_res2: Vec<Vec<Multivector>> = after_res1
+        .iter()
+        .zip(ffn.output.iter())
         .map(|(xi, fi)| {
-            xi.iter().zip(fi.iter())
-                .map(|(a, b)| Multivector { c: std::array::from_fn(|k| a.c[k] + b.c[k]) })
+            xi.iter()
+                .zip(fi.iter())
+                .map(|(a, b)| Multivector {
+                    c: std::array::from_fn(|k| a.c[k] + b.c[k]),
+                })
                 .collect()
-        }).collect();
+        })
+        .collect();
 
     BlockTape {
         block_input: input.to_vec(),
@@ -351,22 +374,23 @@ pub fn block_forward_taped(
 /// Includes positional encoding and the output head's multivector projection
 /// before the scalar extraction that produces logits.
 pub fn model_forward_taped(
-    alg:       &CliffordAlgebraConst,
-    model:     &CliffordLLM,
+    alg: &CliffordAlgebraConst,
+    model: &CliffordLLM,
     token_ids: &[usize],
-    causal:    bool,
+    causal: bool,
     dot_scores: bool,
 ) -> Tape {
     let score_mode = crate::AttentionScoreMode::from_dot_flag(dot_scores);
     use crate::positional::RotorPositionalEncoding;
 
     // 1. Embedding lookup
-    let embedded: Vec<Vec<Multivector>> = token_ids.iter()
+    let embedded: Vec<Vec<Multivector>> = token_ids
+        .iter()
         .map(|&id| model.embedding[id].clone())
         .collect();
 
     // 2. Positional encoding
-    let pe      = RotorPositionalEncoding::new(model.embedding[0].len());
+    let pe = RotorPositionalEncoding::new(model.embedding[0].len());
     let post_pe = pe.encode(alg, &embedded);
 
     // 3. Blocks
@@ -381,15 +405,16 @@ pub fn model_forward_taped(
     // 4. Final layer norm, then output head — flatten each position's d_model
     //    multivectors to 16·d_model real features and project to vocab logits.
     let mut final_norm_stats = Vec::with_capacity(x.len());
-    let head_input: Vec<Vec<Multivector>> = x.iter().map(|xi| {
-        let (out, stats) = norm_forward_taped(&model.final_norm, xi);
-        final_norm_stats.push(stats);
-        out
-    }).collect();
-
-    let logits: Vec<Vec<f32>> = head_input.iter()
-        .map(|xi| model.head.forward(xi))
+    let head_input: Vec<Vec<Multivector>> = x
+        .iter()
+        .map(|xi| {
+            let (out, stats) = norm_forward_taped(&model.final_norm, xi);
+            final_norm_stats.push(stats);
+            out
+        })
         .collect();
+
+    let logits: Vec<Vec<f32>> = head_input.iter().map(|xi| model.head.forward(xi)).collect();
 
     Tape {
         token_ids: token_ids.to_vec(),
@@ -432,21 +457,26 @@ fn softmax(x: &[f32]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use crate::{CliffordAlgebra, LinearReal};
+    use std::sync::Arc;
 
     #[test]
     fn tape_shapes_match_forward() {
         let alg_arc = Arc::new(CliffordAlgebra::sta());
-        let alg     = CliffordAlgebraConst::new();
+        let alg = CliffordAlgebraConst::new();
         let d_model = 4;
-        let vocab   = 16;
+        let vocab = 16;
 
-        let attn  = CliffordAttention::new(d_model, 2, alg_arc.clone());
-        let ffn   = FfnVariant::clifford(d_model, 8, alg_arc.clone());
+        let attn = CliffordAttention::new(d_model, 2, alg_arc.clone());
+        let ffn = FfnVariant::clifford(d_model, 8, alg_arc.clone());
         let norm1 = CliffordLayerNorm::new(d_model);
         let norm2 = CliffordLayerNorm::new(d_model);
-        let block = CliffordBlock { attn, ffn, norm1, norm2 };
+        let block = CliffordBlock {
+            attn,
+            ffn,
+            norm1,
+            norm2,
+        };
 
         let head = LinearReal::new(d_model, vocab);
         let model = CliffordLLM {
@@ -465,11 +495,11 @@ mod tests {
         assert_eq!(tape.embedded[0].len(), d_model);
         assert_eq!(tape.blocks.len(), 1);
         // scores are now [n_heads][seq][seq]
-        assert_eq!(tape.blocks[0].attn.scores.len(), 2);     // n_heads
-        assert_eq!(tape.blocks[0].attn.scores[0].len(), 4);  // seq
+        assert_eq!(tape.blocks[0].attn.scores.len(), 2); // n_heads
+        assert_eq!(tape.blocks[0].attn.scores[0].len(), 4); // seq
         assert_eq!(tape.blocks[0].attn.scores[0][0].len(), 4);
         let row_sum: f32 = tape.blocks[0].attn.weights[0][0].iter().sum();
-        assert!((row_sum - 1.0).abs() < 1e-5);  // softmax row-stochastic
+        assert!((row_sum - 1.0).abs() < 1e-5); // softmax row-stochastic
         assert_eq!(tape.logits.len(), 4);
         assert_eq!(tape.logits[0].len(), vocab);
     }
@@ -477,12 +507,19 @@ mod tests {
     #[test]
     fn causal_mask_zeros_future_weights() {
         let alg_arc = Arc::new(CliffordAlgebra::sta());
-        let alg     = CliffordAlgebraConst::new();
-        let attn    = CliffordAttention::new(4, 2, alg_arc.clone());
+        let alg = CliffordAlgebraConst::new();
+        let attn = CliffordAttention::new(4, 2, alg_arc.clone());
 
         let x: Vec<Vec<Multivector>> = (0..3)
-            .map(|i| vec![Multivector::scalar((i + 1) as f32); 4]).collect();
-        let tape = attention_forward_taped(&alg, &attn, &x, true, crate::AttentionScoreMode::InnerProduct);
+            .map(|i| vec![Multivector::scalar((i + 1) as f32); 4])
+            .collect();
+        let tape = attention_forward_taped(
+            &alg,
+            &attn,
+            &x,
+            true,
+            crate::AttentionScoreMode::InnerProduct,
+        );
 
         // Check every head: position 0 attends only to position 0; position 2 sees all.
         for head in &tape.weights {

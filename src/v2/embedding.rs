@@ -9,9 +9,9 @@
 //   3. Applies Adam-style updates only to token ids that actually appeared
 //      in the batch (sparse update — efficient for large vocabularies)
 
-use std::collections::HashMap;
+use crate::optim::{adam_step, AdamConfig, MvAdamState};
 use crate::Multivector;
-use crate::optim::{AdamConfig, MvAdamState, adam_step};
+use std::collections::HashMap;
 
 // ─── Gradient accumulator ────────────────────────────────────────────────────
 
@@ -27,7 +27,10 @@ pub struct EmbeddingGrad {
 
 impl EmbeddingGrad {
     pub fn new(d_model: usize) -> Self {
-        Self { d_model, grads: HashMap::new() }
+        Self {
+            d_model,
+            grads: HashMap::new(),
+        }
     }
 
     /// Accumulate gradient at a single token position.
@@ -36,22 +39,32 @@ impl EmbeddingGrad {
     /// `grad`       — dL/d(embedding[token_id])  (length d_model)
     pub fn accumulate(&mut self, token_id: usize, grad: &[Multivector]) {
         debug_assert_eq!(grad.len(), self.d_model);
-        let entry = self.grads.entry(token_id)
+        let entry = self
+            .grads
+            .entry(token_id)
             .or_insert_with(|| vec![Multivector::zero(); self.d_model]);
         for d in 0..self.d_model {
-            for k in 0..16 { entry[d].c[k] += grad[d].c[k]; }
+            for k in 0..16 {
+                entry[d].c[k] += grad[d].c[k];
+            }
         }
     }
 
     /// Average over a batch of `n` samples (divide every accumulated gradient).
     pub fn scale(&mut self, s: f32) {
         for entry in self.grads.values_mut() {
-            for mv in entry { for k in 0..16 { mv.c[k] *= s; } }
+            for mv in entry {
+                for k in 0..16 {
+                    mv.c[k] *= s;
+                }
+            }
         }
     }
 
     /// Number of distinct token ids with accumulated gradient.
-    pub fn n_updated(&self) -> usize { self.grads.len() }
+    pub fn n_updated(&self) -> usize {
+        self.grads.len()
+    }
 
     /// Merge another sparse embedding gradient into this one (sum per token id).
     /// Used for gradient accumulation across microbatches.
@@ -78,19 +91,21 @@ pub struct EmbeddingOptimizer {
 
 impl EmbeddingOptimizer {
     pub fn new(d_model: usize, cfg: AdamConfig) -> Self {
-        Self { d_model, cfg, states: HashMap::new() }
+        Self {
+            d_model,
+            cfg,
+            states: HashMap::new(),
+        }
     }
 
     /// Apply Adam updates to `embedding` for every token id present in `grad`.
     ///
     /// Token ids absent from the batch are left untouched.
-    pub fn step(
-        &mut self,
-        embedding: &mut Vec<Vec<Multivector>>,
-        grad:      &EmbeddingGrad,
-    ) {
+    pub fn step(&mut self, embedding: &mut Vec<Vec<Multivector>>, grad: &EmbeddingGrad) {
         for (&token_id, token_grad) in &grad.grads {
-            let state = self.states.entry(token_id)
+            let state = self
+                .states
+                .entry(token_id)
                 .or_insert_with(|| vec![MvAdamState::zero(); self.d_model]);
 
             for d in 0..self.d_model {
@@ -117,7 +132,7 @@ mod tests {
         let some_grad = vec![Multivector::scalar(0.5); 4];
 
         g.accumulate(7, &some_grad);
-        g.accumulate(7, &some_grad);   // same id twice
+        g.accumulate(7, &some_grad); // same id twice
         g.accumulate(42, &some_grad);
 
         assert_eq!(g.n_updated(), 2);
@@ -131,9 +146,13 @@ mod tests {
     fn step_updates_only_seen_tokens() {
         let d_model = 4;
         let mut embedding = vec![vec![Multivector::scalar(0.1); d_model]; 10];
-        let mut opt = EmbeddingOptimizer::new(d_model, AdamConfig {
-            lr: 0.1, ..Default::default()
-        });
+        let mut opt = EmbeddingOptimizer::new(
+            d_model,
+            AdamConfig {
+                lr: 0.1,
+                ..Default::default()
+            },
+        );
 
         let mut grad = EmbeddingGrad::new(d_model);
         grad.accumulate(3, &vec![Multivector::scalar(1.0); d_model]);
@@ -144,7 +163,9 @@ mod tests {
         opt.step(&mut embedding, &grad);
 
         assert!(embedding[3][0].c[0] < before_3, "seen token should move");
-        assert!((embedding[5][0].c[0] - before_5).abs() < 1e-9,
-            "unseen token must not move");
+        assert!(
+            (embedding[5][0].c[0] - before_5).abs() < 1e-9,
+            "unseen token must not move"
+        );
     }
 }

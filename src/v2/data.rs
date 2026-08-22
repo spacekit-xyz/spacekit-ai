@@ -41,6 +41,10 @@ impl TrainExample {
         let n = full_ids.len();
         let mut loss_mask = vec![false; n];
         for t in 0..n.saturating_sub(1) {
+            // Skip predicting from/into PAD (turn-aligned padding).
+            if full_ids[t] == special::PAD || full_ids[t + 1] == special::PAD {
+                continue;
+            }
             loss_mask[t] = true;
         }
         Self {
@@ -79,7 +83,11 @@ pub struct Dataset {
 }
 
 impl Dataset {
-    pub fn load_jsonl(path: &Path, tokenizer: &mut Tokenizer, max_seq: usize) -> Result<Self, String> {
+    pub fn load_jsonl(
+        path: &Path,
+        tokenizer: &mut Tokenizer,
+        max_seq: usize,
+    ) -> Result<Self, String> {
         let records = load_raw_records(path)?;
         tokenizer.fit(&records);
         let mut train = Vec::new();
@@ -167,7 +175,10 @@ impl Tokenizer {
 
     /// Encode a whitespace-tokenized string (lowercased words).
     pub fn encode_words(&self, s: &str) -> Vec<usize> {
-        tokenize_words(s).into_iter().map(|w| self.word_id(&w)).collect()
+        tokenize_words(s)
+            .into_iter()
+            .map(|w| self.word_id(&w))
+            .collect()
     }
 
     /// Restore tokenizer from checkpoint vocabulary (`id_to_word` order).
@@ -189,7 +200,11 @@ impl Default for Tokenizer {
     }
 }
 
-pub fn encode_record(rec: &RawRecord, tok: &Tokenizer, max_seq: usize) -> Result<TrainExample, String> {
+pub fn encode_record(
+    rec: &RawRecord,
+    tok: &Tokenizer,
+    max_seq: usize,
+) -> Result<TrainExample, String> {
     let mut ids = vec![special::BOS];
     for w in tokenize_words(&rec.text) {
         ids.push(tok.word_id(&w));
@@ -233,8 +248,8 @@ fn load_raw_records(path: &Path) -> Result<Vec<RawRecord>, String> {
         if trim.is_empty() {
             continue;
         }
-        let rec: RawRecord =
-            serde_json::from_str(trim).map_err(|e| format!("{}:{}: {}", path.display(), ln + 1, e))?;
+        let rec: RawRecord = serde_json::from_str(trim)
+            .map_err(|e| format!("{}:{}: {}", path.display(), ln + 1, e))?;
         out.push(rec);
     }
     Ok(out)
@@ -263,7 +278,7 @@ mod tests {
         tok.fit(&[rec.clone()]);
         let ex = encode_record(&rec, &tok, 64).unwrap();
         assert!(ex.loss_mask[0] == false); // BOS predicts hello — masked false
-                                             // First true should predict start of response
+                                           // First true should predict start of response
         let sep_ix = ex.full_ids.iter().position(|&x| x == special::SEP).unwrap();
         let r_start = sep_ix + 1;
         assert_eq!(r_start, 4); // BOS, hello, world, SEP → first response token at index 4

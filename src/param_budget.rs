@@ -8,7 +8,7 @@ pub fn clifford_linear_scalars(in_dim: usize, out_dim: usize) -> usize {
 pub fn clifford_block_scalars(d_model: usize, d_ff: usize) -> usize {
     let attn = 4 * clifford_linear_scalars(d_model, d_model);
     let ln = 2 * 2 * 16 * d_model;
-    let ffn = crate::ffn::clifford_ffn_scalars(d_model, d_ff);
+    let ffn = 16 * (2 * d_model * d_ff + d_ff + d_model);
     attn + ln + ffn
 }
 
@@ -48,7 +48,11 @@ pub fn vanilla_lm_scalars(
     let blocks = n_blocks * vanilla_block_scalars(d_model, d_ff);
     let embed = vocab * d_model;
     let final_norm = 2 * d_model;
-    let head = if tie_embeddings { vocab } else { vocab * (d_model + 1) };
+    let head = if tie_embeddings {
+        vocab
+    } else {
+        vocab * (d_model + 1)
+    };
     blocks + embed + final_norm + head
 }
 

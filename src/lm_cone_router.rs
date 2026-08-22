@@ -147,7 +147,11 @@ impl LmAdjustableConeRouter {
                 let (a1, logit) = piecewise.forward(x);
                 let p = sigmoid(logit);
                 let y = if s.route_a { 1.0 } else { 0.0 };
-                let w = if is_near { 1.0 + cfg.curriculum_boost } else { 1.0 };
+                let w = if is_near {
+                    1.0 + cfg.curriculum_boost
+                } else {
+                    1.0
+                };
                 let mut dlogit = w * (p - y);
                 if is_near {
                     dlogit += cfg.balance_lambda * (mean_p_annulus - 0.5);
@@ -223,9 +227,7 @@ impl Mlp {
         let w1 = (0..hidden)
             .map(|_| (0..in_dim).map(|_| rng.gen_range(-scale..scale)).collect())
             .collect();
-        let w2 = (0..hidden)
-            .map(|_| rng.gen_range(-scale..scale))
-            .collect();
+        let w2 = (0..hidden).map(|_| rng.gen_range(-scale..scale)).collect();
         Self {
             w1,
             b1: vec![0.0; hidden],

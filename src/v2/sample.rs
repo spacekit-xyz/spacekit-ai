@@ -51,18 +51,31 @@ impl Default for SampleConfig {
 
 impl SampleConfig {
     pub fn greedy() -> Self {
-        Self { temperature: 0.0, top_k: None, top_p: None,
-               repetition_penalty: 1.0, ..Default::default() }
+        Self {
+            temperature: 0.0,
+            top_k: None,
+            top_p: None,
+            repetition_penalty: 1.0,
+            ..Default::default()
+        }
     }
 
     pub fn creative() -> Self {
-        Self { temperature: 1.0, top_p: Some(0.95),
-               repetition_penalty: 1.1, ..Default::default() }
+        Self {
+            temperature: 1.0,
+            top_p: Some(0.95),
+            repetition_penalty: 1.1,
+            ..Default::default()
+        }
     }
 
     pub fn focused() -> Self {
-        Self { temperature: 0.7, top_p: Some(0.9),
-               repetition_penalty: 1.15, ..Default::default() }
+        Self {
+            temperature: 0.7,
+            top_p: Some(0.9),
+            repetition_penalty: 1.15,
+            ..Default::default()
+        }
     }
 }
 
@@ -71,14 +84,20 @@ impl SampleConfig {
 /// Apply temperature scaling: logits /= T.  T=0 returns the input unchanged
 /// (caller will use argmax).
 pub fn apply_temperature(logits: &mut [f32], temperature: f32) {
-    if temperature <= 0.0 || (temperature - 1.0).abs() < 1e-6 { return; }
-    for l in logits.iter_mut() { *l /= temperature; }
+    if temperature <= 0.0 || (temperature - 1.0).abs() < 1e-6 {
+        return;
+    }
+    for l in logits.iter_mut() {
+        *l /= temperature;
+    }
 }
 
 /// Penalise tokens already present in `context` by dividing their logit by
 /// `penalty` (if positive) or multiplying by it (if negative — symmetric).
 pub fn apply_repetition_penalty(logits: &mut [f32], context: &[usize], penalty: f32) {
-    if (penalty - 1.0).abs() < 1e-6 { return; }
+    if (penalty - 1.0).abs() < 1e-6 {
+        return;
+    }
     for &tok in context {
         if tok < logits.len() {
             if logits[tok] > 0.0 {
@@ -92,7 +111,9 @@ pub fn apply_repetition_penalty(logits: &mut [f32], context: &[usize], penalty: 
 
 /// Keep only the top-k logits — set the rest to NEG_INFINITY.
 pub fn apply_top_k(logits: &mut [f32], k: usize) {
-    if k == 0 || k >= logits.len() { return; }
+    if k == 0 || k >= logits.len() {
+        return;
+    }
 
     // Find the k-th largest value (anything below it is filtered out)
     let mut sorted: Vec<f32> = logits.to_vec();
@@ -100,14 +121,18 @@ pub fn apply_top_k(logits: &mut [f32], k: usize) {
     let cutoff = sorted[k - 1];
 
     for l in logits.iter_mut() {
-        if *l < cutoff { *l = f32::NEG_INFINITY; }
+        if *l < cutoff {
+            *l = f32::NEG_INFINITY;
+        }
     }
 }
 
 /// Top-p / nucleus filtering: keep the smallest set of tokens whose cumulative
 /// probability is ≥ `p`.  Everything else is set to NEG_INFINITY.
 pub fn apply_top_p(logits: &mut [f32], p: f32) {
-    if p >= 1.0 || p <= 0.0 { return; }
+    if p >= 1.0 || p <= 0.0 {
+        return;
+    }
 
     // Compute softmax over the logits we currently have
     let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -125,12 +150,16 @@ pub fn apply_top_p(logits: &mut [f32], p: f32) {
     for (idx, prob) in indexed {
         keep.insert(idx);
         cum += prob;
-        if cum >= p { break; }
+        if cum >= p {
+            break;
+        }
     }
 
     // Mask out tokens not in the keep set
     for (i, l) in logits.iter_mut().enumerate() {
-        if !keep.contains(&i) { *l = f32::NEG_INFINITY; }
+        if !keep.contains(&i) {
+            *l = f32::NEG_INFINITY;
+        }
     }
 }
 
@@ -154,14 +183,18 @@ pub fn multinomial(probs: &[f32], rng: &mut SimpleRng) -> usize {
     let mut cum = 0.0f32;
     for (i, &p) in probs.iter().enumerate() {
         cum += p;
-        if r < cum { return i; }
+        if r < cum {
+            return i;
+        }
     }
     probs.len() - 1
 }
 
 /// Argmax — returns the token with the highest logit.  Used for greedy decoding.
 pub fn argmax(logits: &[f32]) -> usize {
-    logits.iter().enumerate()
+    logits
+        .iter()
+        .enumerate()
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(i, _)| i)
         .unwrap_or(0)
@@ -172,10 +205,10 @@ pub fn argmax(logits: &[f32]) -> usize {
 /// Applies (in order): repetition penalty, temperature, top-k, top-p, then samples.
 /// `context` is the full sequence so far (for repetition penalty).
 pub fn sample_next(
-    logits:  &[f32],
+    logits: &[f32],
     context: &[usize],
-    cfg:     &SampleConfig,
-    rng:     &mut SimpleRng,
+    cfg: &SampleConfig,
+    rng: &mut SimpleRng,
 ) -> usize {
     let mut l: Vec<f32> = logits.to_vec();
 
@@ -187,8 +220,12 @@ pub fn sample_next(
     }
 
     apply_temperature(&mut l, cfg.temperature);
-    if let Some(k) = cfg.top_k { apply_top_k(&mut l, k); }
-    if let Some(p) = cfg.top_p { apply_top_p(&mut l, p); }
+    if let Some(k) = cfg.top_k {
+        apply_top_k(&mut l, k);
+    }
+    if let Some(p) = cfg.top_p {
+        apply_top_p(&mut l, p);
+    }
 
     let probs = softmax(&l);
     multinomial(&probs, rng)
@@ -203,7 +240,9 @@ pub trait TokenCallback {
 }
 
 impl<F: FnMut(usize, &str) -> bool> TokenCallback for F {
-    fn on_token(&mut self, token_id: usize, piece: &str) -> bool { self(token_id, piece) }
+    fn on_token(&mut self, token_id: usize, piece: &str) -> bool {
+        self(token_id, piece)
+    }
 }
 
 /// Streaming generation.  Calls `callback` for each generated token; if the
@@ -214,9 +253,9 @@ impl<F: FnMut(usize, &str) -> bool> TokenCallback for F {
 ///
 /// Returns the full sequence of generated token ids (excluding the prompt).
 pub fn generate_stream<F, C>(
-    prompt_ids:  &[usize],
-    cfg:         &SampleConfig,
-    tokenizer:   &Tokenizer,
+    prompt_ids: &[usize],
+    cfg: &SampleConfig,
+    tokenizer: &Tokenizer,
     mut forward_fn: F,
     mut callback: C,
 ) -> Vec<usize>
@@ -229,7 +268,9 @@ where
     let mut rng = SimpleRng::new(cfg.seed.unwrap_or_else(|| {
         // Fallback seed if none provided — uses ids as deterministic seed
         let mut s: u64 = 0xCAFEBABE;
-        for &i in &ids { s = s.wrapping_mul(31).wrapping_add(i as u64); }
+        for &i in &ids {
+            s = s.wrapping_mul(31).wrapping_add(i as u64);
+        }
         s
     }));
 
@@ -237,21 +278,26 @@ where
         let logits = forward_fn(&ids);
         let last = match logits.last() {
             Some(l) => l,
-            None    => break,
+            None => break,
         };
 
         let next = sample_next(last, &ids, cfg, &mut rng);
 
         // Stop conditions
-        if cfg.stop_tokens.contains(&next) { break; }
+        if cfg.stop_tokens.contains(&next) {
+            break;
+        }
 
         // Decode this single token for the callback
-        let piece = tokenizer.id_to_word
+        let piece = tokenizer
+            .id_to_word
             .get(next)
             .map(|s| s.as_str())
             .unwrap_or("<UNK>");
 
-        if !callback.on_token(next, piece) { break; }
+        if !callback.on_token(next, piece) {
+            break;
+        }
 
         ids.push(next);
         generated.push(next);
@@ -264,13 +310,18 @@ where
 
 /// Linear congruential generator — small, deterministic, no dependencies.
 /// Not cryptographically secure; perfectly fine for sampling.
-pub struct SimpleRng { state: u64 }
+pub struct SimpleRng {
+    state: u64,
+}
 
 impl SimpleRng {
-    pub fn new(seed: u64) -> Self { Self { state: seed.max(1) } }
+    pub fn new(seed: u64) -> Self {
+        Self { state: seed.max(1) }
+    }
 
     pub fn next_u32(&mut self) -> u32 {
-        self.state = self.state
+        self.state = self
+            .state
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
         (self.state >> 32) as u32
@@ -337,7 +388,8 @@ mod tests {
     fn streaming_stops_on_eos() {
         // Mock forward function that always emits EOS
         let cfg = SampleConfig {
-            temperature: 0.0, max_new_tokens: 100,
+            temperature: 0.0,
+            max_new_tokens: 100,
             stop_tokens: vec![special::EOS],
             ..Default::default()
         };
@@ -351,7 +403,10 @@ mod tests {
             row[special::EOS] = 100.0;
             vec![row]
         };
-        let cb = |t: usize, _p: &str| { last_token = Some(t); true };
+        let cb = |t: usize, _p: &str| {
+            last_token = Some(t);
+            true
+        };
 
         let generated = generate_stream(&[], &cfg, &tok, forward, cb);
         assert!(generated.is_empty(), "should stop immediately on EOS");

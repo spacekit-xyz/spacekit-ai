@@ -30,7 +30,7 @@ const fn geo_blades(a: usize, b: usize) -> (i8, usize) {
         // basis vectors that would have to move past this one).  Each such swap
         // flips the sign.
         let higher = b & !((bit << 1).wrapping_sub(1)); // bits above `bit` in b
-        // Equivalently: count bits in b strictly less than this bit
+                                                        // Equivalently: count bits in b strictly less than this bit
         let lower = b & (bit - 1);
         if lower.count_ones() % 2 == 1 {
             sign = -sign;
@@ -56,7 +56,7 @@ const fn geo_blades(a: usize, b: usize) -> (i8, usize) {
 /// One cell of the Cayley table: (sign as i8, output blade index).
 #[derive(Clone, Copy, Debug)]
 pub struct CayleyCell {
-    pub sign:  i8,
+    pub sign: i8,
     pub blade: u8,
 }
 
@@ -67,7 +67,10 @@ const fn build_cayley() -> [[CayleyCell; 16]; 16] {
         let mut j = 0;
         while j < 16 {
             let (sign, blade) = geo_blades(i, j);
-            table[i][j] = CayleyCell { sign, blade: blade as u8 };
+            table[i][j] = CayleyCell {
+                sign,
+                blade: blade as u8,
+            };
             j += 1;
         }
         i += 1;
@@ -88,7 +91,9 @@ pub const CAYLEY_STA: [[CayleyCell; 16]; 16] = build_cayley();
 pub struct CliffordAlgebraConst;
 
 impl CliffordAlgebraConst {
-    pub const fn new() -> Self { CliffordAlgebraConst }
+    pub const fn new() -> Self {
+        CliffordAlgebraConst
+    }
 
     /// Geometric product a ⊛ b.
     #[inline]
@@ -171,25 +176,41 @@ mod tests {
     #[test]
     fn e0_squares_to_plus_one() {
         let result = ALG.geo_product(&e(1), &e(1)); // e0 * e0
-        assert!((result.c[0] - 1.0).abs() < 1e-6, "e0² should be +1, got {}", result.c[0]);
+        assert!(
+            (result.c[0] - 1.0).abs() < 1e-6,
+            "e0² should be +1, got {}",
+            result.c[0]
+        );
     }
 
     #[test]
     fn e1_squares_to_minus_one() {
         let result = ALG.geo_product(&e(2), &e(2)); // e1 * e1
-        assert!((result.c[0] + 1.0).abs() < 1e-6, "e1² should be −1, got {}", result.c[0]);
+        assert!(
+            (result.c[0] + 1.0).abs() < 1e-6,
+            "e1² should be −1, got {}",
+            result.c[0]
+        );
     }
 
     #[test]
     fn e2_squares_to_minus_one() {
         let result = ALG.geo_product(&e(4), &e(4)); // e2 * e2
-        assert!((result.c[0] + 1.0).abs() < 1e-6, "e2² should be −1, got {}", result.c[0]);
+        assert!(
+            (result.c[0] + 1.0).abs() < 1e-6,
+            "e2² should be −1, got {}",
+            result.c[0]
+        );
     }
 
     #[test]
     fn e3_squares_to_minus_one() {
         let result = ALG.geo_product(&e(8), &e(8)); // e3 * e3
-        assert!((result.c[0] + 1.0).abs() < 1e-6, "e3² should be −1, got {}", result.c[0]);
+        assert!(
+            (result.c[0] + 1.0).abs() < 1e-6,
+            "e3² should be −1, got {}",
+            result.c[0]
+        );
     }
 
     #[test]
@@ -205,11 +226,17 @@ mod tests {
     #[test]
     fn associativity() {
         // (e0 ⊛ e1) ⊛ e2 == e0 ⊛ (e1 ⊛ e2)
-        let e0 = e(1); let e1 = e(2); let e2 = e(4);
+        let e0 = e(1);
+        let e1 = e(2);
+        let e2 = e(4);
         let lhs = ALG.geo_product(&ALG.geo_product(&e0, &e1), &e2);
         let rhs = ALG.geo_product(&e0, &ALG.geo_product(&e1, &e2));
         for i in 0..16 {
-            assert!((lhs.c[i] - rhs.c[i]).abs() < 1e-6, "associativity failed at blade {}", i);
+            assert!(
+                (lhs.c[i] - rhs.c[i]).abs() < 1e-6,
+                "associativity failed at blade {}",
+                i
+            );
         }
     }
 
@@ -228,18 +255,21 @@ mod tests {
         // (the function from clifford_llm.rs).
         // We spot-check a handful of entries.
         let checks: &[(usize, usize, i8, usize)] = &[
-            (0, 0,  1, 0),   // 1 * 1 = 1
-            (1, 1,  1, 0),   // e0 * e0 = +1
-            (2, 2, -1, 0),   // e1 * e1 = -1
-            (1, 2,  1, 3),   // e0 * e1 = e01
-            (2, 1, -1, 3),   // e1 * e0 = -e01
-            (6, 6, -1, 0),   // e12 * e12 = -1  (since e1²e2² = -1·-1 = +1... wait)
+            (0, 0, 1, 0),  // 1 * 1 = 1
+            (1, 1, 1, 0),  // e0 * e0 = +1
+            (2, 2, -1, 0), // e1 * e1 = -1
+            (1, 2, 1, 3),  // e0 * e1 = e01
+            (2, 1, -1, 3), // e1 * e0 = -e01
+            (6, 6, -1, 0), // e12 * e12 = -1  (since e1²e2² = -1·-1 = +1... wait)
         ];
         // e12 * e12 = e1*e2*e1*e2 = -e1*e1*e2*e2 = -(-1)(-1) = -1
         for &(i, j, exp_sign, exp_blade) in checks {
             let cell = CAYLEY_STA[i][j];
-            assert_eq!(cell.sign, exp_sign,    "sign mismatch for [{i}][{j}]");
-            assert_eq!(cell.blade as usize, exp_blade, "blade mismatch for [{i}][{j}]");
+            assert_eq!(cell.sign, exp_sign, "sign mismatch for [{i}][{j}]");
+            assert_eq!(
+                cell.blade as usize, exp_blade,
+                "blade mismatch for [{i}][{j}]"
+            );
         }
     }
 }

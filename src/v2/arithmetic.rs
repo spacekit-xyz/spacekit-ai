@@ -16,14 +16,14 @@
 //! using a real [`crate::v2::ModelStateV2`]'s distribution and decodes it back
 //! bit-for-bit, asserting the encoded length matches `Σ −log₂ p`.
 
-const TOP:   u64 = 1 << 32;
-const MASK:  u64 = TOP - 1;        // 0xFFFF_FFFF
-const HALF:  u64 = 1 << 31;
-const QTR:   u64 = 1 << 30;
-const TQTR:  u64 = 3 << 30;
+const TOP: u64 = 1 << 32;
+const MASK: u64 = TOP - 1; // 0xFFFF_FFFF
+const HALF: u64 = 1 << 31;
+const QTR: u64 = 1 << 30;
+const TQTR: u64 = 3 << 30;
 
 /// Maximum frequency total (denominator).  Keeps `range * total` within u64.
-pub const FREQ_BITS:  u32 = 16;
+pub const FREQ_BITS: u32 = 16;
 pub const FREQ_TOTAL: u64 = 1 << FREQ_BITS;
 
 // ─── Quantisation ─────────────────────────────────────────────────────────────
@@ -42,7 +42,10 @@ pub fn quantize(probs: &[f32]) -> Vec<u64> {
     let sum: i64 = freq.iter().map(|&f| f as i64).sum();
     let maxi = (0..n).max_by(|&a, &b| freq[a].cmp(&freq[b])).unwrap_or(0);
     let corrected = freq[maxi] as i64 + (total as i64 - sum);
-    debug_assert!(corrected >= 1, "quantisation underflow; vocab too large for FREQ_TOTAL");
+    debug_assert!(
+        corrected >= 1,
+        "quantisation underflow; vocab too large for FREQ_TOTAL"
+    );
     freq[maxi] = corrected.max(1) as u64;
     freq
 }
@@ -63,12 +66,19 @@ pub struct ArithmeticEncoder {
 }
 
 impl Default for ArithmeticEncoder {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ArithmeticEncoder {
     pub fn new() -> Self {
-        Self { low: 0, high: MASK, pending: 0, bits: Vec::new() }
+        Self {
+            low: 0,
+            high: MASK,
+            pending: 0,
+            bits: Vec::new(),
+        }
     }
 
     fn emit(&mut self, bit: bool) {
@@ -83,23 +93,23 @@ impl ArithmeticEncoder {
     pub fn encode(&mut self, cum_low: u64, cum_high: u64, total: u64) {
         let range = self.high - self.low + 1;
         self.high = self.low + range * cum_high / total - 1;
-        self.low  = self.low + range * cum_low / total;
+        self.low = self.low + range * cum_low / total;
 
         loop {
             if self.high < HALF {
                 self.emit(false);
             } else if self.low >= HALF {
                 self.emit(true);
-                self.low  -= HALF;
+                self.low -= HALF;
                 self.high -= HALF;
             } else if self.low >= QTR && self.high < TQTR {
                 self.pending += 1;
-                self.low  -= QTR;
+                self.low -= QTR;
                 self.high -= QTR;
             } else {
                 break;
             }
-            self.low  = (self.low << 1) & MASK;
+            self.low = (self.low << 1) & MASK;
             self.high = ((self.high << 1) | 1) & MASK;
         }
     }
@@ -107,7 +117,11 @@ impl ArithmeticEncoder {
     /// Flush remaining state and return `(bytes, n_bits)`.
     pub fn finish(mut self) -> (Vec<u8>, usize) {
         self.pending += 1;
-        if self.low < QTR { self.emit(false); } else { self.emit(true); }
+        if self.low < QTR {
+            self.emit(false);
+        } else {
+            self.emit(true);
+        }
 
         let n_bits = self.bits.len();
         let mut bytes = vec![0u8; n_bits.div_ceil(8)];
@@ -133,7 +147,14 @@ pub struct ArithmeticDecoder<'a> {
 
 impl<'a> ArithmeticDecoder<'a> {
     pub fn new(bytes: &'a [u8], n_bits: usize) -> Self {
-        let mut d = Self { low: 0, high: MASK, value: 0, bytes, n_bits, pos: 0 };
+        let mut d = Self {
+            low: 0,
+            high: MASK,
+            value: 0,
+            bytes,
+            n_bits,
+            pos: 0,
+        };
         for _ in 0..32 {
             d.value = (d.value << 1) | d.next_bit();
         }
@@ -161,24 +182,24 @@ impl<'a> ArithmeticDecoder<'a> {
     pub fn update(&mut self, cum_low: u64, cum_high: u64, total: u64) {
         let range = self.high - self.low + 1;
         self.high = self.low + range * cum_high / total - 1;
-        self.low  = self.low + range * cum_low / total;
+        self.low = self.low + range * cum_low / total;
 
         loop {
             if self.high < HALF {
                 // nothing
             } else if self.low >= HALF {
                 self.value -= HALF;
-                self.low   -= HALF;
-                self.high  -= HALF;
+                self.low -= HALF;
+                self.high -= HALF;
             } else if self.low >= QTR && self.high < TQTR {
                 self.value -= QTR;
-                self.low   -= QTR;
-                self.high  -= QTR;
+                self.low -= QTR;
+                self.high -= QTR;
             } else {
                 break;
             }
-            self.low   = (self.low << 1) & MASK;
-            self.high  = ((self.high << 1) | 1) & MASK;
+            self.low = (self.low << 1) & MASK;
+            self.high = ((self.high << 1) | 1) & MASK;
             self.value = ((self.value << 1) | self.next_bit()) & MASK;
         }
     }
@@ -201,9 +222,6 @@ pub fn find_symbol(freq: &[u64], target: u64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v2::sample::softmax;
-    use crate::v2::tape::model_forward_logits;
-    use crate::v2::train_v2::{ModelStateV2, TrainConfigV2};
 
     /// Encode/decode a fixed integer sequence with static (non-model) tables.
     #[test]
@@ -236,10 +254,16 @@ mod tests {
     /// The real equivalence test: encode a token sequence with a model's
     /// next-token distribution, decode it back losslessly, and check that the
     /// code length matches the model's information content `Σ −log₂ p`.
+    #[cfg(feature = "clifford-lm")]
     #[test]
     fn round_trip_against_model_distribution() {
+        use crate::v2::sample::softmax;
+        use crate::v2::tape::model_forward_logits;
+        use crate::v2::train_v2::{ModelStateV2, TrainConfigV2};
+
         // Tiny model; weights are random but fixed (seeded init).
         let mut cfg = TrainConfigV2::small(40);
+        cfg.vanilla = false;
         cfg.d_model = 8;
         cfg.n_heads = 2;
         cfg.d_ff = 16;
@@ -251,7 +275,13 @@ mod tests {
 
         // Distribution for the token *after* `prefix` (last position's logits).
         let dist_at = |prefix: &[usize]| -> Vec<f32> {
-            let logits = model_forward_logits(&state.alg, &state.model, prefix, true, state.cfg.dot_attention);
+            let logits = model_forward_logits(
+                &state.alg,
+                &state.model,
+                prefix,
+                true,
+                state.cfg.dot_attention,
+            );
             softmax(logits.last().unwrap())
         };
 

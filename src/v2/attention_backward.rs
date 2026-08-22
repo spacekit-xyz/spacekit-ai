@@ -37,19 +37,19 @@
 // Returns gradients for all four projections plus dL/dx (input to attention)
 // so they can flow into the upstream layer-norm and residual.
 
-use crate::Multivector;
-use crate::CliffordAttention;
-use crate::AttentionScoreMode;
-use crate::backprop::{GradLinear, geo_product_backward, linear_backward};
-use crate::blade::REVERSE_SIGNS;
 use super::tape::AttentionTape;
+use crate::backprop::{geo_product_backward, linear_backward, GradLinear};
+use crate::blade::REVERSE_SIGNS;
+use crate::AttentionScoreMode;
+use crate::CliffordAttention;
+use crate::Multivector;
 
 /// Full set of gradients produced by attention_backward.
 pub struct AttentionGrads {
-    pub w_q:   GradLinear,
-    pub w_k:   GradLinear,
-    pub w_v:   GradLinear,
-    pub w_o:   GradLinear,
+    pub w_q: GradLinear,
+    pub w_k: GradLinear,
+    pub w_v: GradLinear,
+    pub w_o: GradLinear,
     /// dL/d(attention input) — propagate to the layer below.  [seq][d_model]
     pub grad_input: Vec<Vec<Multivector>>,
 }
@@ -60,30 +60,28 @@ pub struct AttentionGrads {
 /// `tape`     — the AttentionTape recorded during the forward pass
 /// `grad_out` — dL/d(attention output) one multivector per position. [seq][d_model]
 pub fn attention_backward(
-    attn:     &CliffordAttention,
-    tape:     &AttentionTape,
+    attn: &CliffordAttention,
+    tape: &AttentionTape,
     grad_out: &[Vec<Multivector>],
 ) -> AttentionGrads {
-    let seq      = tape.input.len();
-    let d_model  = attn.d_model;
-    let n_heads  = attn.n_heads;
+    let seq = tape.input.len();
+    let d_model = attn.d_model;
+    let n_heads = attn.n_heads;
     let head_dim = attn.head_dim;
-    let scale    = ((head_dim * 16) as f32).sqrt();
+    let scale = ((head_dim * 16) as f32).sqrt();
 
     // ── Step 1: w_o backward ──────────────────────────────────────────────────
-    let mut grad_wo  = GradLinear::zeros(d_model, d_model);
+    let mut grad_wo = GradLinear::zeros(d_model, d_model);
     let mut grad_agg = vec![vec![Multivector::zero(); d_model]; seq];
 
     for i in 0..seq {
-        let (g_wo, g_agg) = linear_backward(
-            &attn.w_o.weights,
-            &tape.agg[i],
-            &grad_out[i],
-        );
+        let (g_wo, g_agg) = linear_backward(&attn.w_o.weights, &tape.agg[i], &grad_out[i]);
         grad_wo.accumulate(&g_wo);
         // g_agg has length d_model
         for d in 0..d_model {
-            for k in 0..16 { grad_agg[i][d].c[k] += g_agg[d].c[k]; }
+            for k in 0..16 {
+                grad_agg[i][d].c[k] += g_agg[d].c[k];
+            }
         }
     }
 
@@ -106,11 +104,15 @@ pub fn attention_backward(
                 for d in d0..d1 {
                     let ga = &grad_agg[i][d].c;
                     let vd = &tape.v[j][d].c;
-                    for k in 0..16 { gw += ga[k] * vd[k]; }
+                    for k in 0..16 {
+                        gw += ga[k] * vd[k];
+                    }
                 }
                 grad_w[h][i][j] = gw;
 
-                if w_ij == 0.0 { continue; } // masked / numerically zero
+                if w_ij == 0.0 {
+                    continue;
+                } // masked / numerically zero
                 for d in d0..d1 {
                     for k in 0..16 {
                         grad_v[j][d].c[k] += w_ij * grad_agg[i][d].c[k];
@@ -124,7 +126,9 @@ pub fn attention_backward(
     let mut grad_score = vec![vec![vec![0.0f32; seq]; seq]; n_heads];
     for h in 0..n_heads {
         for i in 0..seq {
-            let dot: f32 = (0..seq).map(|l| tape.weights[h][i][l] * grad_w[h][i][l]).sum();
+            let dot: f32 = (0..seq)
+                .map(|l| tape.weights[h][i][l] * grad_w[h][i][l])
+                .sum();
             for j in 0..seq {
                 grad_score[h][i][j] = tape.weights[h][i][j] * (grad_w[h][i][j] - dot);
             }
@@ -143,7 +147,9 @@ pub fn attention_backward(
         for i in 0..seq {
             for j in 0..seq {
                 let gs = grad_score[h][i][j];
-                if gs == 0.0 { continue; }
+                if gs == 0.0 {
+                    continue;
+                }
 
                 match tape.score_mode {
                     AttentionScoreMode::Dot => {
@@ -163,11 +169,8 @@ pub fn attention_backward(
                             }
                             let mut grad_c = Multivector::zero();
                             grad_c.c[0] = gs * inv_scale;
-                            let (g_qid, g_krev) = geo_product_backward(
-                                &tape.q[i][d],
-                                &k_rev,
-                                &grad_c,
-                            );
+                            let (g_qid, g_krev) =
+                                geo_product_backward(&tape.q[i][d], &k_rev, &grad_c);
                             for m in 0..16 {
                                 grad_q[i][d].c[m] += g_qid.c[m];
                                 grad_k[j][d].c[m] += REVERSE_SIGNS[m] * g_krev.c[m];
@@ -215,15 +218,21 @@ pub fn attention_backward(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use crate::{CliffordAlgebra, CliffordAttention, AttentionScoreMode};
     use crate::cayley_const::CliffordAlgebraConst;
     use crate::v2::tape::attention_forward_taped;
+    use crate::{AttentionScoreMode, CliffordAlgebra, CliffordAttention};
+    use std::sync::Arc;
 
     /// Sum of all components of grad_out is the loss for the finite-difference check.
     fn dummy_loss(out: &[Vec<Multivector>]) -> f32 {
         let mut s = 0.0;
-        for row in out { for mv in row { for k in 0..16 { s += mv.c[k]; } } }
+        for row in out {
+            for mv in row {
+                for k in 0..16 {
+                    s += mv.c[k];
+                }
+            }
+        }
         s
     }
 
@@ -232,7 +241,9 @@ mod tests {
         let mut out = vec![vec![Multivector::zero(); d_model]; seq];
         for row in &mut out {
             for mv in row {
-                for k in 0..16 { mv.c[k] = 1.0; }
+                for k in 0..16 {
+                    mv.c[k] = 1.0;
+                }
             }
         }
         out
@@ -256,19 +267,25 @@ mod tests {
         // Numerical check: perturb each component of attn input and verify the
         // analytic gradient matches the finite difference.
         let alg_arc = Arc::new(CliffordAlgebra::sta());
-        let alg     = CliffordAlgebraConst::new();
+        let alg = CliffordAlgebraConst::new();
         let d_model = 4;
-        let seq     = 3;
-        let attn    = CliffordAttention::new(d_model, 2, alg_arc.clone());
+        let seq = 3;
+        let attn = CliffordAttention::new(d_model, 2, alg_arc.clone());
 
         // Random-ish input
-        let mut x: Vec<Vec<Multivector>> = (0..seq).map(|i| {
-            (0..d_model).map(|d| {
-                let mut mv = Multivector::zero();
-                for k in 0..16 { mv.c[k] = ((i * d + k) as f32 * 0.1).sin(); }
-                mv
-            }).collect()
-        }).collect();
+        let mut x: Vec<Vec<Multivector>> = (0..seq)
+            .map(|i| {
+                (0..d_model)
+                    .map(|d| {
+                        let mut mv = Multivector::zero();
+                        for k in 0..16 {
+                            mv.c[k] = ((i * d + k) as f32 * 0.1).sin();
+                        }
+                        mv
+                    })
+                    .collect()
+            })
+            .collect();
 
         // Forward and backward
         let tape = attention_forward_taped(&alg, &attn, &x, true, AttentionScoreMode::InnerProduct);
@@ -280,11 +297,13 @@ mod tests {
         let checks = [(0usize, 0usize, 0usize), (1, 2, 5), (2, 1, 6)];
         for (i, d, k) in checks {
             x[i][d].c[k] += eps;
-            let tape_plus = attention_forward_taped(&alg, &attn, &x, true, AttentionScoreMode::InnerProduct);
+            let tape_plus =
+                attention_forward_taped(&alg, &attn, &x, true, AttentionScoreMode::InnerProduct);
             let loss_plus = dummy_loss(&tape_plus.output);
 
             x[i][d].c[k] -= 2.0 * eps;
-            let tape_minus = attention_forward_taped(&alg, &attn, &x, true, AttentionScoreMode::InnerProduct);
+            let tape_minus =
+                attention_forward_taped(&alg, &attn, &x, true, AttentionScoreMode::InnerProduct);
             let loss_minus = dummy_loss(&tape_minus.output);
 
             x[i][d].c[k] += eps; // restore
@@ -304,18 +323,24 @@ mod tests {
     fn finite_diff_grad_wq() {
         // Check a few entries of the W_Q gradient against finite differences.
         let alg_arc = Arc::new(CliffordAlgebra::sta());
-        let alg     = CliffordAlgebraConst::new();
+        let alg = CliffordAlgebraConst::new();
         let d_model = 4;
-        let seq     = 3;
+        let seq = 3;
         let mut attn = CliffordAttention::new(d_model, 2, alg_arc.clone());
 
-        let x: Vec<Vec<Multivector>> = (0..seq).map(|i| {
-            (0..d_model).map(|d| {
-                let mut mv = Multivector::zero();
-                for k in 0..16 { mv.c[k] = ((i * d + k) as f32 * 0.13).cos() * 0.3; }
-                mv
-            }).collect()
-        }).collect();
+        let x: Vec<Vec<Multivector>> = (0..seq)
+            .map(|i| {
+                (0..d_model)
+                    .map(|d| {
+                        let mut mv = Multivector::zero();
+                        for k in 0..16 {
+                            mv.c[k] = ((i * d + k) as f32 * 0.13).cos() * 0.3;
+                        }
+                        mv
+                    })
+                    .collect()
+            })
+            .collect();
 
         let tape = attention_forward_taped(&alg, &attn, &x, true, AttentionScoreMode::InnerProduct);
         let grad_out = dummy_grad_out(seq, d_model);
@@ -327,11 +352,13 @@ mod tests {
             let original = attn.w_q.weights[out_d][in_d].c[k];
 
             attn.w_q.weights[out_d][in_d].c[k] = original + eps;
-            let t1 = attention_forward_taped(&alg, &attn, &x, true, AttentionScoreMode::InnerProduct);
+            let t1 =
+                attention_forward_taped(&alg, &attn, &x, true, AttentionScoreMode::InnerProduct);
             let l1 = dummy_loss(&t1.output);
 
             attn.w_q.weights[out_d][in_d].c[k] = original - eps;
-            let t2 = attention_forward_taped(&alg, &attn, &x, true, AttentionScoreMode::InnerProduct);
+            let t2 =
+                attention_forward_taped(&alg, &attn, &x, true, AttentionScoreMode::InnerProduct);
             let l2 = dummy_loss(&t2.output);
 
             attn.w_q.weights[out_d][in_d].c[k] = original;
@@ -349,18 +376,24 @@ mod tests {
     #[test]
     fn finite_diff_grad_input_dot_scores() {
         let alg_arc = Arc::new(CliffordAlgebra::sta());
-        let alg     = CliffordAlgebraConst::new();
+        let alg = CliffordAlgebraConst::new();
         let d_model = 4;
-        let seq     = 3;
-        let attn    = CliffordAttention::new(d_model, 2, alg_arc.clone());
+        let seq = 3;
+        let attn = CliffordAttention::new(d_model, 2, alg_arc.clone());
 
-        let mut x: Vec<Vec<Multivector>> = (0..seq).map(|i| {
-            (0..d_model).map(|d| {
-                let mut mv = Multivector::zero();
-                for k in 0..16 { mv.c[k] = ((i * d + k) as f32 * 0.11).sin(); }
-                mv
-            }).collect()
-        }).collect();
+        let mut x: Vec<Vec<Multivector>> = (0..seq)
+            .map(|i| {
+                (0..d_model)
+                    .map(|d| {
+                        let mut mv = Multivector::zero();
+                        for k in 0..16 {
+                            mv.c[k] = ((i * d + k) as f32 * 0.11).sin();
+                        }
+                        mv
+                    })
+                    .collect()
+            })
+            .collect();
 
         let tape = attention_forward_taped(&alg, &attn, &x, true, AttentionScoreMode::Dot);
         let grad_out = dummy_grad_out(seq, d_model);

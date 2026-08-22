@@ -19,9 +19,9 @@
 // Spatial planes produce ordinary rotations; boost planes produce hyperbolic
 // "rotations" (cosh/sinh).  Both are supported below.
 
-use crate::Multivector;
-use crate::cayley_const::CliffordAlgebraConst;
 use crate::blade::{E01, E02, E03, E12, E13, E23, SCALAR};
+use crate::cayley_const::CliffordAlgebraConst;
+use crate::Multivector;
 
 // ─── Bivector plane descriptor ────────────────────────────────────────────────
 
@@ -38,17 +38,35 @@ pub enum PlaneKind {
 /// A single bivector plane used as a rotation axis.
 #[derive(Clone, Copy, Debug)]
 pub struct BivectorPlane {
-    pub blade_idx: usize,   // which component of c[…] to use (e.g. E12 = 6)
-    pub kind:      PlaneKind,
+    pub blade_idx: usize, // which component of c[…] to use (e.g. E12 = 6)
+    pub kind: PlaneKind,
 }
 
 impl BivectorPlane {
-    pub const E01: Self = Self { blade_idx: E01, kind: PlaneKind::Boost    };
-    pub const E02: Self = Self { blade_idx: E02, kind: PlaneKind::Boost    };
-    pub const E03: Self = Self { blade_idx: E03, kind: PlaneKind::Boost    };
-    pub const E12: Self = Self { blade_idx: E12, kind: PlaneKind::Rotation };
-    pub const E13: Self = Self { blade_idx: E13, kind: PlaneKind::Rotation };
-    pub const E23: Self = Self { blade_idx: E23, kind: PlaneKind::Rotation };
+    pub const E01: Self = Self {
+        blade_idx: E01,
+        kind: PlaneKind::Boost,
+    };
+    pub const E02: Self = Self {
+        blade_idx: E02,
+        kind: PlaneKind::Boost,
+    };
+    pub const E03: Self = Self {
+        blade_idx: E03,
+        kind: PlaneKind::Boost,
+    };
+    pub const E12: Self = Self {
+        blade_idx: E12,
+        kind: PlaneKind::Rotation,
+    };
+    pub const E13: Self = Self {
+        blade_idx: E13,
+        kind: PlaneKind::Rotation,
+    };
+    pub const E23: Self = Self {
+        blade_idx: E23,
+        kind: PlaneKind::Rotation,
+    };
 }
 
 /// Default plane schedule: alternate rotation and boost planes across the
@@ -75,11 +93,11 @@ pub fn make_rotor(theta: f32, plane: BivectorPlane) -> Multivector {
     let mut r = Multivector::zero();
     match plane.kind {
         PlaneKind::Rotation => {
-            r.c[SCALAR]          =  half.cos();
+            r.c[SCALAR] = half.cos();
             r.c[plane.blade_idx] = -half.sin();
         }
         PlaneKind::Boost => {
-            r.c[SCALAR]          =  half.cosh();
+            r.c[SCALAR] = half.cosh();
             r.c[plane.blade_idx] = -half.sinh();
         }
     }
@@ -102,8 +120,8 @@ pub fn apply_rotor(alg: &CliffordAlgebraConst, r: &Multivector, x: &Multivector)
 
 pub struct RotorPositionalEncoding {
     pub d_model: usize,
-    pub planes:  Vec<BivectorPlane>,  // length d_model
-    pub base:    f32,                 // frequency base (default 10000.0)
+    pub planes: Vec<BivectorPlane>, // length d_model
+    pub base: f32,                  // frequency base (default 10000.0)
 }
 
 impl RotorPositionalEncoding {
@@ -113,7 +131,11 @@ impl RotorPositionalEncoding {
         let planes: Vec<BivectorPlane> = (0..d_model)
             .map(|i| ALL_PLANES[i % ALL_PLANES.len()])
             .collect();
-        Self { d_model, planes, base: 10_000.0 }
+        Self {
+            d_model,
+            planes,
+            base: 10_000.0,
+        }
     }
 
     /// Compute the angle for dimension slot `d` at position `t`.
@@ -128,15 +150,18 @@ impl RotorPositionalEncoding {
     /// `position`  — the integer sequence position (0-indexed)
     pub fn encode_position(
         &self,
-        alg:      &CliffordAlgebraConst,
-        x:        &[Multivector],
+        alg: &CliffordAlgebraConst,
+        x: &[Multivector],
         position: usize,
     ) -> Vec<Multivector> {
-        x.iter().enumerate().map(|(d, mv)| {
-            let theta = self.angle(position, d);
-            let r     = make_rotor(theta, self.planes[d]);
-            apply_rotor(alg, &r, mv)
-        }).collect()
+        x.iter()
+            .enumerate()
+            .map(|(d, mv)| {
+                let theta = self.angle(position, d);
+                let r = make_rotor(theta, self.planes[d]);
+                apply_rotor(alg, &r, mv)
+            })
+            .collect()
     }
 
     /// Apply positional encoding to an entire sequence.
@@ -147,9 +172,10 @@ impl RotorPositionalEncoding {
     pub fn encode(
         &self,
         alg: &CliffordAlgebraConst,
-        x:   &[Vec<Multivector>],
+        x: &[Vec<Multivector>],
     ) -> Vec<Vec<Multivector>> {
-        x.iter().enumerate()
+        x.iter()
+            .enumerate()
             .map(|(t, xi)| self.encode_position(alg, xi, t))
             .collect()
     }
@@ -157,11 +183,13 @@ impl RotorPositionalEncoding {
     /// Pre-compute and cache all rotors up to `max_seq_len`.
     /// Useful during inference to avoid repeated trig evaluations.
     pub fn precompute_rotors(&self, max_seq_len: usize) -> Vec<Vec<Multivector>> {
-        (0..max_seq_len).map(|t| {
-            (0..self.d_model).map(|d| {
-                make_rotor(self.angle(t, d), self.planes[d])
-            }).collect()
-        }).collect()
+        (0..max_seq_len)
+            .map(|t| {
+                (0..self.d_model)
+                    .map(|d| make_rotor(self.angle(t, d), self.planes[d]))
+                    .collect()
+            })
+            .collect()
     }
 }
 
@@ -181,7 +209,10 @@ mod tests {
         let r_rev = ALG.reverse(&r);
         let rr_rev = ALG.geo_product(&r, &r_rev);
         // Should be the scalar 1
-        assert!((rr_rev.c[0] - 1.0).abs() < 1e-6, "R R̃ scalar part should be 1");
+        assert!(
+            (rr_rev.c[0] - 1.0).abs() < 1e-6,
+            "R R̃ scalar part should be 1"
+        );
         for i in 1..16 {
             assert!(rr_rev.c[i].abs() < 1e-6, "R R̃ should have no grade > 0");
         }
@@ -200,14 +231,16 @@ mod tests {
         // At t=0 all angles are 0, so every rotor is the scalar 1,
         // and the sandwich product should leave x unchanged.
         let alg = CliffordAlgebraConst::new();
-        let pe  = RotorPositionalEncoding::new(4);
+        let pe = RotorPositionalEncoding::new(4);
         let x: Vec<Multivector> = vec![vector(1.0, 0.5, -0.3, 0.1); 4];
         let encoded = pe.encode_position(&alg, &x, 0);
 
         for (orig, enc) in x.iter().zip(encoded.iter()) {
             for k in 0..16 {
-                assert!((orig.c[k] - enc.c[k]).abs() < 1e-5,
-                    "position 0 should leave multivector unchanged");
+                assert!(
+                    (orig.c[k] - enc.c[k]).abs() < 1e-5,
+                    "position 0 should leave multivector unchanged"
+                );
             }
         }
     }
@@ -215,7 +248,7 @@ mod tests {
     #[test]
     fn different_positions_produce_different_encodings() {
         let alg = CliffordAlgebraConst::new();
-        let pe  = RotorPositionalEncoding::new(4);
+        let pe = RotorPositionalEncoding::new(4);
         // Use a spatial vector so the slot-0 E12 rotor changes the embedding (e0 alone is fixed).
         let x: Vec<Multivector> = vec![vector(0.0, 1.0, 0.0, 0.0); 4];
         let enc0 = pe.encode_position(&alg, &x, 0);
@@ -224,6 +257,9 @@ mod tests {
 
         // enc0 == x (identity at t=0), enc1 != enc5
         let same_1_5: bool = (0..16).all(|k| (enc1[0].c[k] - enc5[0].c[k]).abs() < 1e-5);
-        assert!(!same_1_5, "positions 1 and 5 should give different encodings");
+        assert!(
+            !same_1_5,
+            "positions 1 and 5 should give different encodings"
+        );
     }
 }

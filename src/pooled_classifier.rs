@@ -67,9 +67,7 @@ impl PooledClassifier {
     pub fn forward_logits(&self, byte_ids: &[usize], g: &[f32]) -> (Vec<f32>, Vec<Multivector>) {
         assert_eq!(g.len(), self.ground_dim);
         let seq_len = byte_ids.len().max(1);
-        let mut pooled: Vec<Multivector> = (0..self.d_model)
-            .map(|_| Multivector::zero())
-            .collect();
+        let mut pooled: Vec<Multivector> = (0..self.d_model).map(|_| Multivector::zero()).collect();
 
         for &id in byte_ids {
             let row = &self.embedding[id];
@@ -118,8 +116,7 @@ impl PooledClassifier {
         let (logits, aug) = self.forward_logits(byte_ids, g);
         let (loss, grad_logits) = cross_entropy(&logits, label);
         let grad_head_out = scalar_head_backward(&grad_logits);
-        let (grad_head, grad_aug) =
-            linear_backward(&self.head.weights, &aug, &grad_head_out);
+        let (grad_head, grad_aug) = linear_backward(&self.head.weights, &aug, &grad_head_out);
 
         let seq_len = byte_ids.len().max(1);
         let inv = 1.0f32 / seq_len as f32;
@@ -140,9 +137,7 @@ impl PooledClassifier {
                     .collect()
             })
             .collect();
-        let mut grad_gb: Vec<f32> = (0..self.d_model)
-            .map(|d| grad_aug[d].c[0])
-            .collect();
+        let mut grad_gb: Vec<f32> = (0..self.d_model).map(|d| grad_aug[d].c[0]).collect();
 
         // Finite grounding can inflate grads — gentle scaling keeps Adam stable on tiny data.
         let gs = 0.25f32;
