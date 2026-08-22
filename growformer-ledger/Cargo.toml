@@ -6,8 +6,8 @@ description = "Append-only hash-chained eval ledger with paired-SE Bet B verdict
 authors = ["Astor Rivera-Carcamo"]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/spacekit-xyz/growformer-ledger"
-homepage = "https://github.com/spacekit-xyz/growformer-ledger"
+repository = "https://github.com/spacekit-xyz/spacekit-ai"
+homepage = "https://github.com/spacekit-xyz/spacekit-ai/tree/main/growformer-ledger"
 keywords = ["evaluation", "machine-learning", "reproducibility", "ledger"]
 categories = ["science", "development-tools"]
 

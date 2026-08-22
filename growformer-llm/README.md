@@ -4,21 +4,20 @@ A Rust language model crate for **small domain chatbots**: vanilla transformer
 core (Bet B winner), chat train/infer format, optional Path A brain memory, and
 optional Clifford research behind `clifford-lm`.
 
-## Repository dependencies
+## Monorepo dependencies
 
-This repository currently uses sibling path dependencies. Clone these
-repositories into one parent directory:
+This crate is a member of the SpaceKit AI Cargo workspace:
 
 ```text
-workspace/
+spacekit-ai/
 ├── growformer/
 ├── growformer-ledger/
 └── growformer-llm/
 ```
 
-Publish or tag `growformer` and `growformer-ledger` before publishing
-`growformer-llm`. Replace sibling paths with pinned release dependencies once
-those releases exist; do not substitute machine-specific absolute paths.
+Workspace dependencies resolve from the monorepo root. Published packages must
+use released dependency versions; do not substitute machine-specific absolute
+paths.
 
 - **Start here (chatbots):** [`DEVELOPER.md`](DEVELOPER.md)
 - Binary: `gf-llm` (alias of `tinystories`) — tokenize → train → **chat** / generate
@@ -707,9 +706,13 @@ boundaries, KV-cache eviction, and the end-to-end `train_v2` loss-decrease test.
 
 
 
-## Growformer sibling crate (`brain-memory` feature)
+## Growformer integration (`brain-memory` feature)
 
-**Canonical project paths (SpaceKit):** crypto and fintech train/infer data + deployed brains live under [`spacekit-projects/sentiment`](../../spacekit/spacekit-projects/sentiment) (`crypto/`, `fintech/`). Override root with `SPACEKIT_SENTIMENT_ROOT`. General sentiment (Bet D cases 1/4) has **no brain arm** — RAG-only on `growformer/data/sentiment` until a SpaceKit general-sentiment project exists. Deprecated `sentiment-brain-v3.bin` is not used.
+**External project data:** crypto and fintech train/infer data and deployed
+brains are not part of this public repository. Set `SPACEKIT_SENTIMENT_ROOT` to
+the local sentiment project directory. General sentiment (Bet D cases 1/4) has
+**no brain arm** — RAG-only on `growformer/data/sentiment` until a general
+sentiment project exists. Deprecated `sentiment-brain-v3.bin` is not used.
 
 **Status (2026-07-04):** Bet D pre-registered verdict **`SWITCH_TO_EMBEDDING_RAG`** on full 4-prompt battery (**RAG 4/4, brain 2/4** round 4). SpaceKit cases 2–3 show brain raw **2/2** on the **original battery prompts** after gap retrain + routing fixes — **exploratory, not certified** (see [`PRE_REGISTRATION.md`](../growformer/docs/PRE_REGISTRATION.md) §6 protocol caveats). Held-out (2 prompts): brain **2/2**, RAG **1/2**; routing rules were patched after initial held-out failure (**eval leakage**).
 

@@ -7,8 +7,8 @@ description = "A promote-freeze neural substrate for deterministic specialist ro
 license = "Apache-2.0"
 readme = "README.md"
 documentation = "https://docs.rs/growformer"
-repository = "https://github.com/spacekit-xyz/growformer"
-homepage = "https://github.com/spacekit-xyz/growformer"
+repository = "https://github.com/spacekit-xyz/spacekit-ai"
+homepage = "https://github.com/spacekit-xyz/spacekit-ai/tree/main/growformer"
 keywords = ["continual-learning", "routing", "neural-networks", "wasm", "inference"]
 categories = ["science", "algorithms"]
 include = [
@@ -27,7 +27,6 @@ include = [
     "/data/linguistics/frame_lexicon.toml",
     "/build.rs",
     "/Cargo.toml",
-    "/Cargo.lock",
     "/README.md",
     "/LICENSE",
 ]

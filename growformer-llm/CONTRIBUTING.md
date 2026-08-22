@@ -2,14 +2,14 @@
 
 ## Development
 
-Keep `growformer`, `growformer-ledger`, and `growformer-llm` as sibling
-checkouts while path dependencies are used.
+Run checks from the SpaceKit AI monorepo root so Cargo resolves shared
+workspace dependencies consistently.
 
 ```bash
 cargo fmt --all --check
-cargo check --no-default-features --features vanilla-lm,clifford-lm
-cargo test --lib
-cargo test
+cargo check -p growformer-llm --no-default-features --features vanilla-lm,clifford-lm
+cargo test -p growformer-llm --lib
+cargo test -p growformer-llm
 ```
 
 Changes to reported comparisons must preserve dataset splits, selection tags,

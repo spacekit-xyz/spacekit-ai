@@ -6,8 +6,8 @@ description = "Growformer LLM — vanilla transformer core (Bet B) + optional Cl
 authors = ["Astor Rivera-Carcamo"]
 license = "Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/spacekit-xyz/growformer-llm"
-homepage = "https://github.com/spacekit-xyz/growformer-llm"
+repository = "https://github.com/spacekit-xyz/spacekit-ai"
+homepage = "https://github.com/spacekit-xyz/spacekit-ai/tree/main/growformer-llm"
 keywords = ["language-model", "transformer", "continual-learning", "research"]
 categories = ["science", "algorithms"]
 
@@ -35,8 +35,8 @@ rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
-growformer-ledger = { version = "0.1.0", path = "../growformer-ledger" }
-growformer = { version = "0.1.0", path = "../growformer", default-features = false, optional = true }
+growformer-ledger = { workspace = true }
+growformer = { workspace = true, optional = true }
 flate2 = "1"
 lzma-rs = "0.3"
 
@@ -50,8 +50,3 @@ brain-memory = ["dep:growformer"]
 clifford-lm = []
 
 [dev-dependencies]
-
-[profile.release]
-opt-level     = 3
-lto           = true
-codegen-units = 1

@@ -6,8 +6,8 @@ description = "Experimental neural cellular automata and Clifford-algebra langua
 authors = ["Astor Rivera-Carcamo"]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/spacekit-xyz/growformer-nca"
-homepage = "https://github.com/spacekit-xyz/growformer-nca"
+repository = "https://github.com/spacekit-xyz/spacekit-ai"
+homepage = "https://github.com/spacekit-xyz/spacekit-ai/tree/main/growformer-nca"
 keywords = ["neural-cellular-automata", "clifford-algebra", "machine-learning"]
 categories = ["science", "algorithms"]
 
