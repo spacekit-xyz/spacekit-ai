@@ -1,0 +1,52 @@
+# Build and dependency output
+/target/
+**/target/
+**/node_modules/
+**/pkg/
+**/dist/
+**/build/
+**/coverage/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*_secret*
+**/*_private*
+
+# Datasets, models, and generated research artifacts
+**/agent-data/
+**/checkpoints/
+**/models/
+**/corpora/
+**/*.bin
+**/*.safetensors
+**/*.gguf
+**/*.onnx
+**/*.pt
+**/*.pth
+**/*_results.txt
+**/*_diagnostic.csv
+**/*_curve.csv
+**/*_captures.csv
+**/*_proposals.csv
+**/capture_artifacts/
+**/certify_artifacts/
+**/drift_artifacts/
+
+# Python, editors, and operating systems
+**/__pycache__/
+**/*.py[cod]
+.DS_Store
+**/.DS_Store
+.idea/
+.vscode/
+*.swp
+*.log

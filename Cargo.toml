@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "growformer",
+    "growformer-ledger",
+    "growformer-llm",
+    "growformer-nca",
+]
+
+[workspace.package]
+edition = "2021"
+authors = ["Astor Rivera-Carcamo"]
+repository = "https://github.com/spacekit-xyz/spacekit-ai"
+
+[workspace.dependencies]
+growformer = { version = "0.1.0", path = "growformer", default-features = false }
+growformer-ledger = { version = "0.1.0", path = "growformer-ledger" }
+growformer-nca = { version = "0.1.0", path = "growformer-nca" }
