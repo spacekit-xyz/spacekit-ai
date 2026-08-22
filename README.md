@@ -40,7 +40,7 @@ cargo test -p growformer --lib
 
 ```text
 growformer ───────────────┐
-                         ├──> growformer-llm
+                          ├──> growformer-llm
 growformer-ledger ────────┘
 
 growformer-nca                 standalone
