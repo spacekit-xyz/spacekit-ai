@@ -1,0 +1,24 @@
+{"text":"bitcoin broke above resistance","expected_response":"and rallied as trading volume surged","split":"train"}
+{"text":"ethereum gas fees rose","expected_response":"as network activity increased sharply","split":"train"}
+{"text":"the token price surged","expected_response":"after the protocol upgrade went live","split":"train"}
+{"text":"bitcoin fell below support","expected_response":"as traders reduced leverage across exchanges","split":"train"}
+{"text":"the defi protocol launched","expected_response":"a new staking pool with higher yields","split":"train"}
+{"text":"a large wallet moved","expected_response":"tokens to an exchange ahead of the sell off","split":"train"}
+{"text":"the altcoin rallied","expected_response":"on rising trading volume and new listings","split":"train"}
+{"text":"ethereum staking rewards","expected_response":"attracted more validators to the network","split":"train"}
+{"text":"the blockchain processed","expected_response":"record transaction volume during the rally","split":"train"}
+{"text":"crypto markets turned volatile","expected_response":"as liquidations cascaded across leveraged positions","split":"train"}
+{"text":"the stablecoin held its peg","expected_response":"despite heavy redemptions during the sell off","split":"train"}
+{"text":"miners increased hash rate","expected_response":"as bitcoin prices recovered from the lows","split":"train"}
+{"text":"the exchange listed","expected_response":"a new token and volume spiked immediately","split":"train"}
+{"text":"onchain data showed","expected_response":"accumulation by long term bitcoin holders","split":"train"}
+{"text":"the wallet approved","expected_response":"a swap on the decentralized exchange","split":"train"}
+{"text":"token holders voted","expected_response":"to upgrade the protocol governance parameters","split":"train"}
+{"text":"bitcoin dominance rose","expected_response":"as altcoins underperformed during the pullback","split":"train"}
+{"text":"the network upgrade reduced","expected_response":"gas fees and improved transaction throughput","split":"train"}
+{"text":"defi total value locked","expected_response":"grew as yields attracted new liquidity","split":"train"}
+{"text":"the crypto rally faded","expected_response":"as leverage unwound and volume dried up","split":"train"}
+{"text":"bitcoin surged after","expected_response":"the token supply halving reduced new issuance","split":"val"}
+{"text":"ethereum fees dropped","expected_response":"following the network scaling upgrade","split":"val"}
+{"text":"the altcoin sold off","expected_response":"as a large wallet moved tokens to an exchange","split":"val"}
+{"text":"defi staking yields","expected_response":"drew liquidity into the new protocol pool","split":"val"}

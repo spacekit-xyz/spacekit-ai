@@ -22,9 +22,11 @@ struct CausalRow {
 fn load_causal_rows() -> Vec<CausalRow> {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/data/fintech/train_sentiment_causal.jsonl"
+        "/tests/fixtures/fintech/train_sentiment_causal.jsonl"
     );
-    let data = fs::read_to_string(path).expect("read causal JSONL");
+    // Fixture copy of spacekit-projects/sentiment/fintech/data/train_sentiment_causal.jsonl
+    // (training data moved out of growformer/data/; tests keep their own snapshot).
+    let data = fs::read_to_string(path).unwrap_or_else(|e| panic!("read causal JSONL {path}: {e}"));
     data.lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| serde_json::from_str(l).expect("parse causal row"))

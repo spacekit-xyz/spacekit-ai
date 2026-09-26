@@ -29,6 +29,13 @@ name = "growformer-llm"
 path = "src/main.rs"
 required-features = ["clifford-lm"]
 
+# Lean inference runtime: single specialist or a fleet of brain micro-models.
+# Build lean with: --no-default-features --features clifford-lm
+[[bin]]
+name = "gf-llm-runtime"
+path = "src/bin/gf_llm_runtime.rs"
+required-features = ["clifford-lm"]
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 rand = "0.8"

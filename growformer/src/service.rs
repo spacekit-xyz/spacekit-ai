@@ -1286,7 +1286,7 @@ impl LanguageService {
                 .then(|| frame.to_persisted());
             let intent_note = hints.intent.clone();
             // Drop composer borrow before mutating conversation.
-            drop(fc);
+            let _ = fc;
             if let Some(p) = persist {
                 self.conversation.last_context_frame = Some(p);
             }

@@ -1,0 +1,24 @@
+{"text":"the company reported quarterly earnings","expected_response":"revenue beat analyst expectations and shares rose","split":"train"}
+{"text":"quarterly revenue grew","expected_response":"driven by strong product demand and margin expansion","split":"train"}
+{"text":"the stock rallied after","expected_response":"the earnings call raised full year guidance","split":"train"}
+{"text":"analysts upgraded the shares","expected_response":"citing improving free cash flow and buybacks","split":"train"}
+{"text":"the company missed on earnings","expected_response":"and the stock fell on weak forward guidance","split":"train"}
+{"text":"operating margin expanded","expected_response":"as cost controls offset softer top line growth","split":"train"}
+{"text":"management raised guidance","expected_response":"for revenue and earnings per share this year","split":"train"}
+{"text":"the dividend was increased","expected_response":"reflecting confidence in recurring cash flow","split":"train"}
+{"text":"the balance sheet remains strong","expected_response":"with low leverage and ample liquidity","split":"train"}
+{"text":"gross profit improved","expected_response":"on favorable pricing and lower input costs","split":"train"}
+{"text":"the market reacted to","expected_response":"the earnings report with heavy trading volume","split":"train"}
+{"text":"free cash flow rose","expected_response":"allowing the company to fund buybacks and dividends","split":"train"}
+{"text":"revenue guidance was cut","expected_response":"and the shares declined in after hours trading","split":"train"}
+{"text":"the earnings call highlighted","expected_response":"strong demand and expanding operating margins","split":"train"}
+{"text":"profit came in above","expected_response":"consensus estimates on higher unit sales","split":"train"}
+{"text":"the company announced a buyback","expected_response":"of shares to return capital to investors","split":"train"}
+{"text":"net income increased","expected_response":"year over year on higher revenue and margins","split":"train"}
+{"text":"the guidance disappointed","expected_response":"investors and the stock sold off sharply","split":"train"}
+{"text":"the firm beat estimates","expected_response":"on both revenue and earnings per share","split":"train"}
+{"text":"cost of goods declined","expected_response":"boosting gross margin for the quarter","split":"train"}
+{"text":"the stock rose after earnings","expected_response":"as revenue beat and guidance was raised","split":"val"}
+{"text":"quarterly profit fell","expected_response":"on weaker demand and rising costs","split":"val"}
+{"text":"analysts expect revenue","expected_response":"to grow on strong product demand","split":"val"}
+{"text":"the company raised its dividend","expected_response":"reflecting durable free cash flow","split":"val"}

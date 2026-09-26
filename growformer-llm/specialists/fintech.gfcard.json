@@ -1,0 +1,22 @@
+{
+  "format_version": 1,
+  "arch": "clifford",
+  "caps": {
+    "tied_embeddings": false,
+    "ffn": "clifford",
+    "quant": "none",
+    "grounding": ["fintech"],
+    "early_exit": false
+  },
+  "card": {
+    "subject": "fintech-sentiment",
+    "keywords": ["earnings", "revenue", "stock", "shares", "market", "guidance", "profit", "dividend", "margin", "quarterly", "buyback"],
+    "created_utc": "",
+    "train_steps": 0,
+    "eval_bits_per_byte": null,
+    "base_model": null,
+    "notes": "Demo domain specialist — equity/earnings language."
+  },
+  "weights_path": "fintech.lm.json",
+  "tokenizer_path": null
+}

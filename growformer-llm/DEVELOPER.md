@@ -9,6 +9,9 @@ This crate is **not** a general-purpose ChatGPT replacement. Expect ~0.7M-param
 CPU models, short context (`max_seq` often 128), and best results when train and
 chat share the same `### User:` / `### Assistant:` format.
 
+> **New here?** Run the end-to-end tutorial first: [`tutorial/README.md`](tutorial/README.md)
+> (`train_brain.sh` → `infer.sh` → `train_lm.sh`, with a bundled example project).
+
 ---
 
 ## Chatbots (product path)
@@ -130,11 +133,41 @@ cargo run --release $FEAT --bin $BIN -- train \
   data/domain/chat-both.tok data/domain/chat-both-train.bin data/domain/chat-both-heldout.bin \
   --checkpoint-out agent-data/chat-domain-vanilla.json \
   --seq-len 128 --steps 4000 \
-  --d-model 16 --d-ff 64 --n-blocks 4 --n-heads 4 \
+  --no-param-match --d-model 128 --d-ff 512 --n-blocks 4 --n-heads 4 \
+  --grad-accum 8 --lr-max 1e-3 --patience 5 \
   --tie-embeddings --init-seed 1000
 ```
 
 Vanilla is the **default** (no `--vanilla` flag).
+
+#### Training knobs (vanilla)
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--no-param-match` | off | Use `--d-model` as given. Without it, `--d-model` is treated as a Clifford reference and the vanilla width is param-matched (e.g. `--d-model 16` → ~148 with `d_ff 64`). |
+| `--grad-accum N` | 1 | Sequences per optimiser step. Gradients are computed in parallel (`GF_THREADS` to cap threads) and averaged **per supervised token**. |
+| `--weight-decay` | 0.1 | AdamW (decoupled) on attention/FFN/head matrices only. |
+| `--beta2` | 0.95 | Adam β₂. |
+| `--grad-clip` | 1.0 | One global L2 clip across all trainable tensors. |
+| `--lr-max` / `--lr-min` | 3e-4 / 1e-5 | Linear warmup (5% of steps, ≥50) from `lr-min`, cosine back to `lr-min`. |
+| `--embed-scale` | 0 (auto) | Token embeddings × `sqrt(d_model)` before the sinusoidal positions. Old checkpoints load with 1.0. |
+| `--val-every` / `--val-chunks` | 200 / 32 | Fixed held-out chunks (own RNG, so evaluation never changes the training stream). |
+| `--patience N` | 0 (off) | Early stop after N validations without improvement. |
+| `--no-keep-best` | off | By default `--checkpoint-out` holds the **best-validation** weights and `*.last.json` the final state. |
+| `--resume <ckpt>.last.json` | — | Continue exactly (weights + Adam moments from `*.optim.json` + step). `--steps` is the total. |
+| `--init-from <base.json>` | — | Fine-tune a vanilla base (shape from the base, fresh optimiser, LR schedule restarts). Combine with `--freeze-blocks N` / `--freeze-embeddings`. |
+
+Each run also writes `<checkpoint>.gfcard.json` (`arch: vanilla`, tokenizer path,
+quick bits/byte); `gf-llm eval --train-bin …` overwrites that with the full held-out bits/byte.
+
+#### Pretrain → fine-tune (recommended for small domain corpora)
+
+```bash
+bash scripts/get_tinystories.sh
+bash scripts/pretrain_base_vanilla.sh          # → agent-data/base/base-vanilla.json + base.tok
+BASE_CKPT=agent-data/base/base-vanilla.json BASE_TOK=agent-data/base/base.tok \
+  bash scripts/train_domain_vanilla.sh         # freezes the lower half of the blocks by default
+```
 
 ### 3. Chat REPL
 

@@ -96,8 +96,9 @@ fn eval_window(spec: &FrozenSpecialist, window: &[usize]) -> WindowStat {
             continue;
         }
         let probs = logits_softmax(&logits_rows[p]);
-        let pr = (probs[target] as f64).max(1e-12);
-        bits += -pr.log2();
+        // Log-space CE (a 1e-12 probability floor capped misses at ~40 bits).
+        let (nats, _) = crate::real_ops::cross_entropy(&logits_rows[p], target);
+        bits += nats as f64 / std::f64::consts::LN_2;
         top1_sum += probs.iter().copied().fold(0.0f32, f32::max);
         n_pred += 1;
     }

@@ -304,6 +304,28 @@ fn resolve_fragment_library_from_inference_toml(
     None
 }
 
+/// `[train].sentiment_spawn_threshold` / `chat_spawn_threshold` from the project manifest.
+static SPAWN_OVERRIDES: std::sync::Mutex<(Option<f32>, Option<f32>)> =
+    std::sync::Mutex::new((None, None));
+
+fn set_spawn_threshold_overrides(sentiment: Option<f32>, chat: Option<f32>) {
+    if let Ok(mut g) = SPAWN_OVERRIDES.lock() {
+        *g = (sentiment, chat);
+    }
+}
+
+/// Manifest value, then `GF_SENTIMENT_SPAWN` / `GF_CHAT_SPAWN` env, then the default.
+fn spawn_threshold_override(sentiment: bool, default: f32) -> f32 {
+    let manifest = SPAWN_OVERRIDES
+        .lock()
+        .ok()
+        .and_then(|g| if sentiment { g.0 } else { g.1 });
+    let env_key = if sentiment { "GF_SENTIMENT_SPAWN" } else { "GF_CHAT_SPAWN" };
+    manifest
+        .or_else(|| std::env::var(env_key).ok().and_then(|v| v.parse::<f32>().ok()))
+        .unwrap_or(default)
+}
+
 fn apply_gf_project(args: &mut Args, project_path: &Path) -> Result<GfOverlay, String> {
     let mut overlay = GfOverlay::default();
     let gf = crate::project_gf::read_project_file(project_path)?;
@@ -334,6 +356,7 @@ fn apply_gf_project(args: &mut Args, project_path: &Path) -> Result<GfOverlay, S
         overlay.brain_epochs = tr.brain_epochs;
         overlay.brain_gen_epochs = tr.brain_gen_epochs;
         overlay.brain_gen_replicas = tr.brain_gen_replicas;
+        set_spawn_threshold_overrides(tr.sentiment_spawn_threshold, tr.chat_spawn_threshold);
 
         if args.data_dir.is_none() {
             if let Some(d) = &tr.data_dir {
@@ -3853,12 +3876,12 @@ fn train_brain(
     let spawn_threshold = 0.985;
     // Sentiment lattices use a looser threshold so positive/negative programs stay
     // distinct after polarity-aware encoding (P0/P1); the default 0.97 over-merges.
-    let sentiment_spawn_threshold = 0.92;
+    let sentiment_spawn_threshold = spawn_threshold_override(true, 0.92);
     // Chat/generative brains (pet companion, etc.) have many semantically similar
     // prompts within the same domain. A tighter threshold over-merges intents that
     // need distinct programs for varied responses. Use a much lower threshold so
     // each intent cluster gets its own program.
-    let chat_spawn_threshold = 0.85; // 0.72
+    let chat_spawn_threshold = spawn_threshold_override(false, 0.85); // 0.72
     println!("chat_spawn_threshold: {}", chat_spawn_threshold);
     let min_code_for_index = 10usize;
     let mut index_jobs: u64 = 0;
@@ -3986,8 +4009,10 @@ fn train_brain(
                 "fee_complaint",
             ];
             for topic in &mut env.topic_subindex {
-                if is_lookup_group {
-                    continue; // skip autogamy — preserve per-row lookup programs
+                if is_lookup_group || effective_spawn >= 1.0 {
+                    // skip autogamy — preserve per-row programs (lookup groups, or a
+                    // project that set `[train].*_spawn_threshold` >= 1.0 = never merge)
+                    continue;
                 }
                 let merge = if SCENARIO_TOPICS
                     .iter()

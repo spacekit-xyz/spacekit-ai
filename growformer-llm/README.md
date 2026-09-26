@@ -19,7 +19,8 @@ Workspace dependencies resolve from the monorepo root. Published packages must
 use released dependency versions; do not substitute machine-specific absolute
 paths.
 
-- **Start here (chatbots):** [`DEVELOPER.md`](DEVELOPER.md)
+- **Start here:** [`tutorial/README.md`](tutorial/README.md) — train + infer end to end (runnable example project)
+- Reference for training flags and chat formats: [`DEVELOPER.md`](DEVELOPER.md)
 - Binary: `gf-llm` (alias of `tinystories`) — tokenize → train → **chat** / generate
 - Path A: `brain-memory` — lattice retrieve + label (recommended for grounded domain answers)
 
@@ -27,6 +28,28 @@ paths.
 > research-only (`--clifford`). **Bet B closed:** matched vanilla beats Clifford
 > (~8.15 vs ~9.6–9.7 bpt on TinyStories). For portable domain *answers*, ship Path A
 > first; use the LM for fluent chat turns after a domain checkpoint.
+
+---
+
+## Quick start: train and infer
+
+End-to-end walkthrough with a bundled example project:
+**[`tutorial/README.md`](tutorial/README.md)**
+
+```bash
+# from the repo root (spacekit-ai/)
+T=growformer-llm/tutorial; P=$T/projects/crypto-sentiment
+
+bash $T/train_brain.sh $P                                # brain + label model, ~1 min
+bash $T/infer.sh $P "Bitcoin crashed after the ETF delay"
+# Assistant> NEGATIVE (mild) — ETF timeline slip plus overnight BTC selloff; regulatory delay driving price weakness.
+
+bash $T/train_lm.sh $P                                   # optional chat LM (+ held-out eval, specialist card)
+COMPOSE=polish bash $T/infer.sh $P "Bitcoin crashed after the ETF delay"
+```
+
+The same scripts work for any folder with a `*.gf.toml` manifest and `data/*.jsonl`
+(for example `spacekit-projects/sentiment/fintech` or `spacekit-projects/companions/luna`).
 
 ---
 

@@ -70,7 +70,7 @@ impl VanillaAttention {
         let mut out = vec![vec![0.0f32; d]; seq];
         for h in 0..self.n_heads {
             let d0 = h * self.head_dim;
-            let d1 = d0 + self.head_dim;
+            let _d1 = d0 + self.head_dim;
             for i in 0..seq {
                 let mut scores = vec![0.0f32; seq];
                 for j in 0..seq {
@@ -140,6 +140,9 @@ pub struct VanillaLLM {
     pub final_norm: StandardLayerNorm,
     pub head: LinearReal,
     pub d_model: usize,
+    /// Token-embedding multiplier applied before the positional signal
+    /// (`sqrt(d_model)` for new models; 1.0 for legacy checkpoints).
+    pub embed_scale: f32,
 }
 
 impl VanillaLLM {
@@ -160,7 +163,23 @@ impl VanillaLLM {
             final_norm: StandardLayerNorm::new(d_model),
             head: LinearReal::new_dims(d_model, vocab, seed ^ 0xEAD0),
             d_model,
+            embed_scale: 1.0,
         }
+    }
+
+    /// Scaled token embeddings + sinusoidal positions for a sequence.
+    ///
+    /// Without the scale, small-init embeddings (|e| ≈ 0.2–1) sit next to a
+    /// position signal of norm ≈ sqrt(d/2), and the pre-LN blocks see mostly
+    /// position. Scaling by sqrt(d_model) puts token identity on par with it.
+    pub fn embed_with_positions(&self, ids: &[usize]) -> Vec<Vec<f32>> {
+        let s = self.embed_scale;
+        let mut x: Vec<Vec<f32>> = ids
+            .iter()
+            .map(|&id| self.embedding[id].iter().map(|&v| v * s).collect())
+            .collect();
+        add_sinusoidal_pe(&mut x);
+        x
     }
 
     pub fn sync_tied_head(&mut self) {
@@ -173,8 +192,7 @@ impl VanillaLLM {
 
 /// Inference forward — logits per position.
 pub fn vanilla_forward_logits(model: &VanillaLLM, ids: &[usize], causal: bool) -> Vec<Vec<f32>> {
-    let mut x: Vec<Vec<f32>> = ids.iter().map(|&id| model.embedding[id].clone()).collect();
-    add_sinusoidal_pe(&mut x);
+    let mut x = model.embed_with_positions(ids);
     let d = model.d_model;
 
     for block in &model.blocks {

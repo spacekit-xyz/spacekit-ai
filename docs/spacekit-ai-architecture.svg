@@ -1,0 +1,172 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1680" height="1145.0" viewBox="0 0 1680 1145.0" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif">
+<defs>
+<filter id="cardShadow" x="-20%" y="-20%" width="140%" height="160%"><feDropShadow dx="0" dy="1" stdDeviation="1.4" flood-color="#0F172A" flood-opacity="0.10"/></filter>
+<filter id="bandShadow" x="-6%" y="-5%" width="112%" height="115%"><feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#0F172A" flood-opacity="0.07"/></filter>
+<marker id="arw_dep" markerWidth="11" markerHeight="11" refX="7.5" refY="5" orient="auto"><path d="M1 1 L9 5 L1 9 Z" fill="#334155"/></marker>
+<marker id="arw_core" markerWidth="11" markerHeight="11" refX="7.5" refY="5" orient="auto"><path d="M1 1 L9 5 L1 9 Z" fill="#B45309"/></marker>
+</defs>
+<rect x="0" y="0" width="1680" height="1145.0" fill="#FBFBFD"/>
+<text x="40" y="50" font-size="29" font-weight="700" fill="#0F172A">SpaceKit AI &#8212; Growformer Project Map</text>
+<text x="40" y="78" font-size="14.5" fill="#475569">The <tspan font-family="ui-monospace, Menlo, Consolas, monospace" fill="#4338CA">spacekit-ai</tspan> monorepo: the Growformer neural substrate, evaluation ledger, language models, and Clifford NCA research — and how they depend on each other.</text>
+<text x="40" y="98" font-size="12" fill="#94A3B8">Module names are Rust source modules; crate names shown in full. © 2026 SWTCH Labs LLC.</text>
+<rect x="1340" y="20" width="300" height="74" rx="9" fill="#FFFFFF" stroke="#E2E8F0"/>
+<text x="1354" y="39" font-size="11" font-weight="700" fill="#334155" letter-spacing="0.4">LEGEND</text>
+<line x1="1356" y1="56" x2="1390" y2="56" stroke="#334155" stroke-width="2.4"  marker-end="url(#arw_dep)"/>
+<text x="1402" y="60" font-size="11.5" fill="#475569">internal crate dependency</text>
+<line x1="1356" y1="78" x2="1390" y2="78" stroke="#B45309" stroke-width="2.4" stroke-dasharray="7 4" marker-end="url(#arw_core)"/>
+<text x="1402" y="82" font-size="11.5" fill="#475569">downstream consumer (tagged rev)</text>
+<rect x="40" y="224" width="470" height="575.0" rx="14" fill="#EEF2FF" stroke="#B7C2F6" filter="url(#bandShadow)"/>
+<rect x="40" y="224" width="470" height="6" rx="3" fill="#6366F1"/>
+<text x="58" y="255" font-size="17.5" font-weight="800" font-family="ui-monospace, Menlo, Consolas, monospace" fill="#4338CA">growformer</text>
+<text x="58" y="272" font-size="11.5" fill="#475569">Promote-freeze neural substrate — deterministic specialist</text>
+<text x="58" y="286" font-size="11.5" fill="#475569">routing &amp; local inference</text>
+<text x="58" y="303" font-size="10.5" fill="#4338CA" font-weight="600" font-family="ui-monospace, Menlo, Consolas, monospace">Apache-2.0 · primary implementation · v0.1.0</text>
+<g filter="url(#cardShadow)">
+<rect x="58" y="310" width="434" height="57.5" rx="9" fill="#FFFFFF" stroke="#E6EAF0"/>
+<rect x="58" y="310" width="5" height="57.5" rx="2.5" fill="#6366F1"/>
+</g>
+<text x="72" y="333" font-size="13.5" font-weight="700" fill="#0F172A">Promote-freeze substrate</text>
+<text x="72" y="349" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">brain · micro_brain · neuron · dimension · growformer_lang · types</text>
+<g filter="url(#cardShadow)">
+<rect x="58" y="379.5" width="434" height="71.0" rx="9" fill="#FFFFFF" stroke="#E6EAF0"/>
+<rect x="58" y="379.5" width="5" height="71.0" rx="2.5" fill="#6366F1"/>
+</g>
+<text x="72" y="402.5" font-size="13.5" font-weight="700" fill="#0F172A">Active inference &amp; cognition</text>
+<text x="72" y="418.5" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">active_inference · predictive_coder · metacognition · reasoning ·</text>
+<text x="72" y="432.0" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">basal_ganglia · drive / reflective_field · coherence · cmi</text>
+<g filter="url(#cardShadow)">
+<rect x="58" y="462.5" width="434" height="57.5" rx="9" fill="#FFFFFF" stroke="#E6EAF0"/>
+<rect x="58" y="462.5" width="5" height="57.5" rx="2.5" fill="#6366F1"/>
+</g>
+<text x="72" y="485.5" font-size="13.5" font-weight="700" fill="#0F172A">Specialist routing</text>
+<text x="72" y="501.5" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">semantic_router · topic_graph · fragment_composer</text>
+<g filter="url(#cardShadow)">
+<rect x="58" y="532.0" width="434" height="57.5" rx="9" fill="#FFFFFF" stroke="#E6EAF0"/>
+<rect x="58" y="532.0" width="5" height="57.5" rx="2.5" fill="#6366F1"/>
+</g>
+<text x="72" y="555.0" font-size="13.5" font-weight="700" fill="#0F172A">Inference &amp; runtime</text>
+<text x="72" y="571.0" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">inference · runtime · service · text_autoencoder · spectral · cloze</text>
+<g filter="url(#cardShadow)">
+<rect x="58" y="601.5" width="434" height="71.0" rx="9" fill="#FFFFFF" stroke="#E6EAF0"/>
+<rect x="58" y="601.5" width="5" height="71.0" rx="2.5" fill="#6366F1"/>
+</g>
+<text x="72" y="624.5" font-size="13.5" font-weight="700" fill="#0F172A">Training &amp; evaluation</text>
+<text x="72" y="640.5" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">training_objectives · gradient_memory · environment · category</text>
+<text x="72" y="654.0" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">(DAG) · ARC-AGI · MNIST / CIFAR benches</text>
+<g filter="url(#cardShadow)">
+<rect x="58" y="684.5" width="434" height="84.5" rx="9" fill="#FFFFFF" stroke="#E6EAF0"/>
+<rect x="58" y="684.5" width="5" height="84.5" rx="2.5" fill="#6366F1"/>
+</g>
+<text x="72" y="707.5" font-size="13.5" font-weight="700" fill="#0F172A">Surfaces · binaries</text>
+<text x="72" y="723.5" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">growformer CLI (train / merge / infer) · growformer-node (Axum</text>
+<text x="72" y="737.0" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">server) · growformer-runtime (lean, no-std deps) · WASM runtime ·</text>
+<text x="72" y="750.5" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">entitlement gate (SpaceKit embed)</text>
+<rect x="40" y="825.0" width="470" height="254.0" rx="14" fill="#ECFEFF" stroke="#9DE3EC" filter="url(#bandShadow)"/>
+<rect x="40" y="825.0" width="470" height="6" rx="3" fill="#06B6D4"/>
+<text x="58" y="856.0" font-size="17.5" font-weight="800" font-family="ui-monospace, Menlo, Consolas, monospace" fill="#0E7490">growformer-ledger</text>
+<text x="58" y="873.0" font-size="11.5" fill="#475569">Hash-chained evaluation records &amp; paired statistical comparison</text>
+<text x="58" y="890.0" font-size="10.5" fill="#0E7490" font-weight="600" font-family="ui-monospace, Menlo, Consolas, monospace">MIT · supporting library · v0.1.0</text>
+<g filter="url(#cardShadow)">
+<rect x="58" y="911.0" width="434" height="71.0" rx="9" fill="#FFFFFF" stroke="#E6EAF0"/>
+<rect x="58" y="911.0" width="5" height="71.0" rx="2.5" fill="#06B6D4"/>
+</g>
+<text x="72" y="934.0" font-size="13.5" font-weight="700" fill="#0F172A">Eval ledger</text>
+<text x="72" y="950.0" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">append-only SHA-256 chain · tamper detection (verify_chain) ·</text>
+<text x="72" y="963.5" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">pre-registration §1.2 gate table</text>
+<g filter="url(#cardShadow)">
+<rect x="58" y="994.0" width="434" height="71.0" rx="9" fill="#FFFFFF" stroke="#E6EAF0"/>
+<rect x="58" y="994.0" width="5" height="71.0" rx="2.5" fill="#06B6D4"/>
+</g>
+<text x="72" y="1017.0" font-size="13.5" font-weight="700" fill="#0F172A">Comparison</text>
+<text x="72" y="1033.0" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">paired-SE verdicts · split / config hashes · record_hashes</text>
+<text x="72" y="1046.5" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">(optional Verkle hook)</text>
+<rect x="640" y="224" width="470" height="519.0" rx="14" fill="#F1FDF4" stroke="#A6E4BC" filter="url(#bandShadow)"/>
+<rect x="640" y="224" width="470" height="6" rx="3" fill="#22C55E"/>
+<text x="658" y="255" font-size="17.5" font-weight="800" font-family="ui-monospace, Menlo, Consolas, monospace" fill="#15803D">growformer-llm</text>
+<text x="658" y="272" font-size="11.5" fill="#475569">Domain language models, chat workflows &amp; optional Growformer</text>
+<text x="658" y="286" font-size="11.5" fill="#475569">memory</text>
+<text x="658" y="303" font-size="10.5" fill="#15803D" font-weight="600" font-family="ui-monospace, Menlo, Consolas, monospace">Apache-2.0 · v0.2.0 · depends on growformer + ledger</text>
+<g filter="url(#cardShadow)">
+<rect x="658" y="310" width="434" height="71.0" rx="9" fill="#FFFFFF" stroke="#E6EAF0"/>
+<rect x="658" y="310" width="5" height="71.0" rx="2.5" fill="#22C55E"/>
+</g>
+<text x="672" y="333" font-size="13.5" font-weight="700" fill="#0F172A">Vanilla LM core</text>
+<rect x="944" y="320" width="136" height="17" rx="8.5" fill="#DBF6E3"/>
+<text x="1012.0" y="332" font-size="9.6" font-weight="600" font-family="ui-monospace, Menlo, Consolas, monospace" fill="#15803D" text-anchor="middle">product default</text>
+<text x="672" y="349" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">vanilla_llm · bpe · lm_config · param_budget · real_ops ·</text>
+<text x="672" y="362.5" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">standard_layer_norm · tinystories</text>
+<g filter="url(#cardShadow)">
+<rect x="658" y="393.0" width="434" height="71.0" rx="9" fill="#FFFFFF" stroke="#E6EAF0"/>
+<rect x="658" y="393.0" width="5" height="71.0" rx="2.5" fill="#22C55E"/>
+</g>
+<text x="672" y="416.0" font-size="13.5" font-weight="700" fill="#0F172A">Brain memory</text>
+<rect x="1008" y="403.0" width="72" height="17" rx="8.5" fill="#DBF6E3"/>
+<text x="1044.0" y="415.0" font-size="9.6" font-weight="600" font-family="ui-monospace, Menlo, Consolas, monospace" fill="#15803D" text-anchor="middle">feature</text>
+<text x="672" y="432.0" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">brain_memory · brain_infer_config — Growformer lattice memory unit</text>
+<text x="672" y="445.5" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">(dep:growformer)</text>
+<g filter="url(#cardShadow)">
+<rect x="658" y="476.0" width="434" height="71.0" rx="9" fill="#FFFFFF" stroke="#E6EAF0"/>
+<rect x="658" y="476.0" width="5" height="71.0" rx="2.5" fill="#22C55E"/>
+</g>
+<text x="672" y="499.0" font-size="13.5" font-weight="700" fill="#0F172A">Clifford research stack</text>
+<rect x="976" y="486.0" width="104" height="17" rx="8.5" fill="#DBF6E3"/>
+<text x="1028.0" y="498.0" font-size="9.6" font-weight="600" font-family="ui-monospace, Menlo, Consolas, monospace" fill="#15803D" text-anchor="middle">clifford-lm</text>
+<text x="672" y="515.0" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">clifford_llm · blade · cayley · cl1 · kv_cache · lm_cone_router ·</text>
+<text x="672" y="528.5" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">rotor positional — Bet B (closed)</text>
+<g filter="url(#cardShadow)">
+<rect x="658" y="559.0" width="434" height="71.0" rx="9" fill="#FFFFFF" stroke="#E6EAF0"/>
+<rect x="658" y="559.0" width="5" height="71.0" rx="2.5" fill="#22C55E"/>
+</g>
+<text x="672" y="582.0" font-size="13.5" font-weight="700" fill="#0F172A">Fleet &amp; specialists</text>
+<text x="672" y="598.0" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">fleet (route domain micro-models) · model_card · specialists:</text>
+<text x="672" y="611.5" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">crypto · fintech</text>
+<g filter="url(#cardShadow)">
+<rect x="658" y="642.0" width="434" height="71.0" rx="9" fill="#FFFFFF" stroke="#E6EAF0"/>
+<rect x="658" y="642.0" width="5" height="71.0" rx="2.5" fill="#22C55E"/>
+</g>
+<text x="672" y="665.0" font-size="13.5" font-weight="700" fill="#0F172A">Chat &amp; surfaces</text>
+<text x="672" y="681.0" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">chat · domain_data · bins: gf-llm (tinystories) · gf-llm-runtime</text>
+<text x="672" y="694.5" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">(lean) · growformer-llm</text>
+<rect x="1160" y="224" width="480" height="254.0" rx="14" fill="#FDF2FB" stroke="#F0BEE3" filter="url(#bandShadow)"/>
+<rect x="1160" y="224" width="480" height="6" rx="3" fill="#D946A6"/>
+<text x="1178" y="255" font-size="17.5" font-weight="800" font-family="ui-monospace, Menlo, Consolas, monospace" fill="#A21C74">growformer-nca</text>
+<text x="1178" y="272" font-size="11.5" fill="#475569">Space-Time Algebra Cl(1,3) transformer via geometric products</text>
+<text x="1178" y="289" font-size="10.5" fill="#A21C74" font-weight="600" font-family="ui-monospace, Menlo, Consolas, monospace">MIT · independent research · isolated</text>
+<g filter="url(#cardShadow)">
+<rect x="1178" y="310" width="444" height="71.0" rx="9" fill="#FFFFFF" stroke="#E6EAF0"/>
+<rect x="1178" y="310" width="5" height="71.0" rx="2.5" fill="#D946A6"/>
+</g>
+<text x="1192" y="333" font-size="13.5" font-weight="700" fill="#0F172A">Clifford Cl(1,3) LM</text>
+<text x="1192" y="349" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">clifford_llm (Multivector, algebra, layers) · blade · cayley table ·</text>
+<text x="1192" y="362.5" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">backprop · optim · rotor positional · mask · kv_cache</text>
+<g filter="url(#cardShadow)">
+<rect x="1178" y="393.0" width="444" height="71.0" rx="9" fill="#FFFFFF" stroke="#E6EAF0"/>
+<rect x="1178" y="393.0" width="5" height="71.0" rx="2.5" fill="#D946A6"/>
+</g>
+<text x="1192" y="416.0" font-size="13.5" font-weight="700" fill="#0F172A">Status</text>
+<text x="1192" y="432.0" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">neural cellular automata &amp; Clifford experiments — standalone until an</text>
+<text x="1192" y="445.5" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">integration contract replaces duplicated code</text>
+<rect x="1160" y="504.0" width="480" height="171.0" rx="14" fill="#FFF7ED" stroke="#FDBA74" filter="url(#bandShadow)"/>
+<rect x="1160" y="504.0" width="480" height="6" rx="3" fill="#F59E0B"/>
+<text x="1178" y="535.0" font-size="17.5" font-weight="800" font-family="ui-monospace, Menlo, Consolas, monospace" fill="#B45309">SpaceKit Core</text>
+<text x="1178" y="552.0" font-size="11.5" fill="#475569">Downstream consumer (separate monorepo)</text>
+<text x="1178" y="569.0" font-size="10.5" fill="#B45309" font-weight="600" font-family="ui-monospace, Menlo, Consolas, monospace">optional · feature-gated</text>
+<g filter="url(#cardShadow)">
+<rect x="1178" y="590.0" width="444" height="71.0" rx="9" fill="#FFFFFF" stroke="#E6EAF0"/>
+<rect x="1178" y="590.0" width="5" height="71.0" rx="2.5" fill="#F59E0B"/>
+</g>
+<text x="1192" y="613.0" font-size="13.5" font-weight="700" fill="#0F172A">growformer-inference</text>
+<text x="1192" y="629.0" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">CLI embedded Growformer + optional compute-node inference — consumes</text>
+<text x="1192" y="642.5" font-size="11" fill="#475569" font-family="ui-monospace, Menlo, Consolas, monospace">a tagged Growformer git revision, never a path dep</text>
+<path d="M510 374 L636 374" fill="none" stroke="#334155" stroke-width="2.5" marker-end="url(#arw_dep)"/>
+<rect x="520.8" y="352.0" width="108.39999999999999" height="17" rx="8.5" fill="#FFFFFF" stroke="#E2E8F0"/>
+<text x="575.0" y="364.0" font-size="10" fill="#334155" text-anchor="middle" font-family="ui-monospace, Menlo, Consolas, monospace">dep:growformer</text>
+<path d="M510 885.0 L636 673.0" fill="none" stroke="#334155" stroke-width="2.5" marker-end="url(#arw_dep)"/>
+<rect x="524.1" y="757.0" width="101.8" height="17" rx="8.5" fill="#FFFFFF" stroke="#E2E8F0"/>
+<text x="575.0" y="769.0" font-size="10" fill="#334155" text-anchor="middle" font-family="ui-monospace, Menlo, Consolas, monospace">workspace dep</text>
+<path d="M440 224 L440 170 L1136 170 L1136 589.5 L1156 589.5" fill="none" stroke="#B45309" stroke-width="2.3" stroke-dasharray="7 4" marker-end="url(#arw_core)"/>
+<rect x="638.0" y="151" width="300" height="17" rx="8.5" fill="#FFF7ED" stroke="#FDBA74"/>
+<text x="788.0" y="163" font-size="10" fill="#B45309" text-anchor="middle" font-family="ui-monospace, Menlo, Consolas, monospace">tagged git rev · feature-gated</text>
+<line x1="40" y1="1103.0" x2="1640" y2="1103.0" stroke="#E2E8F0"/>
+<text x="40" y="1119.0" font-size="11.3" fill="#64748B"><tspan font-weight="700" fill="#475569">Dependency direction:</tspan> growformer &amp; growformer-ledger are independently usable; growformer-llm consumes both; growformer-nca stays isolated. External consumers (SpaceKit Core, apps) must use tagged revisions or published crates, never filesystem path deps.</text>
+</svg>

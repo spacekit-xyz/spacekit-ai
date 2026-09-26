@@ -67,6 +67,10 @@ pub struct RawLatticeCandidate {
     pub score: f32,
     pub topic: String,
     pub text_preview: String,
+    /// Full decoded program text (the preview is capped at 160 chars, which can
+    /// cut off the stored answer after the sentiment witness marker).
+    #[serde(default)]
+    pub full_text: String,
     pub witness_ok: bool,
     pub hard_reject: bool,
     pub soft_reject: bool,
@@ -5119,6 +5123,7 @@ impl IndexedGenEnv {
                     score,
                     topic: topic.topic_name.clone(),
                     text_preview: preview,
+                    full_text: text.clone(),
                     witness_ok,
                     hard_reject,
                     soft_reject,

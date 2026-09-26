@@ -18,6 +18,9 @@ pub enum MemorySource {
     RawLattice,
     /// Full generation path (metacog + grounding gate + user-anchored).
     FullGeneration,
+    /// Label from the supervised classifier; explanation retrieved from that
+    /// label's sub-lattice (see [`BrainMemoryRuntime::query_labeled`]).
+    LabelForced,
 }
 
 impl MemorySource {
@@ -25,6 +28,7 @@ impl MemorySource {
         match self {
             Self::RawLattice => "raw_lattice",
             Self::FullGeneration => "full_generation",
+            Self::LabelForced => "label_forced",
         }
     }
 }
@@ -37,16 +41,47 @@ fn is_scenario_lattice_topic(topic: &str) -> bool {
     )
 }
 
-/// Extract lattice headline body from raw diagnostic preview (witness marker may truncate).
-fn lattice_body_from_preview(preview: &str) -> String {
-    const WITNESS: &str = "__GROWFORMER_SENT_WITNESS__";
-    if let Some(idx) = preview.find(WITNESS) {
-        let body = preview[..idx].trim();
+/// The stored answer for a raw-lattice hit.
+///
+/// Sentiment lattice programs are stored as
+/// `"<training prompt> __GROWFORMER_SENT_WITNESS__ <expected response>"`.
+/// The answer is the part **after** the witness marker. (This used to return
+/// the part before it — i.e. the nearest training *prompt* — so the chat
+/// echoed a paraphrase of the user's question instead of the sentiment reply.)
+/// Uses the untruncated program text when available; the 160-char preview can
+/// cut the answer mid-word.
+fn lattice_answer_from_candidate(c: &growformer::dimension::group_gen::RawLatticeCandidate) -> String {
+    use growformer::dimension::language::SENTIMENT_LATTICE_WITNESS_CORE as WITNESS;
+    let full = if c.full_text.is_empty() {
+        c.text_preview.as_str()
+    } else {
+        c.full_text.as_str()
+    };
+    if let Some(idx) = full.find(WITNESS) {
+        let answer = full[idx + WITNESS.len()..].trim();
+        if !answer.is_empty() {
+            return answer.to_string();
+        }
+        let body = full[..idx].trim();
         if !body.is_empty() {
             return body.to_string();
         }
     }
-    growformer::dimension::language::strip_sentiment_lattice_witness_for_display(preview)
+    growformer::dimension::language::strip_sentiment_lattice_witness_for_display(full)
+}
+
+/// The training prompt a lattice program was built from (text before the witness marker).
+fn stored_prompt_of_candidate(c: &growformer::dimension::group_gen::RawLatticeCandidate) -> String {
+    use growformer::dimension::language::SENTIMENT_LATTICE_WITNESS_CORE as WITNESS;
+    let full = if c.full_text.is_empty() {
+        c.text_preview.as_str()
+    } else {
+        c.full_text.as_str()
+    };
+    match full.find(WITNESS) {
+        Some(i) => full[..i].trim().to_string(),
+        None => full.split("\n---\n").next().unwrap_or(full).trim().to_string(),
+    }
 }
 
 fn raw_candidate_usable(
@@ -130,12 +165,24 @@ impl BrainMemoryRuntime {
     }
 
     /// HYBRID retrieval: prefer raw lattice top-1 when rubric passes; else full generation path.
+    ///
+    /// The raw-lattice probe is best-effort: prompts that don't route into the
+    /// brain's lattice (off-domain, e.g. "Hey Luna" to the crypto brain) make it
+    /// return "no encoded routing path". That used to abort the whole query;
+    /// now it falls back to the full generation path (which has the OOD /
+    /// guardrail handling) instead.
     pub fn query_hybrid(&mut self, text: &str) -> Result<(BrainMemoryQuery, MemorySource), String> {
-        let raw = self.raw_lattice_diagnostic(text, 1)?;
+        let raw = match self.raw_lattice_diagnostic(text, 1) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                eprintln!("[brain] raw lattice skipped ({e}); using full generation path");
+                None
+            }
+        };
         let mut q = self.query(text)?;
-        let source = if let Some(c) = raw.candidates.first() {
-            if raw_candidate_usable(c, &raw, text) {
-                q.memory_text = lattice_body_from_preview(&c.text_preview);
+        let source = if let Some((c, raw)) = raw.as_ref().and_then(|r| r.candidates.first().map(|c| (c, r))) {
+            if raw_candidate_usable(c, raw, text) {
+                q.memory_text = lattice_answer_from_candidate(c);
                 q.memory_template_id = format!("raw_lattice_prog_{}", c.prog_idx);
                 q.memory_confidence = c.score;
                 MemorySource::RawLattice
@@ -146,6 +193,73 @@ impl BrainMemoryRuntime {
             MemorySource::FullGeneration
         };
         Ok((q, source))
+    }
+
+    /// Classifier-routed query: the supervised label classifier chooses the topic,
+    /// the brain retrieves an explanation from that topic's sub-lattice.
+    ///
+    /// The brain's own answer is kept when it is a non-domain reply the classifier
+    /// can't know about (identity, greeting, tool calls, companion fallbacks), or
+    /// when the classifier is less confident than `min_conf`.
+    pub fn query_labeled(
+        &mut self,
+        text: &str,
+        labeler: &crate::label_classifier::LabelClassifier,
+        min_conf: f32,
+    ) -> Result<(BrainMemoryQuery, MemorySource, crate::label_classifier::LabelScore), String> {
+        use crate::label_classifier::{display_label, reply_has_label};
+        let top = labeler.predict_top(text);
+        let mut q = self.query(text)?;
+        let tid = q.memory_template_id.to_ascii_lowercase();
+        let brain_owns = ["greeting", "identity", "tool_call", "pet_", "lookup_graph"]
+            .iter()
+            .any(|p| tid.starts_with(p));
+        if brain_owns || top.prob < min_conf {
+            return Ok((q, MemorySource::FullGeneration, top));
+        }
+        // Pull the label's stored examples and keep the one whose *stored prompt*
+        // is lexically closest to this prompt, so the explanation fits the input
+        // (the brain's own embedding ranks nearly every example alike within a topic).
+        let forced = self
+            .raw_lattice_diagnostic_with_force_topic(text, 256, Some(&top.label))
+            .ok()
+            .and_then(|r| {
+                r.candidates
+                    .into_iter()
+                    .filter(|c| !c.hard_reject)
+                    .map(|c| {
+                        let sim = labeler.similarity(text, &stored_prompt_of_candidate(&c));
+                        (sim, c)
+                    })
+                    .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(_, c)| c)
+            });
+        let body = match &forced {
+            Some(c) => lattice_answer_from_candidate(c),
+            None => String::new(),
+        };
+        let sentiment = labeler.is_sentiment_scheme();
+        q.memory_text = if body.trim().is_empty() {
+            if sentiment {
+                format!(
+                    "{} — classified from the wording; no stored explanation for this label yet.",
+                    display_label(&top.label)
+                )
+            } else {
+                // Non-sentiment scheme with nothing stored: keep the brain's own reply.
+                return Ok((q, MemorySource::FullGeneration, top));
+            }
+        } else if sentiment && !reply_has_label(&body) {
+            format!("{} — {}", display_label(&top.label), body.trim())
+        } else {
+            body.trim().to_string()
+        };
+        q.memory_template_id = match &forced {
+            Some(c) => format!("label_forced:{}:prog_{}", top.label, c.prog_idx),
+            None => format!("label_forced:{}:none", top.label),
+        };
+        q.memory_confidence = top.prob;
+        Ok((q, MemorySource::LabelForced, top))
     }
 
     /// Route + retrieve a lattice memory unit for `text` (full generation path: metacog + gates).

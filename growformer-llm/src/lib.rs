@@ -18,6 +18,13 @@ pub mod standard_layer_norm;
 pub mod tinystories;
 pub mod vanilla_llm;
 
+/// Portable identity + capability descriptor for a domain specialist, and the
+/// sidecar manifest a host uses to index many of them. Arch-agnostic, always on.
+pub mod model_card;
+
+/// TF-IDF + logistic-regression label classifier (picks the label; brain retrieves the explanation).
+pub mod label_classifier;
+
 pub use lm_config::TrainConfigV2;
 pub use real_linear::LinearReal;
 pub use real_ops::{
@@ -64,6 +71,11 @@ pub mod mask;
 pub mod optim;
 #[cfg(feature = "clifford-lm")]
 pub mod positional;
+
+/// Fleet of brain micro-models: load and route across many domain specialists.
+/// Runs the Clifford LM path, so it rides the `clifford-lm` feature.
+#[cfg(feature = "clifford-lm")]
+pub mod fleet;
 
 #[cfg(feature = "clifford-lm")]
 pub use attention_score::{attention_pair_score, AttentionScoreMode};
