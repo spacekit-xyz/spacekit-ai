@@ -111,7 +111,11 @@ pub fn load_labeled_lines(dirs: &[PathBuf]) -> Result<Vec<(String, String)>, Str
                 let label = v
                     .get("semantic_intent")
                     .and_then(|x| x.as_str())
-                    .or_else(|| v.get("causal").and_then(|c| c.get("causal_type")).and_then(|x| x.as_str()))
+                    .or_else(|| {
+                        v.get("causal")
+                            .and_then(|c| c.get("causal_type"))
+                            .and_then(|x| x.as_str())
+                    })
                     .ok_or_else(|| format!("{}:{}: missing semantic_intent", p.display(), n + 1))?
                     .to_string();
                 out.push((line.trim().to_string(), label));

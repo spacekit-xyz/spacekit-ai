@@ -12,16 +12,16 @@ use flate2::{write::GzEncoder, Compression};
 
 use growformer_llm::bpe::BpeTokenizer;
 use growformer_llm::cross_entropy;
+use growformer_llm::label_classifier::{
+    coarse_sentiment, reply_label_head, LabelClassifier, LabelTrainConfig,
+};
+use growformer_llm::model_card::{Arch, ModelCard, SpecialistManifest, CARD_EXT};
 use growformer_llm::param_budget::{log_param_match, matched_vanilla_d_model};
 use growformer_llm::tinystories::{
     chunk_to_example, encode_corpus, load_tinystories_txt, PackedDataset,
 };
 use growformer_llm::v2::data::{special, TrainExample, N_SPECIAL};
 use growformer_llm::v2::sample::{sample_next, SampleConfig, SimpleRng};
-use growformer_llm::label_classifier::{
-    coarse_sentiment, reply_label_head, LabelClassifier, LabelTrainConfig,
-};
-use growformer_llm::model_card::{Arch, ModelCard, SpecialistManifest, CARD_EXT};
 use growformer_llm::v2::vanilla_checkpoint::{
     load_vanilla_state, load_vanilla_state_for_resume, save_vanilla_optim, save_vanilla_state,
 };
@@ -925,7 +925,11 @@ fn main() -> Result<(), String> {
                     cfg.warmup_steps = warmup;
                     cfg.total_steps = steps;
                     cfg.log_every = 10;
-                    cfg.val_every = if val_every == 0 { usize::MAX } else { val_every as usize };
+                    cfg.val_every = if val_every == 0 {
+                        usize::MAX
+                    } else {
+                        val_every as usize
+                    };
                     cfg.grad_clip = grad_clip;
                     cfg.weight_decay = weight_decay;
                     cfg.adam_beta2 = beta2;
@@ -936,12 +940,19 @@ fn main() -> Result<(), String> {
                 let mut state = if let Some(ck) = &resume {
                     let mut st = load_vanilla_state_for_resume(ck)?;
                     if st.cfg.vocab_size != vs {
-                        return Err(format!("resume vocab {} != tokenizer {vs}", st.cfg.vocab_size));
+                        return Err(format!(
+                            "resume vocab {} != tokenizer {vs}",
+                            st.cfg.vocab_size
+                        ));
                     }
                     // Schedule/optimiser knobs must match the original run to resume exactly;
                     // only the total length may be extended.
                     st.cfg.total_steps = steps.max(st.step);
-                    st.cfg.val_every = if val_every == 0 { usize::MAX } else { val_every as usize };
+                    st.cfg.val_every = if val_every == 0 {
+                        usize::MAX
+                    } else {
+                        val_every as usize
+                    };
                     st.update_lr();
                     eprintln!(
                         "[train] resuming {} at step {} / {} (lr={:.2e})",
@@ -998,7 +1009,14 @@ fn main() -> Result<(), String> {
                             tie_embeddings,
                             500,
                         );
-                        log_param_match(vs, clifford_ref, matched_d, d_ff, n_blocks, tie_embeddings);
+                        log_param_match(
+                            vs,
+                            clifford_ref,
+                            matched_d,
+                            d_ff,
+                            n_blocks,
+                            tie_embeddings,
+                        );
                         eprintln!(
                             "[train] note: --d-model {d_model} is a Clifford reference; vanilla d_model \
                              set to {matched_d} to match its params. Pass --no-param-match to use \
@@ -1052,7 +1070,10 @@ fn main() -> Result<(), String> {
                     }
                     st
                 };
-                if (freeze_blocks > 0 || freeze_embeddings) && init_from.is_none() && resume.is_none() {
+                if (freeze_blocks > 0 || freeze_embeddings)
+                    && init_from.is_none()
+                    && resume.is_none()
+                {
                     eprintln!("[train] note: freezing requested without --init-from; freezing fresh random weights");
                 }
 
@@ -1172,7 +1193,11 @@ fn main() -> Result<(), String> {
                 }
 
                 // Final state (+ optimiser moments for --resume).
-                let final_path = if keep_best { &last_path } else { &checkpoint_out };
+                let final_path = if keep_best {
+                    &last_path
+                } else {
+                    &checkpoint_out
+                };
                 save_vanilla_state(final_path, &state)?;
                 save_vanilla_optim(final_path, &state)?;
                 if keep_best {
@@ -1183,14 +1208,22 @@ fn main() -> Result<(), String> {
                         checkpoint_out.display(),
                         state.step,
                         last_path.display(),
-                        if stopped_early { " (stopped early)" } else { "" }
+                        if stopped_early {
+                            " (stopped early)"
+                        } else {
+                            ""
+                        }
                     );
                 } else {
                     eprintln!("[train] wrote {}", checkpoint_out.display());
                 }
 
                 // Specialist card (Arch::Vanilla) so fleets/runtimes can discover it.
-                let card_steps = if keep_best { stopper.best_step } else { state.step };
+                let card_steps = if keep_best {
+                    stopper.best_step
+                } else {
+                    state.step
+                };
                 write_vanilla_card(
                     &checkpoint_out,
                     &tok,
@@ -1429,7 +1462,11 @@ fn main() -> Result<(), String> {
                     .map(|l| {
                         let v: serde_json::Value =
                             serde_json::from_str(l).map_err(|e| e.to_string())?;
-                        let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                        let text = v
+                            .get("text")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let label = v
                             .get("semantic_intent")
                             .and_then(|x| x.as_str())
@@ -1479,7 +1516,10 @@ fn main() -> Result<(), String> {
                     test_rows.len(),
                     fine as f32 / test_rows.len() as f32,
                     if n_coarse > 0 {
-                        format!("  coarse sentiment acc {:.3}", coarse as f32 / n_coarse as f32)
+                        format!(
+                            "  coarse sentiment acc {:.3}",
+                            coarse as f32 / n_coarse as f32
+                        )
                     } else {
                         String::new()
                     }
@@ -1751,7 +1791,10 @@ fn main() -> Result<(), String> {
                                 seq_len
                             );
                             m.save(&card_path)?;
-                            eprintln!("[eval] updated {} eval_bits_per_byte={model_bpb:.4}", card_path.display());
+                            eprintln!(
+                                "[eval] updated {} eval_bits_per_byte={model_bpb:.4}",
+                                card_path.display()
+                            );
                         }
                         Err(e) => eprintln!("[eval] note: card not updated ({e})"),
                     }
@@ -2550,7 +2593,11 @@ fn run_chat_repl(args: ChatReplArgs<'_>) -> Result<(), String> {
     let labeler = match args.label_model {
         Some(p) => {
             let m = LabelClassifier::load(p)?;
-            eprintln!("[chat] label model: {} ({} labels)", p.display(), m.labels.len());
+            eprintln!(
+                "[chat] label model: {} ({} labels)",
+                p.display(),
+                m.labels.len()
+            );
             Some(m)
         }
         None => None,
@@ -2623,14 +2670,16 @@ fn run_chat_repl(args: ChatReplArgs<'_>) -> Result<(), String> {
         #[cfg(feature = "brain-memory")]
         if let Some(rt) = brain_rt.as_mut() {
             let res = if let Some(lab) = labeler.as_ref() {
-                rt.query_labeled(&user_line, lab, args.label_min_conf).map(|(q, src, top)| {
-                    eprintln!("[chat] label={} p={:.2}", top.label, top.prob);
-                    (q, src)
-                })
+                rt.query_labeled(&user_line, lab, args.label_min_conf)
+                    .map(|(q, src, top)| {
+                        eprintln!("[chat] label={} p={:.2}", top.label, top.prob);
+                        (q, src)
+                    })
             } else if args.hybrid {
                 rt.query_hybrid(&user_line)
             } else {
-                rt.query(&user_line).map(|q| (q, MemorySource::FullGeneration))
+                rt.query(&user_line)
+                    .map(|q| (q, MemorySource::FullGeneration))
             };
             match res {
                 Ok((q, source)) => {
@@ -2745,7 +2794,11 @@ fn polish_is_faithful(memory: &str, rewrite: &str) -> bool {
     }
     if let Some((label, _)) = memory.split_once(" — ") {
         let label = label.trim();
-        if !label.is_empty() && !out.to_ascii_lowercase().contains(&label.to_ascii_lowercase()) {
+        if !label.is_empty()
+            && !out
+                .to_ascii_lowercase()
+                .contains(&label.to_ascii_lowercase())
+        {
             return false;
         }
     }
@@ -2997,8 +3050,8 @@ fn run_brain_infer_case(
     Ok(())
 }
 
-#[cfg(feature = "brain-memory")]
 /// Hedge replies the brain gives when its grounding gate declines.
+#[cfg(feature = "brain-memory")]
 fn is_hedge_reply(reply: &str) -> bool {
     let r = reply.to_ascii_lowercase();
     r.contains("don't have enough information")
@@ -3024,7 +3077,11 @@ fn run_brain_eval(
     let mut rows: Vec<(String, String)> = Vec::new();
     for line in raw.lines().filter(|l| !l.trim().is_empty()) {
         let v: serde_json::Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
-        let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let text = v
+            .get("text")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         let label = v
             .get("semantic_intent")
             .and_then(|x| x.as_str())
@@ -3073,7 +3130,8 @@ fn run_brain_eval(
         } else if hybrid {
             mem.query_hybrid(text).map(|(q, s)| (q, s, None))
         } else {
-            mem.query(text).map(|q| (q, MemorySource::FullGeneration, None))
+            mem.query(text)
+                .map(|q| (q, MemorySource::FullGeneration, None))
         };
         let (reply, source, predicted) = match res {
             Ok((q, src, top)) => (q.memory_text.trim().to_string(), src.as_str(), top),
@@ -3100,7 +3158,11 @@ fn run_brain_eval(
                 gold,
                 gold_c.unwrap_or("-"),
                 pred_c.unwrap_or("-"),
-                if pred_c.is_some() && pred_c == gold_c { "✓" } else { "✗" },
+                if pred_c.is_some() && pred_c == gold_c {
+                    "✓"
+                } else {
+                    "✗"
+                },
                 reply.chars().take(140).collect::<String>()
             );
         }
@@ -3138,13 +3200,17 @@ fn run_brain_eval(
     );
     if let Some(p) = json_out {
         let doc = serde_json::json!({ "summary": summary, "rows": per_row });
-        std::fs::write(p, serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?)
-            .map_err(|e| format!("write {}: {e}", p.display()))?;
+        std::fs::write(
+            p,
+            serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| format!("write {}: {e}", p.display()))?;
         eprintln!("[brain-eval] wrote {}", p.display());
     }
     Ok(())
 }
 
+#[cfg(feature = "brain-memory")]
 fn print_raw_lattice_report(report: &growformer::dimension::group_gen::RawLatticeDiagnosticReport) {
     println!("prompt: {}", report.prompt);
     println!(
@@ -3181,14 +3247,23 @@ mod polish_tests {
     #[test]
     fn keeps_faithful_rewrite() {
         let mem = "NEGATIVE (mild) — ETF timeline slip plus overnight BTC selloff; regulatory delay driving price weakness.";
-        assert!(polish_is_faithful(mem, "NEGATIVE (mild) — the ETF delay and overnight BTC selloff point to price weakness."));
+        assert!(polish_is_faithful(
+            mem,
+            "NEGATIVE (mild) — the ETF delay and overnight BTC selloff point to price weakness."
+        ));
     }
 
     #[test]
     fn rejects_noise_and_label_flip() {
         let mem = "NEGATIVE (mild) — ETF timeline slip plus overnight BTC selloff.";
         assert!(!polish_is_faithful(mem, "--ered s s"));
-        assert!(!polish_is_faithful(mem, "POSITIVE (strong) — ETF timeline slip plus overnight BTC selloff."));
-        assert!(!polish_is_faithful(mem, "NEGATIVE (mild) — Tight be sider deal: misconfirsted for a ling"));
+        assert!(!polish_is_faithful(
+            mem,
+            "POSITIVE (strong) — ETF timeline slip plus overnight BTC selloff."
+        ));
+        assert!(!polish_is_faithful(
+            mem,
+            "NEGATIVE (mild) — Tight be sider deal: misconfirsted for a ling"
+        ));
     }
 }

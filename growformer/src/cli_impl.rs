@@ -320,9 +320,17 @@ fn spawn_threshold_override(sentiment: bool, default: f32) -> f32 {
         .lock()
         .ok()
         .and_then(|g| if sentiment { g.0 } else { g.1 });
-    let env_key = if sentiment { "GF_SENTIMENT_SPAWN" } else { "GF_CHAT_SPAWN" };
+    let env_key = if sentiment {
+        "GF_SENTIMENT_SPAWN"
+    } else {
+        "GF_CHAT_SPAWN"
+    };
     manifest
-        .or_else(|| std::env::var(env_key).ok().and_then(|v| v.parse::<f32>().ok()))
+        .or_else(|| {
+            std::env::var(env_key)
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+        })
         .unwrap_or(default)
 }
 

@@ -43,7 +43,10 @@ impl Specialist {
     /// Load a specialist from a sidecar manifest (`*.gfcard.json`).
     /// `manifest_dir` is the directory the manifest lives in (weights paths are
     /// resolved relative to it).
-    pub fn from_manifest(manifest_dir: &Path, manifest: &SpecialistManifest) -> Result<Self, String> {
+    pub fn from_manifest(
+        manifest_dir: &Path,
+        manifest: &SpecialistManifest,
+    ) -> Result<Self, String> {
         match manifest.arch {
             Arch::Clifford => {
                 let weights = manifest.weights_abs(manifest_dir);
@@ -254,7 +257,9 @@ impl SpecialistFleet {
 
     /// Generate from a named specialist, bypassing the router.
     pub fn generate_with(&self, subject: &str, prompt: &str, cfg: &SampleConfig) -> Option<String> {
-        self.specialists.get(subject).map(|s| s.generate(prompt, cfg))
+        self.specialists
+            .get(subject)
+            .map(|s| s.generate(prompt, cfg))
     }
 }
 

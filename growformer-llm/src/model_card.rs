@@ -45,7 +45,11 @@ pub enum FfnKind {
     Dense,
     Clifford,
     /// Top-k mixture-of-experts (subtopic experts). `n_experts == 1` behaves as dense.
-    Moe { n_experts: usize, top_k: usize, skip_expert: bool },
+    Moe {
+        n_experts: usize,
+        top_k: usize,
+        skip_expert: bool,
+    },
 }
 
 /// Weight quantization of the referenced checkpoint payload.

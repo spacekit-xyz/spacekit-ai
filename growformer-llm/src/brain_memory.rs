@@ -50,7 +50,9 @@ fn is_scenario_lattice_topic(topic: &str) -> bool {
 /// echoed a paraphrase of the user's question instead of the sentiment reply.)
 /// Uses the untruncated program text when available; the 160-char preview can
 /// cut the answer mid-word.
-fn lattice_answer_from_candidate(c: &growformer::dimension::group_gen::RawLatticeCandidate) -> String {
+fn lattice_answer_from_candidate(
+    c: &growformer::dimension::group_gen::RawLatticeCandidate,
+) -> String {
     use growformer::dimension::language::SENTIMENT_LATTICE_WITNESS_CORE as WITNESS;
     let full = if c.full_text.is_empty() {
         c.text_preview.as_str()
@@ -80,7 +82,12 @@ fn stored_prompt_of_candidate(c: &growformer::dimension::group_gen::RawLatticeCa
     };
     match full.find(WITNESS) {
         Some(i) => full[..i].trim().to_string(),
-        None => full.split("\n---\n").next().unwrap_or(full).trim().to_string(),
+        None => full
+            .split("\n---\n")
+            .next()
+            .unwrap_or(full)
+            .trim()
+            .to_string(),
     }
 }
 
@@ -180,7 +187,10 @@ impl BrainMemoryRuntime {
             }
         };
         let mut q = self.query(text)?;
-        let source = if let Some((c, raw)) = raw.as_ref().and_then(|r| r.candidates.first().map(|c| (c, r))) {
+        let source = if let Some((c, raw)) = raw
+            .as_ref()
+            .and_then(|r| r.candidates.first().map(|c| (c, r)))
+        {
             if raw_candidate_usable(c, raw, text) {
                 q.memory_text = lattice_answer_from_candidate(c);
                 q.memory_template_id = format!("raw_lattice_prog_{}", c.prog_idx);
@@ -206,7 +216,14 @@ impl BrainMemoryRuntime {
         text: &str,
         labeler: &crate::label_classifier::LabelClassifier,
         min_conf: f32,
-    ) -> Result<(BrainMemoryQuery, MemorySource, crate::label_classifier::LabelScore), String> {
+    ) -> Result<
+        (
+            BrainMemoryQuery,
+            MemorySource,
+            crate::label_classifier::LabelScore,
+        ),
+        String,
+    > {
         use crate::label_classifier::{display_label, reply_has_label};
         let top = labeler.predict_top(text);
         let mut q = self.query(text)?;

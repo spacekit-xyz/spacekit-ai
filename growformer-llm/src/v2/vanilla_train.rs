@@ -887,8 +887,7 @@ impl VanillaModelState {
         if o.block_opts.len() != self.cfg.n_blocks {
             return Err("optimizer state block count mismatch".into());
         }
-        if o.head_opt.w_m.len() != self.cfg.vocab_size
-            || o.fnorm_gamma_m.len() != self.cfg.d_model
+        if o.head_opt.w_m.len() != self.cfg.vocab_size || o.fnorm_gamma_m.len() != self.cfg.d_model
         {
             return Err("optimizer state shape mismatch".into());
         }
@@ -1341,7 +1340,9 @@ fn compute_grads_batch(state: &VanillaModelState, examples: &[TrainExample]) -> 
             .collect()
     });
     let mut it = partials.into_iter();
-    let mut acc = it.next().unwrap_or_else(|| VanillaStepGrads::zeros(&state.cfg));
+    let mut acc = it
+        .next()
+        .unwrap_or_else(|| VanillaStepGrads::zeros(&state.cfg));
     for p in it {
         acc.add(&p);
     }
@@ -1379,7 +1380,10 @@ pub fn train_step_vanilla_accum(state: &mut VanillaModelState, examples: &[Train
         acc.scale(clip / norm);
     }
     if !norm.is_finite() {
-        eprintln!("[train] warning: non-finite grad norm at step {} — update skipped", state.step);
+        eprintln!(
+            "[train] warning: non-finite grad norm at step {} — update skipped",
+            state.step
+        );
         return mean_loss;
     }
 
@@ -1437,7 +1441,9 @@ pub fn eval_vanilla_set(state: &VanillaModelState, set: &[TrainExample]) -> (f32
                 })
             })
             .collect();
-        hs.into_iter().map(|h| h.join().expect("eval worker")).collect()
+        hs.into_iter()
+            .map(|h| h.join().expect("eval worker"))
+            .collect()
     });
     let (sum, n) = parts
         .into_iter()
@@ -1561,12 +1567,16 @@ mod tests {
                     }
                 };
                 let (ok, num) = fd_close(&mut st, &e, analytic, &set, orig);
-                assert!(ok, "tied={tied} embed[{tok}][{d}] analytic={analytic} numeric={num}");
+                assert!(
+                    ok,
+                    "tied={tied} embed[{tok}][{d}] analytic={analytic} numeric={num}"
+                );
             }
 
             let analytic = g.blocks[1].w_q.d_weights[1][2];
             let orig = st.model.blocks[1].attn.w_q.weights[1][2];
-            let set = |s: &mut VanillaModelState, v: f32| s.model.blocks[1].attn.w_q.weights[1][2] = v;
+            let set =
+                |s: &mut VanillaModelState, v: f32| s.model.blocks[1].attn.w_q.weights[1][2] = v;
             let (ok, num) = fd_close(&mut st, &e, analytic, &set, orig);
             assert!(ok, "tied={tied} w_q analytic={analytic} numeric={num}");
 
@@ -1574,14 +1584,20 @@ mod tests {
             let orig = st.model.blocks[0].norm1.gamma[1];
             let set = |s: &mut VanillaModelState, v: f32| s.model.blocks[0].norm1.gamma[1] = v;
             let (ok, num) = fd_close(&mut st, &e, analytic, &set, orig);
-            assert!(ok, "tied={tied} norm1.gamma analytic={analytic} numeric={num}");
+            assert!(
+                ok,
+                "tied={tied} norm1.gamma analytic={analytic} numeric={num}"
+            );
         }
     }
 
     #[test]
     fn first_update_uses_warmup_lr_not_lr_max() {
         let mut st = VanillaModelState::new(cfg(false));
-        assert!((st.current_lr() - 1e-5).abs() < 1e-9, "step 0 must start at lr_min");
+        assert!(
+            (st.current_lr() - 1e-5).abs() < 1e-9,
+            "step 0 must start at lr_min"
+        );
         train_step_vanilla_accum(&mut st, &[ex(&[3, 4, 5, 6])]);
         assert_eq!(st.step, 1);
         let expect = cosine_lr_with_warmup(1, 5, 100, 1e-2, 1e-5);

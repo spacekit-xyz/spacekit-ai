@@ -340,7 +340,11 @@ impl LabelClassifier {
                 prob,
             })
             .collect();
-        out.sort_by(|a, b| b.prob.partial_cmp(&a.prob).unwrap_or(std::cmp::Ordering::Equal));
+        out.sort_by(|a, b| {
+            b.prob
+                .partial_cmp(&a.prob)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         out
     }
 
@@ -380,10 +384,10 @@ impl LabelClassifier {
     }
 
     pub fn load(path: &Path) -> Result<Self, String> {
-        let raw = std::fs::read_to_string(path)
-            .map_err(|e| format!("read {}: {e}", path.display()))?;
-        let mut m: Self = serde_json::from_str(&raw)
-            .map_err(|e| format!("parse {}: {e}", path.display()))?;
+        let raw =
+            std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let mut m: Self =
+            serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
         if m.format != MODEL_FORMAT {
             return Err(format!("unsupported label model format {}", m.format));
         }
@@ -474,15 +478,24 @@ mod tests {
         ];
         pos.iter()
             .map(|t| (t.to_string(), "positive_mild".to_string()))
-            .chain(neg.iter().map(|t| (t.to_string(), "negative_mild".to_string())))
+            .chain(
+                neg.iter()
+                    .map(|t| (t.to_string(), "negative_mild".to_string())),
+            )
             .collect()
     }
 
     #[test]
     fn learns_and_generalises_on_toy_data() {
         let m = LabelClassifier::train(&toy(), &LabelTrainConfig::default()).unwrap();
-        assert_eq!(m.predict_top("solana rallied to a new high").label, "positive_mild");
-        assert_eq!(m.predict_top("doge crashed after the dump").label, "negative_mild");
+        assert_eq!(
+            m.predict_top("solana rallied to a new high").label,
+            "positive_mild"
+        );
+        assert_eq!(
+            m.predict_top("doge crashed after the dump").label,
+            "negative_mild"
+        );
         let p = m.predict("anything");
         assert!((p.iter().map(|s| s.prob).sum::<f32>() - 1.0).abs() < 1e-4);
     }
@@ -503,14 +516,24 @@ mod tests {
     #[test]
     fn roundtrip_keeps_coarse_head_working() {
         let mut rows = toy();
-        rows.push(("btc ripped higher on etf news".into(), "positive_strong".into()));
-        rows.push(("massive liquidation cascade wiped longs".into(), "negative_strong".into()));
+        rows.push((
+            "btc ripped higher on etf news".into(),
+            "positive_strong".into(),
+        ));
+        rows.push((
+            "massive liquidation cascade wiped longs".into(),
+            "negative_strong".into(),
+        ));
         let m = LabelClassifier::train(&rows, &LabelTrainConfig::default()).unwrap();
         assert!(m.coarse_head.is_some());
         let path = std::env::temp_dir().join(format!("gf-label-c-{}.json", std::process::id()));
         m.save(&path).unwrap();
         let back = LabelClassifier::load(&path).unwrap();
-        for t in ["bitcoin crashed overnight", "eth pumped to a new high", "random words"] {
+        for t in [
+            "bitcoin crashed overnight",
+            "eth pumped to a new high",
+            "random words",
+        ] {
             assert_eq!(m.predict_top(t), back.predict_top(t), "{t}");
         }
         let _ = std::fs::remove_file(path);
@@ -525,6 +548,8 @@ mod tests {
         assert_eq!(coarse_sentiment("greeting_check_in"), None);
         assert!(reply_has_label("MIXED — both sides"));
         assert!(reply_has_label("NEGATIVE (mild) — selloff"));
-        assert!(!reply_has_label("Positive governance outcome; mixed sentiment"));
+        assert!(!reply_has_label(
+            "Positive governance outcome; mixed sentiment"
+        ));
     }
 }

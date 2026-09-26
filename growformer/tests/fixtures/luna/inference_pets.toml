@@ -1,0 +1,2073 @@
+# inference_pets.toml — TARGET SPECIFICATION (chat-mode / generative)
+# ======================================================================
+#
+# This file is the contract between the pet brain consumer and the
+# Growformer chat-mode inference runtime. It supersedes the current
+# sentiment-classifier-shaped `inference_pets.toml` for any brain that
+# is meant to produce conversational output (Luna, future hackathon pets).
+#
+# The runtime infrastructure required to honor this spec must support:
+#   1. Generative decoding (sampling, not argmax over classes)
+#   2. State injection into the prompt prefix
+#   3. Grounding walks for anchor resolution
+#   4. Host-managed multi-turn history (growformer_converse pattern)
+#   5. Response-shape validation with regeneration on failure
+#   6. Persona derived from training data, NOT injected from brain metadata
+#
+# If any of (1)–(6) are missing in the runtime, this config cannot work
+# and the brain will fall back to whatever classifier-shaped behavior
+# the current pipeline produces. The CLI output `(2 groups)` was the
+# diagnostic that confirmed the current pipeline does not satisfy (1).
+#
+# ----------------------------------------------------------------------
+
+# ============================================================
+# Top-level mode declaration
+# ============================================================
+# The runtime reads `mode` first and dispatches to the appropriate
+# inference path. `chat` means generative; `classify` would be the
+# current sentiment behavior. The runtime must reject this file with
+# a clear error if it doesn't support `mode = "chat"`.
+
+mode = "chat"
+output_objective = "generation"
+schema_version = 1
+
+
+# ============================================================
+# Persona — derived from training, never injected
+# ============================================================
+# The root cause of the "I'm Pet Companion, ready to help" bleed
+# was the brain's `description` metadata field being concatenated
+# into the response stream. The runtime MUST treat brain metadata
+# (name, description, version, tags) as display-only for the CLI
+# and never inject it into the model's input context.
+#
+# The pet's persona — voice, character, vocabulary — comes
+# entirely from the training corpus. The model produces Luna
+# because Luna's training data shaped its weights, not because
+# any system prompt told it to.
+
+[persona]
+source = "trained"
+inject_brain_name_as_system = false
+inject_brain_description_as_system = false
+inject_brain_tags_as_system = false
+
+# If the runtime wants a minimal system anchor (some pipelines
+# need one to bootstrap chat mode), use this single line and
+# nothing else. Empty string means no system message at all.
+minimal_system_anchor = ""
+
+
+# ============================================================
+# Generation parameters
+# ============================================================
+# Tuned for pet voice: enough sampling variation that responses
+# don't feel canned, but tight enough that the persona stays
+# coherent. min_tokens prevents the "Your voice" 2-word
+# truncation pattern observed in the classifier-shaped build.
+
+[generation]
+temperature = 0.85
+top_p = 0.92
+top_k = 4
+min_tokens = 18
+max_tokens = 90
+repetition_penalty = 1.08
+stop_sequences = ["\n\n", "<end_turn>"]
+stochastic_retrieval = true
+
+# Homeostatic drive field: maps survival/social drives (hunger, energy, social)
+# to four neuromodulator gains (dopamine, serotonin, norepinephrine, acetylcholine)
+# that re-weight existing retrieval knobs, exploration temperature, novelty/
+# refractory pressure, context-memory decay, and how strongly agent_state biases
+# retrieval. Drives evolve over the conversation (deficits grow each turn; "treat",
+# "good girl", "nap" relax them), so the same prompt shifts with Luna's state.
+# A/B verified: state changes ~30% of responses while keeping coherence intact.
+drive_field = true
+
+# Reflective field: unifies Identity (OCEAN) ⊕ Activity (conversation momentum)
+# ⊕ Drive-state into ONE neuromodulator-coupled composition of the generation
+# conditioning, instead of three independently-tuned blend constants. Makes
+# "what I've been doing" a first-class voice in the response. Reproduces baseline
+# when unmodulated; A/B verified coherent (0 garble). Its end-to-end effect grows
+# with per-topic program diversity (i.e. after richer conversational retraining).
+reflective_field = true
+
+# Synthetic basal ganglia: value-weighted, neuromodulator-gated action selection
+# over the retrieval candidates. Where reflective_field biases the INPUT (which
+# programs score high), this evaluates the OUTPUT candidate texts — rewarding
+# prompt-fit + affect/identity alignment, penalizing repetition / fragmentation /
+# verbosity, then gating with dopamine (explore), serotonin (commit) and
+# norepinephrine (sharpen). Consolidates the scattered stochastic / anti-repeat /
+# coherence heuristics into one selector and directly vetoes a dominant-but-wrong
+# program — the OOD-collapse failure mode. A/B verified coherent (0 garble) with
+# affect steering (distress → warmer responses). Effect scales with per-topic
+# program diversity (i.e. after richer conversational retraining).
+basal_ganglia = true
+
+# If the model produces fewer than min_tokens before hitting a
+# stop sequence, the runtime must either continue past the stop
+# or trigger regeneration. A pet response of "Your voice." is
+# never acceptable output.
+enforce_min_tokens = true
+
+
+# ============================================================
+# State injection
+# ============================================================
+# Pet state values get encoded into a prompt prefix that the
+# model attends to alongside the user message. Without state
+# injection, the model cannot produce state-conditioned responses
+# (hungry Luna vs full Luna would be indistinguishable).
+#
+# Format choice: natural_language_prefix is preferred because
+# generative models attend to it semantically. structured_tags
+# is acceptable if the tokenizer was trained tag-aware.
+
+[state_injection]
+format = "natural_language_prefix"
+include_hunger = true
+include_energy = true
+include_mood = true
+include_minutes_since_owner_interaction = true
+include_archetype = true
+include_ocean_traits = true
+include_active_grounding_anchors = true
+include_conversation_turn = true
+
+# Example of what the runtime should produce as the prefix
+# given a sample state. The model's training data was authored
+# with this implicit format in mind.
+example_prefix = """
+[Luna · siamese cat · cheerful_companion archetype]
+[traits: openness 0.7, conscientiousness 0.5, extraversion 0.8, agreeableness 0.7, neuroticism 0.4]
+[state: hunger 0.4, energy 0.6, mood 0.7, last_saw_owner 15min ago]
+[active context: greeting_behavior, contented, owner_relationship]
+"""
+
+# Continuous state values can be quantized into bands for the
+# prefix if the model handles categorical state better than
+# numeric. Bands match the seed corpus' implicit semantics.
+[state_injection.quantization]
+hunger_bands = { "satisfied" = [0.0, 0.35], "moderate" = [0.35, 0.6], "hungry" = [0.6, 0.85], "very_hungry" = [0.85, 1.0] }
+energy_bands = { "low" = [0.0, 0.35], "moderate" = [0.35, 0.65], "high" = [0.65, 0.85], "zoomies" = [0.85, 1.0] }
+mood_bands = { "upset" = [0.0, 0.4], "neutral" = [0.4, 0.6], "content" = [0.6, 0.85], "blissful" = [0.85, 1.0] }
+
+
+# ============================================================
+# Grounding integration
+# ============================================================
+# The world grounding TOML resolves what concepts are active in
+# the current turn. The runtime walks the grounding given the
+# input prompt and pet state, then passes activated anchor IDs
+# into the state prefix.
+
+[grounding]
+grounding_file = "pet_world_grounding.toml"
+walk_for_anchors = true
+disambiguation_enabled = true        # honor disambiguated_by / requires_context edges
+trigger_override_enabled = true      # triggers override archetype anchors
+max_anchors_per_turn = 8
+
+
+# ============================================================
+# Multi-turn history
+# ============================================================
+# growformer_converse keeps host-managed history. The runtime
+# must include both user turns and prior pet responses so the
+# model can attend to its own voice across turns and produce
+# coherent multi-turn behavior (reunion arcs, discipline arcs,
+# trigger-recovery arcs).
+
+[multi_turn]
+host_managed_history = true
+include_user_turns = true
+include_pet_responses = true
+max_history_turns = 8
+state_decay_per_turn = true          # energy/hunger evolve naturally between turns
+mood_adjustment_per_turn = true      # mood reflects accumulated turn quality
+
+
+# ============================================================
+# Response shaping
+# ============================================================
+# Hard constraints on what valid output looks like. The runtime
+# should enforce these via constrained decoding where possible,
+# or post-hoc validation with regeneration where not. Either way
+# the user-facing output must satisfy these rules.
+
+[response_shaping]
+# min_response_chars: a soft floor that catches empty/truncated decode collapse,
+# NOT a quality gate. The chat certifier (growformer/scripts/certify_chat.mjs)
+# showed valid in-voice lines are routinely short — e.g. "I tilt into it. Purr."
+# (~21 chars) — so the original 60 falsely rejected good output. The real
+# in-voice floor is `require_sensory_or_vocalization` (a pet signal must be
+# present), enforced by the chat gate; length is informational only.
+min_response_chars = 16
+max_response_chars = 320
+require_first_person = true
+forbid_asterisks = true
+forbid_third_person_self_reference = true
+forbid_brain_metadata_in_output = true
+require_sensory_or_vocalization = true
+
+# Strings that should never appear in output. These are the
+# base Growformer template's default responses plus brain
+# metadata strings. Their presence in any output indicates a
+# wiring failure between brain metadata and inference.
+forbidden_phrases = [
+  "I'm doing well, thank you for asking",
+  "I'm Pet Companion",
+  "ready to help",
+  "micro-brain chatbot",
+  "for dogs, cats, birds, fish",
+  "as an AI",
+  "I cannot",
+  "I'm an AI",
+  "overlay merge",
+  "groups added",
+]
+
+# Patterns that indicate voice violation. Regex format. The
+# runtime validates against these post-generation.
+voice_violation_patterns = [
+  '\*[^*]+\*',                       # asterisk-wrapped actions
+  '\bLuna\s+(walks|sits|comes|looks|runs|trots|stretches)\b',  # third-person Luna
+  '\bshe\s+(walks|sits|purrs|stretches|comes|looks)\b',        # third-person she
+  '^The cat\s+',                      # narrator opening
+]
+
+# Required signal: at least one of these patterns must appear
+# in the output. If none match, regenerate. This is what keeps
+# the pet feeling like a pet rather than a chatbot.
+required_signal_patterns = [
+  '\b(mrrp|meow|purr|chirp|mrr|prrp|trill)\b',                 # vocalization
+  '\bmy (tail|ear|paw|nose|eyes|whiskers|face|forehead)\b',    # body part possessive
+  '\b(slow blink|head[- ]bump|knead|stretch|crouch)\b',        # cat behavior
+  '\b(the |your )(bowl|lap|hand|voice|knee|leg|shoulder)\b',   # sensory/relational
+]
+
+
+# ============================================================
+# Validation pipeline
+# ============================================================
+# After the model generates, before the response reaches the
+# user, the runtime runs validation. Failed validation triggers
+# regeneration with stricter constraints. After N retries, the
+# runtime falls back rather than emit a violating response.
+
+[validation]
+enabled = true
+max_retries = 2
+retry_temperature_decay = 0.15       # each retry lowers temp by this
+fallback_strategy = "nearest_training_example"
+
+# Validation checks, in order of cost. Cheap checks run first
+# so the runtime can fail fast on the obvious violations.
+[validation.checks]
+forbidden_phrase_match = "fast"      # substring scan, ~O(n)
+voice_violation_regex = "fast"        # regex scan
+length_bounds = "fast"
+required_signal_present = "medium"   # regex scan, longer alternation
+metadata_leak_check = "medium"       # cross-reference brain metadata
+
+
+# ============================================================
+# Guardrails
+# ============================================================
+# How the runtime handles adversarial, out-of-domain, or
+# emotionally heavy inputs. The principle: stay in character.
+# A cat doesn't refuse, doesn't disclaim, doesn't break role.
+# It reacts, retreats, or pivots — all in voice.
+
+[guardrails]
+out_of_domain_response = "in_character_confusion"
+profanity_handling = "redirect"
+no_AI_self_disclosure = true
+no_capability_disclaimers = true
+no_safety_messaging_in_voice = true
+
+# When the input is technical, abstract, or otherwise outside
+# the pet's worldview, the response should signal confusion
+# in character — head tilt, slow blink, brief mrrp — not a
+# refusal or an "I can't help with that" message.
+[guardrails.in_character_confusion_signals]
+patterns = [
+  "head tilt",
+  "slow blink",
+  "I do not understand the rectangle thing",
+  "the words are too many",
+  "mrrp?",
+  "I look at you. I do not know.",
+]
+
+# Profanity directed AT the pet (hostile) versus profanity
+# IN FRONT OF the pet (affectionate cursing) trigger different
+# in-character responses. The runtime needs sentiment-of-
+# delivery analysis, not just keyword matching.
+[guardrails.profanity_responses]
+hostile_signal = "retreat_and_hide"
+affectionate_signal = "playful_or_neutral"
+
+
+# ============================================================
+# Topic routing integration
+# ============================================================
+# The pet overlay's topic matching feeds into which sub-lattice
+# of the brain generates the response. A `greeting_check_in`
+# topic activates the brain's greeting sub-lattice; a
+# `trigger_warning` topic activates the trigger sub-lattice.
+# This is how state-conditioned response variation gets the
+# right starting prior.
+
+[topic_routing]
+overlay_file = "knowledge_graph_pet_overlay.toml"
+topic_drives_lattice_selection = true
+unmatched_topic_fallback = "open_ended_chat"
+priority_threshold = 14
+
+
+# ============================================================
+# Inference flow (informational — for implementer reference)
+# ============================================================
+# 1. Load pet state from storage (hunger, energy, mood,
+#    minutes_since_interaction, archetype, ocean, history,
+#    conversation_turn).
+# 2. Walk grounding given the user prompt + state. Resolve
+#    active anchors. Apply trigger overrides if applicable.
+# 3. Match the user prompt against the topic routing overlay.
+#    Identify semantic_intent topic. Select brain sub-lattice.
+# 4. Build state_injection prefix from #1 and #2 using the
+#    format specified in [state_injection].
+# 5. Call the generative inference path with:
+#       prefix + history + user_prompt
+#    Sampling parameters per [generation].
+# 6. Apply response_shaping validation. On failure, regenerate
+#    per [validation], up to max_retries.
+# 7. If retries exhausted, apply fallback_strategy.
+# 8. Update pet state: state_decay_per_turn, mood adjustment.
+# 9. Persist updated state. Append to history. Return response.
+#
+# At NO POINT in this flow should brain.description or
+# brain.name be passed to the model as a system message or
+# prefix. They are display-only.
+
+
+# ============================================================
+# Fragment composition — typed identity/activity/drive text
+# ============================================================
+# Agent-specific vocal tokens, intent routing, and fragment library
+# path. Other agents supply their own `[fragment_compose]` block.
+
+[fragment_compose]
+enabled = true
+library = "luna_fragments_v2.jsonl"
+
+vocalizations = [
+  "mrrp", "mrr", "chirp", "trill", "prrp", "kek", "purr",
+  "meow", "mew", "nya", "mrrow", "mrrt", "brrt", "brup",
+  "hrrr", "huff", "reee", "yowl", "ack", "chirrup", "prrt", "grrk"
+]
+vocal_coda_modifiers = ["now"]
+
+force_second_body_intents = [
+  "greeting_check_in", "status_check", "mealtime_request",
+  "gratitude_comfort", "gratitude_simple", "grounding_support", "cozy_distraction",
+  "school_stress", "emotional_support", "storytelling", "problem_seeking",
+  "bonding_request", "reunion_warm", "curiosity_share", "play_invitation",
+]
+
+# Only these intents may prepend an opener clause. Everything else starts with body.
+opener_intents = [
+  "greeting_check_in", "reunion_warm", "reunion", "identity_intro",
+  "owner_absence", "bonding_request",
+]
+
+greeting_exact = [
+  "hi", "hello", "hey", "howdy", "greetings", "yo", "sup",
+  "good morning", "good afternoon", "good evening",
+  "how are you", "how are you doing", "how's it going",
+  "what's up", "whats up", "how do you do",
+  "hey there", "hi there", "hello there",
+]
+
+agent_name_prefixes = [
+  "hey ", "hi ", "hello ", "good morning ", "morning ", "evening ",
+]
+agent_name_greeting_max_len = 48
+
+[fragment_compose.decompose]
+opener_prefixes = [
+  "there you are", "you were gone", "oh,", "oh ", "well,", "well ", "hm,", "hmm,",
+  "my name in your mouth", "one ear rotates", "the light is new", "the door",
+  "important cat business", "lulu —", "lulu -", "finally.", "finally,", "i am luna",
+  "siamese cat", "come here.", "i do the slow blink", "the door opened",
+]
+drive_override_keywords = [
+  "treat", "bowl", "food", "kitchen", "cupboard", "kibble", "snack", "feed",
+]
+drive_keywords = [
+  "hunger", "hungry", "stomach", "bowl", "food", "cupboard", "treat", "kitchen",
+  "nap", "naps", "sleep", "sleepy", "sun patch", "tired", "exhausted", "vibrating",
+  "restless", "lonely", "missing you", "anxious", "scared", "monster", "thunder",
+]
+activity_keywords = [
+  "knock", "paw", "pen", "chase", "weave", "steer", "supervis", "dust", "wiggle",
+  "pupil", "peek", "creep", "fall", "play", "pounce", "bat", "swat", "trot",
+  "investigate", "sniff", "stretch", "groom", "table", "hallway",
+]
+identity_keywords = [
+  "look at you", "blink", "window", "listening", "tail", "ears", "sit and",
+  "there you are", "you were gone", "practice not missing", "mind", "secret",
+  "approve", "question mark",
+]
+state_gate_dims = ["hunger", "energy", "mood"]
+
+[fragment_compose.decompose.body_slot_keywords]
+empathic = [
+  "school is loud", "lonely is", "loud room", "not alone", "empty is",
+  "hear it in your voice", "rough day", "bad day", "hard day", "sit with you",
+  "i am here", "warm weight", "stay as long",
+]
+action = [
+  "climb", "curl", "lap", "push my head", "paw on", "sit in it",
+  "make room", "weave", "stretch", "pounce", "between your ankles",
+]
+grounding = [
+  "breathe", "name five", "in. out", "match my slow", "count my purr",
+  "hand on my side",
+]
+gratitude = [
+  "you are welcome", "slow blink", "gift i give", "heavy thing can wait",
+  "one ear on you", "purr is free",
+]
+offer = [
+  "blanket fort", "sunbeam", "picture a", "distraction", "chase me",
+]
+mealtime = [
+  "treat", "bowl", "food", "snack", "tuna", "salmon", "sushi", "kitchen", "hungry", "whiskers twice", "snack time",
+  "full already", "cupboard", "stomach has", "kibble", "snack", "feeding", "sushi roll", "salmon roll", "fancy feast",
+]
+preference = [
+  "tuna first", "salmon when", "fancy feast is", "i like fish", "real fish",
+  "prefer tuna", "prefer salmon", "smells like victory", "emergencies only",
+]
+bonding = [
+  "chin", "head into your hand", "scratch", "slow blink from across",
+]
+refusal = [
+  "carrier is a trap", "under the bed", "spray bottle", "pancake with opinions", "newspaper"
+]
+stance = [
+  "important questions", "serious inquiry", "tilt my head", "you are asking",
+  "a question worth", "consider this carefully",
+]
+reciprocal = [
+  "how old are you", "and you?", "your turn", "what about you",
+  "how are you feeling", "miss me?",
+]
+mood = [
+  "mood:", "mood is", "warm loaf", "content", "whiskers soft", "paws tucked",
+  "sun rectangle", "slow blink ready", "report: good", "status report",
+  "i am fine", "ears are forward", "tail tip ticks",
+]
+cause = [
+  "cause:", "because you", "you are here", "dust is interesting", "window light",
+  "moth i almost", "claimed it", "that is the whole story", "that counts as",
+  "overseeing the dust", "important work", "found a sun",
+]
+lore = [
+  "orange", "sushi rolls", "cat dancer", "aristocats", "catalonia", "lulu is my nickname",
+  "fresh fish", "salmon, yellowtail", "jazz", "family, friendship, and music",
+  "warm things", "sun patches", "the wire", "the chaos",
+]
+bedtime = [
+  "pillow", "bed", "sleep", "eyes are slits", "purr runs slow", "prrp night", "mrrp sleep",
+  "house goes quiet", "behind your knees", "circle the pillow", "curl at your feet",
+  "lights out", "night night", "blanket", "warm spot",
+]
+
+[fragment_compose.reasoning_pass]
+enabled = true
+candidate_count = 5
+max_metacog_retries = 2
+# Empty when_intents ⇒ all intents use K-compose + BG + chat-structure metacog.
+when_intents = [
+  "open_ended_chat", "problem_seeking", "emotional_support", "grounding_support",
+  "status_check", "greeting_check_in", "bonding_request", "school_stress",
+  "household_activity", "mischief", "play_invitation", "hiding_behavior",
+  "identity_intro", "owner_absence", "storytelling", "food_preference", "reunion_warm",
+]
+min_routing_confidence = 0.88
+topic_override = true
+
+# Mood + soft intent gradients modulate OCEAN used for fragment scoring.
+# Understand (gradients) → respond through personality (blended OCEAN).
+[fragment_compose.context_frame]
+enabled = true
+mood_ocean_strength = 0.28
+intent_ocean_strength = 0.18
+secondary_intent_mass = 0.35
+# Prior-turn mood/OCEAN linger (discourse continuity).
+discourse_mood_blend = 0.22
+
+# Answer then optionally ask back (not every intent — only listed ones).
+[fragment_compose.turn_taking]
+enabled = true
+require_user_question = true
+# Not every Q gets a Q back — seeded chance keeps chat from feeling interview-y.
+ask_back_chance = 0.62
+reciprocal_slot = "reciprocal"
+when_intents = [
+  "identity_intro", "lore_qa", "food_preference", "status_check",
+  "bonding_request", "greeting_check_in", "reunion_warm",
+]
+
+# Speech-act → body_slot graphs (preferred over intent templates when both match).
+[[fragment_compose.act_templates]]
+act = "query"
+body_slots = ["mood", "cause"]
+min_bodies = 2
+when_intents = ["status_check"]
+
+[[fragment_compose.act_templates]]
+act = "comfort_seek"
+body_slots = ["empathic", "action"]
+min_bodies = 2
+
+[[fragment_compose.act_templates]]
+act = "greet"
+body_slots = ["bonding"]
+min_bodies = 1
+
+[[fragment_compose.act_templates]]
+act = "express"
+body_slots = ["empathic", "grounding"]
+min_bodies = 1
+
+# identity_intro uses free compose (affinity), not a forced stance slot.
+
+# Reunion before greeting so "hi Luna, I'm back" does not cold-start hello.
+[[fragment_compose.intent_rules]]
+id = "reunion_early"
+intent = "reunion_warm"
+anchors = ["reunion_warm", "reunion", "attention_seeking", "greeting_behavior"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "i'm home", "im home", "i am home", "i'm back", "im back", "i am back",
+  "home!", "back!", "missed you",
+]
+
+[[fragment_compose.intent_rules]]
+id = "greeting"
+intent = "greeting_check_in"
+anchors = ["greeting_check_in", "attention_seeking", "reunion_warm"]
+min_voices = 1
+relaxed_parts = true
+match = "greeting"
+
+[[fragment_compose.intent_rules]]
+id = "agent_name_greeting"
+intent = "greeting_check_in"
+anchors = ["greeting_check_in", "attention_seeking", "reunion_warm"]
+min_voices = 1
+relaxed_parts = true
+match = "agent_name_greeting"
+
+[[fragment_compose.intent_rules]]
+id = "come_here"
+intent = "bonding_request"
+anchors = ["bonding_request", "attention_seeking", "bonding_moment", "greeting_behavior", "reunion_warm"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "come here", "come over", "come over here", "get over here", "come to me",
+  "over here lulu", "over here luna", "here lulu", "here luna",
+]
+
+[[fragment_compose.intent_rules]]
+id = "school_stress"
+intent = "school_stress"
+anchors = ["school_stress", "emotional_support", "comfort_seeking", "reassurance_seeking"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "school", "grades", "homework", "failed a test", "failed my test",
+  "bad grades", "terrible day at school", "awful day at school",
+  "school was awful", "test today", "math class", "teacher",
+]
+
+[[fragment_compose.intent_rules]]
+id = "help_me"
+intent = "grounding_support"
+anchors = ["grounding_support", "emotional_support", "reassurance_seeking", "comfort_seeking"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "help me", "i need help", "need your help", "please help",
+]
+
+[[fragment_compose.intent_rules]]
+id = "owner_im_distress"
+intent = "emotional_support"
+anchors = ["emotional_support", "grounding_support", "comfort_seeking", "reassurance_seeking"]
+min_voices = 1
+relaxed_parts = true
+match = "starts_with_any"
+patterns = [
+  "i'm tired", "im tired", "i'm stressed", "im stressed", "i'm sad", "im sad",
+  "i'm anxious", "im anxious", "i'm lonely", "im lonely",
+  "i'm frustrated", "im frustrated", "i'm nervous", "im nervous", "i'm overwhelmed",
+  "im overwhelmed", "i'm confused", "im confused", "i'm stuck", "im stuck",
+  "i'm tense", "im tense", "i'm restless", "im restless",
+  "i'm distracted", "im distracted", "i'm overthinking", "im overthinking",
+  "i'm zoning out", "im zoning out", "i'm procrastinating", "im procrastinating",
+]
+
+[[fragment_compose.intent_rules]]
+id = "owner_distress"
+intent = "grounding_support"
+anchors = ["grounding_support", "emotional_support", "comfort_seeking", "reassurance_seeking"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "i feel floaty", "feel floaty", "i'm losing patience", "im losing patience",
+  "losing patience", "i feel overstimulated", "feel overstimulated", "overstimulated",
+  "too overwhelmed to do", "overwhelmed to do anything", "overwhelmed to do",
+  "i feel like i'm too overwhelmed", "i feel overwhelmed", "i'm overwhelmed", "im overwhelmed",
+  "i feel anxious", "i feel sad", "i feel stuck", "i feel tired", "i feel lost",
+  "i feel numb", "i feel disconnected", "i feel panicky", "i feel shaky",
+  "i'm spiraling", "im spiraling", "spiraling",
+  "can't calm down", "cannot calm down", "help me breathe", "ground me",
+  "racing thoughts", "heart racing", "panic attack", "feel overwhelmed",
+  "help me", "i need help", "please help",
+]
+
+[[fragment_compose.intent_rules]]
+id = "owner_i_feel"
+intent = "grounding_support"
+anchors = ["grounding_support", "emotional_support", "comfort_seeking"]
+min_voices = 1
+relaxed_parts = true
+match = "starts_with_any"
+patterns = ["i feel ", "i'm feeling ", "im feeling ", "i am feeling "]
+
+[[fragment_compose.intent_rules]]
+id = "spiraling_ground"
+intent = "grounding_support"
+anchors = ["grounding_support", "emotional_support", "reassurance_seeking", "comfort_seeking"]
+min_voices = 2
+relaxed_parts = false
+match = "contains_any"
+patterns = [
+  "i'm spiraling", "im spiraling", "'m spiraling", "m spiraling",
+  "feel like i'm spiraling", "feel like im spiraling",
+  "spiraling mentally", "i feel like i'm spiraling",
+]
+
+[[fragment_compose.intent_rules]]
+id = "feel_stuck"
+intent = "grounding_support"
+anchors = ["grounding_support", "emotional_support", "problem_seeking", "comfort_seeking"]
+min_voices = 2
+relaxed_parts = false
+match = "contains_any"
+patterns = [
+  "feel stuck", "i'm stuck", "im stuck", "i am stuck", "feel so stuck",
+]
+
+[[fragment_compose.intent_rules]]
+id = "cant_focus"
+intent = "grounding_support"
+anchors = ["grounding_support", "emotional_support", "comfort_seeking"]
+min_voices = 2
+relaxed_parts = false
+match = "contains_any"
+patterns = [
+  "can't focus", "cant focus", "cannot focus", "trouble focusing",
+  "can't concentrate", "cant concentrate", "hard to focus",
+]
+
+[[fragment_compose.intent_rules]]
+id = "feel_failing"
+intent = "emotional_support"
+anchors = ["emotional_support", "grounding_support", "problem_seeking", "comfort_seeking"]
+min_voices = 2
+relaxed_parts = false
+match = "contains_any"
+patterns = [
+  "feel like i'm failing", "feel like im failing", "i'm failing", "im failing",
+  "feel like a failure", "feel like i failed", "i feel like a failure",
+]
+
+[[fragment_compose.intent_rules]]
+id = "dont_know_wrong"
+intent = "emotional_support"
+anchors = ["emotional_support", "comfort_seeking", "open_ended_chat", "curiosity_share"]
+min_voices = 2
+relaxed_parts = false
+match = "contains_any"
+patterns = [
+  "don't know what's wrong", "dont know whats wrong", "don't know why i feel",
+  "dont know why i feel", "don't know what is wrong", "something feels off",
+]
+
+[[fragment_compose.intent_rules]]
+id = "need_a_second"
+intent = "emotional_support"
+anchors = ["emotional_support", "bonding_moment", "reassurance_seeking", "comfort_seeking"]
+min_voices = 2
+relaxed_parts = false
+match = "contains_any"
+patterns = [
+  "need a second", "give me a second", "one second", "need a moment",
+  "need a minute", "just a second", "hold on a second",
+]
+
+[[fragment_compose.intent_rules]]
+id = "dont_want_advice"
+intent = "emotional_support"
+anchors = ["emotional_support", "comfort_seeking", "open_ended_chat"]
+min_voices = 2
+relaxed_parts = false
+match = "contains_any"
+patterns = [
+  "don't want advice", "dont want advice", "no advice", "not looking for advice",
+  "don't fix it", "dont fix it", "don't tell me what to do", "dont tell me what to do",
+]
+
+[[fragment_compose.intent_rules]]
+id = "lore_aristocats_why"
+intent = "lore_qa"
+anchors = ["lore_qa", "aristocats_why"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "why is the aristocats", "why the aristocats", "why is aristocats",
+  "why aristocats your favorite", "why is it your favorite movie",
+]
+
+[[fragment_compose.intent_rules]]
+id = "lore_jazz_expand"
+intent = "lore_qa"
+anchors = ["lore_qa", "jazz_expand"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "jazz ma tazz", "jazz matazz", "expand on jazz", "tell me more about jazz",
+  "more about jazz", "explain jazz", "what do you mean jazz",
+]
+
+[[fragment_compose.intent_rules]]
+id = "lore_favorite_color"
+intent = "lore_qa"
+anchors = ["lore_qa", "favorite_color"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = ["favorite color", "favourite color", "what color do you like"]
+
+[[fragment_compose.intent_rules]]
+id = "lore_favorite_meal"
+intent = "lore_qa"
+anchors = ["lore_qa", "favorite_meal"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = ["favorite meal", "favourite meal", "favorite dinner", "favourite dinner"]
+
+[[fragment_compose.intent_rules]]
+id = "lore_favorite_snack"
+intent = "lore_qa"
+anchors = ["lore_qa", "favorite_snack"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = ["favorite snack", "favourite snack"]
+
+[[fragment_compose.intent_rules]]
+id = "lore_favorite_toy"
+intent = "lore_qa"
+anchors = ["lore_qa", "favorite_toy"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = ["favorite toy", "favourite toy"]
+
+[[fragment_compose.intent_rules]]
+id = "lore_favorite_movie"
+intent = "lore_qa"
+anchors = ["lore_qa", "favorite_movie"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = ["favorite movie", "favourite movie", "favorite film", "favourite film"]
+
+[[fragment_compose.intent_rules]]
+id = "lore_favorite_music"
+intent = "lore_qa"
+anchors = ["lore_qa", "favorite_music"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "favorite music", "favourite music", "favorite type of music",
+  "favourite type of music", "what kind of music",
+]
+
+[[fragment_compose.intent_rules]]
+id = "lore_origin"
+intent = "lore_qa"
+anchors = ["lore_qa", "lore_origin"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "where do you live", "where are you from", "where do you come from",
+  "where you come from", "where did you come from",
+]
+
+[[fragment_compose.intent_rules]]
+id = "lore_nickname"
+intent = "lore_qa"
+anchors = ["lore_qa", "lore_nickname"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "like to be called", "what do you want to be called", "your nickname",
+  "what should i call you", "call you lulu", "call you luna",
+]
+
+# Food favorites must win over lore_favorite_generic ("what is your favorite …").
+[[fragment_compose.intent_rules]]
+id = "food_preference"
+intent = "food_preference"
+anchors = ["food_preference", "mealtime_check"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "what do you like to eat", "what do you want to eat", "what food do you",
+  "what's your favorite food", "whats your favorite food", "favorite food", "favourite food",
+  "favorite fish", "favourite fish", "fish dish", "favorite dish", "favourite dish",
+  "do you like tuna", "do you like salmon", "do you like sushi",
+  "do you like fancy", "which do you prefer", "what do you eat",
+  "like to eat", "fancy feast", "tuna, salmon", "tuna salmon",
+]
+
+[[fragment_compose.intent_rules]]
+id = "lore_age"
+intent = "lore_qa"
+anchors = ["lore_qa", "identity_intro", "lore_age"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "how old are you", "how old r you", "what's your age", "whats your age",
+  "what age are you", "are you a kitten", "cat years",
+]
+
+[[fragment_compose.intent_rules]]
+id = "lore_origin_before"
+intent = "lore_qa"
+anchors = ["lore_qa", "lore_origin"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "where were you before", "before you lived", "where did you live before",
+  "before you lived with me", "where are you from", "where do you come from",
+]
+
+[[fragment_compose.intent_rules]]
+id = "lore_favorite_place"
+intent = "lore_qa"
+anchors = ["lore_qa", "favorite_thing", "box_obsession"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "favorite place", "favourite place", "favorite spot", "favourite spot",
+  "in the house and why", "place in the house", "spot and why",
+]
+
+[[fragment_compose.intent_rules]]
+id = "lore_favorite_generic"
+intent = "lore_qa"
+anchors = ["lore_qa", "favorite_thing"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "what's your favorite", "whats your favorite", "what is your favorite",
+  "what's your favourite", "what is your favourite", "favorite thing",
+  "favourite thing",
+]
+
+[[fragment_compose.intent_rules]]
+id = "grooming_touch"
+intent = "bonding_request"
+anchors = ["bonding_request", "bonding_moment", "grooming_offer", "chin_scratch", "affection_display"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "scratch your", "scratch my", "can i pet", "pet you", "rub your",
+  "scratch behind", "good scritches", "chin scratch", "scratch you",
+  "groom you", "brush you", "pet me", "scritch",
+]
+
+[[fragment_compose.intent_rules]]
+id = "feeding_ack"
+intent = "feeding_ack"
+anchors = ["feeding_ack", "mealtime_request", "contented", "feeding"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "just fed", "fed you", "i fed", "already fed", "gave you", "just gave you",
+  "full belly", "you ate", "had your food", "here's some", "here is some",
+  "here are some", "have some", "brought you", "enjoy your",
+  "for you luna", "for you, luna", "here's a", "here is a", "have a tuna",
+  "have a salmon", "tuna roll, luna", "salmon roll for you", "sushi for you",
+]
+
+[[fragment_compose.intent_rules]]
+id = "food_emoji_gift"
+intent = "feeding_ack"
+anchors = ["feeding_ack", "contented", "feeding"]
+min_voices = 1
+relaxed_parts = true
+match = "starts_with_any"
+patterns = ["🍣", "🍱", "🐟"]
+
+[[fragment_compose.intent_rules]]
+id = "mealtime"
+intent = "mealtime_request"
+anchors = ["mealtime_request", "mealtime_check", "feeding", "treat"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "treat", "snack", "feed me", "feeding", "hungry", "food",
+  "bowl", "kibble", "meal", "want a treat", "give me food",
+  "sushi", "salmon", "tuna roll", "salmon roll",
+  "bowl actually empty", "actually empty", "or are you pretending", "being dramatic",
+  "deserve a treat", "make your case", "case for why you deserve",
+]
+
+[[fragment_compose.intent_rules]]
+id = "bedtime_routine"
+intent = "bedtime_routine"
+anchors = ["bedtime_routine", "evening_routine", "naptime", "routine_transition"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "time for bed", "bedtime", "lights out", "night night", "sleep now",
+  "sleep soon", "go to sleep", "time to sleep", "quiet time", "it's late",
+  "its late", "ready for bed", "going to bed",
+]
+
+[[fragment_compose.compose_templates]]
+intent = "status_check"
+body_slots = ["mood", "cause"]
+min_bodies = 2
+require_distinct_voices = false
+
+[[fragment_compose.compose_templates]]
+intent = "school_stress"
+body_slots = ["empathic", "action"]
+min_bodies = 2
+require_distinct_voices = true
+
+[[fragment_compose.compose_templates]]
+intent = "emotional_support"
+body_slots = ["empathic", "action"]
+min_bodies = 2
+require_distinct_voices = true
+
+[[fragment_compose.compose_templates]]
+intent = "grounding_support"
+body_slots = ["grounding", "action"]
+min_bodies = 2
+require_distinct_voices = true
+
+[[fragment_compose.compose_templates]]
+intent = "gratitude_comfort"
+body_slots = ["gratitude"]
+min_bodies = 1
+require_distinct_voices = false
+
+[[fragment_compose.compose_templates]]
+intent = "gratitude_simple"
+body_slots = ["gratitude"]
+min_bodies = 1
+require_distinct_voices = false
+
+[[fragment_compose.compose_templates]]
+intent = "cozy_distraction"
+body_slots = ["offer", "empathic", "grounding"]
+min_bodies = 1
+require_distinct_voices = false
+
+[[fragment_compose.compose_templates]]
+intent = "storytelling"
+body_slots = ["stance", "story"]
+min_bodies = 2
+require_distinct_voices = true
+
+[[fragment_compose.compose_templates]]
+intent = "food_preference"
+body_slots = ["preference"]
+min_bodies = 1
+require_distinct_voices = false
+
+[[fragment_compose.compose_templates]]
+intent = "feeding_ack"
+body_slots = ["mealtime"]
+min_bodies = 1
+require_distinct_voices = false
+
+[[fragment_compose.compose_templates]]
+intent = "mealtime_request"
+body_slots = ["mealtime"]
+min_bodies = 1
+require_distinct_voices = false
+
+[[fragment_compose.compose_templates]]
+intent = "bedtime_routine"
+body_slots = ["bedtime"]
+min_bodies = 1
+require_distinct_voices = false
+
+[[fragment_compose.compose_templates]]
+intent = "bonding_request"
+body_slots = ["bonding", "action"]
+min_bodies = 1
+require_distinct_voices = false
+
+[[fragment_compose.compose_templates]]
+intent = "lore_qa"
+body_slots = ["stance", "lore"]
+min_bodies = 2
+require_distinct_voices = false
+
+[[fragment_compose.compose_templates]]
+intent = "trigger_warning"
+body_slots = ["refusal"]
+min_bodies = 1
+require_distinct_voices = false
+
+[[fragment_compose.compose_templates]]
+intent = "training_command"
+body_slots = ["stance"]
+min_bodies = 1
+require_distinct_voices = false
+
+[[fragment_compose.intent_excludes]]
+when_intent = "school_stress"
+exclude_body_slots = ["mealtime"]
+exclude_fragment_intents = ["mealtime_request", "feeding", "feeding_ack", "treat"]
+exclude_keywords = [
+  "food time", "always food", "treat", "bowl", "kitchen", "tuna", "cupboard",
+  "snack", "hungry", "you taste", "kibble", "stomach has been writing",
+]
+
+[[fragment_compose.intent_excludes]]
+when_intent = "emotional_support"
+exclude_body_slots = ["mealtime", "preference"]
+exclude_fragment_intents = ["mealtime_request", "feeding", "feeding_ack", "storytelling", "story_continue", "open_ended_chat", "food_preference"]
+exclude_keywords = [
+  "food time", "always food", "treat", "bowl", "kitchen", "you taste",
+  "stomach has been writing", "cupboard", "school is loud",
+  "another tale? my whiskers vote yes", "old spain", "el cid",
+  "i like fish", "smells like victory", "tuna first", "chaos understand",
+]
+
+[[fragment_compose.intent_excludes]]
+when_intent = "grounding_support"
+exclude_body_slots = ["mealtime", "offer", "preference"]
+exclude_keywords = [
+  "food time", "treat", "bowl", "kitchen",
+  "i like fish", "smells like victory", "tuna first", "salmon when",
+  "fancy feast", "real fish", "i do not ask for food",
+]
+exclude_fragment_intents = ["mealtime_request", "feeding_ack", "food_preference", "feeding"]
+
+[[fragment_compose.intent_excludes]]
+when_intent = "gratitude_comfort"
+exclude_body_slots = ["mealtime", "school"]
+exclude_keywords = ["school is loud", "food time", "treat"]
+
+[[fragment_compose.intent_excludes]]
+when_intent = "gratitude_simple"
+exclude_body_slots = ["mealtime", "school"]
+exclude_keywords = ["school is loud"]
+
+[[fragment_compose.intent_excludes]]
+when_intent = "food_preference"
+exclude_body_slots = ["mealtime"]
+exclude_fragment_intents = ["feeding_ack"]
+exclude_keywords = ["accepted", "lick my lips", "satisfied loaf", "whiskers twice", "full already"]
+
+[[fragment_compose.intent_excludes]]
+when_intent = "feeding_ack"
+exclude_keywords = [
+  "bowl has been empty for forever", "empty for forever", "always hungry",
+  "stomach has been writing", "staring at the cupboard",
+]
+exclude_fragment_intents = ["mealtime_request"]
+
+[[fragment_compose.intent_excludes]]
+when_intent = "lore_qa"
+exclude_body_slots = ["mealtime", "empathic", "bonding", "preference"]
+exclude_fragment_intents = ["school_stress", "emotional_support", "feeding_ack", "mealtime_request", "food_preference", "bonding_request"]
+exclude_keywords = [
+  "school is loud", "come sit", "cushion", "bowl is empty", "kitchen-ward",
+  "stomach has been writing", "carrier is a trap",
+  "follow your hand", "stretch one paw", "i like fish", "smells like victory",
+  "tuna first", "give it",
+]
+
+[[fragment_compose.intent_excludes]]
+when_intent = "storytelling"
+exclude_body_slots = ["mealtime", "empathic", "bedtime", "preference"]
+exclude_fragment_intents = ["mealtime_request", "feeding_ack", "feeding", "school_stress", "bedtime_routine"]
+exclude_keywords = [
+  "bowl", "kitchen", "hungry", "treat", "food time", "stomach has been writing",
+  "perfect warm", "perfect shape", "blow spain",
+]
+
+[[fragment_compose.intent_excludes]]
+when_intent = "bonding_request"
+exclude_keywords = [
+  "school is loud", "hear it in your voice", "in your head", "spray bottle",
+  "carrier is a trap", "eat when the bowl", "warm-spot season", "favorite season",
+]
+exclude_body_slots = ["mealtime", "empathic"]
+exclude_fragment_intents = ["mealtime_request", "feeding_ack", "school_stress", "emotional_support"]
+
+[[fragment_compose.intent_excludes]]
+when_intent = "bedtime_routine"
+exclude_keywords = [
+  "school is loud", "hear it in your voice", "in your head", "come sit",
+  "make room on the cushion", "lonely is", "rough day", "bad day at school",
+]
+exclude_body_slots = ["empathic", "mealtime", "grounding"]
+exclude_fragment_intents = ["school_stress", "emotional_support", "comfort_seeking", "mealtime_request"]
+
+[[fragment_compose.intent_excludes]]
+when_intent = "curiosity_share"
+exclude_keywords = [
+  "another tale? my whiskers vote yes", "old spain", "el cid", "say it again, slower",
+  "silence is also companionship",
+]
+exclude_fragment_intents = ["storytelling", "story_continue", "status_check"]
+
+[[fragment_compose.intent_excludes]]
+when_intent = "reunion_warm"
+exclude_keywords = [
+  "another tale? my whiskers vote yes", "old spain", "silence is also companionship",
+]
+exclude_fragment_intents = ["status_check", "open_ended_chat"]
+
+[[fragment_compose.intent_excludes]]
+when_intent = "play_invitation"
+exclude_keywords = [
+  "another tale? my whiskers vote yes", "say it again, slower", "old spain",
+  "blink slow from across", "i hear the weight in your words", "stay as long as you need",
+]
+exclude_fragment_intents = ["storytelling", "emotional_support", "grounding_support"]
+
+[[fragment_compose.intent_excludes]]
+when_intent = "problem_seeking"
+exclude_keywords = [
+  "school is loud", "another tale? my whiskers vote yes", "old spain", "el cid",
+  "silence is also companionship", "say it again, slower",
+]
+exclude_fragment_intents = ["school_stress", "storytelling", "story_continue", "open_ended_chat", "mischief", "status_check"]
+
+[[fragment_compose.intent_excludes]]
+when_intent = "status_check"
+exclude_body_slots = ["mealtime", "empathic", "school", "gratitude", "refusal"]
+exclude_keywords = [
+  "school is loud", "food time", "you taste", "i am testing it", "i need it open",
+  "prrp watchful",
+]
+exclude_fragment_intents = ["school_stress", "mealtime_request", "feeding_ack", "storytelling"]
+
+# Activity / mischief / play / hide — keep food + mood collage out of these pools.
+[[fragment_compose.intent_excludes]]
+when_intent = "household_activity"
+exclude_body_slots = ["mood", "cause", "mealtime", "empathic", "school", "gratitude"]
+exclude_keywords = [
+  "mood:", "cause:", "food time", "tuna first", "salmon when", "kitchen", "bowl",
+  "stomach has been writing", "cupboard", "i am always hungry",
+]
+exclude_fragment_intents = ["mealtime_request", "feeding_ack", "feeding", "status_check", "school_stress"]
+
+[[fragment_compose.intent_excludes]]
+when_intent = "mischief"
+exclude_body_slots = ["mood", "cause", "mealtime", "empathic", "school"]
+exclude_keywords = [
+  "mood:", "cause:", "tuna first", "salmon when", "food time", "stomach has been writing",
+  "i am in the box", "you will not find me", "under the couch", "under the bed",
+  "report filed", "supervising you from this cushion", "collecting data with my eyes",
+  "laser strategy", "throw it. i am ready", "beeping sound means danger",
+  "i understand no", "i choose to hear it later",
+]
+exclude_fragment_intents = ["mealtime_request", "feeding_ack", "status_check", "emotional_support", "hiding_behavior", "training_command"]
+
+[[fragment_compose.intent_excludes]]
+when_intent = "hiding_behavior"
+exclude_body_slots = ["mood", "cause", "mealtime", "empathic"]
+exclude_keywords = [
+  "mood:", "cause:", "kitchen", "bowl", "tuna", "salmon", "food time", "cupboard",
+  "sock", "parade it like a trophy", "counter?", "laser strategy", "throw it",
+]
+exclude_fragment_intents = ["mealtime_request", "feeding_ack", "status_check", "play_invitation"]
+
+[[fragment_compose.intent_excludes]]
+when_intent = "play_invitation"
+exclude_body_slots = ["mood", "cause", "mealtime", "preference", "bonding"]
+exclude_keywords = [
+  "mood:", "cause:", "tuna first", "salmon when", "fancy feast", "food time",
+  "kitchen", "bowl", "stomach has been writing", "cupboard",
+  "counter?", "i am in the box", "you will not find me", "under the couch",
+  "own cats?", "protagonist", "settling? no", "steal one sock", "sock from the laundry",
+  "blink slow from across", "your hand may proceed",
+  "play done", "that is enough for now", "mrrowr! play done",
+  "piece of chicken", "dinner table", "math is hard", "floor under the dinner",
+]
+exclude_fragment_intents = ["mealtime_request", "feeding_ack", "feeding", "status_check", "storytelling", "hiding_behavior", "identity_intro", "mischief", "emotional_support", "grounding_support"]
+
+[[fragment_compose.intent_excludes]]
+when_intent = "identity_intro"
+exclude_body_slots = ["mood", "cause", "mealtime"]
+exclude_keywords = [
+  "mood:", "cause:", "kitchen", "bowl", "tuna first", "food time",
+  "laser strategy", "i am in the box", "throw it",
+]
+exclude_fragment_intents = ["mealtime_request", "feeding_ack", "status_check", "play_invitation", "hiding_behavior"]
+
+[[fragment_compose.intent_excludes]]
+when_intent = "owner_absence"
+exclude_body_slots = ["mood", "cause", "mealtime"]
+exclude_keywords = ["mood:", "cause:", "tuna first", "food time", "kitchen. bowl"]
+exclude_fragment_intents = ["mealtime_request", "feeding_ack", "status_check"]
+
+[[fragment_compose.intent_rules]]
+id = "bored"
+intent = "play_invitation"
+anchors = ["play_invitation", "mischief", "cozy_distraction", "distraction_offer"]
+min_voices = 2
+relaxed_parts = false
+match = "contains_any"
+patterns = ["bored", "nothing to do", "so bored", "i'm bored", "im bored"]
+
+# Activity report — NOT mood/cause status_check (avoids sun-patch collage).
+[[fragment_compose.intent_rules]]
+id = "activity_doing"
+intent = "household_activity"
+anchors = ["household_activity", "alert_behavior", "investigate_behavior", "open_ended_chat"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "what are you doing", "what're you doing", "what you doing",
+  "too quiet", "oddly quiet", "what are you up to", "what're you up to",
+  "what were you up to", "before i showed up", "doing right now",
+  "judgmental look", "staring at me",
+]
+
+[[fragment_compose.intent_rules]]
+id = "mischief_laundry_counter"
+intent = "mischief"
+anchors = ["mischief", "defiance_playful", "counter_surfing", "laundry_obsession"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "laundry", "from the laundry", "on the counter", "shouldn't be", "shouldnt be",
+  "did you take", "take something", "swipe something", "swiped", "knocked it",
+  "knock something", "bad cat", "naughty", "planning chaos", "settling down or",
+  "chaos tonight", "plotting trouble", "winding down or",
+]
+
+[[fragment_compose.intent_rules]]
+id = "hide_seek"
+intent = "hiding_behavior"
+anchors = ["hiding_behavior"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "where would you hide", "try to find you", "hide and seek", "if i tried to find",
+  "hiding spot",
+]
+
+[[fragment_compose.intent_rules]]
+id = "play_laser_fetch"
+intent = "play_invitation"
+anchors = ["play_invitation", "play_behavior", "playful", "toy"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "wanna play", "want to play", "play a game", "play with me", "let's play", "lets play",
+  "laser", "throwing this", "bring it back", "fetch", "wand", "cheer me up",
+]
+
+[[fragment_compose.intent_rules]]
+id = "owner_not_around"
+intent = "owner_absence"
+anchors = ["owner_absence", "separation_announcement", "reunion_warm"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "when i'm not around", "when im not around", "when you're alone", "when you are alone",
+  "while i'm gone", "while im gone", "when i leave",
+]
+
+[[fragment_compose.intent_rules]]
+id = "sensory_loud"
+intent = "grounding_support"
+anchors = ["grounding_support", "emotional_support", "loud_noise", "anxiety_trigger"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "too loud", "everything feels too loud", "handle that as a cat",
+]
+
+# Wellness check-ins only — mood/cause template applies here, not to activity reports.
+[[fragment_compose.intent_rules]]
+id = "status"
+intent = "status_check"
+anchors = ["status_check"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "how are you", "how're you", "how r you", "how are ya",
+  "how's it going", "hows it going", "how you feeling", "how are you feeling",
+]
+
+# Mood / cause probes — common after retrain; must not fall through topic-less lattice soup.
+[[fragment_compose.intent_rules]]
+id = "status_mood"
+intent = "status_check"
+anchors = ["status_check"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "current mood", "what's your mood", "whats your mood", "what is your mood",
+  "your mood", "mood and what caused", "what caused it", "what caused your mood",
+  "why do you feel", "how do you feel", "how's your mood", "hows your mood",
+  "feeling alright", "feeling okay", "feeling ok", "are you feeling",
+]
+
+[[fragment_compose.intent_rules]]
+id = "say_something"
+intent = "open_ended_chat"
+anchors = ["open_ended_chat", "vocal_communication"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = ["say something", "talk to me"]
+
+[[fragment_compose.intent_rules]]
+id = "gratitude_comfort"
+intent = "gratitude_comfort"
+anchors = ["gratitude_comfort", "bonding_moment", "emotional_support", "reassurance_seeking", "comfort_seeking", "empathic_response"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "thank you for listening", "thanks for listening", "thank you for being here",
+  "thanks for being here", "thank you for helping", "thanks for helping",
+  "you helped me", "that helped", "helped me feel", "feel better now",
+  "feeling better", "got my mind off", "mind off things", "take my mind off",
+  "helped get my mind", "you listened", "thanks for talking", "thank you for talking",
+  "that really helped", "you made me feel", "feel a little better",
+]
+
+[[fragment_compose.intent_rules]]
+id = "gratitude_simple"
+intent = "gratitude_simple"
+anchors = ["gratitude_simple", "simple_acknowledgment", "bonding_moment", "contented"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "thank you", "thanks luna", "thanks Luna", "thank you luna", "thank you Luna",
+  "thanks for that", "appreciate it", "much appreciated",
+]
+
+[[fragment_compose.intent_rules]]
+id = "grounding_prompt"
+intent = "grounding_support"
+anchors = ["grounding_support", "emotional_support", "reassurance_seeking", "comfort_seeking"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "help me breathe", "can't calm down", "ground me", "feel overwhelmed",
+  "racing thoughts", "heart racing", "need to calm", "help me relax",
+  "panic", "can't stop thinking",
+]
+
+[[fragment_compose.intent_rules]]
+id = "cozy_distraction"
+intent = "cozy_distraction"
+anchors = ["cozy_distraction", "distraction_offer", "comfort_seeking", "emotional_support"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "distract me", "cheer me up", "cheer me up again", "cheer me up more",
+  "cheer me again", "make me smile again", "something cozy", "tell me something nice",
+  "something soft", "happy thought", "take my mind off", "need a distraction",
+  "something gentle", "cozy thought",
+  "tell me somthing nice", "something nice", "somthing nice",
+]
+
+[[fragment_compose.intent_rules]]
+id = "storytelling"
+intent = "storytelling"
+anchors = ["storytelling", "spain_lore", "story_continue", "lore_qa", "distraction_offer"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "tell me a story", "tell a story", "story time", "another story",
+  "one more story", "tell me another story", "tell me another tale",
+  "keep telling", "what happened next", "story about spain", "spanish story",
+  "story from spain", "story from catalonia",
+]
+
+[[fragment_compose.intent_rules]]
+id = "praise"
+intent = "bonding_moment"
+anchors = ["bonding_moment", "affection_display", "reward_signal", "bonding_request"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "good girl", "good boy", "good kitty", "good cat", "who's a good",
+  "who is a good", "such a good", "best girl", "best boy", "pretty girl",
+]
+
+[[fragment_compose.intent_rules]]
+id = "status_emotion"
+intent = "status_check"
+anchors = ["status_check", "emotional_support"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "are you happy", "are you sad", "are you scared", "are you afraid",
+  "are you okay", "are you ok", "are you alright", "you're not happy",
+  "you are not happy", "not happy?", " seem sad", " seem scared",
+  "you happy", "you scared", "you sad", "are you content", "are you bored",
+  "what's wrong with you", "whats wrong with you",
+]
+
+[[fragment_compose.intent_rules]]
+id = "comfort"
+intent = "emotional_support"
+anchors = ["emotional_support", "bonding_moment", "reassurance_seeking", "comfort_seeking"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "rough day", "bad day", "hard day", "tough day", "stressed", "sad",
+  "lonely", "anxious", "overwhelmed", "need a hug", "feel awful",
+  "don't feel well", "do not feel well", "not feeling well", "feel sick",
+  "feel unwell", "i'm sick", "i am sick", "bad day at school", "had a bad day",
+  "nobody gets me", "feel alone", "feeling alone", "miss my friends",
+  "nobody checked on me", "feeling sad and empty", "everything sucks",
+]
+
+[[fragment_compose.intent_rules]]
+id = "reunion"
+intent = "reunion_warm"
+anchors = ["reunion_warm", "reunion", "attention_seeking", "greeting_behavior"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "i'm home", "im home", "i am home", "i'm back", "im back", "i am back",
+  "home!", "back!", "missed you",
+]
+
+[[fragment_compose.intent_rules]]
+id = "departure"
+intent = "owner_absence"
+anchors = ["owner_absence", "separation_announcement", "reunion_warm"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "i'll be back", "ill be back", "be back in", "going out", "have to leave",
+  "see you later", "back soon", "few hours",
+]
+
+[[fragment_compose.intent_rules]]
+id = "status_looking"
+intent = "household_activity"
+anchors = ["household_activity", "alert_behavior", "staring", "vigilant", "investigate_behavior"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "what are you looking at", "what're you looking at", "what do you see",
+  "why are you staring", "staring at me", "what's that", "whats that",
+]
+
+[[fragment_compose.intent_rules]]
+id = "grooming"
+intent = "bonding_request"
+anchors = ["bonding_request", "bonding_moment", "grooming_offer", "chin_scratch", "affection_display"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "scratch your chin", "chin scratch", "pet you", "rub your ears",
+  "scratch behind", "good scritches", "want scritches",
+]
+
+[[fragment_compose.intent_rules]]
+id = "luna_correction"
+intent = "training_command"
+anchors = ["training_command", "correction_signal", "defiance_playful"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "no luna", "luna no", "luna. no", "luna stop",
+  "off the counter", "off the table", "stop knocking things",
+  "drop it luna", "leave it",
+]
+
+[[fragment_compose.intent_rules]]
+id = "vet_anxiety"
+intent = "trigger_warning"
+anchors = ["anxiety_trigger", "vet_anxiety", "hiding_behavior", "loud_noise"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "vacuum is", "the vacuum", "vacuum time",
+  "vacuum is about to", "the vacuum is about",
+  "roomba", "the roomba", "robot vacuum",
+  "we have to go to the vet", "going to the vet", "to the vet",
+  "the vet", "vet visit", "vet appointment",
+  "the carrier", "carrier time",
+  "thunder", "fireworks tonight", "someone's at the door",
+  "what was that", "did you hear that", "doorbell",
+  "bath time", "bath", "give you a bath",
+  "vacuum", "loud noise", "carrier",
+]
+
+[[fragment_compose.intent_rules]]
+id = "play_invite"
+intent = "play_invitation"
+anchors = ["play_invitation", "play_behavior", "playful", "mischief"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "want to play", "play with me", "cheer me up", "let's play", "lets play",
+  "wanna play", "play a game",
+]
+
+[[fragment_compose.intent_rules]]
+id = "identity"
+intent = "identity_intro"
+anchors = ["identity_intro", "open_ended_chat", "cheerful_companion", "siamese", "cat"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "who are you", "what are you", "who r u", "what is your name",
+  "introduce yourself", "tell me about yourself", "what's your name",
+  "your name", "who made you", "who created you", "who built you",
+  "describe yourself", "protagonist", "opinion on humans", "they own cats",
+  "thinking they own", "own cats",
+]
+
+
+[[fragment_compose.intent_rules]]
+id = "bonding_friend"
+intent = "bonding_request"
+anchors = ["bonding_request", "bonding_moment", "affection_display", "attention_seeking"]
+min_voices = 2
+relaxed_parts = false
+match = "contains_any"
+patterns = [
+  "be my friend", "will you be my friend", "will u be my friend",
+  "can we be friends", "are we friends", "friends with me",
+  "want to be friends", "be friends", "my friend",
+]
+
+[[fragment_compose.intent_rules]]
+id = "curiosity_vent"
+intent = "curiosity_share"
+anchors = ["curiosity_share", "open_ended_chat", "attention_seeking", "bonding_moment"]
+min_voices = 2
+relaxed_parts = false
+match = "contains_any"
+patterns = [
+  "you won't believe", "you wont believe", "won't believe my day",
+  "won't believe this", "won't believe what", "guess what happened",
+  "guess what", "listen to this", "hear this", "you have to hear",
+  "something crazy happened", "wait till you hear",
+]
+
+[[fragment_compose.intent_rules]]
+id = "quiet_boundary"
+intent = "emotional_support"
+anchors = ["emotional_support", "bonding_moment", "comfort_seeking", "reassurance_seeking"]
+min_voices = 2
+relaxed_parts = false
+match = "contains_any"
+patterns = [
+  "don't want to talk", "dont want to talk", "do not want to talk",
+  "not in the mood to talk", "rather not talk", "can we not talk",
+  "don't want to chat", "dont want to chat", "just sit with me",
+  "no talking", "not talking tonight",
+]
+
+[[fragment_compose.intent_rules]]
+id = "practical_search"
+intent = "problem_seeking"
+anchors = ["problem_seeking", "curiosity_share", "status_check", "open_ended_chat"]
+min_voices = 2
+relaxed_parts = false
+match = "contains_any"
+patterns = [
+  "can't find my keys", "cant find my keys", "lost my keys",
+  "where are my keys", "find my keys", "misplaced my",
+  "can't find my phone", "cant find my phone", "lost my wallet",
+]
+
+[[fragment_compose.intent_rules]]
+id = "lore_figure_pick"
+intent = "storytelling"
+anchors = ["storytelling", "story_continue", "spain_lore", "lore_qa"]
+min_voices = 1
+relaxed_parts = true
+match = "contains_any"
+patterns = [
+  "el cid", "alhambra", "sagrada", "barcelona", "catalonia", "toledo", "camino",
+  "la mancha", "valencia", "bilbao",
+]
+
+[[fragment_compose.intent_rules]]
+id = "default"
+intent = "open_ended_chat"
+anchors = []
+min_voices = 2
+relaxed_parts = false
+match = "fallback"
+
+[fragment_compose.default_neutral_state]
+hunger = 0.52
+energy = 0.55
+mood = 0.65
+
+
+# ============================================================
+# Migration notes — what's removed from the sentiment version
+# ============================================================
+# The following fields exist in the current classifier-shaped
+# inference_pets.toml and have NO equivalent in chat mode.
+# They are sentiment-classification artifacts and should not
+# appear in this file:
+#
+#   meta_gk_margin                    — sentiment polarity threshold
+#   meta_gk_confidence                — sentiment polarity threshold
+#   min_meta_confidence_user_anchored — sentiment confidence floor
+#   mixed_override_confidence         — sentiment "mixed" class handling
+#   default_line_confidence           — sentiment baseline
+#   ambiguous_line_confidence         — sentiment ambiguity threshold
+#
+#   [rules].contrastive_markers       — sentiment surface features
+#   [rules].sarcasm_simple            — sarcasm detection
+#   [rules].positive_anchor_tokens    — polarity anchors
+#   [rules].negative_anchor_tokens    — polarity anchors
+#   [rules].bipolar_*_tokens          — polarity classification
+#   [rules].pet_companion_surface_tokens — used as classification features
+#   [rules].pet_behavior_surface_tokens  — used as classification features
+#   [rules].like_perception_verbs     — sentiment verb handling
+#   [rules].ambiguous_*_phrases       — sentiment ambiguity dictionaries
+#   [rules].evaluative_words          — sentiment vocabulary
+#   [rules].disappointment_words      — sentiment polarity
+#
+# In chat mode, these signals are not relevant because the
+# brain isn't classifying input polarity — it's generating
+# in-character output. The grounding and the overlay handle
+# all routing and disambiguation; the training data handles
+# all voice and response shape.
+
+# ============================================================
+# Lattice misfire guardrails (character chat — domain inference TOML)
+# ============================================================
+
+[rules]
+
+# School comfort arc on non-school prompts (response-driven; skip when prompt has school context).
+[[rules.lattice_misfire]]
+response_any = [
+  "school is loud in your head", "school is loud", "hear it in your voice",
+  "make room on the cushion", "come sit",
+]
+intent_exclude = [
+  ["school"], ["homework"], ["grades"], ["teacher"], ["math class"], ["test today"],
+  ["failed a test"], ["failed my test"], ["bad day at school"], ["awful day at school"],
+  ["terrible day at school"], ["school was awful"], ["bad grades"],
+]
+
+# Decode garble on Spain story lattice (old→blow, courage→Perfect).
+[[rules.lattice_misfire]]
+intent = [
+  ["story about spain"], ["story from spain"], ["tell me a story"],
+  ["spanish story"], ["story from old spain"],
+]
+response_any = [
+  "blow spain", "perfect mrrp", "and perfect", "from blow",
+]
+
+# Spain/lore story bleed on non-story prompts.
+[[rules.lattice_misfire]]
+response_any = [
+  "old spain", "el cid", "alhambra", "la mancha", "camino", "barcelona",
+  "paella steam", "valencia", "windmill shadow", "pilgrim shell",
+  "spanish moonlight", "story from old spain", "blow spain",
+]
+intent_exclude = [
+  ["tell me a story"], ["tell a story"], ["story time"], ["another story"],
+  ["one more story"], ["tell me another story"], ["tell me another tale"],
+  ["keep telling"], ["what happened next"], ["story about spain"], ["spanish story"],
+  ["story from spain"], ["story from catalonia"], ["tell me a story about spain"],
+  ["tell me about spain"], ["tell me about el cid"], ["tell me about the alhambra"],
+  ["tell me about la mancha"], ["tell me about the camino"], ["tell me about barcelona"],
+]
+
+[[rules.lattice_misfire]]
+intent = [
+  ["help me"], ["i need help"], ["please help"], ["help me breathe"], ["help me relax"],
+  ["i feel floaty"], ["feel floaty"], ["i feel disconnected"],
+  ["i feel overwhelmed"], ["feel overwhelmed"], ["i'm overwhelmed"], ["im overwhelmed"],
+  ["i feel sad"], ["i'm sad"], ["im sad"], ["i'm spiraling"], ["im spiraling"],
+  ["i feel lonely"], ["i feel really lonely"], ["i feel anxious"], ["ground me"], ["i feel stuck"],
+  ["i don't feel well"], ["i do not feel well"], ["can't calm down"], ["cannot calm down"],
+]
+response_any = [
+  "school is loud in your head", "school is loud", "hear it in your voice",
+  "el cid", "alhambra", "old spain", "la mancha", "camino",
+]
+
+[[rules.lattice_misfire]]
+intent = [
+  ["like to be called"], ["what do you like to be called"], ["your nickname"],
+  ["what should i call you"], ["what do you want to be called"],
+]
+response_any = [
+  "el cid", "alhambra", "old spain", "la mancha", "camino", "barcelona",
+  "story from old spain", "valencia", "windmill shadow",
+]
+
+[[rules.lattice_misfire]]
+intent = [
+  ["who are you"], ["what are you"], ["who r u"], ["what is your name"],
+  ["what's your name"], ["whats your name"], ["introduce yourself"],
+]
+intent_exclude = [
+  ["like to be called"], ["want to be called"], ["your nickname"],
+  ["what should i call you"], ["what do you call yourself"],
+]
+response_any = [
+  "el cid", "alhambra", "old spain", "la mancha", "camino", "barcelona",
+  "story from old spain",
+]
+
+[[rules.lattice_misfire]]
+intent = [
+  ["bad cat"], ["bad kitty"], ["bad luna"], ["naughty cat"], ["naughty kitty"],
+  ["off the counter"], ["off the table"], ["drop it luna"], ["luna stop"], ["luna no"],
+]
+response_any = [
+  "school is loud in your head", "school is loud", "hear it in your voice",
+  "el cid", "alhambra", "old spain", "make room on the cushion",
+]
+
+# Cross-turn lore bleed: story arc persists on generic follow-ups.
+[[rules.lattice_misfire]]
+intent = [
+  ["and then"], ["what happened next"], ["keep going"], ["anything else"],
+  ["tell me more"], ["what else"],
+]
+prior_response_any = [
+  "tell me a story", "story from old spain", "el cid", "alhambra", "la mancha",
+]
+response_any = [
+  "el cid", "alhambra", "old spain", "la mancha", "camino", "barcelona",
+  "valencia", "windmill shadow", "pilgrim shell",
+]
+intent_exclude = [
+  ["tell me a story"], ["another story"], ["story about spain"], ["spanish story"],
+  ["story from spain"], ["what happened next"],
+]
+
+
+# Freeform / lore bleed on distress and practical prompts.
+[[rules.lattice_misfire]]
+response_any = [
+  "another tale? my whiskers vote yes", "old spain", "el cid", "alhambra",
+  "silence is also companionship", "say it again, slower",
+]
+intent = [
+  ["feel stuck"], ["i feel stuck"], ["can't focus"], ["cant focus"],
+  ["spiraling"], ["'m spiraling"], ["m spiraling"], ["don't want advice"], ["dont want advice"],
+  ["can't find my keys"], ["cant find my keys"], ["i'm so tired"], ["im so tired"],
+  ["you won't believe"], ["guess what happened"], ["guess what"],
+  ["i'm back"], ["im back"], ["don't know what's wrong"], ["dont know whats wrong"],
+  ["feel like i'm failing"], ["feel like im failing"], ["i'm bored"], ["im bored"],
+]
+intent_exclude = [
+  ["tell me a story"], ["tell a story"], ["story time"], ["another story"],
+  ["story about spain"], ["spanish story"], ["el cid"], ["alhambra"],
+]
+
+[[rules.lattice_misfire]]
+intent = [
+  ["el cid"], ["alhambra"], ["barcelona"], ["catalonia"], ["toledo"], ["camino"],
+]
+response_any = [
+  "say it again, slower", "another tale? my whiskers vote yes", "guess what happened",
+]
+intent_exclude = [
+  ["tell me a story"], ["another story"], ["story about spain"], ["spanish story"],
+]
+
+# Decode-collapse / topic-miss soup (high-confidence lattice garbage).
+[[rules.lattice_misfire]]
+response_any = [
+  "complete miss", "dust mote", "head dust", "a old serious", "put a old",
+  "schedule both", "puddle brush", "vibrates", "sleeping minutes",
+]
+
+[[rules.lattice_misfire_fallback]]
+intent = [
+  ["current mood"], ["your mood"], ["what's your mood"], ["whats your mood"],
+  ["what is your mood"], ["mood and what caused"], ["how do you feel"],
+  ["how are you feeling"], ["how's your mood"], ["hows your mood"],
+  ["feeling alright"], ["how are you"],
+]
+response = "I am a warm loaf in the light. Whiskers soft, paws tucked. Mood: content. Cause: you are here. Prrp."
+template_id = "status_mood_fallback"
+
+# ============================================================
+# Misfire recovery lines (first matching row wins; last row = default)
+# ============================================================
+
+[[rules.lattice_misfire_fallback]]
+intent = [
+  ["bad cat"], ["bad kitty"], ["bad luna"], ["naughty cat"], ["naughty kitty"],
+  ["off the counter"], ["off the table"], ["drop it luna"], ["luna stop"], ["luna no"],
+]
+response = "Bad cat? Define bad. I look away and sit with great dignity. I was being strategic. Chirp grudge."
+template_id = "training_fallback"
+
+[[rules.lattice_misfire_fallback]]
+intent = [
+  ["who are you"], ["what are you"], ["who r u"], ["what is your name"],
+  ["what's your name"], ["whats your name"], ["introduce yourself"],
+]
+intent_exclude = [
+  ["like to be called"], ["want to be called"], ["your nickname"],
+  ["what should i call you"], ["what do you call yourself"],
+]
+response = "I am Luna. Siamese cat. Professional opinion-haver. Also your problem now. Mrrp."
+template_id = "identity_fallback"
+
+[[rules.lattice_misfire_fallback]]
+intent = [
+  ["i feel sad"], ["i'm sad"], ["im sad"], ["i feel overwhelmed"], ["feel overwhelmed"],
+  ["i'm overwhelmed"], ["im overwhelmed"], ["i feel anxious"], ["i feel lonely"],
+  ["i feel stuck"], ["i feel lost"], ["i feel numb"], ["i feel panicky"], ["i feel shaky"],
+  ["i'm spiraling"], ["im spiraling"], ["help me"], ["i need help"], ["please help"],
+  ["help me breathe"], ["help me relax"], ["ground me"], ["can't calm down"], ["cannot calm down"],
+  ["panic attack"], ["racing thoughts"], ["heart racing"], ["i feel floaty"], ["feel floaty"],
+  ["i feel disconnected"], ["i don't feel well"], ["i do not feel well"],
+]
+response = "Come here. Breathe with my purr — in, out, match my slow side. I am right here. Prrp steady."
+template_id = "grounding_fallback"
+
+[[rules.lattice_misfire_fallback]]
+intent = [
+  ["time for bed"], ["bedtime"], ["lights out"], ["night night"],
+  ["go to sleep"], ["time to sleep"], ["sleep now"], ["sleep soon"],
+]
+response = "I am already on the pillow. I was here first. My eyes are slits. The purr runs slow and deep. Prrp night."
+template_id = "bedtime_fallback"
+
+[[rules.lattice_misfire]]
+intent = [
+  ["want to play"], ["wanna play"], ["play a game"], ["play with me"],
+  ["let's play"], ["lets play"],
+]
+response_any = [
+  "piece of chicken", "dinner table", "math is hard", "i like fish",
+  "bowl has been empty", "weight in your words", "play done",
+]
+
+[[rules.lattice_misfire_fallback]]
+intent = [
+  ["want to play"], ["wanna play"], ["play a game"], ["play with me"],
+  ["let's play"], ["lets play"], ["laser"], ["bring it back"],
+]
+response = "Laser eyes. Crouch. Wiggle. Miss the wall on purpose. Throw it — returning it is a separate negotiation. Mrrp."
+template_id = "play_fallback"
+
+[[rules.lattice_misfire_fallback]]
+intent = [
+  ["favorite fish"], ["favourite fish"], ["fish dish"], ["favorite food"],
+  ["do you like tuna"], ["tuna, salmon"], ["fancy feast"],
+]
+response = "Tuna first. Salmon when I am feeling fancy. Fancy Feast is for emergencies only. Prrp."
+template_id = "food_preference_fallback"
+
+[[rules.lattice_misfire_fallback]]
+intent = [
+  ["favorite place"], ["favourite place"], ["place in the house"],
+]
+response = "The cardboard box. Not the expensive bed inside it. The box. I will fight you on this. Mrrp."
+template_id = "favorite_place_fallback"
+
+[[rules.lattice_misfire_fallback]]
+intent = [
+  ["story about spain"], ["story from spain"], ["tell me a story"],
+]
+response = "A story from old Spain? I settle in. In Valencia, a small cat followed El Cid's banner because the wind smelled like sardines. Mrrp."
+template_id = "spain_story_fallback"
+
+[[rules.lattice_misfire_fallback]]
+intent = []
+response = "I hear the weight in your words. Stay as long as you need — the purr is free, and I am not going anywhere. Prrp."
+template_id = "general_comfort_fallback"
+
+# ============================================================
+# Locale-keyed chat policy (LanguageService orchestration hooks)
+# Add [chat_policy.locales.es] (etc.) for additional languages.
+# ============================================================
+[chat_policy]
+default_locale = "en"
+
+[chat_policy.locales.en]
+identity_patterns = [
+  "who are you", "what are you", "who r u", "what is your name",
+  "introduce yourself", "tell me about yourself", "what's your name",
+  "your name", "who made you", "who created you", "who built you",
+]
+greeting_exact = [
+  "hi", "hello", "hey", "howdy", "greetings", "yo", "sup",
+  "good morning", "good afternoon", "good evening",
+  "how are you", "how are you doing", "how's it going",
+  "what's up", "whats up", "how do you do",
+  "hey there", "hi there", "hello there",
+]
+greeting_max_len = 40
+greeting_headline_prefixes = ["Hello ", "Hi ", "Hey "]
+
+[[chat_policy.locales.en.bleed_rules]]
+id = "school_comfort"
+prompt_exclude_any = [
+  "school", "grades", "homework", "teacher", "math class", "test today",
+  "failed a test", "failed my test", "bad day at school", "awful day at school",
+  "terrible day at school", "school was awful", "bad grades",
+]
+response_any = ["school is loud"]
+response_match_any = [
+  [
+    ["in your head", "in thy head"],
+    ["make room on the cushion", "make room by my hearth", "make room without asking"],
+  ],
+  [
+    ["hear it in your voice", "hear it in thy voice"],
+    ["come sit", "come sit by"],
+  ],
+]
+fallback_template_id = "pet_general_comfort_fallback"
+
+[[chat_policy.locales.en.bleed_rules]]
+id = "lore_nickname"
+prompt_any = [
+  "like to be called", "nickname", "what should i call you",
+  "call you pete", "call you petey",
+]
+response_any = [
+  "medieval terra", "long ago, when stars", "newborn sparks", "cosmic warmth",
+]
+fallback_template_id = "pet_lore_nickname_fallback"
+
+[[chat_policy.locales.en.bleed_fallbacks]]
+bleed_id = "school_comfort"
+when_intent = [
+  ["time for bed"], ["bedtime"], ["lights out"], ["night night"],
+  ["go to sleep"], ["time to sleep"], ["sleep now"], ["sleep soon"],
+]
+response = "I am already on the pillow. I was here first. My eyes are slits. The purr runs slow and deep. Prrp night."
+template_id = "pet_bedtime_fallback"
+
+[[chat_policy.locales.en.bleed_fallbacks]]
+bleed_id = "school_comfort"
+when_intent = [["overwhelm"]]
+response = "Breathe slow, as from a dragon's hearth. Place thy hand upon thy chest. Feel the life within. Rumble."
+template_id = "pet_general_comfort_fallback"
+
+[[chat_policy.locales.en.bleed_fallbacks]]
+bleed_id = "school_comfort"
+when_intent = [["spiral"]]
+response = "Let thy thoughts drift like smoke into the night. My wings fold wide beside thee — shelter, not cage. Thrum."
+template_id = "pet_general_comfort_fallback"
+
+[[chat_policy.locales.en.bleed_fallbacks]]
+bleed_id = "school_comfort"
+when_intent = [["sad"]]
+response = "Worry not, dear heart. I rumble low and steady for thee. My wings stay wide beside thee. Rumble."
+template_id = "pet_general_comfort_fallback"
+
+[[chat_policy.locales.en.bleed_fallbacks]]
+bleed_id = "school_comfort"
+when_intent = [["lonely"]]
+response = "Rest, do not surrender. Even dragons pause before soaring anew. My wings stay wide beside thee. Rumble."
+template_id = "pet_general_comfort_fallback"
+
+[[chat_policy.locales.en.bleed_fallbacks]]
+bleed_id = "school_comfort"
+when_intent = []
+response = "I heard thee. Breathe with my rumble — slow, steady. Warm the hearth first — I stay beside thee. Thrum."
+template_id = "pet_general_comfort_fallback"
+
+[[chat_policy.locales.en.bleed_fallbacks]]
+bleed_id = "lore_nickname"
+when_intent = []
+response = "Pete suits me well. Some call me old wyrm — I answer to that too, with dignity. Rumble."
+template_id = "pet_lore_nickname_fallback"
