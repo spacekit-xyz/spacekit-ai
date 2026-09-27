@@ -205,7 +205,8 @@ fn all_seven_labels_produce_composed_output() {
 // ── Trained composer extraction ──────────────────────────────────────────────
 
 fn load_sentiment_batch() -> TrainingBatch {
-    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/fintech");
+    // Fixture snapshot of spacekit-projects/sentiment/fintech/data (moved out of growformer/data/).
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fintech");
     let files = [
         "train_sentiment_fintech.jsonl",
         "train_sentiment_fintech_corporate.jsonl",

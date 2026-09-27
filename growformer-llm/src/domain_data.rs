@@ -94,6 +94,77 @@ fn jsonl_paths_in_dir(dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(paths)
 }
 
+/// Raw training lines (with their label) from one or more dirs, using the same
+/// file-selection rules as [`load_jsonl_dir`].
+pub fn load_labeled_lines(dirs: &[PathBuf]) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    for d in dirs {
+        for p in jsonl_paths_in_dir(d)? {
+            let f = File::open(&p).map_err(|e| format!("open {}: {e}", p.display()))?;
+            for (n, line) in BufReader::new(f).lines().enumerate() {
+                let line = line.map_err(|e| format!("{}:{}: {e}", p.display(), n + 1))?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let v: Value = serde_json::from_str(line.trim())
+                    .map_err(|e| format!("{}:{}: {e}", p.display(), n + 1))?;
+                let label = v
+                    .get("semantic_intent")
+                    .and_then(|x| x.as_str())
+                    .or_else(|| {
+                        v.get("causal")
+                            .and_then(|c| c.get("causal_type"))
+                            .and_then(|x| x.as_str())
+                    })
+                    .ok_or_else(|| format!("{}:{}: missing semantic_intent", p.display(), n + 1))?
+                    .to_string();
+                out.push((line.trim().to_string(), label));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Deterministic stratified split of labelled lines: roughly `test_frac` of each
+/// label goes to test (labels with fewer than 3 rows stay entirely in train).
+pub fn stratified_split(
+    lines: &[(String, String)],
+    test_frac: f64,
+    seed: u64,
+) -> (Vec<String>, Vec<String>) {
+    let mut by: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (line, label) in lines {
+        by.entry(label.as_str()).or_default().push(line.as_str());
+    }
+    let mut state = seed ^ 0x9E37_79B9_7F4A_7C15;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let (mut train, mut test) = (Vec::new(), Vec::new());
+    for (_, mut rows) in by {
+        for i in (1..rows.len()).rev() {
+            let j = (next() % (i as u64 + 1)) as usize;
+            rows.swap(i, j);
+        }
+        let n_test = if rows.len() >= 3 {
+            ((rows.len() as f64 * test_frac).round() as usize).max(1)
+        } else {
+            0
+        };
+        for (i, r) in rows.into_iter().enumerate() {
+            if i < n_test {
+                test.push(r.to_string());
+            } else {
+                train.push(r.to_string());
+            }
+        }
+    }
+    (train, test)
+}
+
 /// Load all `*.jsonl` under `dir`, collect unique `semantic_intent` labels (stable sort).
 pub fn load_jsonl_dir(dir: &Path) -> Result<(Vec<Example>, Vec<String>), String> {
     let paths = jsonl_paths_in_dir(dir)?;

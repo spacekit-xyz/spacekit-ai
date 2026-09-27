@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use growformer_llm::model_card::{Arch, ModelCard, SpecialistManifest};
 use growformer_llm::train::{infer_one, load_infer_pack, train_classifier, TrainConfig};
 use growformer_llm::v2::checkpoint::{load_lm_checkpoint, save_lm_checkpoint};
 use growformer_llm::v2::data::{special, Dataset, Tokenizer};
@@ -82,6 +83,15 @@ enum Commands {
         lr_max: f32,
         #[arg(long, default_value_t = false)]
         freeze_embeddings: bool,
+        /// Also write a `*.gfcard.json` specialist manifest next to the checkpoint.
+        #[arg(long, default_value_t = false)]
+        emit_card: bool,
+        /// Subject for the emitted card (default: checkpoint file stem).
+        #[arg(long)]
+        subject: Option<String>,
+        /// Comma-separated router keywords for the emitted card.
+        #[arg(long)]
+        keywords: Option<String>,
     },
     /// v2: generate continuation after `BOS + prompt + SEP` using LM checkpoint.
     Generate {
@@ -128,6 +138,43 @@ fn resolve_grounding(user: &[PathBuf], no_grounding: bool) -> Vec<PathBuf> {
     } else {
         user.to_vec()
     }
+}
+
+/// Write a specialist manifest next to a freshly trained Clifford checkpoint.
+fn write_specialist_card(
+    checkpoint_out: &std::path::Path,
+    cfg: &TrainConfigV2,
+    step: u64,
+    subject: Option<String>,
+    keywords: Option<String>,
+) -> Result<(), String> {
+    let subject = subject.unwrap_or_else(|| {
+        checkpoint_out
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("specialist")
+            .to_string()
+    });
+    let mut card = ModelCard::new(subject);
+    card.train_steps = step;
+    if let Some(kw) = keywords {
+        card.keywords = kw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    let weights_file = checkpoint_out
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("weights.json")
+        .to_string();
+    // train-lm trains the Clifford model, so tag the card accordingly.
+    let manifest = SpecialistManifest::for_checkpoint(Arch::Clifford, cfg, card, weights_file);
+    let card_path = checkpoint_out.with_extension("gfcard.json");
+    manifest.save(&card_path)?;
+    eprintln!("[train-lm] wrote specialist card {}", card_path.display());
+    Ok(())
 }
 
 fn main() -> Result<(), String> {
@@ -185,6 +232,9 @@ fn main() -> Result<(), String> {
             n_blocks,
             lr_max,
             freeze_embeddings,
+            emit_card,
+            subject,
+            keywords,
         } => {
             if d_model % n_heads != 0 {
                 return Err(format!(
@@ -201,6 +251,9 @@ fn main() -> Result<(), String> {
             }
 
             let mut cfg = TrainConfigV2::small(tokenizer.vocab_size());
+            // train-lm builds and trains the Clifford ModelStateV2; the vanilla
+            // flag must be false so checkpoints/cards are tagged correctly.
+            cfg.vanilla = false;
             cfg.max_seq = max_seq;
             cfg.epochs = epochs;
             cfg.d_model = d_model;
@@ -224,6 +277,10 @@ fn main() -> Result<(), String> {
             train_v2(&dataset, &mut state);
             save_lm_checkpoint(&checkpoint_out, &state, &tokenizer)?;
             eprintln!("[train-lm] wrote {}", checkpoint_out.display());
+
+            if emit_card {
+                write_specialist_card(&checkpoint_out, &state.cfg, state.step, subject, keywords)?;
+            }
         }
         Commands::Generate {
             checkpoint,

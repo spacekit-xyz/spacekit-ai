@@ -4947,7 +4947,12 @@ mod luna_match_smoke {
     use super::*;
     #[test]
     fn hey_luna_how_old_is_lore_not_greeting() {
-        let path = "/Users/astor/Projects/2026/spacekit/spacekit-projects/companions/luna/data/inference_pets.toml";
+        // Fixture snapshot of spacekit-projects/companions/luna/data/inference_pets.toml
+        // (was an absolute path to one developer machine, so it failed everywhere else).
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/luna/inference_pets.toml"
+        );
         let raw = std::fs::read_to_string(path).expect("luna toml");
         let cfg = FragmentComposeConfig::load_from_inference_toml_str(&raw).expect("parse");
         assert!(cfg.turn_taking.enabled, "turn_taking should load");

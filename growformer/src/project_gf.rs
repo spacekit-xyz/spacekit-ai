@@ -48,6 +48,13 @@ pub struct TrainSection {
     /// Encoder preset override: "clifford_e8" for MLP-free Clifford encoder.
     /// When set, takes precedence over gle_checkpoint.
     pub encoder: Option<String>,
+    /// Generation-lattice merge threshold for sentiment brains (cosine). Rows whose
+    /// embedding is at least this similar to an existing program are merged into it
+    /// and their own response is dropped. Default 0.92; use a value > 1.0 (e.g. 2.0)
+    /// to keep every labelled row as its own program.
+    pub sentiment_spawn_threshold: Option<f32>,
+    /// Same for chat/companion brains. Default 0.85.
+    pub chat_spawn_threshold: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]

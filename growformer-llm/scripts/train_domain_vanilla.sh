@@ -17,6 +17,20 @@
 #   FEATURES   cargo features (default: vanilla-lm,brain-memory)
 #   CHAT=1     clean ### User:/### Assistant: corpus + --turn-aligned + seq 256
 #   SEQ_LEN    override sequence length (CHAT default 256, else 128)
+#   D_MODEL / D_FF / N_HEADS / N_BLOCKS  model shape (default 128 / 512 / 4 / 4), used as-is
+#              (--no-param-match; the old run silently turned --d-model 16 into ~148 with d_ff 64)
+#   GRAD_ACCUM sequences per optimiser step (default: 8; computed in parallel)
+#   LR_MAX     peak LR (default: 1e-3 fresh, 3e-4 fine-tune)
+#   PATIENCE   early-stop after N non-improving validations (default: 5; 0 = off)
+#
+# Fine-tune from a pretrained base (recommended — see pretrain_base_vanilla.sh):
+#   BASE_CKPT  base vanilla checkpoint (.json); shape comes from the base
+#   BASE_TOK   the base's tokenizer (.tok); the domain corpus is encoded with it
+#   FREEZE_BLOCKS  lower blocks kept frozen (default: half of the base's blocks)
+#   FREEZE_EMBEDDINGS=1  also freeze the embedding table (default: 0)
+#
+# Outputs: <ckpt>.json = best-validation weights, <ckpt>.last.json + .optim.json =
+# final state (resume with `train ... --resume <ckpt>.last.json`), <ckpt>.gfcard.json.
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -29,6 +43,20 @@ VOCAB="${VOCAB:-2048}"
 FEATURES="${FEATURES:-vanilla-lm,brain-memory}"
 OUT_DIR="${OUT_DIR:-${ROOT}/data/domain}"
 CKPT_DIR="${CKPT_DIR:-${ROOT}/agent-data}"
+
+D_MODEL="${D_MODEL:-128}"
+D_FF="${D_FF:-512}"
+N_HEADS="${N_HEADS:-4}"
+N_BLOCKS="${N_BLOCKS:-4}"
+GRAD_ACCUM="${GRAD_ACCUM:-8}"
+PATIENCE="${PATIENCE:-5}"
+BASE_CKPT="${BASE_CKPT:-}"
+BASE_TOK="${BASE_TOK:-}"
+
+if [[ -n "${BASE_CKPT}" && -z "${BASE_TOK}" ]] || [[ -z "${BASE_CKPT}" && -n "${BASE_TOK}" ]]; then
+  echo "set both BASE_CKPT and BASE_TOK (the base's tokenizer), or neither" >&2
+  exit 1
+fi
 
 mkdir -p "${OUT_DIR}" "${CKPT_DIR}"
 
@@ -57,7 +85,12 @@ if [[ "${CHAT:-0}" == "1" ]]; then
   SUFFIX="-chat"
 fi
 TXT="${OUT_DIR}/${DOMAIN}${SUFFIX}.txt"
-TOK="${OUT_DIR}/${DOMAIN}${SUFFIX}.tok"
+if [[ -n "${BASE_TOK}" ]]; then
+  TOK="${BASE_TOK}"
+  SUFFIX="${SUFFIX}-ft"
+else
+  TOK="${OUT_DIR}/${DOMAIN}${SUFFIX}.tok"
+fi
 BIN="${OUT_DIR}/${DOMAIN}${SUFFIX}.bin"
 TRAIN_BIN="${OUT_DIR}/${DOMAIN}${SUFFIX}-train.bin"
 HELD_BIN="${OUT_DIR}/${DOMAIN}${SUFFIX}-heldout.bin"
@@ -84,8 +117,18 @@ else
   run jsonl-to-txt "${DIRS[@]}" --out "${TXT}"
 fi
 
-echo "[domain] tokenize → ${TOK}"
-run tokenize "${TXT}" "${VOCAB}" "${TOK}"
+N_LINES=$(grep -c . "${TXT}" || true)
+if [[ "${N_LINES}" -eq 0 ]]; then
+  echo "no training text produced from ${DIRS[*]} — these dirs need *.jsonl files" >&2
+  exit 1
+fi
+
+if [[ -n "${BASE_TOK}" ]]; then
+  echo "[domain] reusing base tokenizer ${TOK}"
+else
+  echo "[domain] tokenize → ${TOK}"
+  run tokenize "${TXT}" "${VOCAB}" "${TOK}"
+fi
 
 echo "[domain] encode → ${BIN}"
 run encode "${TXT}" "${TOK}" "${BIN}"
@@ -93,14 +136,30 @@ run encode "${TXT}" "${TOK}" "${BIN}"
 echo "[domain] split → train/heldout"
 run split "${BIN}" "${TRAIN_BIN}" "${HELD_BIN}" --train-frac 0.9
 
+if [[ -n "${BASE_CKPT}" ]]; then
+  BASE_BLOCKS=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['cfg']['n_blocks'])" "${BASE_CKPT}")
+  FREEZE_BLOCKS="${FREEZE_BLOCKS:-$(( BASE_BLOCKS / 2 ))}"
+  LR_MAX="${LR_MAX:-3e-4}"
+  MODEL_ARGS=(--init-from "${BASE_CKPT}" --freeze-blocks "${FREEZE_BLOCKS}")
+  if [[ "${FREEZE_EMBEDDINGS:-0}" == "1" ]]; then
+    MODEL_ARGS+=(--freeze-embeddings)
+  fi
+else
+  LR_MAX="${LR_MAX:-1e-3}"
+  MODEL_ARGS=(--no-param-match --d-model "${D_MODEL}" --d-ff "${D_FF}"
+    --n-blocks "${N_BLOCKS}" --n-heads "${N_HEADS}" --tie-embeddings --init-seed 1000)
+fi
+
 echo "[domain] train vanilla → ${CKPT}"
 run train "${TOK}" "${TRAIN_BIN}" "${HELD_BIN}" \
   --checkpoint-out "${CKPT}" \
   "${TRAIN_EXTRA[@]}" \
   --steps "${STEPS}" \
-  --d-model 16 --d-ff 64 --n-blocks 4 --n-heads 4 \
-  --tie-embeddings \
-  --init-seed 1000 \
+  "${MODEL_ARGS[@]}" \
+  --grad-accum "${GRAD_ACCUM}" \
+  --lr-max "${LR_MAX}" \
+  --val-every 200 --patience "${PATIENCE}" \
+  --subject "${DOMAIN}${SUFFIX}" \
   --sample-every 500
 
 echo "[domain] held-out eval"

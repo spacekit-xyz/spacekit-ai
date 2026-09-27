@@ -12,15 +12,22 @@ use flate2::{write::GzEncoder, Compression};
 
 use growformer_llm::bpe::BpeTokenizer;
 use growformer_llm::cross_entropy;
+use growformer_llm::label_classifier::{
+    coarse_sentiment, reply_label_head, LabelClassifier, LabelTrainConfig,
+};
+use growformer_llm::model_card::{Arch, ModelCard, SpecialistManifest, CARD_EXT};
 use growformer_llm::param_budget::{log_param_match, matched_vanilla_d_model};
 use growformer_llm::tinystories::{
     chunk_to_example, encode_corpus, load_tinystories_txt, PackedDataset,
 };
 use growformer_llm::v2::data::{special, TrainExample, N_SPECIAL};
-use growformer_llm::v2::sample::{sample_next, softmax as logits_softmax, SampleConfig, SimpleRng};
-use growformer_llm::v2::vanilla_checkpoint::{load_vanilla_state, save_vanilla_state};
+use growformer_llm::v2::sample::{sample_next, SampleConfig, SimpleRng};
+use growformer_llm::v2::vanilla_checkpoint::{
+    load_vanilla_state, load_vanilla_state_for_resume, save_vanilla_optim, save_vanilla_state,
+};
 use growformer_llm::v2::vanilla_train::{
-    corpus_semantic_init_vanilla, eval_vanilla_lm_loss, train_step_vanilla_accum, VanillaModelState,
+    corpus_semantic_init_vanilla, eval_vanilla_set, train_step_vanilla_accum, EarlyStopper,
+    VanillaModelState,
 };
 use growformer_llm::vanilla_llm::vanilla_forward_logits;
 use growformer_llm::TrainConfigV2;
@@ -143,8 +150,17 @@ enum Commands {
         #[arg(long, value_name = "PATH")]
         project: Option<PathBuf>,
         #[cfg(feature = "brain-memory")]
-        #[arg(long, default_value_t = true)]
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         hybrid: bool,
+        /// Supervised label model (`gf-llm label-train`). When set, it picks the label and
+        /// the brain retrieves the explanation from that label's sub-lattice.
+        #[cfg(feature = "brain-memory")]
+        #[arg(long, value_name = "PATH")]
+        label_model: Option<PathBuf>,
+        /// Minimum classifier probability to override the brain's own route (0 = always).
+        #[cfg(feature = "brain-memory")]
+        #[arg(long, default_value_t = 0.0)]
+        label_min_conf: f32,
         /// Single-shot user message (no REPL). Useful for scripts.
         #[arg(long)]
         message: Option<String>,
@@ -226,6 +242,114 @@ enum Commands {
         /// Sample whole BOS→EOS documents (chat turns), PAD-pad to seq_len. Prefer for chat corpora.
         #[arg(long, default_value_t = false)]
         turn_aligned: bool,
+        /// Vanilla: use --d-model exactly instead of param-matching it to a Clifford
+        /// reference of that size (the Bet B comparison default). Recommended for product runs.
+        #[arg(long, default_value_t = false)]
+        no_param_match: bool,
+        /// Vanilla: AdamW decoupled weight decay on attention/FFN/head matrices
+        /// (never on LayerNorm, biases, embeddings).
+        #[arg(long, default_value_t = 0.1)]
+        weight_decay: f32,
+        /// Vanilla: Adam β₂ (0.95 is steadier than 0.999 at batch size 1–8).
+        #[arg(long, default_value_t = 0.95)]
+        beta2: f32,
+        /// Vanilla: global grad-norm clip across all trainable tensors (0 = off).
+        #[arg(long, default_value_t = 1.0)]
+        grad_clip: f32,
+        /// Vanilla: LR floor for warmup start and cosine end.
+        #[arg(long, default_value_t = 1e-5)]
+        lr_min: f32,
+        /// Vanilla: token-embedding multiplier before positions (0 = auto sqrt(d_model)).
+        #[arg(long, default_value_t = 0.0)]
+        embed_scale: f32,
+        /// Vanilla: evaluate the fixed validation set every N steps (0 = off).
+        #[arg(long, default_value_t = 200)]
+        val_every: u64,
+        /// Vanilla: stop after N consecutive validations without improvement (0 = never).
+        #[arg(long, default_value_t = 0)]
+        patience: usize,
+        /// Vanilla: write the final weights to --checkpoint-out instead of the best-validation
+        /// weights (by default the best goes to --checkpoint-out and the final to *.last.json).
+        #[arg(long, default_value_t = false)]
+        no_keep_best: bool,
+        /// Vanilla: continue an interrupted run exactly (weights + Adam moments + step).
+        /// Needs the `*.optim.json` sidecar written next to the checkpoint. --steps is the
+        /// total schedule length, not additional steps.
+        #[arg(long)]
+        resume: Option<PathBuf>,
+        /// Specialist card subject (defaults to the checkpoint file stem).
+        #[arg(long)]
+        subject: Option<String>,
+        /// Comma-separated router keywords for the specialist card.
+        #[arg(long)]
+        keywords: Option<String>,
+    },
+    /// Train the supervised label classifier (TF-IDF + logistic regression) on JSONL
+    /// `semantic_intent` labels. Same file-selection rules as `jsonl-to-txt`.
+    LabelTrain {
+        /// Dirs with training `*.jsonl` (e.g. `<project>/data`).
+        dirs: Vec<PathBuf>,
+        #[arg(long, short)]
+        out: PathBuf,
+        /// Inverse L2 strength (larger = weaker regularisation).
+        #[arg(long, default_value_t = 10.0)]
+        c: f32,
+        #[arg(long, default_value_t = 400)]
+        epochs: usize,
+        /// Also report accuracy on a stratified held-out slice of this size (0 = off;
+        /// the saved model is then trained on the remaining rows only).
+        #[arg(long, default_value_t = 0.0)]
+        holdout_frac: f64,
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+    },
+    /// Predict labels for a prompt with a trained label model.
+    LabelPredict {
+        #[arg(long)]
+        model: PathBuf,
+        #[arg(long)]
+        prompt: String,
+        #[arg(long, default_value_t = 3)]
+        top: usize,
+    },
+    /// Stratified train/test split of labelled JSONL rows (per `semantic_intent`).
+    JsonlSplit {
+        dirs: Vec<PathBuf>,
+        #[arg(long)]
+        train_out: PathBuf,
+        #[arg(long)]
+        test_out: PathBuf,
+        #[arg(long, default_value_t = 0.2)]
+        test_frac: f64,
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+    },
+    /// Score a brain (and optionally a label model) on held-out JSONL rows.
+    /// Loads the brain once; reports label accuracy, coarse sentiment accuracy and hedge rate.
+    #[cfg(feature = "brain-memory")]
+    BrainEval {
+        #[arg(long)]
+        brain: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        project: Option<PathBuf>,
+        /// Held-out rows (`gf-llm jsonl-split --test-out`).
+        #[arg(long)]
+        test: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        label_model: Option<PathBuf>,
+        #[arg(long, default_value_t = 0.0)]
+        label_min_conf: f32,
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        hybrid: bool,
+        /// Evaluate at most N rows (0 = all).
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+        /// Write per-row results + summary JSON here.
+        #[arg(long)]
+        json_out: Option<PathBuf>,
+        /// Print every row.
+        #[arg(long, short = 'v', default_value_t = false)]
+        verbose: bool,
     },
     /// Split a packed bin into train + held-out shards (chronological 90/10 default).
     Split {
@@ -374,8 +498,13 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         brain_only: bool,
         /// Prefer raw lattice top-1 when scenario-topic rubric passes (HYBRID_DOMAIN_BRAIN).
-        #[arg(long, default_value_t = true)]
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         hybrid: bool,
+        /// Supervised label model (`gf-llm label-train`): picks the label, brain explains.
+        #[arg(long, value_name = "PATH")]
+        label_model: Option<PathBuf>,
+        #[arg(long, default_value_t = 0.0)]
+        label_min_conf: f32,
         /// Run scored SpaceKit battery (cases 2–3).
         #[arg(long, default_value_t = false)]
         battery: bool,
@@ -481,6 +610,66 @@ fn peek_checkpoint_cfg(path: &Path) -> Result<TrainConfigV2, String> {
     }
     let p: Peek = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
     Ok(p.cfg)
+}
+
+/// Write `<checkpoint>.gfcard.json` for a vanilla checkpoint (arch, caps,
+/// tokenizer sidecar, eval bits/byte when known).
+#[allow(clippy::too_many_arguments)]
+fn write_vanilla_card(
+    checkpoint: &Path,
+    tok: &Path,
+    cfg: &TrainConfigV2,
+    steps: u64,
+    eval_bpb: Option<f32>,
+    subject: Option<String>,
+    keywords: Option<String>,
+    base: Option<&Path>,
+) -> Result<(), String> {
+    let subject = subject.unwrap_or_else(|| {
+        checkpoint
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("specialist")
+            .to_string()
+    });
+    let mut card = ModelCard::new(subject);
+    card.train_steps = steps;
+    card.eval_bits_per_byte = eval_bpb;
+    card.base_model = base.map(|b| b.display().to_string());
+    if let Some(kw) = keywords {
+        card.keywords = kw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    if eval_bpb.is_some() {
+        card.notes = "eval_bits_per_byte: fixed held-out chunks during training (quick); \
+                      run `gf-llm eval` for the full held-out number"
+            .into();
+    }
+    let weights = checkpoint
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("weights.json")
+        .to_string();
+    let mut manifest = SpecialistManifest::for_checkpoint(Arch::Vanilla, cfg, card, weights);
+    let card_path = checkpoint.with_extension(CARD_EXT);
+    let card_dir = card_path.parent().unwrap_or(Path::new("."));
+    manifest.tokenizer_path = Some(relative_or_absolute(tok, card_dir));
+    manifest.save(&card_path)?;
+    eprintln!("[train] wrote specialist card {}", card_path.display());
+    Ok(())
+}
+
+/// `path` relative to `dir` when it lives underneath it, else absolute.
+fn relative_or_absolute(path: &Path, dir: &Path) -> String {
+    let abs = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (p, d) = (abs(path), abs(dir));
+    match p.strip_prefix(&d) {
+        Ok(rel) => rel.display().to_string(),
+        Err(_) => p.display().to_string(),
+    }
 }
 
 fn sample_prompt_vanilla(
@@ -665,6 +854,18 @@ fn main() -> Result<(), String> {
             clifford,
             vanilla: _vanilla_alias,
             turn_aligned,
+            no_param_match,
+            weight_decay,
+            beta2,
+            grad_clip,
+            lr_min,
+            embed_scale,
+            val_every,
+            patience,
+            no_keep_best,
+            resume,
+            subject,
+            keywords,
         } => {
             let use_vanilla = !clifford;
             let sample_chunk = |ds: &PackedDataset, seq_len: usize, rng: &mut SimpleRng| {
@@ -678,7 +879,7 @@ fn main() -> Result<(), String> {
             // (≈37% lower val perplexity at equal steps). Opt out with
             // --no-semantic-init, or pick the random structured init explicitly.
             let do_semantic = semantic_init || (!structured_init && !no_semantic_init);
-            if d_model % n_heads != 0 {
+            if !use_vanilla && d_model % n_heads != 0 {
                 return Err(format!(
                     "d_model ({d_model}) must be divisible by n_heads ({n_heads})"
                 ));
@@ -704,84 +905,232 @@ fn main() -> Result<(), String> {
             }
 
             if use_vanilla {
-                if init_from.is_some() {
-                    return Err(
-                        "--init-from is not supported with vanilla train (train fresh)".into(),
-                    );
-                }
                 if dense_ffn || dot_attention || head_only {
                     return Err(
                         "vanilla train does not use --dense-ffn, --dot-attention, or --head-only"
                             .into(),
                     );
                 }
-                let clifford_ref = d_model;
-                let matched_d = matched_vanilla_d_model(
-                    vs,
-                    clifford_ref,
-                    d_ff,
-                    n_blocks,
-                    n_heads,
-                    tie_embeddings,
-                    500,
-                );
-                log_param_match(vs, clifford_ref, matched_d, d_ff, n_blocks, tie_embeddings);
-
-                let mut cfg = TrainConfigV2::small(vs);
-                cfg.max_seq = seq_len;
-                cfg.batch_size = 1;
-                cfg.epochs = 1;
-                cfg.d_model = matched_d;
-                cfg.n_heads = n_heads;
-                cfg.d_ff = d_ff;
-                cfg.n_blocks = n_blocks;
-                cfg.lr_max = lr_max;
-                cfg.lr_min = 1e-5;
-                cfg.warmup_steps = (steps / 20).max(50);
-                cfg.total_steps = steps;
-                cfg.log_every = 10;
-                cfg.val_every = usize::MAX;
-                cfg.train_embeddings = true;
-                cfg.freeze_embeddings = freeze_embeddings;
-                cfg.freeze_blocks = freeze_blocks;
-                cfg.tie_embeddings = tie_embeddings;
-                cfg.structured_init = structured_init && !do_semantic;
-                cfg.grad_accum = grad_accum;
-                cfg.vanilla = true;
-                cfg.clifford_ref_d_model = clifford_ref;
-                if let Some(s) = init_seed {
-                    cfg.init_seed = s;
+                if init_from.is_some() && resume.is_some() {
+                    return Err("use either --init-from (fine-tune) or --resume, not both".into());
                 }
+                let warmup = (steps / 20).max(50).min(steps.saturating_sub(1).max(1));
+                // Training knobs applied to fresh, fine-tuned and resumed runs alike.
+                let apply_knobs = |cfg: &mut TrainConfigV2| {
+                    cfg.max_seq = seq_len;
+                    cfg.batch_size = grad_accum.max(1);
+                    cfg.epochs = 1;
+                    cfg.lr_max = lr_max;
+                    cfg.lr_min = lr_min;
+                    cfg.warmup_steps = warmup;
+                    cfg.total_steps = steps;
+                    cfg.log_every = 10;
+                    cfg.val_every = if val_every == 0 {
+                        usize::MAX
+                    } else {
+                        val_every as usize
+                    };
+                    cfg.grad_clip = grad_clip;
+                    cfg.weight_decay = weight_decay;
+                    cfg.adam_beta2 = beta2;
+                    cfg.grad_accum = grad_accum;
+                    cfg.vanilla = true;
+                };
 
-                let mut state = VanillaModelState::new(cfg);
-                if do_semantic {
-                    eprintln!(
-                        "[train] row 2 vanilla: corpus-semantic embedding init (window=±{semantic_window})"
-                    );
-                    corpus_semantic_init_vanilla(
-                        &mut state.model,
-                        &train_ds.tokens,
-                        0x5EED ^ 0xE8E8,
-                        semantic_window,
-                        1.0,
-                    );
-                    if state.cfg.tie_embeddings {
-                        state.model.sync_tied_head();
+                let mut state = if let Some(ck) = &resume {
+                    let mut st = load_vanilla_state_for_resume(ck)?;
+                    if st.cfg.vocab_size != vs {
+                        return Err(format!(
+                            "resume vocab {} != tokenizer {vs}",
+                            st.cfg.vocab_size
+                        ));
                     }
+                    // Schedule/optimiser knobs must match the original run to resume exactly;
+                    // only the total length may be extended.
+                    st.cfg.total_steps = steps.max(st.step);
+                    st.cfg.val_every = if val_every == 0 {
+                        usize::MAX
+                    } else {
+                        val_every as usize
+                    };
+                    st.update_lr();
+                    eprintln!(
+                        "[train] resuming {} at step {} / {} (lr={:.2e})",
+                        ck.display(),
+                        st.step,
+                        st.cfg.total_steps,
+                        st.current_lr()
+                    );
+                    st
+                } else if let Some(base) = &init_from {
+                    let mut st = load_vanilla_state(base).map_err(|e| format!("init-from: {e}"))?;
+                    if st.cfg.vocab_size != vs {
+                        return Err(format!(
+                            "base vocab {} != tokenizer {vs} — fine-tune with the base's .tok \
+                             (re-encode the domain corpus with it)",
+                            st.cfg.vocab_size
+                        ));
+                    }
+                    if freeze_blocks > st.cfg.n_blocks {
+                        return Err(format!(
+                            "freeze_blocks ({freeze_blocks}) > n_blocks ({})",
+                            st.cfg.n_blocks
+                        ));
+                    }
+                    apply_knobs(&mut st.cfg);
+                    st.cfg.freeze_blocks = freeze_blocks;
+                    st.cfg.freeze_embeddings = freeze_embeddings;
+                    st.cfg.train_embeddings = true;
+                    st.step = 0; // restart the LR schedule for fine-tuning
+                    st.reset_optimisers();
+                    eprintln!(
+                        "[train] fine-tuning base {} (d_model={} n_heads={} d_ff={} n_blocks={}) \
+                         freeze: embeddings={} blocks=[0..{})",
+                        base.display(),
+                        st.cfg.d_model,
+                        st.cfg.n_heads,
+                        st.cfg.d_ff,
+                        st.cfg.n_blocks,
+                        freeze_embeddings,
+                        freeze_blocks
+                    );
+                    st
+                } else {
+                    let d_model_used = if no_param_match {
+                        d_model
+                    } else {
+                        let clifford_ref = d_model;
+                        let matched_d = matched_vanilla_d_model(
+                            vs,
+                            clifford_ref,
+                            d_ff,
+                            n_blocks,
+                            n_heads,
+                            tie_embeddings,
+                            500,
+                        );
+                        log_param_match(
+                            vs,
+                            clifford_ref,
+                            matched_d,
+                            d_ff,
+                            n_blocks,
+                            tie_embeddings,
+                        );
+                        eprintln!(
+                            "[train] note: --d-model {d_model} is a Clifford reference; vanilla d_model \
+                             set to {matched_d} to match its params. Pass --no-param-match to use \
+                             --d-model as-is."
+                        );
+                        matched_d
+                    };
+                    if d_model_used % n_heads != 0 {
+                        return Err(format!(
+                            "d_model ({d_model_used}) must be divisible by n_heads ({n_heads})"
+                        ));
+                    }
+                    if d_ff < 2 * d_model_used {
+                        eprintln!(
+                            "[train] warning: d_ff={d_ff} < 2·d_model={}; the FFN is a bottleneck \
+                             (typical d_ff ≈ 4·d_model)",
+                            2 * d_model_used
+                        );
+                    }
+                    let mut cfg = TrainConfigV2::small(vs);
+                    apply_knobs(&mut cfg);
+                    cfg.d_model = d_model_used;
+                    cfg.n_heads = n_heads;
+                    cfg.d_ff = d_ff;
+                    cfg.n_blocks = n_blocks;
+                    cfg.train_embeddings = true;
+                    cfg.freeze_embeddings = freeze_embeddings;
+                    cfg.freeze_blocks = freeze_blocks.min(n_blocks);
+                    cfg.tie_embeddings = tie_embeddings;
+                    cfg.structured_init = structured_init && !do_semantic;
+                    cfg.clifford_ref_d_model = if no_param_match { 0 } else { d_model };
+                    cfg.embed_scale = embed_scale;
+                    if let Some(s) = init_seed {
+                        cfg.init_seed = s;
+                    }
+                    let mut st = VanillaModelState::new(cfg);
+                    if do_semantic {
+                        eprintln!(
+                            "[train] row 2 vanilla: corpus-semantic embedding init (window=±{semantic_window})"
+                        );
+                        corpus_semantic_init_vanilla(
+                            &mut st.model,
+                            &train_ds.tokens,
+                            0x5EED ^ 0xE8E8,
+                            semantic_window,
+                            1.0,
+                        );
+                        if st.cfg.tie_embeddings {
+                            st.model.sync_tied_head();
+                        }
+                    }
+                    st
+                };
+                if (freeze_blocks > 0 || freeze_embeddings)
+                    && init_from.is_none()
+                    && resume.is_none()
+                {
+                    eprintln!("[train] note: freezing requested without --init-from; freezing fresh random weights");
                 }
-                state.update_lr();
 
                 let log_every_u64 = state.cfg.log_every as u64;
-                let mut rng = SimpleRng::new(0xC0FFEE);
+                // Training stream RNG. On resume, offset by the step so the run doesn't
+                // replay the chunks it already saw.
+                let mut rng = SimpleRng::new(0xC0FFEE ^ state.step.wrapping_mul(0x9E37_79B9));
                 eprintln!(
-                    "[train] row 2 vanilla: d_model={matched_d} (matched from clifford_ref={clifford_ref}) \
-                     vocab={vs} train_tokens={} val_tokens={} seq_len={seq_len} steps={steps} turn_aligned={turn_aligned}",
+                    "[train] row 2 vanilla: d_model={} n_heads={} d_ff={} n_blocks={} embed_scale={:.3} \
+                     vocab={vs} train_tokens={} val_tokens={} seq_len={seq_len} steps={} batch={} \
+                     wd={} beta2={} clip={} turn_aligned={turn_aligned}",
+                    state.cfg.d_model,
+                    state.cfg.n_heads,
+                    state.cfg.d_ff,
+                    state.cfg.n_blocks,
+                    state.model.embed_scale,
                     train_ds.n_tokens(),
-                    val_ds.n_tokens()
+                    val_ds.n_tokens(),
+                    state.cfg.total_steps,
+                    grad_accum.max(1),
+                    state.cfg.weight_decay,
+                    state.cfg.adam_beta2,
+                    state.cfg.grad_clip,
                 );
-                if grad_accum > 1 {
-                    eprintln!("[train] gradient accumulation: {grad_accum} microbatches/step");
-                }
+
+                // Fixed validation set, drawn once from its own RNG: every eval sees the
+                // same chunks (comparable numbers) and evaluating never perturbs the
+                // training sample stream.
+                let val_set: Vec<TrainExample> = if val_chunks > 0 && val_every > 0 {
+                    let mut vrng = SimpleRng::new(0x7A1_5EED);
+                    (0..val_chunks)
+                        .map(|_| chunk_to_example(sample_chunk(&val_ds, seq_len, &mut vrng)))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let keep_best = !no_keep_best && !val_set.is_empty();
+                let last_path = checkpoint_out.with_extension("last.json");
+                let mut stopper = EarlyStopper::new(patience, 1e-4);
+                let mut best_val_bpb: Option<f32> = None;
+                let val_bytes: usize = val_set
+                    .iter()
+                    .map(|ex| {
+                        let ids = &ex.full_ids;
+                        (0..ids.len().saturating_sub(1))
+                            .filter(|&t| ex.loss_mask()[t])
+                            .map(|t| {
+                                let id = ids[t + 1];
+                                if id >= N_SPECIAL && id < vs {
+                                    bpe.vocab[id].len()
+                                } else {
+                                    0
+                                }
+                            })
+                            .sum::<usize>()
+                    })
+                    .sum();
 
                 let sample_cfg = SampleConfig {
                     temperature: 0.85,
@@ -793,41 +1142,98 @@ fn main() -> Result<(), String> {
                     ..Default::default()
                 };
 
-                for step in 1u64..=steps {
-                    let loss = if grad_accum > 1 {
-                        let exs: Vec<TrainExample> = (0..grad_accum)
-                            .map(|_| chunk_to_example(sample_chunk(&train_ds, seq_len, &mut rng)))
-                            .collect();
-                        train_step_vanilla_accum(&mut state, &exs)
-                    } else {
-                        let ex = chunk_to_example(sample_chunk(&train_ds, seq_len, &mut rng));
-                        train_step_vanilla_accum(&mut state, &[ex])
-                    };
+                let start_step = state.step + 1;
+                let mut stopped_early = false;
+                for step in start_step..=state.cfg.total_steps {
+                    let exs: Vec<TrainExample> = (0..grad_accum.max(1))
+                        .map(|_| chunk_to_example(sample_chunk(&train_ds, seq_len, &mut rng)))
+                        .collect();
+                    let loss = train_step_vanilla_accum(&mut state, &exs);
 
-                    if step % log_every_u64 == 0 || step == 1 {
+                    if step % log_every_u64 == 0 || step == start_step {
                         let ppl = (loss.exp()).min(1e6);
-                        eprintln!("[train] step={step} loss={loss:.4} ppl~={ppl:.1}");
+                        eprintln!(
+                            "[train] step={step} loss={loss:.4} ppl~={ppl:.1} lr={:.2e} gnorm={:.3}",
+                            state.current_lr(),
+                            state.last_grad_norm
+                        );
                     }
                     if sample_every > 0 && step % sample_every == 0 {
                         sample_prompt_vanilla(&state, &bpe, &sample_cfg, step.wrapping_mul(991));
                     }
-                    if step % 200 == 0 && val_chunks > 0 {
-                        let mut vloss = 0.0f32;
-                        for _ in 0..val_chunks {
-                            let chunk = sample_chunk(&val_ds, seq_len, &mut rng);
-                            let ex = chunk_to_example(chunk);
-                            vloss += eval_vanilla_lm_loss(&state, &ex);
-                        }
-                        vloss /= val_chunks as f32;
+                    let is_last = step == state.cfg.total_steps;
+                    if !val_set.is_empty() && (step % val_every == 0 || is_last) {
+                        let (vloss, vsum, _) = eval_vanilla_set(&state, &val_set);
+                        let improved = stopper.observe(step, vloss);
+                        let bpb = if val_bytes > 0 {
+                            Some((vsum / std::f64::consts::LN_2 / val_bytes as f64) as f32)
+                        } else {
+                            None
+                        };
                         eprintln!(
-                            "[val] step={step} mean_nll={vloss:.4} ppl~={}",
-                            (vloss.exp()).min(1e6)
+                            "[val] step={step} mean_nll={vloss:.4} ppl~={:.1}{}{}",
+                            (vloss.exp()).min(1e6),
+                            bpb.map(|b| format!(" bpb≈{b:.4}")).unwrap_or_default(),
+                            if improved { "  (best)" } else { "" }
                         );
+                        if improved && keep_best {
+                            best_val_bpb = bpb;
+                            save_vanilla_state(&checkpoint_out, &state)?;
+                        }
+                        if stopper.should_stop() {
+                            eprintln!(
+                                "[train] early stop at step {step}: no val improvement for {} evals \
+                                 (best {:.4} @ step {})",
+                                stopper.patience, stopper.best, stopper.best_step
+                            );
+                            stopped_early = true;
+                            break;
+                        }
                     }
                 }
 
-                save_vanilla_state(&checkpoint_out, &state)?;
-                eprintln!("[train] wrote {}", checkpoint_out.display());
+                // Final state (+ optimiser moments for --resume).
+                let final_path = if keep_best {
+                    &last_path
+                } else {
+                    &checkpoint_out
+                };
+                save_vanilla_state(final_path, &state)?;
+                save_vanilla_optim(final_path, &state)?;
+                if keep_best {
+                    eprintln!(
+                        "[train] best val {:.4} @ step {} → {}  |  final step {} → {}{}",
+                        stopper.best,
+                        stopper.best_step,
+                        checkpoint_out.display(),
+                        state.step,
+                        last_path.display(),
+                        if stopped_early {
+                            " (stopped early)"
+                        } else {
+                            ""
+                        }
+                    );
+                } else {
+                    eprintln!("[train] wrote {}", checkpoint_out.display());
+                }
+
+                // Specialist card (Arch::Vanilla) so fleets/runtimes can discover it.
+                let card_steps = if keep_best {
+                    stopper.best_step
+                } else {
+                    state.step
+                };
+                write_vanilla_card(
+                    &checkpoint_out,
+                    &tok,
+                    &state.cfg,
+                    card_steps,
+                    best_val_bpb,
+                    subject.clone(),
+                    keywords.clone(),
+                    init_from.as_deref(),
+                )?;
                 return Ok(());
             }
 
@@ -1042,6 +1448,143 @@ fn main() -> Result<(), String> {
                 eprintln!("[train] wrote {}", checkpoint_out.display());
             } // #[cfg(feature = "clifford-lm")]
         }
+        Commands::LabelTrain {
+            dirs,
+            out,
+            c,
+            epochs,
+            holdout_frac,
+            seed,
+        } => {
+            let lines = growformer_llm::domain_data::load_labeled_lines(&dirs)?;
+            let to_rows = |ls: &[String]| -> Result<Vec<(String, String)>, String> {
+                ls.iter()
+                    .map(|l| {
+                        let v: serde_json::Value =
+                            serde_json::from_str(l).map_err(|e| e.to_string())?;
+                        let text = v
+                            .get("text")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let label = v
+                            .get("semantic_intent")
+                            .and_then(|x| x.as_str())
+                            .or_else(|| {
+                                v.get("causal")
+                                    .and_then(|c| c.get("causal_type"))
+                                    .and_then(|x| x.as_str())
+                            })
+                            .unwrap_or("")
+                            .to_string();
+                        Ok((text, label))
+                    })
+                    .collect()
+            };
+            let (train_lines, test_lines) = if holdout_frac > 0.0 {
+                growformer_llm::domain_data::stratified_split(&lines, holdout_frac, seed)
+            } else {
+                (lines.iter().map(|(l, _)| l.clone()).collect(), Vec::new())
+            };
+            let train_rows = to_rows(&train_lines)?;
+            let cfg = LabelTrainConfig {
+                c,
+                epochs,
+                ..Default::default()
+            };
+            let t0 = std::time::Instant::now();
+            let model = LabelClassifier::train(&train_rows, &cfg)?;
+            eprintln!(
+                "[label-train] {} rows, {} labels, trained in {:.1}s",
+                train_rows.len(),
+                model.labels.len(),
+                t0.elapsed().as_secs_f32()
+            );
+            if !test_lines.is_empty() {
+                let test_rows = to_rows(&test_lines)?;
+                let (mut fine, mut coarse, mut n_coarse) = (0usize, 0usize, 0usize);
+                for (t, l) in &test_rows {
+                    let p = model.predict_top(t);
+                    fine += (p.label == *l) as usize;
+                    if let Some(g) = coarse_sentiment(l) {
+                        n_coarse += 1;
+                        coarse += (coarse_sentiment(&p.label) == Some(g)) as usize;
+                    }
+                }
+                eprintln!(
+                    "[label-train] held-out {}: label acc {:.3}{}",
+                    test_rows.len(),
+                    fine as f32 / test_rows.len() as f32,
+                    if n_coarse > 0 {
+                        format!(
+                            "  coarse sentiment acc {:.3}",
+                            coarse as f32 / n_coarse as f32
+                        )
+                    } else {
+                        String::new()
+                    }
+                );
+            }
+            model.save(&out)?;
+            eprintln!("[label-train] wrote {}", out.display());
+        }
+        Commands::LabelPredict { model, prompt, top } => {
+            let m = LabelClassifier::load(&model)?;
+            for s in m.predict(&prompt).into_iter().take(top.max(1)) {
+                println!("{:.3}  {}", s.prob, s.label);
+            }
+        }
+        Commands::JsonlSplit {
+            dirs,
+            train_out,
+            test_out,
+            test_frac,
+            seed,
+        } => {
+            let lines = growformer_llm::domain_data::load_labeled_lines(&dirs)?;
+            let (train, test) =
+                growformer_llm::domain_data::stratified_split(&lines, test_frac, seed);
+            for (path, rows) in [(&train_out, &train), (&test_out, &test)] {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                let mut body = rows.join("\n");
+                body.push('\n');
+                std::fs::write(path, body).map_err(|e| format!("write {}: {e}", path.display()))?;
+            }
+            eprintln!(
+                "[jsonl-split] {} rows → train {} ({}) / test {} ({})",
+                lines.len(),
+                train.len(),
+                train_out.display(),
+                test.len(),
+                test_out.display()
+            );
+        }
+        #[cfg(feature = "brain-memory")]
+        Commands::BrainEval {
+            brain,
+            project,
+            test,
+            label_model,
+            label_min_conf,
+            hybrid,
+            limit,
+            json_out,
+            verbose,
+        } => {
+            run_brain_eval(
+                &brain,
+                project.as_deref(),
+                &test,
+                label_model.as_deref(),
+                label_min_conf,
+                hybrid,
+                limit,
+                json_out.as_deref(),
+                verbose,
+            )?;
+        }
         Commands::Split {
             src,
             train_out,
@@ -1170,9 +1713,11 @@ fn main() -> Result<(), String> {
                         if target < N_SPECIAL {
                             continue;
                         }
-                        let probs = logits_softmax(&logits[p]);
-                        let pr = (probs[target] as f64).max(1e-12);
-                        let bit = -pr.log2();
+                        // Log-space CE: exact even when p(target) underflows f32
+                        // (the old 1e-12 floor capped a miss at ~40 bits and
+                        // made bits/byte look better than it was).
+                        let (nats, _) = cross_entropy(&logits[p], target);
+                        let bit = nats as f64 / std::f64::consts::LN_2;
                         model_bits += bit;
                         window_bits += bit;
                         window_pred += 1;
@@ -1233,6 +1778,27 @@ fn main() -> Result<(), String> {
                 println!("byte baselines (same bytes; not token-aligned):");
                 println!("  gzip -9       : {gz_bpb:.4} bits/byte");
                 println!("  lzma -9       : {lz_bpb:.4} bits/byte");
+
+                // Record the held-out number on the specialist card, if one exists.
+                let card_path = checkpoint.with_extension(CARD_EXT);
+                if train_bin.is_some() && card_path.exists() {
+                    match SpecialistManifest::load(&card_path) {
+                        Ok(mut m) => {
+                            m.card.eval_bits_per_byte = Some(model_bpb as f32);
+                            m.card.notes = format!(
+                                "eval_bits_per_byte: gf-llm eval, {} windows × {} tokens",
+                                per_window_bpt.len(),
+                                seq_len
+                            );
+                            m.save(&card_path)?;
+                            eprintln!(
+                                "[eval] updated {} eval_bits_per_byte={model_bpb:.4}",
+                                card_path.display()
+                            );
+                        }
+                        Err(e) => eprintln!("[eval] note: card not updated ({e})"),
+                    }
+                }
 
                 if !no_ledger && train_bin.is_some() && !per_window_bpt.is_empty() {
                     let split_hash = ledger::compute_split_hash(
@@ -1328,9 +1894,11 @@ fn main() -> Result<(), String> {
                         if target < N_SPECIAL {
                             continue;
                         }
-                        let probs = logits_softmax(&logits[p]);
-                        let pr = (probs[target] as f64).max(1e-12);
-                        let bit = -pr.log2();
+                        // Log-space CE: exact even when p(target) underflows f32
+                        // (the old 1e-12 floor capped a miss at ~40 bits and
+                        // made bits/byte look better than it was).
+                        let (nats, _) = cross_entropy(&logits[p], target);
+                        let bit = nats as f64 / std::f64::consts::LN_2;
                         model_bits += bit;
                         window_bits += bit;
                         window_pred += 1;
@@ -1724,6 +2292,10 @@ fn main() -> Result<(), String> {
             project,
             #[cfg(feature = "brain-memory")]
             hybrid,
+            #[cfg(feature = "brain-memory")]
+            label_model,
+            #[cfg(feature = "brain-memory")]
+            label_min_conf,
             message,
         } => {
             run_chat_repl(ChatReplArgs {
@@ -1743,6 +2315,10 @@ fn main() -> Result<(), String> {
                 project: project.as_deref(),
                 #[cfg(feature = "brain-memory")]
                 hybrid,
+                #[cfg(feature = "brain-memory")]
+                label_model: label_model.as_deref(),
+                #[cfg(feature = "brain-memory")]
+                label_min_conf,
                 message: message.as_deref(),
             })?;
         }
@@ -1764,10 +2340,16 @@ fn main() -> Result<(), String> {
             repetition_penalty,
             brain_only,
             hybrid,
+            label_model,
+            label_min_conf,
             battery,
             heldout,
             battery_brains,
         } => {
+            let labeler = match &label_model {
+                Some(p) => Some(LabelClassifier::load(p)?),
+                None => None,
+            };
             if battery && heldout {
                 return Err("use --battery or --heldout, not both".into());
             }
@@ -1786,6 +2368,8 @@ fn main() -> Result<(), String> {
                         case.prompt,
                         &infer_cfg,
                         hybrid,
+                        labeler.as_ref(),
+                        label_min_conf,
                         brain_only,
                         checkpoint.as_deref(),
                         tokenizer.as_deref(),
@@ -1812,6 +2396,8 @@ fn main() -> Result<(), String> {
                         &case.prompt,
                         &infer_cfg,
                         hybrid,
+                        labeler.as_ref(),
+                        label_min_conf,
                         brain_only,
                         checkpoint.as_deref(),
                         tokenizer.as_deref(),
@@ -1841,6 +2427,8 @@ fn main() -> Result<(), String> {
                     &prompt,
                     &infer_cfg,
                     hybrid,
+                    labeler.as_ref(),
+                    label_min_conf,
                     brain_only,
                     checkpoint.as_deref(),
                     tokenizer.as_deref(),
@@ -1931,6 +2519,10 @@ struct ChatReplArgs<'a> {
     project: Option<&'a Path>,
     #[cfg(feature = "brain-memory")]
     hybrid: bool,
+    #[cfg(feature = "brain-memory")]
+    label_model: Option<&'a Path>,
+    #[cfg(feature = "brain-memory")]
+    label_min_conf: f32,
     message: Option<&'a str>,
 }
 
@@ -1996,6 +2588,19 @@ fn run_chat_repl(args: ChatReplArgs<'_>) -> Result<(), String> {
         Some(BrainMemoryRuntime::from_path_with_config(path, &infer_cfg)?)
     } else {
         None
+    };
+    #[cfg(feature = "brain-memory")]
+    let labeler = match args.label_model {
+        Some(p) => {
+            let m = LabelClassifier::load(p)?;
+            eprintln!(
+                "[chat] label model: {} ({} labels)",
+                p.display(),
+                m.labels.len()
+            );
+            Some(m)
+        }
+        None => None,
     };
 
     let sample_cfg = if args.greedy {
@@ -2064,17 +2669,33 @@ fn run_chat_repl(args: ChatReplArgs<'_>) -> Result<(), String> {
         let mut memory_text: Option<String> = None;
         #[cfg(feature = "brain-memory")]
         if let Some(rt) = brain_rt.as_mut() {
-            let (q, source) = if args.hybrid {
-                rt.query_hybrid(&user_line)?
+            let res = if let Some(lab) = labeler.as_ref() {
+                rt.query_labeled(&user_line, lab, args.label_min_conf)
+                    .map(|(q, src, top)| {
+                        eprintln!("[chat] label={} p={:.2}", top.label, top.prob);
+                        (q, src)
+                    })
+            } else if args.hybrid {
+                rt.query_hybrid(&user_line)
             } else {
-                (rt.query(&user_line)?, MemorySource::FullGeneration)
+                rt.query(&user_line)
+                    .map(|q| (q, MemorySource::FullGeneration))
             };
-            eprintln!(
-                "[chat] brain memory_source={} chars={}",
-                source.as_str(),
-                q.memory_text.len()
-            );
-            memory_text = Some(q.memory_text.trim().to_string());
+            match res {
+                Ok((q, source)) => {
+                    eprintln!(
+                        "[chat] brain memory_source={} chars={}",
+                        source.as_str(),
+                        q.memory_text.len()
+                    );
+                    memory_text = Some(q.memory_text.trim().to_string());
+                }
+                // Keep the REPL alive on a per-prompt brain failure.
+                Err(e) if !oneshot => {
+                    eprintln!("[chat] brain query failed: {e}");
+                }
+                Err(e) => return Err(e),
+            }
         }
 
         let reply = match compose.as_str() {
@@ -2111,10 +2732,18 @@ fn run_chat_repl(args: ChatReplArgs<'_>) -> Result<(), String> {
                         &mut rng,
                         ctx_budget,
                     )?;
-                    let out = if generated.trim().is_empty() {
-                        mem
-                    } else {
+                    // Only accept the rewrite if it stays faithful to the brain's
+                    // answer; a weak LM otherwise replaces a correct reply with noise.
+                    let out = if polish_is_faithful(&mem, &generated) {
                         generated
+                    } else {
+                        if !generated.trim().is_empty() {
+                            eprintln!(
+                                "[chat] polish rejected (label/content drift) — using brain memory. LM said: {:?}",
+                                generated.trim()
+                            );
+                        }
+                        mem
                     };
                     print!("Assistant> {out}\n");
                     out
@@ -2154,6 +2783,38 @@ fn run_chat_repl(args: ChatReplArgs<'_>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Faithfulness gate for `--compose polish`: the rewrite must keep the brain's
+/// label (e.g. `NEGATIVE (mild)`) and mostly reuse its words (no invented facts).
+fn polish_is_faithful(memory: &str, rewrite: &str) -> bool {
+    let out = rewrite.trim();
+    if out.chars().count() < 8 {
+        return false;
+    }
+    if let Some((label, _)) = memory.split_once(" — ") {
+        let label = label.trim();
+        if !label.is_empty()
+            && !out
+                .to_ascii_lowercase()
+                .contains(&label.to_ascii_lowercase())
+        {
+            return false;
+        }
+    }
+    let words = |t: &str| -> Vec<String> {
+        t.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() >= 3)
+            .map(|w| w.to_ascii_lowercase())
+            .collect()
+    };
+    let mem_words: std::collections::HashSet<String> = words(memory).into_iter().collect();
+    let out_words = words(out);
+    if out_words.len() < 2 {
+        return false;
+    }
+    let shared = out_words.iter().filter(|w| mem_words.contains(*w)).count();
+    shared >= 2 && shared as f32 / out_words.len() as f32 >= 0.6
 }
 
 fn generate_vanilla_reply(
@@ -2247,6 +2908,8 @@ fn run_brain_infer_case(
     prompt: &str,
     infer_cfg: &BrainInferConfig,
     hybrid: bool,
+    labeler: Option<&LabelClassifier>,
+    label_min_conf: f32,
     brain_only: bool,
     checkpoint: Option<&Path>,
     tokenizer: Option<&Path>,
@@ -2258,7 +2921,11 @@ fn run_brain_infer_case(
 ) -> Result<(), String> {
     let mut mem = BrainMemoryRuntime::from_path_with_config(brain, infer_cfg)?;
     let info = mem.brain_info();
-    let (q, source) = if hybrid {
+    let (q, source) = if let Some(lab) = labeler {
+        let (q, src, top) = mem.query_labeled(prompt, lab, label_min_conf)?;
+        println!("label: {} p={:.3}", top.label, top.prob);
+        (q, src)
+    } else if hybrid {
         mem.query_hybrid(prompt)?
     } else {
         (mem.query(prompt)?, MemorySource::FullGeneration)
@@ -2383,6 +3050,166 @@ fn run_brain_infer_case(
     Ok(())
 }
 
+/// Hedge replies the brain gives when its grounding gate declines.
+#[cfg(feature = "brain-memory")]
+fn is_hedge_reply(reply: &str) -> bool {
+    let r = reply.to_ascii_lowercase();
+    r.contains("don't have enough information")
+        || r.contains("non-obvious from surface text")
+        || r.contains("no lattice memory retrieved")
+        || r.contains("no stored explanation")
+}
+
+#[cfg(feature = "brain-memory")]
+#[allow(clippy::too_many_arguments)]
+fn run_brain_eval(
+    brain: &Path,
+    project: Option<&Path>,
+    test: &Path,
+    label_model: Option<&Path>,
+    label_min_conf: f32,
+    hybrid: bool,
+    limit: usize,
+    json_out: Option<&Path>,
+    verbose: bool,
+) -> Result<(), String> {
+    let raw = std::fs::read_to_string(test).map_err(|e| format!("read {}: {e}", test.display()))?;
+    let mut rows: Vec<(String, String)> = Vec::new();
+    for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+        let v: serde_json::Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
+        let text = v
+            .get("text")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let label = v
+            .get("semantic_intent")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        rows.push((text, label));
+    }
+    if limit > 0 && rows.len() > limit {
+        rows.truncate(limit);
+    }
+    let labeler = match label_model {
+        Some(p) => Some(LabelClassifier::load(p)?),
+        None => None,
+    };
+    let infer_cfg = BrainInferConfig {
+        project: project.map(|p| p.to_path_buf()),
+        ..BrainInferConfig::default()
+    };
+    let mut mem = BrainMemoryRuntime::from_path_with_config(brain, &infer_cfg)?;
+    let mode = if labeler.is_some() {
+        "label+brain"
+    } else if hybrid {
+        "brain (hybrid)"
+    } else {
+        "brain"
+    };
+    eprintln!("[brain-eval] {} rows, mode={mode}", rows.len());
+
+    #[derive(Default)]
+    struct Tally {
+        n: usize,
+        coarse_n: usize,
+        coarse_ok: usize,
+        label_ok: usize,
+        hedged: usize,
+        errors: usize,
+    }
+    let mut t = Tally::default();
+    let mut per_row = Vec::new();
+    let t0 = std::time::Instant::now();
+    for (text, gold) in &rows {
+        t.n += 1;
+        let res = if let Some(lab) = labeler.as_ref() {
+            mem.query_labeled(text, lab, label_min_conf)
+                .map(|(q, src, top)| (q, src, Some(top)))
+        } else if hybrid {
+            mem.query_hybrid(text).map(|(q, s)| (q, s, None))
+        } else {
+            mem.query(text)
+                .map(|q| (q, MemorySource::FullGeneration, None))
+        };
+        let (reply, source, predicted) = match res {
+            Ok((q, src, top)) => (q.memory_text.trim().to_string(), src.as_str(), top),
+            Err(e) => {
+                t.errors += 1;
+                (format!("ERROR: {e}"), "error", None)
+            }
+        };
+        let hedged = is_hedge_reply(&reply);
+        t.hedged += hedged as usize;
+        if let Some(p) = &predicted {
+            t.label_ok += (p.label == *gold) as usize;
+        }
+        let gold_c = coarse_sentiment(gold);
+        let pred_c = coarse_sentiment(&reply_label_head(&reply));
+        if let Some(g) = gold_c {
+            t.coarse_n += 1;
+            t.coarse_ok += (pred_c == Some(g)) as usize;
+        }
+        if verbose {
+            println!(
+                "[{}] gold={} ({}) pred={} {}\n    {}",
+                source,
+                gold,
+                gold_c.unwrap_or("-"),
+                pred_c.unwrap_or("-"),
+                if pred_c.is_some() && pred_c == gold_c {
+                    "✓"
+                } else {
+                    "✗"
+                },
+                reply.chars().take(140).collect::<String>()
+            );
+        }
+        per_row.push(serde_json::json!({
+            "text": text, "gold": gold, "gold_coarse": gold_c, "reply": reply,
+            "reply_coarse": pred_c, "source": source, "hedged": hedged,
+            "predicted_label": predicted.as_ref().map(|p| p.label.clone()),
+            "predicted_prob": predicted.as_ref().map(|p| p.prob),
+        }));
+    }
+    let pct = |a: usize, b: usize| if b == 0 { 0.0 } else { a as f64 / b as f64 };
+    let summary = serde_json::json!({
+        "mode": mode,
+        "rows": t.n,
+        "coarse_sentiment_acc": pct(t.coarse_ok, t.coarse_n),
+        "coarse_rows": t.coarse_n,
+        "label_acc": labeler.as_ref().map(|_| pct(t.label_ok, t.n)),
+        "hedge_rate": pct(t.hedged, t.n),
+        "errors": t.errors,
+        "seconds": t0.elapsed().as_secs_f64(),
+    });
+    println!(
+        "=== brain-eval ({mode}) ===\nrows {}  coarse sentiment acc {:.3} ({}/{})  hedge rate {:.3}{}  errors {}",
+        t.n,
+        pct(t.coarse_ok, t.coarse_n),
+        t.coarse_ok,
+        t.coarse_n,
+        pct(t.hedged, t.n),
+        if labeler.is_some() {
+            format!("  label acc {:.3}", pct(t.label_ok, t.n))
+        } else {
+            String::new()
+        },
+        t.errors
+    );
+    if let Some(p) = json_out {
+        let doc = serde_json::json!({ "summary": summary, "rows": per_row });
+        std::fs::write(
+            p,
+            serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| format!("write {}: {e}", p.display()))?;
+        eprintln!("[brain-eval] wrote {}", p.display());
+    }
+    Ok(())
+}
+
 #[cfg(feature = "brain-memory")]
 fn print_raw_lattice_report(report: &growformer::dimension::group_gen::RawLatticeDiagnosticReport) {
     println!("prompt: {}", report.prompt);
@@ -2410,5 +3237,33 @@ fn print_raw_lattice_report(report: &growformer::dimension::group_gen::RawLattic
             c.above_score_floor
         );
         println!("      {}", c.text_preview.replace('\n', " "));
+    }
+}
+
+#[cfg(test)]
+mod polish_tests {
+    use super::polish_is_faithful;
+
+    #[test]
+    fn keeps_faithful_rewrite() {
+        let mem = "NEGATIVE (mild) — ETF timeline slip plus overnight BTC selloff; regulatory delay driving price weakness.";
+        assert!(polish_is_faithful(
+            mem,
+            "NEGATIVE (mild) — the ETF delay and overnight BTC selloff point to price weakness."
+        ));
+    }
+
+    #[test]
+    fn rejects_noise_and_label_flip() {
+        let mem = "NEGATIVE (mild) — ETF timeline slip plus overnight BTC selloff.";
+        assert!(!polish_is_faithful(mem, "--ered s s"));
+        assert!(!polish_is_faithful(
+            mem,
+            "POSITIVE (strong) — ETF timeline slip plus overnight BTC selloff."
+        ));
+        assert!(!polish_is_faithful(
+            mem,
+            "NEGATIVE (mild) — Tight be sider deal: misconfirsted for a ling"
+        ));
     }
 }

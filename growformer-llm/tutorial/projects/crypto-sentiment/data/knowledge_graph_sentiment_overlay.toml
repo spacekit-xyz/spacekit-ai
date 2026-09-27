@@ -1,0 +1,199 @@
+# Merged on top of knowledge_graph.toml when both live in the same directory.
+# `topic` values must match lattice semantic_intent labels (e.g. mixed, positive_strong).
+# Priority 14 sits below typical coding nodes (~18–20) so programming prompts still win.
+
+[[nodes]]
+topic = "mixed"
+concept = "GeneralKnowledge"
+category = "sentiment_nl"
+priority = 14
+[[nodes.rules]]
+any = [
+  "somehow i still feel",
+  "still feel like today was fine",
+  "at least the coffee",
+  "paid today but",
+  "half of it went",
+  "portfolio is bleeding",
+  "market is down again",
+  "market opened red",
+]
+[[nodes]]
+topic = "positive_strong"
+concept = "GeneralKnowledge"
+category = "sentiment_nl"
+priority = 14
+[[nodes.rules]]
+any = [
+  "remembered my coffee order",
+  "meant more than anything",
+  "six months of not seeing",
+  "not seeing each other",
+]
+
+[[nodes]]
+topic = "positive_strong"
+concept = "GeneralKnowledge"
+category = "sentiment_gaming_nl"
+priority = 14
+[[nodes.rules]]
+any = [
+  "we stomped",
+  "gg no re",
+  "enemy jungler",
+  "carry was cracked",
+  "almost boring",
+]
+
+[[nodes]]
+topic = "sarcastic"
+concept = "GeneralKnowledge"
+category = "sentiment_nl"
+priority = 14
+[[nodes.rules]]
+any = [
+  "all-hands meeting",
+  "read in an email",
+  "oh brilliant, another",
+  "nobody has reviewed my",
+]
+
+[concept_keywords]
+GeneralKnowledge = [
+  "sentiment",
+  "feel like today",
+  "coffee order",
+  "jungler",
+  "all-hands",
+  # Crypto + fintech: tape, news, product/reg headlines (concept saliency + infer_concept; does not override MetaBrain topic_hint)
+  "btc",
+  "eth",
+  "bitcoin",
+  "ethereum",
+  "open interest",
+  "funding rate",
+  "funding rates",
+  "perpetual",
+  "perps",
+  "liquidation",
+  "liquidations",
+  "long squeeze",
+  "short squeeze",
+  "rsi",
+  "macd",
+  "candle",
+  "candles",
+  "wick",
+  "wicking",
+  "support level",
+  "resistance level",
+  "dominance",
+  "market maker",
+  "market makers",
+  "whale",
+  "whales",
+  "retail",
+  "fear and greed",
+  "fear & greed",
+  "order book",
+  "orderbook",
+  "basis",
+  "contango",
+  "backwardation",
+  "funding",
+  "mev",
+  "maximal extractable value",
+  "front-running",
+  "back-running",
+  "sandwich attacks",
+  "slippage",
+  "arbitrage",
+  "decentralized exchange",
+  "transaction fees",
+  "validator",
+  "validators",
+  "blockchain",
+  "blockchains",
+  "smart contract",
+  "smart contracts",
+  # Crypto news — price, regulation, ETFs, chain/macro (multi-word where possible)
+  "cryptocurrency",
+  "cryptocurrencies",
+  "crypto market",
+  "cryptocurrency market",
+  "digital asset",
+  "digital assets",
+  "altcoin",
+  "altcoins",
+  "xrp",
+  "bitcoin price",
+  "ethereum price",
+  "bitcoin surges",
+  "bitcoin plunges",
+  "ethereum surges",
+  "all-time high",
+  "record high",
+  "spot etf",
+  "bitcoin etf",
+  "ethereum etf",
+  "crypto etf",
+  "etf inflows",
+  "etf outflows",
+  "crypto regulation",
+  "cryptocurrency regulation",
+  "crypto bill",
+  "blockchain project",
+  "blockchain upgrade",
+  "layer 2",
+  "mainnet",
+  "hard fork",
+  "geopolitical tensions",
+  "amid market optimism",
+  "market optimism",
+  # Fintech news — regulation, funding, banking, bank–fintech tie-ups, payments, security, ESG, market commentary
+  "fintech",
+  "fintechs",
+  "financial technology",
+  "fintech regulation",
+  "digital banking",
+  "mobile banking",
+  "online banking",
+  "neobank",
+  "neobanks",
+  "challenger bank",
+  "challenger banks",
+  "open banking",
+  "banking as a service",
+  "embedded finance",
+  "fintech startup",
+  "fintech funding",
+  "venture funding",
+  "growth equity",
+  "fintech partnership",
+  "bank and fintech",
+  "fintech collaboration",
+  "payment innovation",
+  "payment technology",
+  "payment technologies",
+  "digital wallet",
+  "mobile wallet",
+  "contactless payment",
+  "contactless payments",
+  "tap to pay",
+  "real-time payments",
+  "instant payments",
+  "cross-border payments",
+  "payment rails",
+  "account-to-account",
+  "buy now pay later",
+  "financial cybersecurity",
+  "fraud prevention",
+  "aml compliance",
+  "kyc",
+  "sustainable finance",
+  "green finance",
+  "climate finance",
+  "esg",
+  "fintech market",
+  "fintech trends",
+]

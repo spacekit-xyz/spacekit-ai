@@ -12,9 +12,9 @@ use crate::real_ops::{
 };
 use crate::standard_layer_norm::{self, StandardNormStats};
 use crate::vanilla_llm::{
-    add_sinusoidal_pe, vanilla_forward_logits, VanillaAttention, VanillaBlock, VanillaFFN,
-    VanillaLLM,
+    vanilla_forward_logits, VanillaAttention, VanillaBlock, VanillaFFN, VanillaLLM,
 };
+use serde::{Deserialize, Serialize};
 
 use super::data::TrainExample;
 use crate::lm_config::TrainConfigV2;
@@ -208,7 +208,7 @@ fn attention_forward_taped(
 
     for h in 0..attn.n_heads {
         let d0 = h * attn.head_dim;
-        let d1 = d0 + attn.head_dim;
+        let _d1 = d0 + attn.head_dim;
         for i in 0..seq {
             let mut scores = vec![0.0f32; seq];
             for j in 0..seq {
@@ -302,8 +302,7 @@ fn block_forward_taped(block: &VanillaBlock, x: &mut [Vec<f32>], causal: bool) -
 }
 
 fn model_forward_taped(model: &VanillaLLM, ids: &[usize], causal: bool) -> VanillaTape {
-    let mut x: Vec<Vec<f32>> = ids.iter().map(|&id| model.embedding[id].clone()).collect();
-    add_sinusoidal_pe(&mut x);
+    let mut x = model.embed_with_positions(ids);
     let embed_pe = x.clone();
 
     let mut block_tapes = Vec::with_capacity(model.blocks.len());
@@ -554,6 +553,7 @@ fn block_backward(
 
 // ─── Sparse real embedding grad / optimiser ──────────────────────────────────
 
+#[derive(Clone, Debug)]
 pub struct VanillaEmbeddingGrad {
     pub d_model: usize,
     pub grads: HashMap<usize, Vec<f32>>,
@@ -586,6 +586,13 @@ impl VanillaEmbeddingGrad {
         }
     }
 
+    pub fn sq_norm(&self) -> f32 {
+        self.grads
+            .values()
+            .map(|g| g.iter().map(|v| v * v).sum::<f32>())
+            .sum()
+    }
+
     pub fn merge(&mut self, other: &VanillaEmbeddingGrad) {
         for (&tid, grad) in &other.grads {
             self.accumulate(tid, grad);
@@ -593,12 +600,16 @@ impl VanillaEmbeddingGrad {
     }
 }
 
-struct VanillaEmbedAdamState {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VanillaEmbedAdamState {
     m: Vec<f32>,
     v: Vec<f32>,
     step: u64,
 }
 
+/// Sparse ("lazy") Adam over embedding rows: only rows seen in a step update,
+/// each with its own bias-correction step count. Embeddings are never decayed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VanillaEmbeddingOptimizer {
     pub d_model: usize,
     pub cfg: AdamConfig,
@@ -629,7 +640,7 @@ impl VanillaEmbeddingOptimizer {
             let bc1 = 1.0 - self.cfg.beta1.powf(t);
             let bc2 = 1.0 - self.cfg.beta2.powf(t);
             for d in 0..self.d_model {
-                let g = token_grad[d] + self.cfg.weight_decay * embedding[token_id][d];
+                let g = token_grad[d];
                 state.m[d] = self.cfg.beta1 * state.m[d] + (1.0 - self.cfg.beta1) * g;
                 state.v[d] = self.cfg.beta2 * state.v[d] + (1.0 - self.cfg.beta2) * g * g;
                 let m_hat = state.m[d] / bc1;
@@ -642,6 +653,7 @@ impl VanillaEmbeddingOptimizer {
 
 // ─── Optimiser state ─────────────────────────────────────────────────────────
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VanillaBlockOptimizer {
     pub wq: RealHeadOptimizer,
     pub wk: RealHeadOptimizer,
@@ -661,6 +673,8 @@ pub struct VanillaBlockOptimizer {
 }
 
 impl VanillaBlockOptimizer {
+    /// `adam` is the matrix config (AdamW decay applies to Q/K/V/O/FFN only;
+    /// LayerNorm params use a decay-free copy — see `apply_grads_vanilla`).
     pub fn new(cfg: &TrainConfigV2, adam: AdamConfig) -> Self {
         let dm = cfg.d_model;
         Self {
@@ -694,8 +708,10 @@ fn adam_step_scalar(
     let t = step as f32;
     let bc1 = 1.0 - cfg.beta1.powf(t);
     let bc2 = 1.0 - cfg.beta2.powf(t);
+    // LayerNorm gamma/beta: never weight-decayed (decaying gamma toward 0
+    // shrinks every residual branch).
     for i in 0..params.len() {
-        let g = grads[i] + cfg.weight_decay * params[i];
+        let g = grads[i];
         m[i] = cfg.beta1 * m[i] + (1.0 - cfg.beta1) * g;
         v[i] = cfg.beta2 * v[i] + (1.0 - cfg.beta2) * g * g;
         let m_hat = m[i] / bc1;
@@ -716,19 +732,67 @@ pub struct VanillaModelState {
     pub fnorm_beta_m: Vec<f32>,
     pub fnorm_beta_v: Vec<f32>,
     pub fnorm_step: u64,
+    /// Global grad norm of the last update (pre-clip), for logging.
+    pub last_grad_norm: f32,
+}
+
+/// Serializable snapshot of every optimiser moment, so `--resume` continues
+/// exactly where a run stopped instead of restarting Adam from zero.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VanillaOptimState {
+    pub step: u64,
+    pub block_opts: Vec<VanillaBlockOptimizer>,
+    pub head_opt: RealHeadOptimizer,
+    pub embed_opt: VanillaEmbeddingOptimizer,
+    pub fnorm_gamma_m: Vec<f32>,
+    pub fnorm_gamma_v: Vec<f32>,
+    pub fnorm_beta_m: Vec<f32>,
+    pub fnorm_beta_v: Vec<f32>,
+    pub fnorm_step: u64,
+}
+
+/// Matrix-param Adam config derived from the training config (AdamW when
+/// `weight_decay > 0`).
+pub fn vanilla_adam_config(cfg: &TrainConfigV2) -> AdamConfig {
+    AdamConfig {
+        lr: cfg.lr_max,
+        beta2: cfg.adam_beta2,
+        weight_decay: cfg.weight_decay,
+        decoupled_weight_decay: true,
+        ..Default::default()
+    }
+}
+
+/// Same betas/lr as `base`, but no weight decay (LayerNorm, biases, embeddings).
+fn no_decay(base: &AdamConfig) -> AdamConfig {
+    AdamConfig {
+        weight_decay: 0.0,
+        ..base.clone()
+    }
 }
 
 impl VanillaModelState {
-    pub fn new(cfg: TrainConfigV2) -> Self {
-        let adam = AdamConfig {
-            lr: cfg.lr_max,
-            ..Default::default()
-        };
+    fn fresh_optimisers(
+        cfg: &TrainConfigV2,
+    ) -> (
+        Vec<VanillaBlockOptimizer>,
+        RealHeadOptimizer,
+        VanillaEmbeddingOptimizer,
+    ) {
+        let adam = vanilla_adam_config(cfg);
         let block_opts: Vec<_> = (0..cfg.n_blocks)
-            .map(|_| VanillaBlockOptimizer::new(&cfg, adam.clone()))
+            .map(|_| VanillaBlockOptimizer::new(cfg, adam.clone()))
             .collect();
         let head_opt = RealHeadOptimizer::new(cfg.vocab_size, cfg.d_model, adam.clone());
-        let embed_opt = VanillaEmbeddingOptimizer::new(cfg.d_model, adam);
+        let embed_opt = VanillaEmbeddingOptimizer::new(cfg.d_model, no_decay(&adam));
+        (block_opts, head_opt, embed_opt)
+    }
+
+    pub fn new(mut cfg: TrainConfigV2) -> Self {
+        if cfg.embed_scale <= 0.0 {
+            cfg.embed_scale = (cfg.d_model as f32).sqrt();
+        }
+        let (block_opts, head_opt, embed_opt) = Self::fresh_optimisers(&cfg);
         let mut model = VanillaLLM::new(
             cfg.vocab_size,
             cfg.d_model,
@@ -737,12 +801,13 @@ impl VanillaModelState {
             cfg.n_blocks,
             cfg.init_seed,
         );
+        model.embed_scale = cfg.embed_scale;
         randomize_vanilla_model(&mut model, cfg.init_seed);
         if cfg.tie_embeddings {
             model.sync_tied_head();
         }
         let dm = cfg.d_model;
-        Self {
+        let mut st = Self {
             model,
             cfg,
             step: 0,
@@ -754,21 +819,23 @@ impl VanillaModelState {
             fnorm_beta_m: vec![0.0; dm],
             fnorm_beta_v: vec![0.0; dm],
             fnorm_step: 0,
-        }
+            last_grad_norm: 0.0,
+        };
+        st.update_lr();
+        st
     }
 
-    pub fn from_loaded(cfg: TrainConfigV2, model: VanillaLLM, step: u64) -> Self {
-        let adam = AdamConfig {
-            lr: cfg.lr_max,
-            ..Default::default()
+    /// Weights-only load (fresh optimiser moments). Use `restore_optim` to
+    /// resume a run exactly.
+    pub fn from_loaded(cfg: TrainConfigV2, mut model: VanillaLLM, step: u64) -> Self {
+        let (block_opts, head_opt, embed_opt) = Self::fresh_optimisers(&cfg);
+        model.embed_scale = if cfg.embed_scale > 0.0 {
+            cfg.embed_scale
+        } else {
+            1.0
         };
-        let block_opts: Vec<_> = (0..cfg.n_blocks)
-            .map(|_| VanillaBlockOptimizer::new(&cfg, adam.clone()))
-            .collect();
-        let head_opt = RealHeadOptimizer::new(cfg.vocab_size, cfg.d_model, adam.clone());
-        let embed_opt = VanillaEmbeddingOptimizer::new(cfg.d_model, adam);
         let dm = cfg.d_model;
-        Self {
+        let mut st = Self {
             model,
             cfg,
             step,
@@ -780,9 +847,75 @@ impl VanillaModelState {
             fnorm_beta_m: vec![0.0; dm],
             fnorm_beta_v: vec![0.0; dm],
             fnorm_step: 0,
+            last_grad_norm: 0.0,
+        };
+        st.update_lr();
+        st
+    }
+
+    /// Rebuild optimisers after changing `cfg` training knobs (lr / wd / β₂),
+    /// e.g. when fine-tuning from a base checkpoint.
+    pub fn reset_optimisers(&mut self) {
+        let (b, h, e) = Self::fresh_optimisers(&self.cfg);
+        self.block_opts = b;
+        self.head_opt = h;
+        self.embed_opt = e;
+        let dm = self.cfg.d_model;
+        self.fnorm_gamma_m = vec![0.0; dm];
+        self.fnorm_gamma_v = vec![0.0; dm];
+        self.fnorm_beta_m = vec![0.0; dm];
+        self.fnorm_beta_v = vec![0.0; dm];
+        self.fnorm_step = 0;
+        self.update_lr();
+    }
+
+    pub fn optim_snapshot(&self) -> VanillaOptimState {
+        VanillaOptimState {
+            step: self.step,
+            block_opts: self.block_opts.clone(),
+            head_opt: self.head_opt.clone(),
+            embed_opt: self.embed_opt.clone(),
+            fnorm_gamma_m: self.fnorm_gamma_m.clone(),
+            fnorm_gamma_v: self.fnorm_gamma_v.clone(),
+            fnorm_beta_m: self.fnorm_beta_m.clone(),
+            fnorm_beta_v: self.fnorm_beta_v.clone(),
+            fnorm_step: self.fnorm_step,
         }
     }
 
+    pub fn restore_optim(&mut self, o: VanillaOptimState) -> Result<(), String> {
+        if o.block_opts.len() != self.cfg.n_blocks {
+            return Err("optimizer state block count mismatch".into());
+        }
+        if o.head_opt.w_m.len() != self.cfg.vocab_size || o.fnorm_gamma_m.len() != self.cfg.d_model
+        {
+            return Err("optimizer state shape mismatch".into());
+        }
+        if o.step != self.step {
+            return Err(format!(
+                "optimizer state step {} != checkpoint step {}",
+                o.step, self.step
+            ));
+        }
+        self.block_opts = o.block_opts;
+        self.head_opt = o.head_opt;
+        self.embed_opt = o.embed_opt;
+        self.fnorm_gamma_m = o.fnorm_gamma_m;
+        self.fnorm_gamma_v = o.fnorm_gamma_v;
+        self.fnorm_beta_m = o.fnorm_beta_m;
+        self.fnorm_beta_v = o.fnorm_beta_v;
+        self.fnorm_step = o.fnorm_step;
+        self.update_lr();
+        Ok(())
+    }
+
+    /// Current learning rate (the one the next update will use).
+    pub fn current_lr(&self) -> f32 {
+        self.head_opt.cfg.lr
+    }
+
+    /// Set every optimiser's LR for the update at index `self.step`
+    /// (0-based), so step 0 starts at `lr_min` and warms up.
     pub fn update_lr(&mut self) {
         let lr = cosine_lr_with_warmup(
             self.step,
@@ -810,7 +943,9 @@ struct VanillaStepGrads {
     fnorm_dbeta: Vec<f32>,
     blocks: Vec<VanillaBlockGrads>,
     embed: VanillaEmbeddingGrad,
+    /// Summed (not averaged) NLL over `n_tokens` supervised positions.
     loss: f32,
+    n_tokens: usize,
     valid: bool,
 }
 
@@ -838,8 +973,42 @@ impl VanillaStepGrads {
                 .collect(),
             embed: VanillaEmbeddingGrad::new(dm),
             loss: 0.0,
+            n_tokens: 0,
             valid: false,
         }
+    }
+
+    /// Squared global L2 norm over every tensor the optimiser will update.
+    fn sq_norm(&self, cfg: &TrainConfigV2) -> f32 {
+        let mut sq = if cfg.tie_embeddings {
+            // Tied: head weight grads were merged into `embed`; only the bias
+            // is stepped on the head itself.
+            self.head.bias_sq_norm()
+        } else {
+            self.head.sq_norm()
+        };
+        sq += self.fnorm_dgamma.iter().map(|v| v * v).sum::<f32>();
+        sq += self.fnorm_dbeta.iter().map(|v| v * v).sum::<f32>();
+        for (b, g) in self.blocks.iter().enumerate() {
+            if b < cfg.freeze_blocks {
+                continue;
+            }
+            sq += g.w_q.sq_norm() + g.w_k.sq_norm() + g.w_v.sq_norm() + g.w_o.sq_norm();
+            sq += g.fc1.sq_norm() + g.fc2.sq_norm();
+            for v in g
+                .norm1_gamma
+                .iter()
+                .chain(&g.norm1_beta)
+                .chain(&g.norm2_gamma)
+                .chain(&g.norm2_beta)
+            {
+                sq += v * v;
+            }
+        }
+        if cfg.train_embeddings && !cfg.freeze_embeddings {
+            sq += self.embed.sq_norm();
+        }
+        sq
     }
 
     fn add(&mut self, o: &VanillaStepGrads) {
@@ -866,6 +1035,8 @@ impl VanillaStepGrads {
         }
         self.embed.merge(&o.embed);
         self.loss += o.loss;
+        self.n_tokens += o.n_tokens;
+        self.valid |= o.valid;
     }
 
     fn scale(&mut self, s: f32) {
@@ -897,10 +1068,13 @@ impl VanillaStepGrads {
             b.fc2.scale(s);
         }
         self.embed.scale(s);
-        self.loss *= s;
     }
 }
 
+/// Forward + backward for one example. Gradients and loss are **sums** over
+/// the example's supervised positions (`n_tokens`); the caller normalises by
+/// the total token count of the whole step so every token weighs the same,
+/// regardless of how many supervised positions each example has.
 fn compute_grads_vanilla(state: &VanillaModelState, example: &TrainExample) -> VanillaStepGrads {
     let seq = example.len();
     let dm = state.cfg.d_model;
@@ -926,10 +1100,8 @@ fn compute_grads_vanilla(state: &VanillaModelState, example: &TrainExample) -> V
     if n_loss == 0 {
         return out;
     }
-    total_loss /= n_loss as f32;
-    let scale = 1.0 / n_loss as f32;
 
-    let mut grad_head = out.head;
+    let mut grad_head = std::mem::replace(&mut out.head, RealHeadGrad::zeros(0, 0));
     let mut grad_x_final = vec![vec![0.0f32; dm]; seq];
     for t in 0..seq {
         if grad_logits[t].iter().all(|&g| g == 0.0) {
@@ -945,8 +1117,6 @@ fn compute_grads_vanilla(state: &VanillaModelState, example: &TrainExample) -> V
             grad_x_final[t][j] += gx[j];
         }
     }
-    grad_head.scale(scale);
-    grad_head.clip_norm(state.cfg.grad_clip);
 
     let mut fnorm_dgamma = vec![0.0f32; dm];
     let mut fnorm_dbeta = vec![0.0f32; dm];
@@ -967,60 +1137,43 @@ fn compute_grads_vanilla(state: &VanillaModelState, example: &TrainExample) -> V
             stats.std,
         );
     }
-    for g in &mut fnorm_dgamma {
-        *g *= scale;
-    }
-    for g in &mut fnorm_dbeta {
-        *g *= scale;
-    }
 
-    let mut block_grads = Vec::with_capacity(state.cfg.n_blocks);
-    for b in (0..state.cfg.n_blocks).rev() {
+    let train_embed = state.cfg.train_embeddings && !state.cfg.freeze_embeddings;
+    // Blocks below `lowest_needed` are frozen and nothing beneath them trains,
+    // so backprop can stop early.
+    let lowest_needed = if train_embed {
+        0
+    } else {
+        state.cfg.freeze_blocks.min(state.cfg.n_blocks)
+    };
+    let mut block_grads: Vec<Option<VanillaBlockGrads>> =
+        (0..state.cfg.n_blocks).map(|_| None).collect();
+    for b in (lowest_needed..state.cfg.n_blocks).rev() {
         let block = &state.model.blocks[b];
         let block_tape = &tape.blocks[b];
         let mut grads = block_backward(block, block_tape, &grad_x);
-
-        grads.w_q.scale(scale);
-        grads.w_k.scale(scale);
-        grads.w_v.scale(scale);
-        grads.w_o.scale(scale);
-        grads.fc1.scale(scale);
-        grads.fc2.scale(scale);
-        for g in &mut grads.norm1_gamma {
-            *g *= scale;
-        }
-        for g in &mut grads.norm1_beta {
-            *g *= scale;
-        }
-        for g in &mut grads.norm2_gamma {
-            *g *= scale;
-        }
-        for g in &mut grads.norm2_beta {
-            *g *= scale;
-        }
-
-        grads.w_q.clip_norm(state.cfg.grad_clip);
-        grads.w_k.clip_norm(state.cfg.grad_clip);
-        grads.w_v.clip_norm(state.cfg.grad_clip);
-        grads.w_o.clip_norm(state.cfg.grad_clip);
-        grads.fc1.clip_norm(state.cfg.grad_clip);
-        grads.fc2.clip_norm(state.cfg.grad_clip);
-
         grad_x = std::mem::take(&mut grads.grad_input);
-        block_grads.push((b, grads));
+        block_grads[b] = Some(grads);
     }
-    block_grads.reverse();
-    for (i, (_, g)) in block_grads.into_iter().enumerate() {
-        out.blocks[i] = g;
+    for (i, g) in block_grads.into_iter().enumerate() {
+        if let Some(g) = g {
+            out.blocks[i] = g;
+        }
     }
 
     let tied = state.cfg.tie_embeddings;
     let mut embed_grad = VanillaEmbeddingGrad::new(dm);
-    if state.cfg.train_embeddings && !state.cfg.freeze_embeddings {
+    if train_embed {
+        // x = embed_scale · E[id] + PE  ⇒  dL/dE[id] = embed_scale · dL/dx
+        let es = state.model.embed_scale;
         for t in 0..seq {
-            embed_grad.accumulate(example.full_ids[t], &grad_x[t]);
+            if es == 1.0 {
+                embed_grad.accumulate(example.full_ids[t], &grad_x[t]);
+            } else {
+                let g: Vec<f32> = grad_x[t].iter().map(|v| v * es).collect();
+                embed_grad.accumulate(example.full_ids[t], &g);
+            }
         }
-        embed_grad.scale(scale);
         if tied {
             for v in 0..vocab {
                 let row = &grad_head.d_weights[v];
@@ -1037,6 +1190,7 @@ fn compute_grads_vanilla(state: &VanillaModelState, example: &TrainExample) -> V
     out.fnorm_dbeta = fnorm_dbeta;
     out.embed = embed_grad;
     out.loss = total_loss;
+    out.n_tokens = n_loss;
     out.valid = true;
     out
 }
@@ -1044,19 +1198,17 @@ fn compute_grads_vanilla(state: &VanillaModelState, example: &TrainExample) -> V
 fn apply_grads_vanilla(state: &mut VanillaModelState, grads: &VanillaStepGrads) {
     let tied = state.cfg.tie_embeddings;
 
+    // LayerNorm params share the matrices' LR/betas but are never decayed.
+    let ln_cfg = no_decay(&state.head_opt.cfg);
+
     state.fnorm_step += 1;
-    let fnorm_lr = state.head_opt.cfg.lr;
-    let fcfg = AdamConfig {
-        lr: fnorm_lr,
-        ..Default::default()
-    };
     adam_step_scalar(
         &mut state.model.final_norm.gamma,
         &grads.fnorm_dgamma,
         &mut state.fnorm_gamma_m,
         &mut state.fnorm_gamma_v,
         state.fnorm_step,
-        &fcfg,
+        &ln_cfg,
     );
     adam_step_scalar(
         &mut state.model.final_norm.beta,
@@ -1064,7 +1216,7 @@ fn apply_grads_vanilla(state: &mut VanillaModelState, grads: &VanillaStepGrads) 
         &mut state.fnorm_beta_m,
         &mut state.fnorm_beta_v,
         state.fnorm_step,
-        &fcfg,
+        &ln_cfg,
     );
 
     for b in 0..state.cfg.n_blocks {
@@ -1075,7 +1227,6 @@ fn apply_grads_vanilla(state: &mut VanillaModelState, grads: &VanillaStepGrads) 
         let opt = &mut state.block_opts[b];
         opt.step += 1;
         let lr_step = opt.step;
-        let cfg = opt.wq.cfg.clone();
         let bm = &mut state.model.blocks[b];
 
         opt.wq.step(&mut bm.attn.w_q, &pg.w_q);
@@ -1091,7 +1242,7 @@ fn apply_grads_vanilla(state: &mut VanillaModelState, grads: &VanillaStepGrads) 
             &mut opt.norm1_gamma_m,
             &mut opt.norm1_gamma_v,
             lr_step,
-            &cfg,
+            &ln_cfg,
         );
         adam_step_scalar(
             &mut bm.norm1.beta,
@@ -1099,7 +1250,7 @@ fn apply_grads_vanilla(state: &mut VanillaModelState, grads: &VanillaStepGrads) 
             &mut opt.norm1_beta_m,
             &mut opt.norm1_beta_v,
             lr_step,
-            &cfg,
+            &ln_cfg,
         );
         adam_step_scalar(
             &mut bm.norm2.gamma,
@@ -1107,7 +1258,7 @@ fn apply_grads_vanilla(state: &mut VanillaModelState, grads: &VanillaStepGrads) 
             &mut opt.norm2_gamma_m,
             &mut opt.norm2_gamma_v,
             lr_step,
-            &cfg,
+            &ln_cfg,
         );
         adam_step_scalar(
             &mut bm.norm2.beta,
@@ -1115,7 +1266,7 @@ fn apply_grads_vanilla(state: &mut VanillaModelState, grads: &VanillaStepGrads) 
             &mut opt.norm2_beta_m,
             &mut opt.norm2_beta_v,
             lr_step,
-            &cfg,
+            &ln_cfg,
         );
     }
 
@@ -1138,46 +1289,384 @@ fn apply_grads_vanilla(state: &mut VanillaModelState, grads: &VanillaStepGrads) 
     }
 }
 
+/// Worker threads for per-example gradient work. `GF_THREADS` overrides.
+fn worker_threads(n_items: usize) -> usize {
+    let hw = std::env::var("GF_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        });
+    hw.min(n_items).max(1)
+}
+
+/// Compute per-example grads in parallel (examples are independent given the
+/// current weights) and sum them.
+fn compute_grads_batch(state: &VanillaModelState, examples: &[TrainExample]) -> VanillaStepGrads {
+    let n_threads = worker_threads(examples.len());
+    if n_threads <= 1 {
+        let mut acc = VanillaStepGrads::zeros(&state.cfg);
+        for ex in examples {
+            let g = compute_grads_vanilla(state, ex);
+            if g.valid {
+                acc.add(&g);
+            }
+        }
+        return acc;
+    }
+    let chunk = examples.len().div_ceil(n_threads);
+    let partials: Vec<VanillaStepGrads> = std::thread::scope(|scope| {
+        let handles: Vec<_> = examples
+            .chunks(chunk)
+            .map(|part| {
+                scope.spawn(move || {
+                    let mut acc = VanillaStepGrads::zeros(&state.cfg);
+                    for ex in part {
+                        let g = compute_grads_vanilla(state, ex);
+                        if g.valid {
+                            acc.add(&g);
+                        }
+                    }
+                    acc
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("grad worker panicked"))
+            .collect()
+    });
+    let mut it = partials.into_iter();
+    let mut acc = it
+        .next()
+        .unwrap_or_else(|| VanillaStepGrads::zeros(&state.cfg));
+    for p in it {
+        acc.add(&p);
+    }
+    acc
+}
+
+/// One optimiser update over `examples` (a batch / accumulated micro-batches).
+///
+/// 1. Per-example grads are computed in parallel and **summed**.
+/// 2. The sum is divided by the step's total supervised-token count, so the
+///    update is the true mean over tokens (padding-heavy chunks don't get the
+///    same weight as full ones).
+/// 3. A single global L2 clip is applied across every trainable tensor
+///    (per-tensor / per-example clipping distorted the update direction).
+/// 4. The LR for this update index is set *before* stepping, so step 0 runs
+///    at `lr_min` (warmup start) rather than `lr_max`.
+///
+/// Returns the mean token NLL of the batch.
 pub fn train_step_vanilla_accum(state: &mut VanillaModelState, examples: &[TrainExample]) -> f32 {
     if examples.is_empty() {
         return 0.0;
     }
-    let mut acc = VanillaStepGrads::zeros(&state.cfg);
-    let mut n_valid = 0usize;
-    for ex in examples {
-        let g = compute_grads_vanilla(state, ex);
-        if !g.valid {
-            continue;
-        }
-        acc.add(&g);
-        n_valid += 1;
-    }
-    if n_valid == 0 {
+    let mut acc = compute_grads_batch(state, examples);
+    if !acc.valid || acc.n_tokens == 0 {
         return 0.0;
     }
-    acc.scale(1.0 / n_valid as f32);
+    let inv = 1.0 / acc.n_tokens as f32;
+    acc.scale(inv);
+    let mean_loss = acc.loss * inv;
+
+    let norm = acc.sq_norm(&state.cfg).sqrt();
+    state.last_grad_norm = norm;
+    let clip = state.cfg.grad_clip;
+    if clip > 0.0 && norm.is_finite() && norm > clip {
+        acc.scale(clip / norm);
+    }
+    if !norm.is_finite() {
+        eprintln!(
+            "[train] warning: non-finite grad norm at step {} — update skipped",
+            state.step
+        );
+        return mean_loss;
+    }
+
+    state.update_lr();
     apply_grads_vanilla(state, &acc);
     state.step += 1;
     state.update_lr();
-    acc.loss
+    mean_loss
 }
 
-pub fn eval_vanilla_lm_loss(state: &VanillaModelState, ex: &TrainExample) -> f32 {
+/// Summed NLL and supervised-token count for one example (for token-weighted
+/// validation means and bits/byte).
+pub fn eval_vanilla_nll_sum(state: &VanillaModelState, ex: &TrainExample) -> (f64, usize) {
     let logits = vanilla_forward_logits(&state.model, &ex.full_ids, true);
     let mask = ex.loss_mask();
-    let mut total = 0.0f32;
+    let mut total = 0.0f64;
     let mut n = 0usize;
     for t in 0..ex.len() {
         if !mask[t] || t + 1 >= ex.len() {
             continue;
         }
         let (loss, _) = cross_entropy(&logits[t], ex.full_ids[t + 1]);
-        total += loss;
+        total += loss as f64;
         n += 1;
     }
+    (total, n)
+}
+
+pub fn eval_vanilla_lm_loss(state: &VanillaModelState, ex: &TrainExample) -> f32 {
+    let (total, n) = eval_vanilla_nll_sum(state, ex);
     if n == 0 {
         0.0
     } else {
-        total / n as f32
+        (total / n as f64) as f32
+    }
+}
+
+/// Token-weighted mean NLL over a fixed validation set, evaluated in parallel.
+/// Returns `(mean_nll, summed_nll, n_tokens)`.
+pub fn eval_vanilla_set(state: &VanillaModelState, set: &[TrainExample]) -> (f32, f64, usize) {
+    if set.is_empty() {
+        return (0.0, 0.0, 0);
+    }
+    let n_threads = worker_threads(set.len());
+    let chunk = set.len().div_ceil(n_threads);
+    let parts: Vec<(f64, usize)> = std::thread::scope(|scope| {
+        let hs: Vec<_> = set
+            .chunks(chunk)
+            .map(|part| {
+                scope.spawn(move || {
+                    part.iter().fold((0.0f64, 0usize), |(s, n), ex| {
+                        let (a, b) = eval_vanilla_nll_sum(state, ex);
+                        (s + a, n + b)
+                    })
+                })
+            })
+            .collect();
+        hs.into_iter()
+            .map(|h| h.join().expect("eval worker"))
+            .collect()
+    });
+    let (sum, n) = parts
+        .into_iter()
+        .fold((0.0f64, 0usize), |(s, n), (a, b)| (s + a, n + b));
+    let mean = if n == 0 { 0.0 } else { (sum / n as f64) as f32 };
+    (mean, sum, n)
+}
+
+/// Early-stopping bookkeeping on a validation metric (lower is better).
+#[derive(Clone, Debug)]
+pub struct EarlyStopper {
+    pub best: f32,
+    pub best_step: u64,
+    pub bad_evals: usize,
+    /// Consecutive non-improving evals tolerated before stopping (0 = never stop).
+    pub patience: usize,
+    /// Minimum decrease that counts as an improvement.
+    pub min_delta: f32,
+}
+
+impl EarlyStopper {
+    pub fn new(patience: usize, min_delta: f32) -> Self {
+        Self {
+            best: f32::INFINITY,
+            best_step: 0,
+            bad_evals: 0,
+            patience,
+            min_delta,
+        }
+    }
+
+    /// Record a validation value. Returns `true` if it is a new best.
+    pub fn observe(&mut self, step: u64, value: f32) -> bool {
+        if value.is_finite() && value < self.best - self.min_delta {
+            self.best = value;
+            self.best_step = step;
+            self.bad_evals = 0;
+            true
+        } else {
+            self.bad_evals += 1;
+            false
+        }
+    }
+
+    pub fn should_stop(&self) -> bool {
+        self.patience > 0 && self.bad_evals >= self.patience
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(tied: bool) -> TrainConfigV2 {
+        let mut c = TrainConfigV2::small(20);
+        c.d_model = 8;
+        c.n_heads = 2;
+        c.d_ff = 16;
+        c.n_blocks = 2;
+        c.tie_embeddings = tied;
+        c.warmup_steps = 5;
+        c.total_steps = 100;
+        c.lr_max = 1e-2;
+        c.lr_min = 1e-5;
+        c
+    }
+
+    fn ex(ids: &[usize]) -> TrainExample {
+        TrainExample::lm_sequence(ids.to_vec())
+    }
+
+    fn summed_loss(st: &VanillaModelState, e: &TrainExample) -> f64 {
+        eval_vanilla_nll_sum(st, e).0
+    }
+
+    /// Central difference of the summed loss w.r.t. one scalar, taking the
+    /// closest agreement over a few step sizes (ReLU kinks and f32 round-off
+    /// make any single `h` noisy).
+    fn fd_close(
+        st: &mut VanillaModelState,
+        e: &TrainExample,
+        analytic: f32,
+        set: &dyn Fn(&mut VanillaModelState, f32),
+        orig: f32,
+    ) -> (bool, f32) {
+        let mut best = f32::INFINITY;
+        let mut best_num = 0.0;
+        for h in [3e-3f32, 1e-3, 3e-4] {
+            set(st, orig + h);
+            let lp = summed_loss(st, e);
+            set(st, orig - h);
+            let lm = summed_loss(st, e);
+            set(st, orig);
+            let num = ((lp - lm) / (2.0 * h as f64)) as f32;
+            let err = (analytic - num).abs() / (1.0 + num.abs());
+            if err < best {
+                best = err;
+                best_num = num;
+            }
+        }
+        (best < 1e-2, best_num)
+    }
+
+    /// Finite-difference check of the analytic gradient, including the
+    /// sqrt(d_model) embedding scale and the tied head.
+    #[test]
+    fn gradients_match_finite_differences() {
+        for tied in [false, true] {
+            let mut st = VanillaModelState::new(cfg(tied));
+            assert!((st.model.embed_scale - 8f32.sqrt()).abs() < 1e-6);
+            let e = ex(&[4, 7, 9, 4, 11, 12, 7]);
+            let g = compute_grads_vanilla(&st, &e);
+
+            for (tok, d) in [(7usize, 0usize), (7, 3), (9, 5)] {
+                let analytic = g.embed.grads.get(&tok).map(|r| r[d]).unwrap_or(0.0);
+                let orig = st.model.embedding[tok][d];
+                let set = move |s: &mut VanillaModelState, v: f32| {
+                    s.model.embedding[tok][d] = v;
+                    if s.cfg.tie_embeddings {
+                        s.model.sync_tied_head();
+                    }
+                };
+                let (ok, num) = fd_close(&mut st, &e, analytic, &set, orig);
+                assert!(
+                    ok,
+                    "tied={tied} embed[{tok}][{d}] analytic={analytic} numeric={num}"
+                );
+            }
+
+            let analytic = g.blocks[1].w_q.d_weights[1][2];
+            let orig = st.model.blocks[1].attn.w_q.weights[1][2];
+            let set =
+                |s: &mut VanillaModelState, v: f32| s.model.blocks[1].attn.w_q.weights[1][2] = v;
+            let (ok, num) = fd_close(&mut st, &e, analytic, &set, orig);
+            assert!(ok, "tied={tied} w_q analytic={analytic} numeric={num}");
+
+            let analytic = g.blocks[0].norm1_gamma[1];
+            let orig = st.model.blocks[0].norm1.gamma[1];
+            let set = |s: &mut VanillaModelState, v: f32| s.model.blocks[0].norm1.gamma[1] = v;
+            let (ok, num) = fd_close(&mut st, &e, analytic, &set, orig);
+            assert!(
+                ok,
+                "tied={tied} norm1.gamma analytic={analytic} numeric={num}"
+            );
+        }
+    }
+
+    #[test]
+    fn first_update_uses_warmup_lr_not_lr_max() {
+        let mut st = VanillaModelState::new(cfg(false));
+        assert!(
+            (st.current_lr() - 1e-5).abs() < 1e-9,
+            "step 0 must start at lr_min"
+        );
+        train_step_vanilla_accum(&mut st, &[ex(&[3, 4, 5, 6])]);
+        assert_eq!(st.step, 1);
+        let expect = cosine_lr_with_warmup(1, 5, 100, 1e-2, 1e-5);
+        assert!((st.current_lr() - expect).abs() < 1e-9);
+    }
+
+    #[test]
+    fn global_clip_bounds_total_norm() {
+        let mut c = cfg(false);
+        c.grad_clip = 1e-3;
+        let st = VanillaModelState::new(c);
+        let mut g = compute_grads_batch(&st, &[ex(&[3, 4, 5, 6, 7])]);
+        let n = g.sq_norm(&st.cfg).sqrt();
+        assert!(n > 1e-3);
+        g.scale(1e-3 / n);
+        assert!((g.sq_norm(&st.cfg).sqrt() - 1e-3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn step_loss_is_token_weighted() {
+        let st = VanillaModelState::new(cfg(false));
+        let long = ex(&[3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        let short = ex(&[12, 13, 14]);
+        let (sl, nl) = eval_vanilla_nll_sum(&st, &long);
+        let (ss, ns) = eval_vanilla_nll_sum(&st, &short);
+        let g = compute_grads_batch(&st, &[long, short]);
+        assert_eq!(g.n_tokens, nl + ns);
+        let want = ((sl + ss) / (nl + ns) as f64) as f32;
+        assert!((g.loss / g.n_tokens as f32 - want).abs() < 1e-4);
+    }
+
+    #[test]
+    fn parallel_batch_matches_serial() {
+        let st = VanillaModelState::new(cfg(true));
+        let exs: Vec<_> = (0..6)
+            .map(|k| ex(&[3 + k, 4 + k, 5 + k, 6 + k, 7 + k]))
+            .collect();
+        let par = compute_grads_batch(&st, &exs);
+        let mut ser = VanillaStepGrads::zeros(&st.cfg);
+        for e in &exs {
+            ser.add(&compute_grads_vanilla(&st, e));
+        }
+        assert_eq!(par.n_tokens, ser.n_tokens);
+        let d = (par.sq_norm(&st.cfg) - ser.sq_norm(&st.cfg)).abs();
+        assert!(d < 1e-3 * ser.sq_norm(&st.cfg).max(1.0));
+    }
+
+    #[test]
+    fn training_reduces_loss() {
+        let mut c = cfg(true);
+        c.total_steps = 150;
+        let mut st = VanillaModelState::new(c);
+        let data = [ex(&[3, 4, 5, 6, 3, 4, 5, 6]), ex(&[7, 8, 9, 7, 8, 9, 7, 8])];
+        let before = eval_vanilla_set(&st, &data).0;
+        for _ in 0..150 {
+            train_step_vanilla_accum(&mut st, &data);
+        }
+        let after = eval_vanilla_set(&st, &data).0;
+        assert!(after < before * 0.5, "loss {before} -> {after}");
+    }
+
+    #[test]
+    fn early_stopper_patience() {
+        let mut es = EarlyStopper::new(2, 0.0);
+        assert!(es.observe(100, 3.0));
+        assert!(!es.observe(200, 3.1));
+        assert!(!es.should_stop());
+        assert!(!es.observe(300, 3.0));
+        assert!(es.should_stop());
+        assert_eq!(es.best_step, 100);
     }
 }

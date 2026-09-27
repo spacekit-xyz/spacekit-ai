@@ -1,0 +1,23 @@
+# Example manifest for: growformer --train-brain ... --brain-plugins-toml data/plugins/example-brain-plugins.toml
+# Embed as UTF-8 TOML inside the exported .bin (format v2).
+
+[sentiment]
+meta_gk_margin = 0.05
+meta_gk_confidence = 0.55
+min_meta_confidence_user_anchored = 0.28
+mixed_override_confidence = 0.88
+default_line_confidence = 0.92
+ambiguous_line_confidence = 0.58
+
+# Only `[sentiment]` is loaded as inference thresholds (see BrainPluginsManifest).
+# Profile-specific tables like `[fintech_sentiment]` are ignored unless added to the Rust struct.
+
+[language_detection]
+# Opaque until a runtime plugin reads this table (e.g. default_locale, min_confidence).
+default_locale = "en"
+min_confidence = 0.35
+
+[badwords]
+# Opaque until a runtime plugin reads this table (e.g. list path, action).
+# list_path = "data/policy/badwords-en.txt"
+severity = "block"

@@ -47,6 +47,28 @@ pub struct TrainConfigV2 {
     /// Clifford reference `d_model` before param-budget matching (0 if N/A).
     #[serde(default)]
     pub clifford_ref_d_model: usize,
+    /// Vanilla: decoupled (AdamW) weight decay on attention/FFN/head matrices.
+    /// Never applied to LayerNorm params, biases or the embedding table.
+    /// Old checkpoints deserialize to 0.0 (their original behaviour).
+    #[serde(default)]
+    pub weight_decay: f32,
+    /// Vanilla: Adam β₂. 0.95 suits small/noisy batches; old checkpoints → 0.999.
+    #[serde(default = "default_beta2_legacy")]
+    pub adam_beta2: f32,
+    /// Vanilla: multiplier on token embeddings before adding the sinusoidal
+    /// position signal. `<= 0` means "auto" = `sqrt(d_model)` (resolved when a
+    /// fresh model is built). Old checkpoints deserialize to 1.0 (unscaled) so
+    /// their inference is unchanged.
+    #[serde(default = "default_embed_scale_legacy")]
+    pub embed_scale: f32,
+}
+
+fn default_beta2_legacy() -> f32 {
+    0.999
+}
+
+fn default_embed_scale_legacy() -> f32 {
+    1.0
 }
 
 fn default_grad_accum() -> usize {
@@ -91,6 +113,9 @@ impl TrainConfigV2 {
             dot_attention: false,
             vanilla: true,
             clifford_ref_d_model: 0,
+            weight_decay: 0.1,
+            adam_beta2: 0.95,
+            embed_scale: 0.0,
         }
     }
 
@@ -98,6 +123,10 @@ impl TrainConfigV2 {
     pub fn small_clifford(vocab_size: usize) -> Self {
         let mut c = Self::small(vocab_size);
         c.vanilla = false;
+        // Clifford stack keeps its historical optimiser settings.
+        c.weight_decay = 0.0;
+        c.adam_beta2 = 0.999;
+        c.embed_scale = 1.0;
         c
     }
 }

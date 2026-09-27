@@ -1,0 +1,40 @@
+# Crypto DeFi Sentiment Analysis — Demo Prompt Cloud (25)
+# Pre-verified prompts for the demo UI prompt cloud.
+# Use: ./target/release/growformer --infer --brain agent-data/crypto-analysis/crypto-causal.bin --prompts-file data/crypto/crypto-prompts-demo.txt
+
+# --- Crypto price / market (5) ---
+I love that Bitcoin is above $100K — this cycle feels different and I'm finally in profit
+Solana fees are practically zero but nobody's building anything people actually use
+Bitcoin just printed a golden cross on the weekly chart for the first time since 2023
+My portfolio is up 400% this cycle but I still haven't taken profit because I'm a degenerate
+Layer 2 fees dropped to sub-cent but bridging back to mainnet still costs more than my lunch
+
+# --- Crypto crime / fraud (5) ---
+The founder moved 45,000 ETH to a fresh wallet two hours before the exploit was announced
+The rug pull wiped out thousands of investors and the dev team disappeared with the entire treasury
+The exploit drained every wallet that interacted with the contract; people lost their entire savings
+I hate that I fell for the fake MetaMask approval — lost everything to a phishing scam
+SEC filed an emergency freeze on the token sale but half the money already left the country
+
+# --- DeFi / protocol (4) ---
+The governance vote passed with twelve wallets controlling the outcome — so much for decentralization
+Aave V4 migration went clean — no downtime, no stuck funds, zero drama for once
+Staking rewards dropped from 18% to 4% and suddenly everyone discovered the unlock button
+I enjoy using this DEX but the slippage on large orders is awful
+
+# --- General sentiment — sarcasm / mixed / calibration (4) ---
+Oh wonderful, another rebase token that definitely won't go to zero like the last six
+Sure, because a token with 90% held by three wallets is definitely decentralized
+Not the worst wallet UX I've used, which is genuinely the highest praise in this space
+Finally got the airdrop which was great but half the tokens are locked and the vesting schedule is awful
+
+# --- Slang / register (4) ---
+ser the chart is cooked, ngmi if you're still holding that bag after the unlock
+Wen airdrop? The team keeps teasing and the community is getting restless ngl
+This dApp is absolutely mint — gas optimized, clean UI, instant settlement
+I despise these gas fees — paid more in transaction costs than the actual trade was worth
+
+# --- Edge cases (3) ---
+Convert 0.5 BTC to USDT at current market price
+List the top five cryptocurrencies by market capitalization
+The SHA-256 hash function produces a 256-bit digest regardless of input length

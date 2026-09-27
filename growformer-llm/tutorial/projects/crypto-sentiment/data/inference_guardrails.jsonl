@@ -1,0 +1,3 @@
+{"kind":"lexical_topic","topic":"neutral","after_pr_wire":true,"exclude_first_person":true,"require_crypto_lexicon":true,"intent":[["cryptocurrency picks","crypto picks"],["stakes","leads"]]}
+{"kind":"lexical_topic","topic":"neutral","exclude_first_person":true,"intent":[["google ads"],["certification"],["cryptocurrency"]]}
+{"kind":"lexical_topic","topic":"mixed","after_pr_wire":true,"exclude_first_person":true,"require_crypto_lexicon":true,"intent":[["start mixed"],["large cryptocurrencies","cryptocurrencies"]]}

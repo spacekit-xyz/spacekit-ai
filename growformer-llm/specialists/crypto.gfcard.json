@@ -1,0 +1,22 @@
+{
+  "format_version": 1,
+  "arch": "clifford",
+  "caps": {
+    "tied_embeddings": false,
+    "ffn": "clifford",
+    "quant": "none",
+    "grounding": ["crypto"],
+    "early_exit": false
+  },
+  "card": {
+    "subject": "crypto-markets",
+    "keywords": ["bitcoin", "ethereum", "crypto", "token", "blockchain", "wallet", "defi", "altcoin", "staking", "onchain", "stablecoin"],
+    "created_utc": "",
+    "train_steps": 0,
+    "eval_bits_per_byte": null,
+    "base_model": null,
+    "notes": "Demo domain specialist — crypto/onchain language."
+  },
+  "weights_path": "crypto.lm.json",
+  "tokenizer_path": null
+}

@@ -7,6 +7,12 @@ research.
 
 Repository: [spacekit-xyz/spacekit-ai](https://github.com/spacekit-xyz/spacekit-ai)
 
+## Project map
+
+![SpaceKit AI Growformer project map: growformer, growformer-ledger, growformer-llm and growformer-nca with their dependency direction](docs/spacekit-ai-architecture.svg)
+
+The four crates, their internal module clusters, and the dependency direction. Rendered from [`docs/spacekit-ai-architecture.svg`](docs/spacekit-ai-architecture.svg); see [Dependency direction](#dependency-direction) below.
+
 ## Projects
 
 | Directory | Role | Status | License |
@@ -34,6 +40,19 @@ cargo test -p growformer-ledger
 cargo test -p growformer-nca
 cargo test -p growformer-llm
 cargo test -p growformer --lib
+```
+
+## Train and run a domain assistant
+
+The fastest way in is the runnable tutorial in
+[`growformer-llm/tutorial/`](growformer-llm/tutorial/README.md). It trains a Growformer
+brain and a small chat LM on a bundled crypto-sentiment project, then runs inference:
+
+```bash
+T=growformer-llm/tutorial; P=$T/projects/crypto-sentiment
+bash $T/train_brain.sh $P
+bash $T/infer.sh $P "Bitcoin crashed after the ETF delay"
+bash $T/train_lm.sh $P            # optional
 ```
 
 ## Dependency direction
