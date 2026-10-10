@@ -8,6 +8,7 @@ A Growformer assistant has two parts:
 |---|---|---|---|
 | **Brain** (`agent/*.bin`) | Growformer lattice memory with routing, grounding and guardrails | **Explains the answer** from stored examples. Also handles identity, greetings and guardrails. | `train_brain.sh` (the `growformer` CLI) |
 | **Label model** (`agent/label-model.json`) | TF-IDF + logistic-regression classifier over `semantic_intent` | **Picks the label.** The brain then explains from that label's examples. | `train_brain.sh` (`gf-llm label-train`) |
+| **System 1 brain** (`agent/*.s1.json.gz`) | Per-question heads with calibrated probabilities (`growformer-system1`) | **Answers typed questions fast**: pick an option, rate on a scale, yes/no. No text. | `train_brain.sh` (when the manifest has `[system1]`) |
 | **LM** (`*-lm.json` + `.tok`) | Small vanilla transformer (`growformer-llm`) | Optional. Rephrases the brain's answer (`polish`), or generates freely (`lm`, experimental) | `train_lm.sh` (the `gf-llm` CLI) |
 
 ```text
@@ -20,6 +21,7 @@ growformer-llm/tutorial/
 └── projects/
     └── crypto-sentiment/     ← complete example project (copy of spacekit-projects/sentiment/crypto)
         ├── crypto-sentiment-analysis.gf.toml   ← manifest: data, inference TOMLs, brain path
+        ├── system1/questions.toml              ← System 1 questions (§7)
         ├── agent/                              ← brain goes here (*.bin is git-ignored; step 1 builds it)
         ├── data/
         │   ├── train_sentiment_*.jsonl         ← training rows (brain + LM)
@@ -190,6 +192,52 @@ Per seed, label model + brain scored 61.6 / 56.2 / 60.3%, and the brain alone (o
 2. **Balance the labels.** `euphoric` has 4 rows, `capitulation` 6 and `sarcastic` 14, versus 76 for `mixed`. Get every label to at least 30 rows, or merge rare labels into their coarse bucket.
 3. **Use one reply format.** Start every `expected_response` with the label (`NEGATIVE (mild) — …`). About half the crypto rows don't.
 4. **Label what the brain hedges on.** Collect real prompts that got a hedge or a wrong label, label them, add them to `data/`, and retrain. `brain-eval --json-out` lists every held-out row with its reply.
+
+## 7. Fast typed decisions (System 1)
+
+Sometimes you don't want a reply, you want a decision your code can branch on: *which* label, *how* bullish, *is it* bearish. `growformer-system1` answers typed questions about a state and returns a probability for every outcome. It never generates text.
+
+| Type | Example in this project | Returns |
+|---|---|---|
+| `choice` | `sentiment`: positive / negative / neutral / mixed / sarcastic | option + distribution |
+| `score` | `bullishness`: 0 (very bearish) … 4 (very bullish) | mean, std + distribution |
+| `noul` | `bearish`: is the text bearish? | `true`/`false` + P(true) |
+
+The questions live in `system1/questions.toml`. Each one maps the existing `semantic_intent` field onto its outcomes, so no new labelling is needed. The manifest points at them:
+
+```toml
+[system1]
+questions = "system1/questions.toml"
+data = ["data"]
+brain_output = "agent/crypto.s1.json.gz"
+```
+
+`train_brain.sh` trains it after the brain (about 6 s). By hand:
+
+```bash
+cargo build --release -p growformer-system1 --features server,candle --bin gf-system1
+S1=target/release/gf-system1; P=growformer-llm/tutorial/projects/crypto-sentiment
+
+$S1 train  --project $P/crypto-sentiment-analysis.gf.toml
+$S1 decide --brain $P/agent/crypto.s1.json.gz --state "Bitcoin crashed after the ETF delay"
+# sentiment = negative (p 0.81), bearish = true (p 0.74), …  ≈1 ms per request once loaded
+$S1 serve  --project $P/crypto-sentiment-analysis.gf.toml     # POST /v1/decide
+```
+
+Held-out results on this project (88 rows):
+
+| Question | Accuracy | ECE |
+|---|---|---|
+| sentiment (5 options) | 59.1% | 0.105 |
+| bullishness (0–4) | 51.1% (MAE 0.72) | 0.093 |
+| bearish (yes/no) | 75.0% | 0.105 |
+| intent (16 labels) | 47.7% | 0.121 |
+
+ECE is the calibration error: how far stated confidence is from actual accuracy. Set `min_confidence` on a question and low-confidence answers come back with `abstain: true`, so your code can send them elsewhere.
+
+**Questions without training data.** Attach a small open-weight model (any Llama, Qwen2 or Qwen3 GGUF plus its `tokenizer.json`). Questions with no head, and heads below the router threshold, then go to that model. It reads the answer-token probabilities instead of generating, and still returns a full distribution. `eval --lm --tune-router` measures it against the heads on your labelled rows, and `distill` turns its answers into training data for new heads. See [`growformer-system1/README.md`](../../growformer-system1/README.md).
+
+The same brain file loads in the browser through the crate's `wasm` feature.
 
 ## The raw commands
 

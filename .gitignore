@@ -30,6 +30,8 @@
 **/*.safetensors
 **/*.gguf
 **/*.onnx
+**/*.s1.json
+**/*.s1.json.gz
 **/*.pt
 **/*.pth
 **/*_results.txt

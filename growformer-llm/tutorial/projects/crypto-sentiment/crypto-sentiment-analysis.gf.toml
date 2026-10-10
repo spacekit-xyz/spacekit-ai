@@ -30,3 +30,9 @@ grounding_toml = "data/world_grounding_crypto.toml"
 
 [infer]
 brain = "agent/crypto-brain.bin"
+
+[system1]
+# Fast typed decisions (Choice / Score / Noul) — see growformer-system1 and tutorial README §7.
+questions = "system1/questions.toml"
+data = ["data"]
+brain_output = "agent/crypto.s1.json.gz"

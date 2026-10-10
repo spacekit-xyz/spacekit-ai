@@ -1,0 +1,52 @@
+[package]
+name = "growformer-system1"
+version = "0.1.0"
+edition = "2021"
+description = "System 1 decision brain: typed Choice/Score/Noul answers with calibrated probabilities"
+license = "Apache-2.0"
+authors = ["Astor Rivera-Carcamo"]
+readme = "README.md"
+repository = "https://github.com/spacekit-xyz/spacekit-ai"
+keywords = ["classification", "calibration", "decision", "wasm"]
+categories = ["science", "algorithms"]
+
+[dependencies]
+candle-core = { version = "0.9", optional = true }
+candle-nn = { version = "0.9", optional = true }
+candle-transformers = { version = "0.9", optional = true }
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokenizers = { version = "0.23.2", default-features = false, features = ["unstable_wasm"], optional = true }
+toml = "1.1.8"
+web-time = "1.1.0"
+wasm-bindgen = { version = "=0.2.115", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+axum = { version = "0.7", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"], optional = true }
+
+# candle -> rand -> getrandom 0.3 needs its JS backend in the browser.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"], optional = true }
+
+[features]
+default = []
+cli = ["dep:clap"]
+server = ["cli", "dep:axum", "dep:tokio"]
+wasm = ["dep:wasm-bindgen"]
+candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:getrandom"]
+# GPU passthroughs for the open-model backend (native only).
+metal = ["candle", "candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+cuda = ["candle", "candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+
+[[bin]]
+name = "gf-system1"
+path = "src/bin/gf-system1.rs"
+required-features = ["cli"]
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[[example]]
+name = "tiny_model"
+required-features = ["candle"]

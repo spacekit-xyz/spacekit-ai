@@ -11,7 +11,7 @@ Repository: [spacekit-xyz/spacekit-ai](https://github.com/spacekit-xyz/spacekit-
 
 ![SpaceKit AI Growformer project map: growformer, growformer-ledger, growformer-llm and growformer-nca with their dependency direction](docs/spacekit-ai-architecture.svg)
 
-The four crates, their internal module clusters, and the dependency direction. Rendered from [`docs/spacekit-ai-architecture.svg`](docs/spacekit-ai-architecture.svg); see [Dependency direction](#dependency-direction) below.
+The four original crates, their internal module clusters, and the dependency direction. Rendered from [`docs/spacekit-ai-architecture.svg`](docs/spacekit-ai-architecture.svg); see [Dependency direction](#dependency-direction) below.
 
 ## Projects
 
@@ -21,6 +21,7 @@ The four crates, their internal module clusters, and the dependency direction. R
 | [`growformer-ledger/`](growformer-ledger/) | Hash-chained evaluation records and paired statistical comparisons | Supporting library | MIT |
 | [`growformer-llm/`](growformer-llm/) | Domain language models, chat workflows, optional Growformer memory, and historical Clifford experiments | Depends on Growformer and Ledger | Apache-2.0 |
 | [`growformer-nca/`](growformer-nca/) | Experimental neural cellular automata and Clifford-algebra components | Independent research crate | MIT |
+| [`growformer-system1/`](growformer-system1/) | Fast typed decisions (Choice / Score / Noul) with calibrated probabilities: trained heads plus an optional open-weight model (pure Rust, WASM) | Standalone | Apache-2.0 |
 
 ## Clone and build
 
@@ -55,6 +56,10 @@ bash $T/infer.sh $P "Bitcoin crashed after the ETF delay"
 bash $T/train_lm.sh $P            # optional
 ```
 
+For fast, structured answers (pick an option, rate on a scale, yes/no) with
+calibrated probabilities, see [`growformer-system1/`](growformer-system1/README.md)
+and tutorial §7.
+
 ## Dependency direction
 
 ```text
@@ -63,6 +68,7 @@ growformer ───────────────┐
 growformer-ledger ────────┘
 
 growformer-nca                 standalone
+growformer-system1             standalone
 ```
 
 `growformer` and `growformer-ledger` remain independently usable.
@@ -84,7 +90,8 @@ spacekit-ai/
 ├── growformer/
 ├── growformer-ledger/
 ├── growformer-llm/
-└── growformer-nca/
+├── growformer-nca/
+└── growformer-system1/
 ```
 
 Each project owns its detailed architecture, usage, and reproducibility

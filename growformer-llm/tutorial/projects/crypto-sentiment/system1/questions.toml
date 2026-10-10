@@ -1,0 +1,90 @@
+# System 1 questions for the crypto sentiment project.
+# Labels come from the existing training rows' `semantic_intent` field via `source`,
+# so no new annotation is needed to train the fast heads.
+
+[[questions]]
+id = "sentiment"
+text = "What is the overall sentiment of this crypto text?"
+type = "choice"
+options = ["positive", "negative", "neutral", "mixed", "sarcastic"]
+min_confidence = 0.5
+[questions.source]
+field = "semantic_intent"
+[questions.source.map]
+positive_strong = "positive"
+positive_mild = "positive"
+cautiously_positive = "positive"
+hopium = "positive"
+euphoric = "positive"
+negative_strong = "negative"
+negative_mild = "negative"
+cautiously_negative = "negative"
+capitulation = "negative"
+etf_delay_bearish = "negative"
+copium = "negative"
+neutral = "neutral"
+neutral_chop = "neutral"
+confused = "neutral"
+mixed = "mixed"
+sarcastic = "sarcastic"
+
+[[questions]]
+id = "bullishness"
+text = "How bullish is this text for the asset it discusses?"
+type = "score"
+min = 0
+max = 4
+labels = ["very bearish", "bearish", "neutral or mixed", "bullish", "very bullish"]
+[questions.source]
+field = "semantic_intent"
+[questions.source.map]
+negative_strong = 0
+capitulation = 0
+negative_mild = 1
+cautiously_negative = 1
+etf_delay_bearish = 1
+copium = 1
+neutral = 2
+neutral_chop = 2
+confused = 2
+mixed = 2
+sarcastic = 2
+cautiously_positive = 3
+positive_mild = 3
+hopium = 3
+positive_strong = 4
+euphoric = 4
+
+[[questions]]
+id = "bearish"
+text = "Is this text bearish (negative for the asset)?"
+type = "noul"
+[questions.source]
+field = "semantic_intent"
+[questions.source.map]
+negative_strong = true
+negative_mild = true
+cautiously_negative = true
+capitulation = true
+etf_delay_bearish = true
+copium = true
+positive_strong = false
+positive_mild = false
+cautiously_positive = false
+hopium = false
+euphoric = false
+neutral = false
+neutral_chop = false
+confused = false
+mixed = false
+sarcastic = false
+
+[[questions]]
+id = "intent"
+text = "Which fine-grained sentiment label fits best?"
+type = "choice"
+options = ["positive_strong", "positive_mild", "cautiously_positive", "hopium", "euphoric",
+           "negative_strong", "negative_mild", "cautiously_negative", "capitulation",
+           "etf_delay_bearish", "copium", "neutral", "neutral_chop", "confused", "mixed", "sarcastic"]
+[questions.source]
+field = "semantic_intent"

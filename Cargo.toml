@@ -5,6 +5,7 @@ members = [
     "growformer-ledger",
     "growformer-llm",
     "growformer-nca",
+    "growformer-system1",
 ]
 
 [workspace.package]
