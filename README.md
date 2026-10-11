@@ -21,7 +21,7 @@ The four original crates, their internal module clusters, and the dependency dir
 | [`growformer-ledger/`](growformer-ledger/) | Hash-chained evaluation records and paired statistical comparisons | Supporting library | MIT |
 | [`growformer-llm/`](growformer-llm/) | Domain language models, chat workflows, optional Growformer memory, and historical Clifford experiments | Depends on Growformer and Ledger | Apache-2.0 |
 | [`growformer-nca/`](growformer-nca/) | Experimental neural cellular automata and Clifford-algebra components | Independent research crate | MIT |
-| [`growformer-system1/`](growformer-system1/) | Fast typed decisions (Choice / Score / Noul) with calibrated probabilities: trained heads plus an optional open-weight model (pure Rust, WASM) | Standalone | Apache-2.0 |
+| [`growformer-system1/`](growformer-system1/) | Fast typed decisions (Choice / Score / Noul) with calibrated probabilities: trained heads plus an optional open-weight model (pure Rust, WASM). Also picks the label for growformer-llm's brain flow | Standalone; optional in growformer-llm | Apache-2.0 |
 
 ## Clone and build
 
@@ -64,14 +64,13 @@ and tutorial §7.
 
 ```text
 growformer ───────────────┐
-                          ├──> growformer-llm
-growformer-ledger ────────┘
+growformer-ledger ────────┼──> growformer-llm
+growformer-system1 ───────┘    (optional `system1` feature: System 1 brain as label model)
 
 growformer-nca                 standalone
-growformer-system1             standalone
 ```
 
-`growformer` and `growformer-ledger` remain independently usable.
+`growformer`, `growformer-ledger` and `growformer-system1` remain independently usable.
 `growformer-llm` consumes their public APIs. `growformer-nca` remains isolated
 until an explicit integration contract replaces duplicated experimental code.
 

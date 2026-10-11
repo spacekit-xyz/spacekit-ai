@@ -44,16 +44,19 @@ serde_json = "1"
 toml = "0.8"
 growformer-ledger = { workspace = true }
 growformer = { workspace = true, optional = true }
+growformer-system1 = { workspace = true, optional = true }
 flate2 = "1"
 lzma-rs = "0.3"
 
 [features]
-default = ["vanilla-lm", "brain-memory", "clifford-lm"]
+default = ["vanilla-lm", "brain-memory", "clifford-lm", "system1"]
 # Product LM core (always implied; marker for docs / slim builds).
 vanilla-lm = []
 # Path A: growformer lattice memory unit.
 brain-memory = ["dep:growformer"]
 # Research / historical Clifford Cl(1,3) LM (Bet B closed — not the product path).
 clifford-lm = []
+# growformer-system1 brains as label models (`--label-model agent/x.s1.json.gz`).
+system1 = ["dep:growformer-system1"]
 
 [dev-dependencies]

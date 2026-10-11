@@ -11,13 +11,14 @@
 #   3. Score on the test rows with `gf-llm brain-eval`:
 #        brain (hybrid)  – current default path
 #        label+brain     – classifier picks the label, brain explains
+#        system1+brain   – System 1 head picks the label (when the manifest has [system1])
 #   4. Print a summary table (+ JSON per mode in <out_dir>)
 #
 # Env:
 #   SEED [7]  TEST_FRAC [0.2]
 #   SPAWN     also run with this lattice merge threshold (e.g. 0.92 = old default merge,
 #             2.0 = never merge); overrides [train].*_spawn_threshold in the copy's manifest
-#   GF / GROWFORMER  binary paths (built if missing)
+#   GF / GROWFORMER / S1  binary paths (built if missing)
 
 set -euo pipefail
 
@@ -96,12 +97,27 @@ evaluate() {
       --test "${OUT}/test.jsonl" --label-model "${OUT}/label-model.json" \
       --json-out "${OUT}/${tag}-label.json" 2>/dev/null | tail -1 \
     | sed "s/^/${tag} label+brain         : /")
+  if [[ -n "${S1_BRAIN:-}" ]]; then
+    (cd "${dir}" && "${GF}" brain-eval --brain "${brain}" --project "${MANIFEST}" \
+        --test "${OUT}/test.jsonl" --label-model "${S1_BRAIN}" \
+        --json-out "${OUT}/${tag}-system1.json" 2>/dev/null | tail -1 \
+      | sed "s/^/${tag} system1+brain       : /")
+  fi
 }
 
 "${GF}" label-train "${OUT}/labelled" --out "${OUT}/label-model.json" >/dev/null 2>&1 || true
 # The model above saw all rows; retrain on the train split only for a fair score.
 mkdir -p "${OUT}/train-only" && cp "${OUT}/train.jsonl" "${OUT}/train-only/train_split.jsonl"
 "${GF}" label-train "${OUT}/train-only" --out "${OUT}/label-model.json"
+
+# System 1 heads on the same train split (when the manifest has [system1]).
+S1_Q="$(awk '/^\[system1\]/{f=1;next} /^\[/{f=0} f && /^questions[[:space:]]*=/{gsub(/.*=[[:space:]]*"|".*/,"");print;exit}' "${P}/${MANIFEST}")"
+if [[ -n "${S1_Q}" ]]; then
+  S1="${S1:-${REPO_ROOT}/target/release/gf-system1}"
+  [[ -x "${S1}" ]] || (cd "${REPO_ROOT}" && cargo build --release -p growformer-system1 --features cli --bin gf-system1)
+  S1_BRAIN="${OUT}/system1.s1.json.gz"
+  "${S1}" train --questions "${P}/${S1_Q}" --data "${OUT}/train-only" --out "${S1_BRAIN}" --seed "${SEED}" | tail -1
+fi
 
 make_copy "${OUT}/proj"
 RESULTS="$(evaluate "${OUT}/proj" manifest)"

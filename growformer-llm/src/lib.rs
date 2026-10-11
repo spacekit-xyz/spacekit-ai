@@ -24,6 +24,8 @@ pub mod model_card;
 
 /// TF-IDF + logistic-regression label classifier (picks the label; brain retrieves the explanation).
 pub mod label_classifier;
+#[cfg(feature = "system1")]
+pub mod system1_labeler;
 
 pub use lm_config::TrainConfigV2;
 pub use real_linear::LinearReal;

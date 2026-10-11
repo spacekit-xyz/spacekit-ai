@@ -40,7 +40,7 @@ End-to-end walkthrough with a bundled example project:
 # from the repo root (spacekit-ai/)
 T=growformer-llm/tutorial; P=$T/projects/crypto-sentiment
 
-bash $T/train_brain.sh $P                                # brain + label model, ~1 min
+bash $T/train_brain.sh $P                                # brain + label model (+ System 1 brain), ~1 min
 bash $T/infer.sh $P "Bitcoin crashed after the ETF delay"
 # Assistant> NEGATIVE (mild) — ETF timeline slip plus overnight BTC selloff; regulatory delay driving price weakness.
 
@@ -60,11 +60,12 @@ The same scripts work for any folder with a `*.gf.toml` manifest and `data/*.jso
 | `vanilla-lm` | yes | Product LM core marker |
 | `brain-memory` | yes | Path A lattice memory (independent of LM algebra) |
 | `clifford-lm` | yes* | Historical Bet B stack + CL-1; omit for slim product builds |
+| `system1` | yes | Accept `growformer-system1` brains (`*.s1.json.gz`) as `--label-model` |
 
 \* Kept on by default so old Clifford checkpoints still load. Slim chatbot build:
 
 ```bash
-cargo build --release --no-default-features --features vanilla-lm,brain-memory --bin gf-llm
+cargo build --release --no-default-features --features vanilla-lm,brain-memory,system1 --bin gf-llm
 ```
 
 Quick chat (Path A compose — no LM required):
@@ -879,6 +880,7 @@ cargo run --release --bin tinystories -- brain-infer \
 
 API: `growformer_llm::brain_memory::{BrainMemoryRuntime, query_hybrid, MemorySource, format_lm_memory_prefix_with_source, brain_router_features}`.
 Raw diagnostic: `BrainMemoryRuntime::raw_lattice_diagnostic`.
+Label models: `BrainMemoryRuntime::query_labeled(text, &dyn label_classifier::Labeler, min_conf)`; `label_classifier::load_labeler(path)` loads a `label-model.json` or a System 1 brain (`x.s1.json.gz[#question[,coarse]]`).
 
 Disable the dependency: `cargo build --no-default-features` (tinystories CL/eval only).
 

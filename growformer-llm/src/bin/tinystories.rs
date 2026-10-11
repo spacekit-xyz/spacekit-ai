@@ -13,7 +13,7 @@ use flate2::{write::GzEncoder, Compression};
 use growformer_llm::bpe::BpeTokenizer;
 use growformer_llm::cross_entropy;
 use growformer_llm::label_classifier::{
-    coarse_sentiment, reply_label_head, LabelClassifier, LabelTrainConfig,
+    coarse_sentiment, load_labeler, reply_label_head, LabelClassifier, LabelTrainConfig, Labeler,
 };
 use growformer_llm::model_card::{Arch, ModelCard, SpecialistManifest, CARD_EXT};
 use growformer_llm::param_budget::{log_param_match, matched_vanilla_d_model};
@@ -1529,10 +1529,13 @@ fn main() -> Result<(), String> {
             eprintln!("[label-train] wrote {}", out.display());
         }
         Commands::LabelPredict { model, prompt, top } => {
-            let m = LabelClassifier::load(&model)?;
+            let m = load_labeler(&model)?;
+            eprintln!("[label-predict] {}", m.describe());
             for s in m.predict(&prompt).into_iter().take(top.max(1)) {
                 println!("{:.3}  {}", s.prob, s.label);
             }
+            let t = m.predict_top(&prompt);
+            println!("top: {} p={:.3}", t.label, t.prob);
         }
         Commands::JsonlSplit {
             dirs,
@@ -2347,7 +2350,7 @@ fn main() -> Result<(), String> {
             battery_brains,
         } => {
             let labeler = match &label_model {
-                Some(p) => Some(LabelClassifier::load(p)?),
+                Some(p) => Some(load_labeler(p)?),
                 None => None,
             };
             if battery && heldout {
@@ -2368,7 +2371,7 @@ fn main() -> Result<(), String> {
                         case.prompt,
                         &infer_cfg,
                         hybrid,
-                        labeler.as_ref(),
+                        labeler.as_deref(),
                         label_min_conf,
                         brain_only,
                         checkpoint.as_deref(),
@@ -2396,7 +2399,7 @@ fn main() -> Result<(), String> {
                         &case.prompt,
                         &infer_cfg,
                         hybrid,
-                        labeler.as_ref(),
+                        labeler.as_deref(),
                         label_min_conf,
                         brain_only,
                         checkpoint.as_deref(),
@@ -2427,7 +2430,7 @@ fn main() -> Result<(), String> {
                     &prompt,
                     &infer_cfg,
                     hybrid,
-                    labeler.as_ref(),
+                    labeler.as_deref(),
                     label_min_conf,
                     brain_only,
                     checkpoint.as_deref(),
@@ -2592,12 +2595,8 @@ fn run_chat_repl(args: ChatReplArgs<'_>) -> Result<(), String> {
     #[cfg(feature = "brain-memory")]
     let labeler = match args.label_model {
         Some(p) => {
-            let m = LabelClassifier::load(p)?;
-            eprintln!(
-                "[chat] label model: {} ({} labels)",
-                p.display(),
-                m.labels.len()
-            );
+            let m = load_labeler(p)?;
+            eprintln!("[chat] label model: {} — {}", p.display(), m.describe());
             Some(m)
         }
         None => None,
@@ -2669,7 +2668,7 @@ fn run_chat_repl(args: ChatReplArgs<'_>) -> Result<(), String> {
         let mut memory_text: Option<String> = None;
         #[cfg(feature = "brain-memory")]
         if let Some(rt) = brain_rt.as_mut() {
-            let res = if let Some(lab) = labeler.as_ref() {
+            let res = if let Some(lab) = labeler.as_deref() {
                 rt.query_labeled(&user_line, lab, args.label_min_conf)
                     .map(|(q, src, top)| {
                         eprintln!("[chat] label={} p={:.2}", top.label, top.prob);
@@ -2908,7 +2907,7 @@ fn run_brain_infer_case(
     prompt: &str,
     infer_cfg: &BrainInferConfig,
     hybrid: bool,
-    labeler: Option<&LabelClassifier>,
+    labeler: Option<&dyn Labeler>,
     label_min_conf: f32,
     brain_only: bool,
     checkpoint: Option<&Path>,
@@ -3093,7 +3092,11 @@ fn run_brain_eval(
         rows.truncate(limit);
     }
     let labeler = match label_model {
-        Some(p) => Some(LabelClassifier::load(p)?),
+        Some(p) => {
+            let l = load_labeler(p)?;
+            eprintln!("[brain-eval] label model: {}", l.describe());
+            Some(l)
+        }
         None => None,
     };
     let infer_cfg = BrainInferConfig {
@@ -3124,7 +3127,7 @@ fn run_brain_eval(
     let t0 = std::time::Instant::now();
     for (text, gold) in &rows {
         t.n += 1;
-        let res = if let Some(lab) = labeler.as_ref() {
+        let res = if let Some(lab) = labeler.as_deref() {
             mem.query_labeled(text, lab, label_min_conf)
                 .map(|(q, src, top)| (q, src, Some(top)))
         } else if hybrid {

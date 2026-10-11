@@ -16,7 +16,9 @@
 #   BRAIN    brain .bin (default: [infer].brain from the project's *.gf.toml)
 #   LM_DIR   folder with <name>-lm.json + <name>.tok (default: where train_lm.sh wrote them)
 #   HYBRID   true|false — try the raw-lattice shortcut first (default true)
-#   LABEL    1 = use <project>/agent/label-model.json when present (default), 0 = brain only
+#   LABEL    1 = use a label model when present (default), 0 = brain only
+#   LABEL_MODEL  label model to use [agent/label-model.json, else the System 1 brain
+#                ([system1].brain_output, e.g. agent/crypto.s1.json.gz; add #question to pick one)]
 #   GF       path to the gf-llm binary
 
 set -euo pipefail
@@ -60,8 +62,14 @@ if [[ ! -f "${BRAIN}" ]]; then
 fi
 
 LABEL_ARGS=()
-LABEL_MODEL="${LABEL_MODEL:-${P}/agent/label-model.json}"
-if [[ "${LABEL:-1}" == "1" && -f "${LABEL_MODEL}" ]]; then
+if [[ -z "${LABEL_MODEL:-}" ]]; then
+  LABEL_MODEL="${P}/agent/label-model.json"
+  if [[ ! -f "${LABEL_MODEL}" ]]; then
+    S1_REL="$(awk '/^\[system1\]/{f=1;next} /^\[/{f=0} f && /^brain_output[[:space:]]*=/{gsub(/.*=[[:space:]]*"|".*/,"");print;exit}' "${MANIFEST}" 2>/dev/null || true)"
+    [[ -n "${S1_REL}" ]] && LABEL_MODEL="${P}/${S1_REL}"
+  fi
+fi
+if [[ "${LABEL:-1}" == "1" && -f "${LABEL_MODEL%%#*}" ]]; then
   LABEL_ARGS=(--label-model "${LABEL_MODEL}")
 fi
 

@@ -404,6 +404,85 @@ impl LabelClassifier {
     }
 }
 
+// ─── Labeler: anything that can pick the label for the brain ─────────────────
+
+/// What the "label model picks, brain explains" flow needs from a label model.
+///
+/// Implemented by [`LabelClassifier`] (`gf-llm label-train`) and, with the
+/// `system1` feature, by `system1_labeler::System1Labeler` (a calibrated
+/// `growformer-system1` head). [`load_labeler`] picks one from the file name.
+pub trait Labeler {
+    /// Best label and its probability (used against `--label-min-conf`).
+    fn predict_top(&self, text: &str) -> LabelScore;
+    /// All labels with probabilities, best first.
+    fn predict(&self, text: &str) -> Vec<LabelScore>;
+    /// Cosine similarity of two texts in the labeler's feature space.
+    fn similarity(&self, a: &str, b: &str) -> f32;
+    /// True when the label set is a sentiment scheme (drives reply label prefixes).
+    fn is_sentiment_scheme(&self) -> bool;
+    /// One-line description for logs.
+    fn describe(&self) -> String;
+}
+
+impl Labeler for LabelClassifier {
+    fn predict_top(&self, text: &str) -> LabelScore {
+        LabelClassifier::predict_top(self, text)
+    }
+    fn predict(&self, text: &str) -> Vec<LabelScore> {
+        LabelClassifier::predict(self, text)
+    }
+    fn similarity(&self, a: &str, b: &str) -> f32 {
+        LabelClassifier::similarity(self, a, b)
+    }
+    fn is_sentiment_scheme(&self) -> bool {
+        LabelClassifier::is_sentiment_scheme(self)
+    }
+    fn describe(&self) -> String {
+        format!(
+            "label classifier ({} labels{})",
+            self.labels.len(),
+            if self.coarse_head.is_some() {
+                ", coarse head"
+            } else {
+                ""
+            }
+        )
+    }
+}
+
+/// True for System 1 brain files (`*.s1.json`, `*.s1.json.gz`), with or without
+/// a `#question[,coarse]` suffix.
+pub fn is_system1_path(spec: &str) -> bool {
+    let file = spec.split('#').next().unwrap_or(spec);
+    file.ends_with(".s1.json") || file.ends_with(".s1.json.gz")
+}
+
+/// Load a label model for `--label-model`.
+///
+/// - `agent/label-model.json` → [`LabelClassifier`].
+/// - `agent/x.s1.json.gz` → a System 1 brain (feature `system1`). The label
+///   question is picked automatically (the choice question with the most
+///   options, plus a coarse sentiment question when there is one); pick them
+///   yourself with `agent/x.s1.json.gz#intent` or `#intent,sentiment`.
+pub fn load_labeler(spec: &Path) -> Result<Box<dyn Labeler>, String> {
+    let s = spec.to_string_lossy();
+    if is_system1_path(&s) {
+        #[cfg(feature = "system1")]
+        {
+            return Ok(Box::new(crate::system1_labeler::System1Labeler::load_spec(
+                &s,
+            )?));
+        }
+        #[cfg(not(feature = "system1"))]
+        {
+            return Err(format!(
+                "{s} is a System 1 brain; rebuild gf-llm with the `system1` feature"
+            ));
+        }
+    }
+    Ok(Box::new(LabelClassifier::load(spec)?))
+}
+
 // ─── Label helpers (sentiment display / coarse scoring) ──────────────────────
 
 /// Human-facing label for a reply prefix: `negative_mild` → `NEGATIVE (mild)`,

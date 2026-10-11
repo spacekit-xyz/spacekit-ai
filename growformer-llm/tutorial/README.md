@@ -78,7 +78,7 @@ COMPOSE=diag bash $T/infer.sh $P "Bitcoin crashed after the ETF delay"   # routi
 
 Replies start with a label, then an explanation taken from the most similar training example that has that label. Off-topic prompts such as "who are you" or "hey" get the brain's identity or greeting reply.
 
-`infer.sh` uses `agent/label-model.json` automatically when it exists. To compare with the brain on its own, run `LABEL=0 bash $T/infer.sh $P "…"`.
+`infer.sh` uses `agent/label-model.json` automatically when it exists, and otherwise the System 1 brain (§7). To compare with the brain on its own, run `LABEL=0 bash $T/infer.sh $P "…"`.
 
 ## 3. Train the LM (optional)
 
@@ -178,6 +178,8 @@ Crypto project, 73 held-out prompts, 3 seeds (7 / 11 / 13):
 
 Per seed, label model + brain scored 61.6 / 56.2 / 60.3%, and the brain alone (old merge) scored 53.4 / 54.8 / 52.1%. Most of the brain's correct labels come from hedged replies whose leading label is a lexicon guess.
 
+When the manifest has `[system1]`, `benchmark.sh` also scores **System 1 + brain**: the System 1 heads, trained on the same split, pick the label. On seeds 7 / 11 / 13 it chose the same label as the label model on all 219 held-out prompts (coarse 61.6 / 56.2 / 60.3%). Both are TF-IDF + logistic regression, so this is expected. What System 1 adds is one brain file that also answers the other typed questions (§7), calibrated probabilities, and the open-model fallback.
+
 - **Coarse accuracy** means the reply's label lands in the right bucket: positive, negative, neutral, mixed or sarcastic.
 - **Hedge rate** is the share of replies that are "I don't have enough information…".
 - **Label accuracy** is an exact `semantic_intent` match across 16 labels.
@@ -235,6 +237,19 @@ Held-out results on this project (88 rows):
 
 ECE is the calibration error: how far stated confidence is from actual accuracy. Set `min_confidence` on a question and low-confidence answers come back with `abstain: true`, so your code can send them elsewhere.
 
+**As the brain's label model.** A System 1 brain can pick the label in the "label model picks, brain explains" flow. Pass it wherever `--label-model` is accepted (`chat`, `brain-infer`, `brain-eval`, `label-predict`):
+
+```bash
+cd $P
+../../../../target/release/gf-llm chat --compose brain --brain agent/crypto-brain.bin \
+  --project crypto-sentiment-analysis.gf.toml --label-model agent/crypto.s1.json.gz \
+  --message "Bitcoin crashed after the ETF delay"
+# [chat] label=etf_delay_bearish p=0.81
+# Assistant> NEGATIVE (mild) — Delay-driven selloff erasing prior gains; moderate bearish read.
+```
+
+It uses the trained choice question with the most options as the label (`intent` here). For a sentiment scheme it also uses a coarse question (`sentiment`): it picks the best bucket first, then the best label inside that bucket, the same way the label model's coarse head works. To choose the questions yourself, add them after `#`: `agent/crypto.s1.json.gz#intent,sentiment`. `--label-min-conf` is compared against the calibrated probability, so low-confidence prompts keep the brain's own reply.
+
 **Questions without training data.** Attach a small open-weight model (any Llama, Qwen2 or Qwen3 GGUF plus its `tokenizer.json`). Questions with no head, and heads below the router threshold, then go to that model. It reads the answer-token probabilities instead of generating, and still returns a full distribution. `eval --lm --tune-router` measures it against the heads on your labelled rows, and `distill` turns its answers into training data for new heads. See [`growformer-system1/README.md`](../../growformer-system1/README.md).
 
 The same brain file loads in the browser through the crate's `wasm` feature.
@@ -274,6 +289,8 @@ $GF label-train data --out agent/label-model.json [--holdout-frac 0.2]   # label
 $GF label-predict --model agent/label-model.json --prompt "…"
 $GF chat --compose brain --brain agent/crypto-brain.bin --project crypto-sentiment-analysis.gf.toml \
   --label-model agent/label-model.json --message "…"
+$GF chat --compose brain --brain agent/crypto-brain.bin --project crypto-sentiment-analysis.gf.toml \
+  --label-model agent/crypto.s1.json.gz --message "…"            # System 1 picks the label (§7)
 $GF jsonl-split data --train-out /tmp/train.jsonl --test-out /tmp/test.jsonl --seed 7
 $GF brain-eval --brain agent/crypto-brain.bin --project crypto-sentiment-analysis.gf.toml \
   --test /tmp/test.jsonl [--label-model agent/label-model.json] [--json-out results.json] [-v]

@@ -17,6 +17,7 @@ repository = "https://github.com/spacekit-xyz/spacekit-ai"
 growformer = { version = "0.1.0", path = "growformer", default-features = false }
 growformer-ledger = { version = "0.1.0", path = "growformer-ledger" }
 growformer-nca = { version = "0.1.0", path = "growformer-nca" }
+growformer-system1 = { version = "0.1.0", path = "growformer-system1" }
 
 [profile.release]
 opt-level = 3

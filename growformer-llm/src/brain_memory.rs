@@ -205,7 +205,7 @@ impl BrainMemoryRuntime {
         Ok((q, source))
     }
 
-    /// Classifier-routed query: the supervised label classifier chooses the topic,
+    /// Classifier-routed query: a label model (`LabelClassifier` or a System 1 head) chooses the topic,
     /// the brain retrieves an explanation from that topic's sub-lattice.
     ///
     /// The brain's own answer is kept when it is a non-domain reply the classifier
@@ -214,7 +214,7 @@ impl BrainMemoryRuntime {
     pub fn query_labeled(
         &mut self,
         text: &str,
-        labeler: &crate::label_classifier::LabelClassifier,
+        labeler: &dyn crate::label_classifier::Labeler,
         min_conf: f32,
     ) -> Result<
         (
