@@ -45,8 +45,10 @@ pub struct QuestionEval {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub head: Option<Metrics>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe: Option<Metrics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub lm: Option<Metrics>,
-    /// Head-if-confident-else-LM at the router threshold.
+    /// Head if confident, else the fallback (probe if trained, else LM), at the router threshold.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routed: Option<Metrics>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,6 +68,8 @@ pub struct EvalReport {
     pub rows: usize,
     pub questions: Vec<QuestionEval>,
     pub head_latency: Latency,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_latency: Option<Latency>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lm_latency: Option<Latency>,
 }
@@ -102,7 +106,9 @@ pub fn evaluate(
     let mut gold: Vec<Vec<usize>> = vec![Vec::new(); nq];
     let mut head_p: Vec<Vec<Option<Vec<f32>>>> = vec![Vec::new(); nq];
     let mut lm_z: Vec<Vec<Option<Vec<f32>>>> = vec![Vec::new(); nq];
-    let (mut head_ms, mut lm_ms) = (Vec::new(), Vec::new());
+    let mut probe_p: Vec<Vec<Option<Vec<f32>>>> = vec![Vec::new(); nq];
+    let use_probe = qs.iter().any(|q| d.probe_ready(&q.id));
+    let (mut head_ms, mut lm_ms, mut probe_ms) = (Vec::new(), Vec::new(), Vec::new());
 
     for r in rows {
         let t0 = Instant::now();
@@ -117,6 +123,17 @@ pub fn evaluate(
         }
         head_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
 
+        let mut pp: Vec<Option<Vec<f32>>> = vec![None; nq];
+        if use_probe {
+            let t1 = Instant::now();
+            let x = d.probe_features(&r.text)?;
+            probe_ms.push(t1.elapsed().as_secs_f64() * 1000.0);
+            for &(qi, _, _) in &r.targets {
+                if d.probe_ready(&qs[qi].id) {
+                    pp[qi] = d.probe_probs(&x, &qs[qi].id);
+                }
+            }
+        }
         let mut lz: Vec<Option<Vec<f32>>> = vec![None; nq];
         if use_lm {
             let asked: Vec<usize> = r.targets.iter().map(|(qi, _, _)| *qi).collect();
@@ -131,6 +148,7 @@ pub fn evaluate(
         for &(qi, _, g) in &r.targets {
             gold[qi].push(g);
             head_p[qi].push(hp[qi].take());
+            probe_p[qi].push(pp[qi].take());
             lm_z[qi].push(lz[qi].take());
         }
     }
@@ -138,6 +156,11 @@ pub fn evaluate(
     let mut out = EvalReport {
         rows: rows.len(),
         head_latency: Latency::from_samples(head_ms),
+        probe_latency: if use_probe {
+            Some(Latency::from_samples(probe_ms))
+        } else {
+            None
+        },
         lm_latency: if use_lm {
             Some(Latency::from_samples(lm_ms))
         } else {
@@ -164,7 +187,12 @@ pub fn evaluate(
         if let Some(h) = &head_all {
             qe.head = Some(metrics(h, g, sv.as_deref(), q.min_confidence));
         }
+        let probe_all: Option<Vec<Vec<f32>>> = probe_p[qi].iter().cloned().collect();
+        if let Some(p) = &probe_all {
+            qe.probe = Some(metrics(p, g, sv.as_deref(), q.min_confidence));
+        }
         let lm_all: Option<Vec<Vec<f32>>> = lm_z[qi].iter().cloned().collect();
+        let mut lm_probs: Option<Vec<Vec<f32>>> = None;
         if let Some(z) = &lm_all {
             if opts.fit_lm_temperature {
                 let t = fit_temperature(z, g);
@@ -174,44 +202,46 @@ pub fn evaluate(
             qe.lm_temperature = Some(t);
             let lp: Vec<Vec<f32>> = z.iter().map(|zz| probs_with_temperature(zz, t)).collect();
             qe.lm = Some(metrics(&lp, g, sv.as_deref(), q.min_confidence));
-
-            if let Some(h) = &head_all {
-                let route = |thr: f32| -> (Vec<Vec<f32>>, usize) {
-                    let mut used = 0usize;
-                    let p = h
-                        .iter()
-                        .zip(&lp)
-                        .map(|(hh, ll)| {
-                            if argmax(hh).1 >= thr {
-                                used += 1;
-                                hh.clone()
-                            } else {
-                                ll.clone()
-                            }
-                        })
-                        .collect();
-                    (p, used)
-                };
-                if opts.tune_router && n < opts.min_router_rows {
-                    qe.router_not_tuned = true;
-                } else if opts.tune_router {
-                    // Best accuracy; ties go to the lower threshold (more head = faster).
-                    let mut best = (f64::MIN, 0.0f32);
-                    for &thr in THRESHOLDS {
-                        let (p, _) = route(thr);
-                        let acc = metrics(&p, g, None, None).accuracy;
-                        if acc > best.0 + 1e-9 {
-                            best = (acc, thr);
+            lm_probs = Some(lp);
+        }
+        // What the decider falls back to when the head is unsure.
+        let fallback = probe_all.or(lm_probs);
+        if let (Some(h), Some(fb)) = (&head_all, &fallback) {
+            let route = |thr: f32| -> (Vec<Vec<f32>>, usize) {
+                let mut used = 0usize;
+                let p = h
+                    .iter()
+                    .zip(fb)
+                    .map(|(hh, ff)| {
+                        if argmax(hh).1 >= thr {
+                            used += 1;
+                            hh.clone()
+                        } else {
+                            ff.clone()
                         }
+                    })
+                    .collect();
+                (p, used)
+            };
+            if opts.tune_router && n < opts.min_router_rows {
+                qe.router_not_tuned = true;
+            } else if opts.tune_router {
+                // Best accuracy; ties go to the lower threshold (more head = faster).
+                let mut best = (f64::MIN, 0.0f32);
+                for &thr in THRESHOLDS {
+                    let (p, _) = route(thr);
+                    let acc = metrics(&p, g, None, None).accuracy;
+                    if acc > best.0 + 1e-9 {
+                        best = (acc, thr);
                     }
-                    d.brain.router.per_question.insert(q.id.clone(), best.1);
                 }
-                let thr = d.brain.router.threshold(&q.id);
-                let (p, used) = route(thr);
-                qe.routed = Some(metrics(&p, g, sv.as_deref(), q.min_confidence));
-                qe.router_threshold = Some(thr);
-                qe.head_share = Some(used as f64 / n as f64);
+                d.brain.router.per_question.insert(q.id.clone(), best.1);
             }
+            let thr = d.brain.router.threshold(&q.id);
+            let (p, used) = route(thr);
+            qe.routed = Some(metrics(&p, g, sv.as_deref(), q.min_confidence));
+            qe.router_threshold = Some(thr);
+            qe.head_share = Some(used as f64 / n as f64);
         }
         out.questions.push(qe);
     }
@@ -225,6 +255,7 @@ pub fn distill(
     d: &mut Decider,
     states: &[Value],
     question_ids: &[String],
+    source: DistillSource,
 ) -> Result<Vec<Value>, String> {
     if !d.has_scorer() {
         return Err("distillation needs an open model (--lm)".into());
@@ -247,11 +278,37 @@ pub fn distill(
     let mut out = Vec::with_capacity(states.len());
     for s in states {
         let text = crate::state::state_to_text(s);
-        let z = d.lm_logits(&text, &refs)?;
-        let (mut labels, mut soft) = (Map::new(), Map::new());
-        for (q, zz) in qs.iter().zip(z) {
-            let t = d.brain.lm_temperature.get(&q.id).copied().unwrap_or(1.0);
-            let p = probs_with_temperature(&zz, t);
+        // (question, calibrated probabilities, backend)
+        let per: Vec<(&Question, Vec<f32>, String)> = match source {
+            DistillSource::Lm => {
+                let z = d.lm_logits(&text, &refs)?;
+                qs.iter()
+                    .zip(z)
+                    .map(|(q, zz)| {
+                        let t = d.brain.lm_temperature.get(&q.id).copied().unwrap_or(1.0);
+                        (q, probs_with_temperature(&zz, t), "lm".to_string())
+                    })
+                    .collect()
+            }
+            DistillSource::Best => {
+                let resp = d.decide(&crate::decide::DecideRequest {
+                    state: s.clone(),
+                    questions: qs
+                        .iter()
+                        .map(|q| crate::decide::QuestionRef::Id(q.id.clone()))
+                        .collect(),
+                    min_confidence: None,
+                    force: None,
+                })?;
+                qs.iter()
+                    .zip(resp.answers)
+                    .filter(|(_, a)| !a.distribution.is_empty())
+                    .map(|(q, a)| (q, a.distribution.iter().map(|o| o.p).collect(), a.source))
+                    .collect()
+            }
+        };
+        let (mut labels, mut soft, mut sources) = (Map::new(), Map::new(), Map::new());
+        for (q, p, src) in per {
             let outcomes = q.outcomes();
             let (best, _) = argmax(&p);
             let label = match &q.kind {
@@ -266,10 +323,20 @@ pub fn distill(
                 .map(|(o, &pp)| (o.clone(), json!(((pp as f64) * 1e4).round() / 1e4)))
                 .collect();
             soft.insert(q.id.clone(), Value::Object(dist));
+            sources.insert(q.id.clone(), json!(src));
         }
-        out.push(json!({"state": s, "labels": labels, "soft": soft}));
+        out.push(json!({"state": s, "labels": labels, "soft": soft, "backend": sources}));
     }
     Ok(out)
+}
+
+/// Which backend labels the states in [`distill`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DistillSource {
+    /// Ask the open model every question (zero-shot).
+    Lm,
+    /// Whatever `decide` would answer: probe or head where trained, else the open model.
+    Best,
 }
 
 #[cfg(test)]
@@ -340,7 +407,7 @@ mod tests {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut d = Decider::new(b).with_scorer(Box::new(FakeScorer { calls }));
         let states: Vec<Value> = (0..12).map(|i| json!(format!("ticket {i}"))).collect();
-        let rows = distill(&mut d, &states, &[]).unwrap();
+        let rows = distill(&mut d, &states, &[], DistillSource::Lm).unwrap();
         assert_eq!(rows.len(), 12);
         assert_eq!(rows[0]["labels"]["route"], json!("Tech"));
         assert_eq!(rows[0]["labels"]["urgent"], json!(false));

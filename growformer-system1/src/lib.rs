@@ -31,6 +31,9 @@ pub mod state;
 
 #[cfg(feature = "candle")]
 pub mod lm;
+pub mod probe;
+#[cfg(feature = "candle")]
+pub mod qwen3;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod project;

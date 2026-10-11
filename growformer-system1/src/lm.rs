@@ -15,7 +15,9 @@ use std::io::Cursor;
 
 use candle_core::quantized::gguf_file;
 use candle_core::{Device, Tensor};
-use candle_transformers::models::{quantized_llama, quantized_qwen2, quantized_qwen3};
+use candle_transformers::models::{quantized_llama, quantized_qwen2};
+
+use crate::qwen3 as quantized_qwen3;
 use tokenizers::Tokenizer;
 
 use crate::brain::{LmArch, LmConfig};
@@ -288,6 +290,57 @@ impl CandleScorer {
         t.squeeze(0).and_then(|t| t.to_vec1::<f32>()).map_err(ce)
     }
 
+    /// Probe features for a state (Qwen3 only): the mean of the residual
+    /// stream after layer `round(layer_frac * (layers - 1))` over the state's
+    /// tokens, concatenated with the final-normed hidden state of the last
+    /// prompt token. One forward pass, no LM head.
+    fn embed_state(&mut self, state_text: &str, layer_frac: f32) -> Result<Vec<f32>, String> {
+        let state = truncate_middle(state_text, self.cfg.max_state_tokens.saturating_mul(4));
+        let ids = self.encode(&self.cfg.template.prefix(&self.system, &state))?;
+        if ids.is_empty() {
+            return Err("empty prompt".into());
+        }
+        // Tokens before the state (system prompt, chat markers) are the same
+        // for every state; average only from where the state starts.
+        let marker = '\u{1}';
+        let head = self
+            .cfg
+            .template
+            .prefix(&self.system, &marker.to_string())
+            .split(marker)
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        let start = self.encode(&head)?.len().min(ids.len() - 1);
+        let x = self.input(&ids)?;
+        let Model::Qwen3(m) = &mut self.model else {
+            return Err(format!(
+                "probe heads need a Qwen3 model for now (this brain uses {:?})",
+                self.cfg.arch
+            ));
+        };
+        let tap_layer =
+            ((layer_frac.clamp(0.0, 1.0) * (m.num_layers() - 1) as f32).round()) as usize;
+        m.clear_kv_cache();
+        let r = m.forward_hidden(&x, 0, tap_layer);
+        m.clear_kv_cache();
+        let (tap, last) = r.map_err(ce)?;
+        let l = ids.len();
+        let to_vec = |t: Tensor| -> Result<Vec<f32>, String> {
+            t.flatten_all()
+                .and_then(|t| t.to_dtype(candle_core::DType::F32))
+                .and_then(|t| t.to_vec1::<f32>())
+                .map_err(ce)
+        };
+        let mean = tap
+            .narrow(1, start, l - start)
+            .and_then(|t| t.mean(1))
+            .map_err(ce)?;
+        let mut v = to_vec(mean)?;
+        v.extend(to_vec(last.narrow(1, l - 1, 1).map_err(ce)?)?);
+        Ok(v)
+    }
+
     #[doc(hidden)]
     pub fn encode_for_test(&self, text: &str) -> Result<Vec<u32>, String> {
         self.encode(text)
@@ -307,6 +360,18 @@ impl OptionScorer for CandleScorer {
             device_name(&self.device),
             self.cfg.model
         )
+    }
+
+    fn embed(&mut self, state_text: &str, layer_frac: f32) -> Result<Vec<f32>, String> {
+        self.embed_state(state_text, layer_frac)
+    }
+
+    fn model_key(&self) -> String {
+        let file = std::path::Path::new(&self.cfg.model)
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.cfg.model.clone());
+        format!("{:?}:{file}:{:?}", self.cfg.arch, self.cfg.template)
     }
 
     fn score(
@@ -576,6 +641,28 @@ mod tests {
             );
             assert_eq!(s.last_answer_mass.len(), 3);
         }
+    }
+
+    #[test]
+    fn qwen3_embeddings_feed_probe_heads() {
+        let mut s = scorer(LmArch::Qwen3, "qwen3", TemplatePreset::ChatmlNothink);
+        let a = s.embed("I was charged twice", 0.5).unwrap();
+        assert_eq!(a.len(), 2 * super::testkit::HIDDEN);
+        assert_eq!(
+            a,
+            s.embed("I was charged twice", 0.5).unwrap(),
+            "deterministic"
+        );
+        assert_ne!(a, s.embed("the app crashes", 0.5).unwrap());
+        // Embedding must not disturb scoring (KV cache is cleared around it).
+        let qs = questions();
+        let refs: Vec<&Question> = qs.iter().collect();
+        let before = s.score("x", &refs).unwrap();
+        s.embed("y", 1.0).unwrap();
+        assert_eq!(before, s.score("x", &refs).unwrap());
+        // Other architectures say so instead of failing obscurely.
+        let mut l = scorer(LmArch::Llama, "llama", TemplatePreset::Llama3);
+        assert!(l.embed("x", 0.5).unwrap_err().contains("Qwen3"));
     }
 
     #[test]

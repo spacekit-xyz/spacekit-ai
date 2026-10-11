@@ -127,6 +127,9 @@ pub struct System1Brain {
     /// can leave them out (see [`row_fingerprint`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub train_rows: Vec<u64>,
+    /// Probe heads on the open model's hidden state (`gf-system1 train-probe`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe: Option<crate::probe::Probe>,
 }
 
 /// Fingerprint of a state's text (FNV-1a over lower-cased, whitespace-collapsed
@@ -204,6 +207,7 @@ impl System1Brain {
             max_state_chars: default_max_state_chars(),
             reports: BTreeMap::new(),
             train_rows: Vec::new(),
+            probe: None,
         })
     }
 
@@ -310,7 +314,15 @@ impl System1Brain {
         Ok(())
     }
 
-    /// True when the heads were trained on this state.
+    /// Add rows to the "trained on" set (e.g. the probe's training rows).
+    pub fn mark_trained(&mut self, texts: impl IntoIterator<Item = String>) {
+        self.train_rows
+            .extend(texts.into_iter().map(|t| row_fingerprint(&t)));
+        self.train_rows.sort_unstable();
+        self.train_rows.dedup();
+    }
+
+    /// True when the heads (or probe) were trained on this state.
     pub fn trained_on(&self, text: &str) -> bool {
         self.train_rows
             .binary_search(&row_fingerprint(text))

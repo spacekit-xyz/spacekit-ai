@@ -250,6 +250,16 @@ cd $P
 
 It uses the trained choice question with the most options as the label (`intent` here). For a sentiment scheme it also uses a coarse question (`sentiment`): it picks the best bucket first, then the best label inside that bucket, the same way the label model's coarse head works. To choose the questions yourself, add them after `#`: `agent/crypto.s1.json.gz#intent,sentiment`. `--label-min-conf` is compared against the calibrated probability, so low-confidence prompts keep the brain's own reply.
 
+**Better accuracy with an open model.** With a Qwen3 model attached, `train-probe` trains a small head per question on the model's hidden state. The model reads each state once; no question text, no decoding. These probes learn labels like `copium` and `neutral` "for once" from your examples, where the word-based heads struggle:
+
+```bash
+$S1 stats --project $P/crypto-sentiment-analysis.gf.toml        # 13 of the 16 intent labels have < 30 rows
+$S1 train-probe --brain $P/agent/crypto.s1.json.gz --data $P/data # one model pass per row, cached in *.emb
+$S1 distill --brain $P/agent/crypto.s1.json.gz --states more_posts.txt --source best --out distilled.jsonl
+```
+
+Measure on held-out rows (`gf-llm jsonl-split`, then `train` / `train-probe` on one part and `eval` on the other); the `probe` column sits next to `head` and `lm`.
+
 **Questions without training data.** Attach a small open-weight model (any Llama, Qwen2 or Qwen3 GGUF plus its `tokenizer.json`). Questions with no head, and heads below the router threshold, then go to that model. It reads the answer-token probabilities instead of generating, and still returns a full distribution. `eval --lm --tune-router` measures it against the heads on your labelled rows, and `distill` turns its answers into training data for new heads. See [`growformer-system1/README.md`](../../growformer-system1/README.md).
 
 The same brain file loads in the browser through the crate's `wasm` feature.

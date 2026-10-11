@@ -26,7 +26,8 @@ request ──► │ featurize once ─► head per question │──► confi
   - It runs a small open-weight model (GGUF; Llama, Qwen2 or Qwen3) through [candle](https://github.com/huggingface/candle).
   - The prompt puts the state first. Llama and Qwen3 process the state once and reuse it for every question; Qwen2 recomputes it per question because its candle model can't be copied.
   - Each answer is read from the probability of its answer token (`A`/`B`/…, a digit, or `Yes`/`No`). No text is generated.
-- **Router.** A question goes to its head when the head's confidence is at or above a threshold; otherwise it goes to the open model. `eval --tune-router` picks a threshold per question from labelled data.
+- **Probe heads** (feature `candle`, Qwen3 models). The open model reads the state once, with no question and no decoding. A small calibrated classifier per question then reads its hidden state (`train-probe`). Probes see what the text means, so they learn your labels from a few hundred examples, and every question is answered from that one pass.
+- **Router.** A question goes to its fast head when the head's confidence is at or above a threshold; otherwise it goes to its probe if one is trained, else to the open model. `train-probe` sends a question straight to its probe when the probe beat the head on held-out rows; `eval --tune-router` picks a threshold per question from labelled data.
 - **Distillation.** `distill` labels raw states with the open model, keeping the full probability distribution as soft labels. `train` then turns those labels into fast heads.
 
 The crate is pure Rust, with no C or C++ dependencies. It builds for Linux, macOS, Windows and `wasm32-unknown-unknown`.
@@ -102,6 +103,14 @@ $S1 eval --brain agent/support.s1.json.gz --data labelled/ --lm --fit-lm-tempera
 $S1 distill --brain agent/support.s1.json.gz --states unlabelled.jsonl --out distilled.jsonl
 $S1 train --questions questions.toml --data distilled.jsonl --data data/ --out agent/support.s1.json.gz
 
+# Probe heads: the open model's hidden state + your labels (features cached in <brain>.emb)
+$S1 train-probe --brain agent/support.s1.json.gz --data data/
+$S1 eval --brain agent/support.s1.json.gz --data test.jsonl            # head / probe / lm / routed side by side
+
+# Label unlabelled text with the best available backend, then retrain the fast heads on it
+$S1 distill --brain agent/support.s1.json.gz --states raw.txt --source best --out distilled.jsonl
+$S1 stats --questions questions.toml --data data/                    # rows per outcome; flags thin ones
+
 $S1 serve --brain agent/support.s1.json.gz --addr 127.0.0.1:8787
 curl -s localhost:8787/v1/decide -H 'content-type: application/json' \
   -d '{"state":"my card was billed twice","questions":["route","refund"]}'
@@ -154,7 +163,7 @@ POST /v1/decide
    "distribution": [{"outcome": "true", "p": 0.22}, {"outcome": "false", "p": 0.78}], "source": "lm"}]}
 ```
 
-`source` is `head`, `lm`, or `none`. `none` means no backend could answer; the answer then has `abstain: true` and an `error` field.
+`source` is `head`, `probe`, `lm`, or `none`. `none` means no backend could answer; the answer then has `abstain: true` and an `error` field.
 
 ## WASM
 
@@ -173,8 +182,16 @@ Use any GGUF of a supported architecture together with its `tokenizer.json`. Sma
 
 To smoke-test the pipeline without downloading anything, run `cargo run --example tiny_model --features candle -- out/`. It writes a tiny random model; its answers are meaningless, but every code path runs.
 
+## Improving quality
+
+1. **Check the labels.** `stats` lists rows per outcome. Outcomes with fewer than about 30 rows are guesswork for any head: add examples or merge them into a broader outcome.
+2. **Probe heads.** `train-probe` usually beats the TF-IDF heads by a wide margin on meaning-heavy labels (sarcasm, regret, "worked for once"). It costs one open-model pass per training row, cached in `<brain>.emb`, so retraining is fast.
+3. **Distil.** Collect unlabelled text (JSONL or a `.txt` file, one state per line) and label it with `distill --source best`. Training the fast heads on it gives them far more wording to learn from. The labels are only as good as the backend that produced them, so keep hand labels for your project-specific outcomes.
+4. **Measure on enough rows.** Use a held-out split of 150 rows or more; on 40 rows, differences under about 15 points are noise.
+
 ## Limits
 
 - Heads are only as good as their labels. On the 375-row crypto sentiment set they reach about 59% (5-way sentiment) and 75% (bearish yes/no) on held-out rows.
 - Open-model accuracy depends on the model you pick. Measure it with `eval --lm`.
+- Probe heads need a Qwen3 model for now, and only work with the model they were trained on (re-run `train-probe` after switching models).
 - Keep arithmetic, counting and date logic in application code. This crate is for semantic judgement.
