@@ -123,6 +123,34 @@ pub struct System1Brain {
     pub max_state_chars: usize,
     #[serde(default)]
     pub reports: BTreeMap<String, HeadReport>,
+    /// Sorted fingerprints of the states the heads were trained on, so `eval`
+    /// can leave them out (see [`row_fingerprint`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub train_rows: Vec<u64>,
+}
+
+/// Fingerprint of a state's text (FNV-1a over lower-cased, whitespace-collapsed
+/// text): identical rows match even when spacing or case differ.
+pub fn row_fingerprint(text: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut space = false;
+    let mut started = false;
+    for c in text.chars().flat_map(char::to_lowercase) {
+        if c.is_whitespace() {
+            space = started;
+            continue;
+        }
+        if space {
+            h = (h ^ b' ' as u64).wrapping_mul(0x0100_0000_01b3);
+            space = false;
+        }
+        started = true;
+        let mut buf = [0u8; 4];
+        for b in c.encode_utf8(&mut buf).bytes() {
+            h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    h
 }
 
 fn default_max_state_chars() -> usize {
@@ -175,6 +203,7 @@ impl System1Brain {
             lm: None,
             max_state_chars: default_max_state_chars(),
             reports: BTreeMap::new(),
+            train_rows: Vec::new(),
         })
     }
 
@@ -274,7 +303,18 @@ impl System1Brain {
             }
         }
         self.featurizer = Some(feat);
+        let mut fp: Vec<u64> = rows.iter().map(|r| row_fingerprint(&r.text)).collect();
+        fp.sort_unstable();
+        fp.dedup();
+        self.train_rows = fp;
         Ok(())
+    }
+
+    /// True when the heads were trained on this state.
+    pub fn trained_on(&self, text: &str) -> bool {
+        self.train_rows
+            .binary_search(&row_fingerprint(text))
+            .is_ok()
     }
 
     pub fn to_json(&self) -> Result<String, String> {

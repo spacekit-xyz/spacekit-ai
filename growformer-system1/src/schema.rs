@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// The three decision primitives.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -45,6 +46,12 @@ pub struct Question {
     /// `labels` object (e.g. reuse a project's `semantic_intent`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<LabelSource>,
+    /// Choice only: a short definition per option, shown to the open model
+    /// next to the option (`hopium = "optimism not backed by fundamentals"`).
+    /// Project-specific labels need these; the model has never seen your
+    /// label names.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub definitions: BTreeMap<String, String>,
 }
 
 /// Where training labels for a question come from when a row has no
@@ -77,6 +84,7 @@ impl Question {
             description: None,
             min_confidence: None,
             source: None,
+            definitions: BTreeMap::new(),
         }
     }
 
@@ -92,6 +100,7 @@ impl Question {
             description: None,
             min_confidence: None,
             source: None,
+            definitions: BTreeMap::new(),
         }
     }
 
@@ -103,6 +112,7 @@ impl Question {
             description: None,
             min_confidence: None,
             source: None,
+            definitions: BTreeMap::new(),
         }
     }
 
@@ -139,6 +149,14 @@ impl Question {
                         return Err(format!("{}: duplicate option {o:?}", self.id));
                     }
                 }
+                for k in self.definitions.keys() {
+                    if !options.iter().any(|o| o == k) {
+                        return Err(format!(
+                            "{}: definition for {k:?}, which is not one of the options",
+                            self.id
+                        ));
+                    }
+                }
             }
             QuestionKind::Score { min, max, labels } => {
                 if max <= min {
@@ -156,6 +174,12 @@ impl Question {
                 }
             }
             QuestionKind::Noul => {}
+        }
+        if !self.definitions.is_empty() && !matches!(self.kind, QuestionKind::Choice { .. }) {
+            return Err(format!(
+                "{}: `definitions` applies to choice questions (use `labels` for score)",
+                self.id
+            ));
         }
         Ok(())
     }

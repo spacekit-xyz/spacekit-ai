@@ -53,6 +53,10 @@ text = "Which team should handle this ticket?"
 type = "choice"
 options = ["Billing", "Tech Support", "Cancellation"]
 
+# Optional: one-line definitions the open model sees next to each option.
+# Add them whenever option names are your own jargon.
+definitions = { Billing = "payments, invoices, refunds", Cancellation = "wants to close the account" }
+
 [[questions]]
 id = "urgency"
 text = "How urgent is this?"
@@ -103,7 +107,15 @@ curl -s localhost:8787/v1/decide -H 'content-type: application/json' \
   -d '{"state":"my card was billed twice","questions":["route","refund"]}'
 ```
 
-`eval --fit-lm-temperature / --tune-router` fits on one half of the rows and reports on the other.
+`eval` leaves out rows the heads were trained on (the brain stores a fingerprint of each training state), so its numbers are held-out by default; `--include-train-rows` keeps them. `--fit-lm-temperature / --tune-router` fits on one half of the remaining rows and reports on the other. A question's router threshold is only tuned with at least 50 fitting rows (`--min-router-rows`); fewer than that and the threshold is mostly noise. `train` keeps an existing brain's open-model settings but clears tuned router thresholds, since they were tuned against the old heads.
+
+To get a held-out set, split before training:
+
+```bash
+gf-llm jsonl-split data --train-out split/train.jsonl --test-out test.jsonl --seed 7
+$S1 train --questions questions.toml --data split/train.jsonl --out agent/support.s1.json.gz
+$S1 eval  --brain agent/support.s1.json.gz --data test.jsonl --lm --fit-lm-temperature --tune-router --save
+```
 
 A Growformer project manifest can supply the paths:
 

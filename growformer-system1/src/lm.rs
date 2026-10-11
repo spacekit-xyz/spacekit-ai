@@ -47,37 +47,82 @@ pub struct CandleScorer {
     pub last_answer_mass: Vec<f32>,
 }
 
-/// Pick the compute device: CUDA / Metal when compiled in and available, else CPU.
+// Command-line apps on macOS must link CoreGraphics, or Metal's device list
+// (`MTLCreateSystemDefaultDevice`) comes back empty and candle panics in `new_metal(0)`.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {}
+
+/// Run `f`, turning a panic into `None` without printing it.
+#[cfg(any(feature = "metal", feature = "cuda"))]
+fn quiet<T>(f: impl FnOnce() -> T + std::panic::UnwindSafe) -> Option<T> {
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let r = std::panic::catch_unwind(f).ok();
+    std::panic::set_hook(hook);
+    r
+}
+
+/// Pick the compute device: CUDA / Metal when compiled in and available, else
+/// CPU. `GF_S1_DEVICE=cpu|metal|cuda` overrides the choice.
 pub fn default_device() -> Device {
+    let want = std::env::var("GF_S1_DEVICE")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if want == "cpu" {
+        return Device::Cpu;
+    }
     #[cfg(feature = "cuda")]
-    if let Ok(d) = Device::new_cuda(0) {
-        return d;
+    if want.is_empty() || want == "cuda" {
+        if let Some(Ok(d)) = quiet(|| Device::new_cuda(0)) {
+            return d;
+        }
     }
     #[cfg(feature = "metal")]
-    if let Ok(d) = Device::new_metal(0) {
-        return d;
+    if want.is_empty() || want == "metal" {
+        if let Some(Ok(d)) = quiet(|| Device::new_metal(0)) {
+            return d;
+        }
+    }
+    if !want.is_empty() {
+        eprintln!("[gf-system1] device {want:?} unavailable in this build; using CPU");
+    } else if cfg!(any(feature = "metal", feature = "cuda")) {
+        eprintln!("[gf-system1] no GPU device found; using CPU");
     }
     Device::Cpu
+}
+
+fn device_name(d: &Device) -> &'static str {
+    match d {
+        Device::Cpu => "cpu",
+        Device::Cuda(_) => "cuda",
+        Device::Metal(_) => "metal",
+    }
 }
 
 impl CandleScorer {
     /// Load from in-memory GGUF + `tokenizer.json` (works in wasm).
     pub fn from_bytes(cfg: LmConfig, gguf: &[u8], tokenizer_json: &[u8]) -> Result<Self, String> {
+        Self::from_reader(cfg, &mut Cursor::new(gguf), tokenizer_json)
+    }
+
+    /// Load from any seekable GGUF reader + `tokenizer.json` bytes.
+    pub fn from_reader<R: std::io::Read + std::io::Seek>(
+        cfg: LmConfig,
+        reader: &mut R,
+        tokenizer_json: &[u8],
+    ) -> Result<Self, String> {
         let device = default_device();
-        let mut reader = Cursor::new(gguf);
-        let content = gguf_file::Content::read(&mut reader).map_err(|e| format!("gguf: {e}"))?;
+        let content = gguf_file::Content::read(reader).map_err(|e| format!("gguf: {e}"))?;
         let model = match cfg.arch {
             LmArch::Llama => Model::Llama(
-                quantized_llama::ModelWeights::from_gguf(content, &mut reader, &device)
-                    .map_err(ce)?,
+                quantized_llama::ModelWeights::from_gguf(content, reader, &device).map_err(ce)?,
             ),
             LmArch::Qwen2 => Model::Qwen2(
-                quantized_qwen2::ModelWeights::from_gguf(content, &mut reader, &device)
-                    .map_err(ce)?,
+                quantized_qwen2::ModelWeights::from_gguf(content, reader, &device).map_err(ce)?,
             ),
             LmArch::Qwen3 => Model::Qwen3(
-                quantized_qwen3::ModelWeights::from_gguf(content, &mut reader, &device)
-                    .map_err(ce)?,
+                quantized_qwen3::ModelWeights::from_gguf(content, reader, &device).map_err(ce)?,
             ),
         };
         let tokenizer =
@@ -96,7 +141,9 @@ impl CandleScorer {
         })
     }
 
-    /// Load the files named in `cfg`, resolved against `base_dir`.
+    /// Load the files named in `cfg`, resolved against `base_dir`. The GGUF is
+    /// read straight from disk (not buffered whole), so peak memory stays near
+    /// the model's own size.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn from_files(cfg: LmConfig, base_dir: &std::path::Path) -> Result<Self, String> {
         let resolve = |p: &str| {
@@ -108,9 +155,10 @@ impl CandleScorer {
             }
         };
         let (m, t) = (resolve(&cfg.model), resolve(&cfg.tokenizer));
-        let gguf = std::fs::read(&m).map_err(|e| format!("read {}: {e}", m.display()))?;
         let tok = std::fs::read(&t).map_err(|e| format!("read {}: {e}", t.display()))?;
-        Self::from_bytes(cfg, &gguf, &tok)
+        let file = std::fs::File::open(&m).map_err(|e| format!("open {}: {e}", m.display()))?;
+        let mut reader = std::io::BufReader::new(file);
+        Self::from_reader(cfg, &mut reader, &tok).map_err(|e| format!("{}: {e}", m.display()))
     }
 
     fn encode(&self, text: &str) -> Result<Vec<u32>, String> {
@@ -253,7 +301,12 @@ fn logsumexp(xs: &[f32]) -> f32 {
 
 impl OptionScorer for CandleScorer {
     fn describe(&self) -> String {
-        format!("candle {:?} ({})", self.cfg.arch, self.cfg.model)
+        format!(
+            "candle {:?} on {} ({})",
+            self.cfg.arch,
+            device_name(&self.device),
+            self.cfg.model
+        )
     }
 
     fn score(

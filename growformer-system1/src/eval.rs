@@ -56,6 +56,9 @@ pub struct QuestionEval {
     pub head_share: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lm_temperature: Option<f32>,
+    /// `tune_router` was asked for but this question had too few rows.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub router_not_tuned: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -75,6 +78,9 @@ pub struct EvalOptions {
     pub fit_lm_temperature: bool,
     /// Pick per-question router thresholds that maximise routed accuracy and store them.
     pub tune_router: bool,
+    /// Questions with fewer labelled rows than this keep their current router
+    /// threshold (a threshold picked on a few dozen rows is mostly noise).
+    pub min_router_rows: usize,
 }
 
 const THRESHOLDS: &[f32] = &[0.0, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.01];
@@ -186,8 +192,10 @@ pub fn evaluate(
                         .collect();
                     (p, used)
                 };
-                if opts.tune_router {
-                    // Best accuracy; ties → higher threshold? No: ties → lower threshold (more head = faster).
+                if opts.tune_router && n < opts.min_router_rows {
+                    qe.router_not_tuned = true;
+                } else if opts.tune_router {
+                    // Best accuracy; ties go to the lower threshold (more head = faster).
                     let mut best = (f64::MIN, 0.0f32);
                     for &thr in THRESHOLDS {
                         let (p, _) = route(thr);
@@ -284,6 +292,7 @@ mod tests {
                 use_lm: true,
                 fit_lm_temperature: true,
                 tune_router: true,
+                min_router_rows: 0,
             },
         )
         .unwrap();
@@ -297,6 +306,31 @@ mod tests {
         );
         assert!(route.head_share.unwrap() > 0.9);
         assert!(rep.lm_latency.is_some());
+    }
+
+    #[test]
+    fn router_needs_enough_rows() {
+        let (qs, rows) = crate::brain::tests::toy_rows();
+        let mut b = System1Brain::new("toy", qs).unwrap();
+        b.train_heads(&rows, &TrainConfig::default()).unwrap();
+        assert!(b.trained_on(&rows[0].text));
+        assert!(b.trained_on(&format!("  {}  ", rows[0].text.to_uppercase())));
+        assert!(!b.trained_on("a state nobody has seen"));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut d = Decider::new(b).with_scorer(Box::new(FakeScorer { calls }));
+        let rep = evaluate(
+            &mut d,
+            &rows,
+            &EvalOptions {
+                use_lm: true,
+                tune_router: true,
+                min_router_rows: 10_000,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(rep.questions.iter().all(|q| q.router_not_tuned || q.n == 0));
+        assert!(d.brain.router.per_question.is_empty());
     }
 
     #[test]

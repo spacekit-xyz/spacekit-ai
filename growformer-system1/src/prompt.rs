@@ -66,7 +66,10 @@ fn options_block(q: &Question, answers: &[String]) -> (String, String) {
             let lines: Vec<String> = options
                 .iter()
                 .zip(answers)
-                .map(|(o, a)| format!("{a}) {o}"))
+                .map(|(o, a)| match q.definitions.get(o).map(|d| d.trim()) {
+                    Some(d) if !d.is_empty() => format!("{a}) {o} = {d}"),
+                    _ => format!("{a}) {o}"),
+                })
                 .collect();
             (
                 format!("Options:\n{}", lines.join("\n")),
@@ -198,6 +201,25 @@ mod tests {
         assert_eq!(qp.answers, vec!["A", "B"]);
         assert!(qp.suffix.contains("A) Billing\nB) Tech Support"));
         assert!(qp.suffix.ends_with("<think>\n\n</think>\n\n"));
+    }
+
+    #[test]
+    fn choice_definitions_are_shown() {
+        let mut q = Question::choice("i", "Which label?", &["hopium", "copium"]);
+        q.definitions.insert(
+            "hopium".into(),
+            "optimism not backed by fundamentals".into(),
+        );
+        q.validate().unwrap();
+        let qp = TemplatePreset::Chatml.question(DEFAULT_SYSTEM, &q);
+        assert!(
+            qp.suffix
+                .contains("A) hopium = optimism not backed by fundamentals\nB) copium"),
+            "{}",
+            qp.suffix
+        );
+        q.definitions.insert("moon".into(), "x".into());
+        assert!(q.validate().is_err());
     }
 
     #[test]

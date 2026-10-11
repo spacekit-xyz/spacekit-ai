@@ -205,7 +205,7 @@ Sometimes you don't want a reply, you want a decision your code can branch on: *
 | `score` | `bullishness`: 0 (very bearish) … 4 (very bullish) | mean, std + distribution |
 | `noul` | `bearish`: is the text bearish? | `true`/`false` + P(true) |
 
-The questions live in `system1/questions.toml`. Each one maps the existing `semantic_intent` field onto its outcomes, so no new labelling is needed. The manifest points at them:
+The questions live in `system1/questions.toml`. Each one maps the existing `semantic_intent` field onto its outcomes, so no new labelling is needed. `definitions` give the open model a one-line meaning for each option, since it has never seen labels like `hopium` or `etf_delay_bearish`. The manifest points at them:
 
 ```toml
 [system1]

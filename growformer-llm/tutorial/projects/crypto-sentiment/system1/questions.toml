@@ -1,6 +1,8 @@
 # System 1 questions for the crypto sentiment project.
 # Labels come from the existing training rows' `semantic_intent` field via `source`,
 # so no new annotation is needed to train the fast heads.
+# `definitions` are shown to the open model next to each option; it has never seen
+# this project's label names, so they matter most for `intent`.
 
 [[questions]]
 id = "sentiment"
@@ -8,6 +10,13 @@ text = "What is the overall sentiment of this crypto text?"
 type = "choice"
 options = ["positive", "negative", "neutral", "mixed", "sarcastic"]
 min_confidence = 0.5
+[questions.definitions]
+positive = "clearly good news or optimism, from mild relief to excitement"
+negative = "losses, scams, frustration, fear or bearish news"
+neutral = "factual, uneventful or uncertain; includes relief that something normal worked 'for once'"
+mixed = "one clear positive and one clear negative point, often joined by 'but'"
+sarcastic = "ironic or mocking; the literal words say the opposite of the meaning"
+
 [questions.source]
 field = "semantic_intent"
 [questions.source.map]
@@ -86,5 +95,23 @@ type = "choice"
 options = ["positive_strong", "positive_mild", "cautiously_positive", "hopium", "euphoric",
            "negative_strong", "negative_mild", "cautiously_negative", "capitulation",
            "etf_delay_bearish", "copium", "neutral", "neutral_chop", "confused", "mixed", "sarcastic"]
+[questions.definitions]
+positive_strong = "strongly bullish or very good outcome (major signal, big win, loss reframed as the best thing)"
+positive_mild = "modestly good: a legitimate result, small win or relief"
+cautiously_positive = "restrained optimism from early signals; 'something is brewing'"
+hopium = "optimism driven by narrative or wishful thinking rather than fundamentals"
+euphoric = "extreme hype: 'we're so back', vertical charts, bull-run excitement"
+negative_strong = "catastrophic or total loss: drained wallets, life savings gone"
+negative_mild = "frustration, broken promises, or a near-miss scam without real loss"
+cautiously_negative = "wary suspicion; spots a scam or risk pattern and avoids it"
+capitulation = "exhausted and giving up after repeated losses: 'I'm done'"
+etf_delay_bearish = "Bitcoin selling off because a spot ETF decision was delayed"
+copium = "counterfactual regret: 'if I had sold at the top', 'had they fixed it sooner'"
+neutral = "factual or uneventful; relief that something normal worked 'for once'"
+neutral_chop = "sideways, directionless, low-volume market"
+confused = "unclear what is happening; uncertainty rather than anger"
+mixed = "one clear positive and one clear negative point, often joined by 'but'"
+sarcastic = "ironic or mocking tone; the literal words say the opposite"
+
 [questions.source]
 field = "semantic_intent"

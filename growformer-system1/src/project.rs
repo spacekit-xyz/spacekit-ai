@@ -167,8 +167,15 @@ pub fn load_decider(brain_path: &Path, with_lm: bool) -> Result<Decider, String>
         if let Some(cfg) = d.brain.lm.clone() {
             #[cfg(feature = "candle")]
             {
+                use crate::decide::OptionScorer;
                 let base = brain_path.parent().unwrap_or(Path::new("."));
+                let t0 = web_time::Instant::now();
                 let s = crate::lm::CandleScorer::from_files(cfg, base)?;
+                eprintln!(
+                    "[gf-system1] open model: {} (loaded in {:.1}s)",
+                    s.describe(),
+                    t0.elapsed().as_secs_f32()
+                );
                 d.set_scorer(Box::new(s));
             }
             #[cfg(not(feature = "candle"))]

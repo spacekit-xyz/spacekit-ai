@@ -118,6 +118,12 @@ enum Cmd {
         /// Evaluate at most N rows.
         #[arg(long, default_value_t = 0)]
         limit: usize,
+        /// Keep rows the heads were trained on (their head scores are then optimistic).
+        #[arg(long)]
+        include_train_rows: bool,
+        /// Tune a question's router threshold only with at least this many fitting rows.
+        #[arg(long, default_value_t = 50)]
+        min_router_rows: usize,
     },
     /// Label states with the open model → JSONL with soft labels for `train`.
     Distill {
@@ -294,8 +300,22 @@ fn run(cli: Cli) -> Result<(), String> {
             // Keep an existing brain's open-model settings and calibration.
             if let Ok(old) = System1Brain::load(&out) {
                 b.lm = old.lm;
-                b.lm_temperature = old.lm_temperature;
-                b.router = old.router;
+                // Open-model temperatures stay valid only while the question
+                // (and so its prompt) is unchanged.
+                b.lm_temperature = old
+                    .lm_temperature
+                    .into_iter()
+                    .filter(|(id, _)| old.questions.get(id) == b.questions.get(id))
+                    .collect();
+                // Per-question router thresholds were tuned against the old
+                // heads; keep only the global default.
+                if !old.router.per_question.is_empty() {
+                    eprintln!(
+                        "note: cleared {} tuned router threshold(s) from the previous brain; re-run `eval --tune-router` on held-out rows",
+                        old.router.per_question.len()
+                    );
+                }
+                b.router.head_min_confidence = old.router.head_min_confidence;
             }
             if let Some(p) = &proj {
                 if let Some(mut lm) = p.lm.clone() {
@@ -406,6 +426,8 @@ fn run(cli: Cli) -> Result<(), String> {
             save,
             json_out,
             limit,
+            include_train_rows,
+            min_router_rows,
         } => {
             let bpath = brain_path(&project, &brain)?;
             let data = if data.is_empty() {
@@ -419,10 +441,26 @@ fn run(cli: Cli) -> Result<(), String> {
             };
             let mut d = load_decider(&bpath, lm || fit_lm_temperature || tune_router)?;
             let (mut rows, _) = read_rows(&data, &d.brain.questions)?;
+            let total = rows.len();
+            let overlap = rows.iter().filter(|r| d.brain.trained_on(&r.text)).count();
+            if !include_train_rows && overlap > 0 {
+                rows.retain(|r| !d.brain.trained_on(&r.text));
+                eprintln!(
+                    "left out {overlap} of {total} rows the heads were trained on ({} remain; --include-train-rows keeps them)",
+                    rows.len()
+                );
+                if rows.is_empty() {
+                    return Err("every row was used to train the heads, so nothing is left to evaluate. \
+Hold some rows out: split the data (e.g. `gf-llm jsonl-split`), `train` on one part and `eval --data` the other."
+                        .into());
+                }
+            }
             if limit > 0 && rows.len() > limit {
                 rows.truncate(limit);
             }
+            let optimistic = d.brain.train_rows.is_empty() || (include_train_rows && overlap > 0);
             let fitting = fit_lm_temperature || tune_router;
+            let mut router_notes: Vec<String> = Vec::new();
             let report = if fitting {
                 // Fit on one half, report on the other (no peeking).
                 let (fit_idx, rep_idx) = growformer_system1::data::split_holdout(&rows, 0.5, 11);
@@ -433,15 +471,24 @@ fn run(cli: Cli) -> Result<(), String> {
                     fit_rows.len(),
                     rep_rows.len()
                 );
-                evaluate(
+                let fit_rep = evaluate(
                     &mut d,
                     &fit_rows,
                     &EvalOptions {
                         use_lm: true,
                         fit_lm_temperature,
                         tune_router,
+                        min_router_rows,
                     },
                 )?;
+                for q in fit_rep.questions.iter().filter(|q| q.router_not_tuned) {
+                    router_notes.push(format!(
+                        "router not tuned for `{}`: {} fitting rows < --min-router-rows {min_router_rows}; kept threshold {:.2}",
+                        q.id,
+                        q.n,
+                        d.brain.router.threshold(&q.id)
+                    ));
+                }
                 evaluate(
                     &mut d,
                     &rep_rows,
@@ -460,11 +507,18 @@ fn run(cli: Cli) -> Result<(), String> {
                     },
                 )?
             };
-            println!(
-                "rows: {}  (heads were trained on rows that may overlap; use held-out data for honest numbers)",
-                report.rows
-            );
+            if optimistic {
+                println!(
+                    "rows: {}  (some may be rows the heads were trained on: head scores are optimistic)",
+                    report.rows
+                );
+            } else {
+                println!("rows: {}  (none used to train the heads)", report.rows);
+            }
             print_eval(&report);
+            for n in &router_notes {
+                println!("{n}");
+            }
             if let Some(p) = json_out {
                 std::fs::write(&p, serde_json::to_string_pretty(&report).unwrap())
                     .map_err(|e| e.to_string())?;
