@@ -374,6 +374,41 @@ pub fn load_grounding_graph_from_str(toml_str: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The runtime domain grounding graph, saved by [`grounding_snapshot`] and put back
+/// by [`restore_grounding`] (used when several brains share one runtime).
+#[derive(Clone, Debug, Default)]
+pub struct GroundingSnapshot(Option<WorldGraph>);
+
+impl GroundingSnapshot {
+    pub fn is_loaded(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
+/// Save the runtime domain grounding graph (the embedded base graph is not affected).
+pub fn grounding_snapshot() -> GroundingSnapshot {
+    GroundingSnapshot(domain_graph_clone())
+}
+
+/// Replace the runtime domain grounding graph with a saved one (`None` clears it).
+pub fn restore_grounding(snapshot: &GroundingSnapshot) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        DOMAIN_GRAPH.with(|cell| *cell.borrow_mut() = snapshot.0.clone());
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if let Ok(mut guard) = DOMAIN_GRAPH_NATIVE.write() {
+            *guard = snapshot.0.clone();
+        }
+    }
+}
+
+/// Drop the runtime domain grounding graph.
+pub fn clear_grounding_graph() {
+    restore_grounding(&GroundingSnapshot(None));
+}
+
 /// `raised` is a fundraising alias, but "Chase raised my mortgage rate" is a consumer complaint —
 /// not a venture round / earnings headline.
 fn fundraising_root_false_positive_on_consumer_rate(intent_text: &str) -> bool {

@@ -3586,6 +3586,36 @@ pub fn reload_inference_toml_from_str(toml_str: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The active inference configuration, without building the default when none is
+/// loaded yet. Pair with [`install_inference_toml_snapshot`] to save and restore the
+/// process-wide rules, e.g. when several brains share one runtime
+/// ([`crate::brain_instances`]).
+pub fn inference_toml_snapshot() -> Option<Arc<LoadedInferenceToml>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        FULL.read().ok().and_then(|g| g.clone())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        WASM_FULL.with(|cell| cell.borrow().clone())
+    }
+}
+
+/// Restore a configuration saved with [`inference_toml_snapshot`]. `None` returns to
+/// the built-in defaults on next use.
+pub fn install_inference_toml_snapshot(snapshot: Option<Arc<LoadedInferenceToml>>) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if let Ok(mut guard) = FULL.write() {
+            *guard = snapshot;
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        WASM_FULL.with(|cell| *cell.borrow_mut() = snapshot);
+    }
+}
+
 pub fn inference_rules_runtime() -> Arc<InferenceRulesRuntime> {
     inference_toml_loaded().rules()
 }

@@ -42,6 +42,7 @@ pub mod arc_brain;
 pub mod arc_dsl;
 pub mod basal_ganglia;
 pub mod brain;
+pub mod brain_instances;
 /// Categorical DAG, Pythagoras-node training scaffolding, and sentiment functor experiments.
 #[cfg(feature = "categorical")]
 pub mod category;

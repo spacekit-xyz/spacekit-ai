@@ -290,6 +290,8 @@ Lean inference without the full training CLI:
 | `runtime.rs` | `Runtime::from_brain_bytes` — prompt, converse, codegen; native + wasm32 |
 | `growformer-runtime` | `cargo build --release --bin growformer-runtime --no-default-features` then `growformer-runtime brain.bin "prompt"` |
 
+**Several brains in one runtime.** `brain_instances::BrainInstance` holds a brain together with its own inference rules, topic graph and grounding graph, which Growformer otherwise keeps process-wide. It makes them active before each call, so brains used one after another behave as if each were loaded alone. The WASM build exposes this as `growformer_instance_create()` → id, the `*_i(id, …)` functions (`growformer_load_brain_i`, `growformer_converse_i`, `growformer_load_inference_toml_i`, …), and `growformer_instance_destroy(id)`. Id 0 stays the single-brain API (`growformer_load_brain`, `growformer_converse`, …). `growformer_engine_info()` reports the engine, its version, the brain formats it reads and whether instances are available. SpaceKit loads these through `GrowformerInstance` (spacekit-js) and `growformerInstanceEngine` (`@spacekit/sdk/plugins`).
+
 The default feature set includes `brain-compression`. A lean runtime built with
 `--no-default-features` reads uncompressed packages; add
 `--features brain-compression` when it must read `GWFCMPKG` files.
