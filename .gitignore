@@ -32,6 +32,8 @@
 **/*.onnx
 **/*.s1.json
 **/*.s1.json.gz
+# probe feature caches (gf-system1 train-probe)
+**/*.emb
 **/*.pt
 **/*.pth
 **/*_results.txt

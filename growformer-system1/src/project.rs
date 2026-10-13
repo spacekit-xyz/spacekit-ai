@@ -188,6 +188,161 @@ pub fn load_decider(brain_path: &Path, with_lm: bool) -> Result<Decider, String>
     Ok(d)
 }
 
+/// Loads brains for a [`crate::multi::Registry`], sharing one loaded open
+/// model between every brain that names the same GGUF (and one
+/// [`crate::multi::ModelPool`] between brains with identical prompt settings).
+pub struct Loader {
+    with_lm: bool,
+    #[cfg_attr(not(feature = "candle"), allow(dead_code))]
+    workers: usize,
+    #[cfg_attr(not(feature = "candle"), allow(dead_code))]
+    feature_cache: usize,
+    #[cfg(feature = "candle")]
+    models: std::sync::Mutex<std::collections::HashMap<String, crate::lm::CandleScorer>>,
+    pools: std::sync::Mutex<
+        std::collections::HashMap<String, std::sync::Arc<crate::multi::ModelPool>>,
+    >,
+}
+
+impl Loader {
+    /// `workers`: parallel model passes per pool (copies share the weights).
+    pub fn new(with_lm: bool, workers: usize) -> Self {
+        Self {
+            with_lm,
+            workers: workers.max(1),
+            feature_cache: crate::multi::DEFAULT_FEATURE_CACHE,
+            #[cfg(feature = "candle")]
+            models: Default::default(),
+            pools: Default::default(),
+        }
+    }
+
+    /// Probe features kept per pool, in states (0 disables).
+    pub fn feature_cache(mut self, states: usize) -> Self {
+        self.feature_cache = states;
+        self
+    }
+
+    /// Distinct model pools loaded so far.
+    pub fn pool_count(&self) -> usize {
+        self.pools.lock().map(|p| p.len()).unwrap_or(0)
+    }
+
+    /// Load a brain file; `name` defaults to the file stem (`crypto.s1.json.gz` → `crypto`).
+    pub fn load(
+        &self,
+        name: Option<String>,
+        path: &Path,
+    ) -> Result<crate::multi::BrainEntry, String> {
+        let brain = System1Brain::load(path)?;
+        let name =
+            name.unwrap_or_else(|| crate::multi::brain_name_from_path(&path.to_string_lossy()));
+        let pool = match (&brain.lm, self.with_lm) {
+            (Some(cfg), true) => Some(self.pool_for(cfg, path)?),
+            _ => None,
+        };
+        Ok(crate::multi::BrainEntry {
+            name,
+            brain: std::sync::Arc::new(brain),
+            pool,
+            source: Some(path.to_string_lossy().into_owned()),
+        })
+    }
+
+    /// Every `*.s1.json` / `*.s1.json.gz` in a folder, sorted by name.
+    pub fn load_dir(&self, dir: &Path) -> Result<Vec<crate::multi::BrainEntry>, String> {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+            .map_err(|e| format!("read_dir {}: {e}", dir.display()))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                let n = p.to_string_lossy();
+                n.ends_with(".s1.json") || n.ends_with(".s1.json.gz")
+            })
+            .collect();
+        files.sort();
+        if files.is_empty() {
+            return Err(format!("no *.s1.json(.gz) brains in {}", dir.display()));
+        }
+        files.iter().map(|f| self.load(None, f)).collect()
+    }
+
+    #[allow(unused_variables)]
+    fn pool_for(
+        &self,
+        cfg: &LmConfig,
+        brain_path: &Path,
+    ) -> Result<std::sync::Arc<crate::multi::ModelPool>, String> {
+        #[cfg(not(feature = "candle"))]
+        {
+            Err(format!(
+                "{} names an open model but this binary was built without the `candle` feature (use --no-lm or rebuild with --features candle)",
+                brain_path.display()
+            ))
+        }
+        #[cfg(feature = "candle")]
+        {
+            use crate::decide::OptionScorer;
+            use crate::multi::ModelPool;
+            use std::sync::Arc;
+            let base = brain_path.parent().unwrap_or(Path::new("."));
+            let abs = |p: &str| {
+                let pb = PathBuf::from(p);
+                let pb = if pb.is_absolute() { pb } else { base.join(pb) };
+                std::fs::canonicalize(&pb)
+                    .unwrap_or(pb)
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            let mut cfg = cfg.clone();
+            cfg.model = abs(&cfg.model);
+            cfg.tokenizer = abs(&cfg.tokenizer);
+            let pool_key = serde_json::to_string(&cfg).map_err(|e| e.to_string())?;
+            let mut pools = self.pools.lock().map_err(|_| "loader lock poisoned")?;
+            if let Some(p) = pools.get(&pool_key) {
+                return Ok(p.clone());
+            }
+            let weights_key = format!("{:?}|{}|{}", cfg.arch, cfg.model, cfg.tokenizer);
+            let mut models = self.models.lock().map_err(|_| "loader lock poisoned")?;
+            let scorer: Box<dyn OptionScorer + Send> = match models
+                .get(&weights_key)
+                .and_then(|m| m.fork_with(Some(cfg.clone())))
+            {
+                Some(s) => {
+                    eprintln!(
+                        "[gf-system1] sharing loaded {} with {}",
+                        cfg.model,
+                        brain_path.display()
+                    );
+                    Box::new(s)
+                }
+                None => {
+                    let t0 = web_time::Instant::now();
+                    let s = crate::lm::CandleScorer::from_files(cfg.clone(), Path::new("/"))?;
+                    eprintln!(
+                        "[gf-system1] open model: {} (loaded in {:.1}s)",
+                        s.describe(),
+                        t0.elapsed().as_secs_f32()
+                    );
+                    match s.fork_with(None) {
+                        // Keep one copy to share with later brains.
+                        Some(copy) => {
+                            models.insert(weights_key, s);
+                            Box::new(copy)
+                        }
+                        // Can't share (Qwen2): this pool owns it.
+                        None => Box::new(s),
+                    }
+                }
+            };
+            let pool = Arc::new(
+                ModelPool::new(scorer, self.workers).with_feature_cache(self.feature_cache),
+            );
+            pools.insert(pool_key, pool.clone());
+            Ok(pool)
+        }
+    }
+}
+
 /// On-disk cache of probe features, keyed by state fingerprint. A cache made
 /// with a different model/layer (`key`) is ignored. Format: `S1EMB1`, key
 /// length (u32 LE) + key bytes, dim (u32 LE), then `(u64 fingerprint, dim × f32)`

@@ -31,6 +31,7 @@ pub mod state;
 
 #[cfg(feature = "candle")]
 pub mod lm;
+pub mod multi;
 pub mod probe;
 #[cfg(feature = "candle")]
 pub mod qwen3;

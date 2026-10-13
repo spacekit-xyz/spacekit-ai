@@ -11,8 +11,10 @@ use serde_json::Value;
 use growformer_system1::brain::{LmArch, LmConfig, System1Brain, TrainConfig};
 use growformer_system1::decide::{Backend, DecideRequest, QuestionRef};
 use growformer_system1::eval::{distill, evaluate, DistillSource, EvalOptions, EvalReport};
+use growformer_system1::multi::{MultiRequest, Registry};
 use growformer_system1::project::{
     label_counts, load_decider, read_project, read_questions, read_rows, relative_to, EmbCache,
+    Loader,
 };
 use growformer_system1::prompt::TemplatePreset;
 
@@ -70,8 +72,10 @@ enum Cmd {
     },
     /// Answer questions about one state (prints the response JSON).
     Decide {
-        #[arg(long)]
-        brain: PathBuf,
+        /// Brain file, optionally `name=path`; repeat to ask several brains
+        /// (they share one loaded open model and one pass per state).
+        #[arg(long, required = true)]
+        brain: Vec<String>,
         /// State text.
         #[arg(long, conflicts_with_all = ["state_json", "request"])]
         state: Option<String>,
@@ -92,6 +96,9 @@ enum Cmd {
         /// Don't load the brain's open model.
         #[arg(long)]
         no_lm: bool,
+        /// Let this (loaded) routing brain pick which brain answers.
+        #[arg(long)]
+        route: Option<String>,
     },
     /// Accuracy, Brier, calibration error and latency on labelled rows.
     Eval {
@@ -181,17 +188,29 @@ enum Cmd {
         #[arg(long, default_value_t = 30)]
         min: usize,
     },
-    /// HTTP server: POST /v1/decide, GET /v1/questions, GET /health.
+    /// HTTP server for one or many brains sharing one loaded open model:
+    /// POST /v1/decide, GET /v1/brains, GET /v1/questions, POST /v1/brains/{name}/reload.
     #[cfg(feature = "server")]
     Serve {
+        /// Project manifests with a [system1] section (repeatable).
         #[arg(long)]
-        project: Option<PathBuf>,
+        project: Vec<PathBuf>,
+        /// Brain files, optionally `name=path` (repeatable).
         #[arg(long)]
-        brain: Option<PathBuf>,
+        brain: Vec<String>,
+        /// Load every *.s1.json(.gz) in this folder.
+        #[arg(long)]
+        brains_dir: Option<PathBuf>,
         #[arg(long, default_value = "127.0.0.1:8787")]
         addr: String,
         #[arg(long)]
         no_lm: bool,
+        /// Parallel open-model passes per model (copies share the weights).
+        #[arg(long, default_value_t = 2)]
+        workers: usize,
+        /// Recent states whose probe features are kept (0 = off).
+        #[arg(long, default_value_t = 1024)]
+        feature_cache: usize,
     },
 }
 
@@ -209,6 +228,16 @@ fn brain_path(project: &Option<PathBuf>, brain: &Option<PathBuf>) -> Result<Path
     match project {
         Some(p) => Ok(read_project(p)?.brain_output),
         None => Err("pass --brain or --project".into()),
+    }
+}
+
+/// `name=path` or `path`.
+fn parse_brain_spec(spec: &str) -> (Option<String>, PathBuf) {
+    match spec.split_once('=') {
+        Some((n, p)) if !n.is_empty() && !n.contains(['/', '\\']) && !p.is_empty() => {
+            (Some(n.to_string()), PathBuf::from(p))
+        }
+        _ => (None, PathBuf::from(spec)),
     }
 }
 
@@ -526,8 +555,14 @@ fn run(cli: Cli) -> Result<(), String> {
             min_confidence,
             force,
             no_lm,
+            route,
         } => {
-            let mut d = load_decider(&brain, !no_lm)?;
+            let loader = Loader::new(!no_lm, 1);
+            let reg = Registry::new();
+            for spec in &brain {
+                let (name, path) = parse_brain_spec(spec);
+                reg.insert(loader.load(name, &path)?);
+            }
             let req: DecideRequest = if let Some(r) = request {
                 let raw = std::fs::read_to_string(&r).map_err(|e| e.to_string())?;
                 serde_json::from_str(&raw).map_err(|e| format!("request: {e}"))?
@@ -553,7 +588,23 @@ fn run(cli: Cli) -> Result<(), String> {
                     },
                 }
             };
-            let resp = d.decide(&req)?;
+            let names = reg.names();
+            let multi = if route.is_some() {
+                MultiRequest {
+                    brain: None,
+                    brains: Vec::new(),
+                    route,
+                    request: req,
+                }
+            } else {
+                MultiRequest {
+                    brain: (names.len() == 1).then(|| names[0].clone()),
+                    brains: if names.len() > 1 { names } else { Vec::new() },
+                    route: None,
+                    request: req,
+                }
+            };
+            let resp = reg.decide(&multi)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&resp).map_err(|e| e.to_string())?
@@ -917,71 +968,155 @@ Hold some rows out: split the data (e.g. `gf-llm jsonl-split`), `train` on one p
         Cmd::Serve {
             project,
             brain,
+            brains_dir,
             addr,
             no_lm,
+            workers,
+            feature_cache,
         } => {
-            let bpath = brain_path(&project, &brain)?;
-            let d = load_decider(&bpath, !no_lm)?;
-            serve(d, &addr)?;
+            let loader = Loader::new(!no_lm, workers).feature_cache(feature_cache);
+            let reg = Registry::new();
+            for p in &project {
+                let proj = read_project(p)?;
+                let mut e = loader.load(None, &proj.brain_output)?;
+                e.name = growformer_system1::multi::brain_name_from_path(
+                    &proj.brain_output.to_string_lossy(),
+                );
+                reg.insert(e);
+            }
+            for spec in &brain {
+                let (name, path) = parse_brain_spec(spec);
+                reg.insert(loader.load(name, &path)?);
+            }
+            if let Some(dir) = &brains_dir {
+                for e in loader.load_dir(dir)? {
+                    reg.insert(e);
+                }
+            }
+            if reg.is_empty() {
+                return Err("pass --brain, --brains-dir or --project".into());
+            }
+            eprintln!(
+                "[gf-system1] {} brain(s): {}; {} open-model pool(s), {} worker(s) each",
+                reg.len(),
+                reg.names().join(", "),
+                loader.pool_count(),
+                workers.max(1)
+            );
+            serve(reg, loader, &addr)?;
         }
     }
     Ok(())
 }
 
 #[cfg(feature = "server")]
-fn serve(d: growformer_system1::Decider, addr: &str) -> Result<(), String> {
-    use axum::extract::State;
+fn serve(reg: Registry, loader: Loader, addr: &str) -> Result<(), String> {
+    use axum::extract::{Path as UrlPath, Query, State};
     use axum::http::StatusCode;
     use axum::routing::{get, post};
     use axum::{Json, Router};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
-    type Shared = Arc<Mutex<growformer_system1::Decider>>;
-    let info = json!({
-        "brain": d.brain.name,
-        "questions": d.brain.questions.questions.iter().map(|q| q.id.clone()).collect::<Vec<_>>(),
-        "heads": d.brain.heads.keys().cloned().collect::<Vec<_>>(),
-        "open_model": d.scorer_description(),
-    });
-    let shared: Shared = Arc::new(Mutex::new(d));
+    #[derive(Clone)]
+    struct App {
+        reg: Arc<Registry>,
+        loader: Arc<Loader>,
+    }
+    type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
+    fn bad(code: StatusCode, e: impl ToString) -> (StatusCode, Json<Value>) {
+        (code, Json(json!({"error": e.to_string()})))
+    }
 
+    // Blocking work (model passes) runs off the async threads; requests for
+    // different brains, or heads-only requests, never wait on each other.
     async fn decide(
-        State(s): State<Shared>,
-        Json(req): Json<DecideRequest>,
-    ) -> Result<Json<growformer_system1::DecideResponse>, (StatusCode, Json<Value>)> {
-        tokio::task::spawn_blocking(move || {
-            let mut d = s.lock().map_err(|_| "decider lock poisoned".to_string())?;
-            d.decide(&req)
+        State(app): State<App>,
+        Json(req): Json<MultiRequest>,
+    ) -> Result<Json<growformer_system1::multi::RegistryResponse>, (StatusCode, Json<Value>)> {
+        tokio::task::spawn_blocking(move || app.reg.decide(&req))
+            .await
+            .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e))?
+            .map(Json)
+            .map_err(|e| bad(StatusCode::BAD_REQUEST, e))
+    }
+
+    async fn brains(State(app): State<App>) -> Json<Value> {
+        Json(json!(app
+            .reg
+            .entries()
+            .iter()
+            .map(|e| e.info())
+            .collect::<Vec<_>>()))
+    }
+
+    #[derive(serde::Deserialize)]
+    struct BrainQuery {
+        brain: Option<String>,
+    }
+    async fn questions(State(app): State<App>, Query(q): Query<BrainQuery>) -> Reply {
+        let e = app
+            .reg
+            .resolve(q.brain.as_deref())
+            .map_err(|e| bad(StatusCode::NOT_FOUND, e))?;
+        Ok(Json(
+            serde_json::to_value(&e.brain.questions).unwrap_or(Value::Null),
+        ))
+    }
+
+    // Reload a brain from its file (e.g. after retraining); in-flight requests
+    // finish on the old copy. The open model is reused, not reloaded.
+    async fn reload(State(app): State<App>, UrlPath(name): UrlPath<String>) -> Reply {
+        let e = app
+            .reg
+            .get(&name)
+            .ok_or_else(|| bad(StatusCode::NOT_FOUND, format!("no brain named {name:?}")))?;
+        let src = e
+            .source
+            .clone()
+            .ok_or_else(|| bad(StatusCode::BAD_REQUEST, "brain has no source file"))?;
+        let entry = tokio::task::spawn_blocking(move || {
+            app.loader.load(Some(name), Path::new(&src)).map(|e| {
+                let info = e.info();
+                app.reg.insert(e);
+                info
+            })
         })
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e.to_string()})),
-            )
-        })?
-        .map(Json)
-        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e}))))
+        .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|e| bad(StatusCode::BAD_REQUEST, e))?;
+        Ok(Json(entry))
     }
 
-    async fn questions(State(s): State<Shared>) -> Json<Value> {
-        let d = s.lock().unwrap();
-        Json(serde_json::to_value(&d.brain.questions).unwrap_or(Value::Null))
-    }
-
-    let health = Json(info.clone());
-    let app = Router::new()
+    let app = App {
+        reg: Arc::new(reg),
+        loader: Arc::new(loader),
+    };
+    let summary = json!(app.reg.names());
+    let health_app = app.clone();
+    let router = Router::new()
         .route("/v1/decide", post(decide))
+        .route("/v1/brains", get(brains))
+        .route("/v1/brains/:name/reload", post(reload))
         .route("/v1/questions", get(questions))
-        .route("/health", get(move || async move { health }))
-        .with_state(shared);
+        .route(
+            "/health",
+            get(move || {
+                let n = health_app.reg.names();
+                async move { Json(json!({"ok": true, "brains": n})) }
+            }),
+        )
+        .with_state(app);
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .map_err(|e| format!("bind {addr}: {e}"))?;
-        eprintln!("gf-system1 serving {info} on http://{addr}  (POST /v1/decide)");
-        axum::serve(listener, app).await.map_err(|e| e.to_string())
+        eprintln!(
+            "gf-system1 serving {summary} on http://{addr}  (POST /v1/decide, GET /v1/brains)"
+        );
+        axum::serve(listener, router)
+            .await
+            .map_err(|e| e.to_string())
     })
 }

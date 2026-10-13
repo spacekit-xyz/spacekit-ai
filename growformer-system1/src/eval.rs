@@ -205,6 +205,7 @@ pub fn evaluate(
             lm_probs = Some(lp);
         }
         // What the decider falls back to when the head is unsure.
+        let probe_fallback = probe_all.is_some();
         let fallback = probe_all.or(lm_probs);
         if let (Some(h), Some(fb)) = (&head_all, &fallback) {
             let route = |thr: f32| -> (Vec<Vec<f32>>, usize) {
@@ -226,15 +227,33 @@ pub fn evaluate(
             if opts.tune_router && n < opts.min_router_rows {
                 qe.router_not_tuned = true;
             } else if opts.tune_router {
-                // Best accuracy; ties go to the lower threshold (more head = faster).
-                let mut best = (f64::MIN, 0.0f32);
-                for &thr in THRESHOLDS {
-                    let (p, _) = route(thr);
-                    let acc = metrics(&p, g, None, None).accuracy;
-                    if acc > best.0 + 1e-9 {
-                        best = (acc, thr);
+                let acc_at = |thr: f32| metrics(&route(thr).0, g, None, None).accuracy;
+                let best = if probe_fallback {
+                    // The probe is usually the stronger backend: keep "always
+                    // probe" unless some threshold beats it by a clear margin
+                    // (≥ 2 rows and ≥ 2 points), so a few lucky fitting rows
+                    // don't move the question off it.
+                    let base = acc_at(1.01);
+                    let margin = (2.0 / n as f64).max(0.02);
+                    let mut best = (base, 1.01f32);
+                    for &thr in THRESHOLDS {
+                        let acc = acc_at(thr);
+                        if acc >= base + margin - 1e-9 && acc > best.0 + 1e-9 {
+                            best = (acc, thr);
+                        }
                     }
-                }
+                    best
+                } else {
+                    // Best accuracy; ties go to the lower threshold (more head = faster).
+                    let mut best = (f64::MIN, 0.0f32);
+                    for &thr in THRESHOLDS {
+                        let acc = acc_at(thr);
+                        if acc > best.0 + 1e-9 {
+                            best = (acc, thr);
+                        }
+                    }
+                    best
+                };
                 d.brain.router.per_question.insert(q.id.clone(), best.1);
             }
             let thr = d.brain.router.threshold(&q.id);
@@ -373,6 +392,42 @@ mod tests {
         );
         assert!(route.head_share.unwrap() > 0.9);
         assert!(rep.lm_latency.is_some());
+    }
+
+    #[test]
+    fn router_keeps_probe_unless_clearly_beaten() {
+        use crate::probe::{toy_embed, Probe, ProbeTrainConfig};
+        let (qs, rows) = crate::brain::tests::toy_rows();
+        let mut b = System1Brain::new("toy", qs.clone()).unwrap();
+        b.train_heads(&rows, &TrainConfig::default()).unwrap();
+        let feats: Vec<Vec<f32>> = rows.iter().map(|r| toy_embed(&r.text, 64)).collect();
+        b.probe = Some(
+            Probe::train(
+                &qs,
+                &rows,
+                &feats,
+                "fake".into(),
+                0.5,
+                &ProbeTrainConfig::default(),
+            )
+            .unwrap(),
+        );
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut d = Decider::new(b).with_scorer(Box::new(FakeScorer { calls }));
+        let rep = evaluate(
+            &mut d,
+            &rows,
+            &EvalOptions {
+                tune_router: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // Head and probe are both near-perfect on this toy data: no clear win
+        // for the head, so the question stays on the probe.
+        let route = rep.questions.iter().find(|q| q.id == "route").unwrap();
+        assert!(route.probe.is_some());
+        assert_eq!(d.brain.router.threshold("route"), 1.01, "{route:?}");
     }
 
     #[test]

@@ -27,6 +27,12 @@ pub trait OptionScorer {
     fn model_key(&self) -> String {
         self.describe()
     }
+    /// Another handle on the same loaded weights with its own cache, so
+    /// requests can run in parallel without loading the model twice. `None`
+    /// when the backend can't share its weights.
+    fn fork(&self) -> Option<Box<dyn OptionScorer + Send>> {
+        None
+    }
 }
 
 /// A question by id (from the brain's schema) or defined inline.
@@ -164,6 +170,236 @@ fn unanswerable(q: &Question, why: &str) -> Answer {
     }
 }
 
+/// Heads' state text (truncated for the featurizer).
+pub fn head_text(brain: &System1Brain, state_text: &str) -> String {
+    truncate_middle(state_text, brain.max_state_chars)
+}
+
+/// Calibrated head probabilities, or `None` if the question has no head.
+pub fn head_probs(
+    brain: &System1Brain,
+    feats: &crate::features::SparseVec,
+    qid: &str,
+) -> Option<Vec<f32>> {
+    let head = brain.heads.get(qid)?;
+    let t = brain.head_temperature.get(qid).copied().unwrap_or(1.0);
+    Some(probs_with_temperature(&head.logits(feats), t))
+}
+
+/// Raw open-model logits for several questions (shared state).
+pub fn lm_logits(
+    scorer: &mut dyn OptionScorer,
+    state_text: &str,
+    qs: &[&Question],
+) -> Result<Vec<Vec<f32>>, String> {
+    let out = scorer.score(state_text, qs)?;
+    if out.len() != qs.len() {
+        return Err("scorer returned the wrong number of questions".into());
+    }
+    for (q, z) in qs.iter().zip(&out) {
+        if z.len() != q.n_outcomes() {
+            return Err(format!("scorer returned {} logits for {}", z.len(), q.id));
+        }
+    }
+    Ok(out)
+}
+
+/// True when the brain has a probe head for `qid` and `model_key` (the
+/// attached model) is the model the probe was trained on.
+pub fn probe_ready(brain: &System1Brain, model_key: Option<&str>, qid: &str) -> bool {
+    match (&brain.probe, model_key) {
+        (Some(p), Some(k)) => p.heads.contains_key(qid) && p.model_key == k,
+        _ => false,
+    }
+}
+
+/// Standardised probe features for a state (one open-model pass).
+pub fn probe_features(
+    brain: &System1Brain,
+    scorer: &mut dyn OptionScorer,
+    state_text: &str,
+) -> Result<Vec<f32>, String> {
+    let p = brain.probe.as_ref().ok_or("brain has no probe")?;
+    let raw = scorer.embed(state_text, p.layer_frac)?;
+    if raw.len() != p.dim {
+        return Err(format!(
+            "probe expects {} features, the model gave {}",
+            p.dim,
+            raw.len()
+        ));
+    }
+    Ok(p.standardize(&raw))
+}
+
+/// Calibrated probe probabilities for standardised features.
+pub fn probe_probs(brain: &System1Brain, x_std: &[f32], qid: &str) -> Option<Vec<f32>> {
+    brain.probe.as_ref()?.probs(qid, x_std)
+}
+
+fn resolve(brain: &System1Brain, refs: &[QuestionRef]) -> Result<Vec<Question>, String> {
+    if refs.is_empty() {
+        return Ok(brain.questions.questions.clone());
+    }
+    refs.iter()
+        .map(|r| match r {
+            QuestionRef::Id(id) => brain
+                .questions
+                .get(id)
+                .cloned()
+                .ok_or_else(|| format!("unknown question id {id:?}")),
+            QuestionRef::Inline(q) => {
+                q.validate()?;
+                Ok(q.clone())
+            }
+        })
+        .collect()
+}
+
+/// Answer every question about one state with `brain`, using `scorer` (the
+/// open model) for probes and unanswered questions. The brain is only read,
+/// so many requests can share one brain; see [`crate::multi`] for serving
+/// many brains on one model.
+pub fn decide_with(
+    brain: &System1Brain,
+    mut scorer: Option<&mut dyn OptionScorer>,
+    req: &DecideRequest,
+) -> Result<DecideResponse, String> {
+    let has_scorer = scorer.is_some();
+    let key = scorer.as_ref().map(|s| s.model_key());
+    let t0 = Instant::now();
+    let questions = resolve(brain, &req.questions)?;
+    let state_text = state_to_text(&req.state);
+    let feats = brain
+        .featurizer
+        .as_ref()
+        .map(|f| f.transform(&head_text(brain, &state_text)));
+
+    let mut answers: Vec<Option<Answer>> = vec![None; questions.len()];
+    let mut to_probe: Vec<usize> = Vec::new();
+    let mut to_lm: Vec<usize> = Vec::new();
+    for (i, q) in questions.iter().enumerate() {
+        // An inline question that reuses a trained id but changes its schema
+        // must not be answered by that trained head or probe.
+        let trained_ok = brain
+            .questions
+            .get(&q.id)
+            .map(|bq| bq.kind == q.kind)
+            .unwrap_or(false);
+        let head = if trained_ok {
+            feats.as_ref().and_then(|x| head_probs(brain, x, &q.id))
+        } else {
+            None
+        };
+        let probe_ok = trained_ok && probe_ready(brain, key.as_deref(), &q.id);
+        // Fallback when the head is missing or unsure: the probe if there is
+        // one, else asking the open model.
+        let fallback = if probe_ok {
+            Some(Backend::Probe)
+        } else if has_scorer {
+            Some(Backend::Lm)
+        } else {
+            None
+        };
+        let backend = match req.force {
+            Some(Backend::Head) if head.is_some() => Backend::Head,
+            Some(Backend::Probe) if probe_ok => Backend::Probe,
+            Some(Backend::Lm) if has_scorer => Backend::Lm,
+            _ => match (&head, fallback) {
+                (Some(p), Some(fb)) => {
+                    if argmax(p).1 >= brain.router.threshold(&q.id) {
+                        Backend::Head
+                    } else {
+                        fb
+                    }
+                }
+                (Some(_), None) => Backend::Head,
+                (None, Some(fb)) => fb,
+                (None, None) => {
+                    answers[i] = Some(unanswerable(
+                        q,
+                        "no trained head for this question and no open model attached",
+                    ));
+                    continue;
+                }
+            },
+        };
+        match backend {
+            Backend::Head => {
+                answers[i] = Some(make_answer(
+                    q,
+                    head.as_ref().expect("head chosen only when present"),
+                    "head",
+                    req.min_confidence,
+                ))
+            }
+            Backend::Probe => to_probe.push(i),
+            Backend::Lm => to_lm.push(i),
+        }
+    }
+
+    if !to_probe.is_empty() {
+        match scorer
+            .as_deref_mut()
+            .ok_or_else(|| "no open-model scorer attached".to_string())
+            .and_then(|s| probe_features(brain, s, &state_text))
+        {
+            Ok(x) => {
+                for &i in &to_probe {
+                    let q = &questions[i];
+                    let p = probe_probs(brain, &x, &q.id).expect("probe_ready checked");
+                    answers[i] = Some(make_answer(q, &p, "probe", req.min_confidence));
+                }
+            }
+            Err(e) => {
+                for &i in &to_probe {
+                    answers[i] = Some(unanswerable(
+                        &questions[i],
+                        &format!("open model failed: {e}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    if !to_lm.is_empty() {
+        let qs: Vec<&Question> = to_lm.iter().map(|&i| &questions[i]).collect();
+        match scorer
+            .ok_or_else(|| "no open-model scorer attached".to_string())
+            .and_then(|s| lm_logits(s, &state_text, &qs))
+        {
+            Ok(logits) => {
+                for (&i, z) in to_lm.iter().zip(logits) {
+                    let q = &questions[i];
+                    let t = brain.lm_temperature.get(&q.id).copied().unwrap_or(1.0);
+                    answers[i] = Some(make_answer(
+                        q,
+                        &probs_with_temperature(&z, t),
+                        "lm",
+                        req.min_confidence,
+                    ));
+                }
+            }
+            Err(e) => {
+                for &i in &to_lm {
+                    answers[i] = Some(unanswerable(
+                        &questions[i],
+                        &format!("open model failed: {e}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(DecideResponse {
+        brain: brain.name.clone(),
+        answers: answers
+            .into_iter()
+            .map(|a| a.expect("every question answered"))
+            .collect(),
+        latency_ms: t0.elapsed().as_secs_f64() * 1000.0,
+    })
+}
+
 /// Brain + optional open-model scorer.
 pub struct Decider {
     pub brain: System1Brain,
@@ -197,14 +433,12 @@ impl Decider {
 
     /// Heads' state text (truncated for the featurizer).
     pub fn head_text(&self, state_text: &str) -> String {
-        truncate_middle(state_text, self.brain.max_state_chars)
+        head_text(&self.brain, state_text)
     }
 
     /// Calibrated head probabilities, or `None` if the question has no head.
     pub fn head_probs(&self, feats: &crate::features::SparseVec, qid: &str) -> Option<Vec<f32>> {
-        let head = self.brain.heads.get(qid)?;
-        let t = self.brain.head_temperature.get(qid).copied().unwrap_or(1.0);
-        Some(probs_with_temperature(&head.logits(feats), t))
+        head_probs(&self.brain, feats, qid)
     }
 
     /// Raw open-model logits for several questions (shared state).
@@ -215,47 +449,24 @@ impl Decider {
     ) -> Result<Vec<Vec<f32>>, String> {
         let s = self
             .scorer
-            .as_mut()
+            .as_deref_mut()
             .ok_or("no open-model scorer attached")?;
-        let out = s.score(state_text, qs)?;
-        if out.len() != qs.len() {
-            return Err("scorer returned the wrong number of questions".into());
-        }
-        for (q, z) in qs.iter().zip(&out) {
-            if z.len() != q.n_outcomes() {
-                return Err(format!("scorer returned {} logits for {}", z.len(), q.id));
-            }
-        }
-        Ok(out)
+        lm_logits(s, state_text, qs)
     }
 
     /// True when the brain has a probe head for `qid`, an open model is
     /// attached, and it is the model the probe was trained on.
     pub fn probe_ready(&self, qid: &str) -> bool {
-        match (&self.brain.probe, &self.scorer) {
-            (Some(p), Some(s)) => p.heads.contains_key(qid) && p.model_key == s.model_key(),
-            _ => false,
-        }
+        probe_ready(&self.brain, self.scorer_model_key().as_deref(), qid)
     }
 
     /// Standardised probe features for a state (one open-model pass).
     pub fn probe_features(&mut self, state_text: &str) -> Result<Vec<f32>, String> {
-        let p = self.brain.probe.as_ref().ok_or("brain has no probe")?;
-        let layer = p.layer_frac;
         let s = self
             .scorer
-            .as_mut()
+            .as_deref_mut()
             .ok_or("no open-model scorer attached")?;
-        let raw = s.embed(state_text, layer)?;
-        let p = self.brain.probe.as_ref().expect("checked above");
-        if raw.len() != p.dim {
-            return Err(format!(
-                "probe expects {} features, the model gave {}",
-                p.dim,
-                raw.len()
-            ));
-        }
-        Ok(p.standardize(&raw))
+        probe_features(&self.brain, s, state_text)
     }
 
     /// The attached model's identity (see [`OptionScorer::model_key`]).
@@ -273,158 +484,16 @@ impl Decider {
 
     /// Calibrated probe probabilities for standardised features.
     pub fn probe_probs(&self, x_std: &[f32], qid: &str) -> Option<Vec<f32>> {
-        self.brain.probe.as_ref()?.probs(qid, x_std)
-    }
-
-    fn resolve(&self, refs: &[QuestionRef]) -> Result<Vec<Question>, String> {
-        if refs.is_empty() {
-            return Ok(self.brain.questions.questions.clone());
-        }
-        refs.iter()
-            .map(|r| match r {
-                QuestionRef::Id(id) => self
-                    .brain
-                    .questions
-                    .get(id)
-                    .cloned()
-                    .ok_or_else(|| format!("unknown question id {id:?}")),
-                QuestionRef::Inline(q) => {
-                    q.validate()?;
-                    Ok(q.clone())
-                }
-            })
-            .collect()
+        probe_probs(&self.brain, x_std, qid)
     }
 
     /// Answer every question about one state.
     pub fn decide(&mut self, req: &DecideRequest) -> Result<DecideResponse, String> {
-        let t0 = Instant::now();
-        let questions = self.resolve(&req.questions)?;
-        let state_text = state_to_text(&req.state);
-        let feats = self
-            .brain
-            .featurizer
-            .as_ref()
-            .map(|f| f.transform(&self.head_text(&state_text)));
-
-        let mut answers: Vec<Option<Answer>> = vec![None; questions.len()];
-        let mut to_probe: Vec<usize> = Vec::new();
-        let mut to_lm: Vec<usize> = Vec::new();
-        for (i, q) in questions.iter().enumerate() {
-            // An inline question that reuses a trained id but changes its schema
-            // must not be answered by that trained head or probe.
-            let trained_ok = self
-                .brain
-                .questions
-                .get(&q.id)
-                .map(|bq| bq.kind == q.kind)
-                .unwrap_or(false);
-            let head = if trained_ok {
-                feats.as_ref().and_then(|x| self.head_probs(x, &q.id))
-            } else {
-                None
-            };
-            let probe_ok = trained_ok && self.probe_ready(&q.id);
-            // Fallback when the head is missing or unsure: the probe if there is
-            // one, else asking the open model.
-            let fallback = if probe_ok {
-                Some(Backend::Probe)
-            } else if self.has_scorer() {
-                Some(Backend::Lm)
-            } else {
-                None
-            };
-            let backend = match req.force {
-                Some(Backend::Head) if head.is_some() => Backend::Head,
-                Some(Backend::Probe) if probe_ok => Backend::Probe,
-                Some(Backend::Lm) if self.has_scorer() => Backend::Lm,
-                _ => match (&head, fallback) {
-                    (Some(p), Some(fb)) => {
-                        if argmax(p).1 >= self.brain.router.threshold(&q.id) {
-                            Backend::Head
-                        } else {
-                            fb
-                        }
-                    }
-                    (Some(_), None) => Backend::Head,
-                    (None, Some(fb)) => fb,
-                    (None, None) => {
-                        answers[i] = Some(unanswerable(
-                            q,
-                            "no trained head for this question and no open model attached",
-                        ));
-                        continue;
-                    }
-                },
-            };
-            match backend {
-                Backend::Head => {
-                    answers[i] = Some(make_answer(
-                        q,
-                        head.as_ref().expect("head chosen only when present"),
-                        "head",
-                        req.min_confidence,
-                    ))
-                }
-                Backend::Probe => to_probe.push(i),
-                Backend::Lm => to_lm.push(i),
-            }
-        }
-
-        if !to_probe.is_empty() {
-            match self.probe_features(&state_text) {
-                Ok(x) => {
-                    for &i in &to_probe {
-                        let q = &questions[i];
-                        let p = self.probe_probs(&x, &q.id).expect("probe_ready checked");
-                        answers[i] = Some(make_answer(q, &p, "probe", req.min_confidence));
-                    }
-                }
-                Err(e) => {
-                    for &i in &to_probe {
-                        answers[i] = Some(unanswerable(
-                            &questions[i],
-                            &format!("open model failed: {e}"),
-                        ));
-                    }
-                }
-            }
-        }
-
-        if !to_lm.is_empty() {
-            let qs: Vec<&Question> = to_lm.iter().map(|&i| &questions[i]).collect();
-            match self.lm_logits(&state_text, &qs) {
-                Ok(logits) => {
-                    for (&i, z) in to_lm.iter().zip(logits) {
-                        let q = &questions[i];
-                        let t = self.brain.lm_temperature.get(&q.id).copied().unwrap_or(1.0);
-                        answers[i] = Some(make_answer(
-                            q,
-                            &probs_with_temperature(&z, t),
-                            "lm",
-                            req.min_confidence,
-                        ));
-                    }
-                }
-                Err(e) => {
-                    for &i in &to_lm {
-                        answers[i] = Some(unanswerable(
-                            &questions[i],
-                            &format!("open model failed: {e}"),
-                        ));
-                    }
-                }
-            }
-        }
-
-        Ok(DecideResponse {
-            brain: self.brain.name.clone(),
-            answers: answers
-                .into_iter()
-                .map(|a| a.expect("every question answered"))
-                .collect(),
-            latency_ms: t0.elapsed().as_secs_f64() * 1000.0,
-        })
+        let scorer = self
+            .scorer
+            .as_deref_mut()
+            .map(|s| s as &mut dyn OptionScorer);
+        decide_with(&self.brain, scorer, req)
     }
 
     /// Convenience: JSON in, JSON out (used by the server and wasm bindings).

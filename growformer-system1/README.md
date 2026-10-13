@@ -170,11 +170,38 @@ POST /v1/decide
 ```js
 import init, * as s1 from "./growformer_system1.js";
 await init();
-s1.system1_load_brain(new Uint8Array(await (await fetch("support.s1.json.gz")).arrayBuffer()));
-// optional, with the `candle` feature:
-// s1.system1_load_lm(ggufBytes, tokenizerJsonBytes);
-const res = JSON.parse(s1.system1_decide(JSON.stringify({ state: "refund please" })));
+const bytes = async (url) => new Uint8Array(await (await fetch(url)).arrayBuffer());
+s1.system1_load_brain_named("crypto", await bytes("crypto.s1.json.gz"));
+s1.system1_load_brain_named("support", await bytes("support.s1.json.gz"));
+// optional, with the `candle` feature: one model shared by every loaded brain
+// s1.system1_load_lm(await bytes("model.gguf"), await bytes("tokenizer.json"));
+const res = JSON.parse(s1.system1_decide(JSON.stringify({ brain: "crypto", state: "refund please" })));
 ```
+
+`system1_load_brain(bytes)` still works for a single brain (loaded as `default`, so requests need no `brain`). `system1_brains()` lists what's loaded and `system1_unload(name)` removes a brain.
+
+## Many brains, one model
+
+A brain's heads, probes and router are a few MB; the open model is GBs. Serve as many brains as you like from one process: brains that name the same GGUF share one loaded copy, and each request uses a worker copy of the model that shares those weights but has its own cache.
+
+```bash
+$S1 serve --brains-dir agent/ --workers 2            # every *.s1.json(.gz) in agent/
+$S1 serve --brain crypto=agent/crypto.s1.json.gz --brain support=agent/support.s1.json.gz
+$S1 decide --brain agent/crypto.s1.json.gz --brain agent/support.s1.json.gz --state "…"   # both, one model load
+```
+
+| Request | Answer |
+|---|---|
+| `{"brain": "crypto", "state": …}` | that brain's response |
+| `{"brains": ["crypto", "support"], "state": …}` | `{"results": {"crypto": …, "support": …}}`; probe features for the state are computed once and shared |
+| `{"route": "router", "state": …}` | a routing brain picks the brain (its choice question's options are brain names); `routed_to` says which |
+| `{"state": …}` | the only loaded brain (an error if several are loaded) |
+
+Other endpoints: `GET /v1/brains` (name, questions, heads, probes, model), `GET /v1/questions?brain=…`, and `POST /v1/brains/{name}/reload`, which re-reads a retrained brain file without restarting; requests already running finish on the old copy, and the model isn't reloaded.
+
+- **Parallelism.** Heads-only answers never wait for the model. Model passes run on `--workers` copies per model (default 2); on a single GPU more workers mostly add queueing, on a many-core CPU they add throughput.
+- **One pass per state.** Probe features are cached per state (the last `--feature-cache` states, default 1024), so several brains, or a repeated state, cost one model pass.
+- **Memory.** One copy of each model's weights, plus each worker's cache (about 300 MB for a 2,000-token state on an 8B model). Brains with different prompt templates on the same GGUF still share the weights. Qwen2 models can't share weights in candle, so each Qwen2 pool loads its own copy.
 
 ## Choosing an open model
 

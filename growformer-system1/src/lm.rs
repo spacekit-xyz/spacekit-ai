@@ -32,6 +32,18 @@ enum Model {
     Qwen3(quantized_qwen3::ModelWeights),
 }
 
+impl Model {
+    /// Shares the weights (candle tensors are reference-counted); only the KV
+    /// cache is per copy. candle's quantized Qwen2 isn't `Clone`.
+    fn share(&self) -> Option<Model> {
+        match self {
+            Model::Llama(m) => Some(Model::Llama(m.clone())),
+            Model::Qwen3(m) => Some(Model::Qwen3(m.clone())),
+            Model::Qwen2(_) => None,
+        }
+    }
+}
+
 fn ce(e: candle_core::Error) -> String {
     e.to_string()
 }
@@ -137,6 +149,25 @@ impl CandleScorer {
             model,
             tokenizer,
             device,
+            cfg,
+            system,
+            last_answer_mass: Vec::new(),
+        })
+    }
+
+    /// A second scorer on the same loaded weights (own KV cache), optionally
+    /// with different prompt settings (`cfg` must name the same model and
+    /// tokenizer). `None` for Qwen2, whose candle model can't share weights.
+    pub fn fork_with(&self, cfg: Option<LmConfig>) -> Option<Self> {
+        let cfg = cfg.unwrap_or_else(|| self.cfg.clone());
+        let system = cfg
+            .system
+            .clone()
+            .unwrap_or_else(|| DEFAULT_SYSTEM.to_string());
+        Some(Self {
+            model: self.model.share()?,
+            tokenizer: self.tokenizer.clone(),
+            device: self.device.clone(),
             cfg,
             system,
             last_answer_mass: Vec::new(),
@@ -364,6 +395,10 @@ impl OptionScorer for CandleScorer {
 
     fn embed(&mut self, state_text: &str, layer_frac: f32) -> Result<Vec<f32>, String> {
         self.embed_state(state_text, layer_frac)
+    }
+
+    fn fork(&self) -> Option<Box<dyn OptionScorer + Send>> {
+        Some(Box::new(self.fork_with(None)?))
     }
 
     fn model_key(&self) -> String {
