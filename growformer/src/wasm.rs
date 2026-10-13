@@ -339,7 +339,8 @@ pub fn growformer_load_topic_graph(
     } else {
         base_graph
     };
-    let out = crate::growformer_lang::init_topic_graph_direct(final_graph).map_err(|e| JsValue::from_str(&e));
+    let out = crate::growformer_lang::init_topic_graph_direct(final_graph)
+        .map_err(|e| JsValue::from_str(&e));
     brain_instances::capture_default();
     out
 }
@@ -403,7 +404,10 @@ thread_local! {
     static INSTANCES: RefCell<BTreeMap<u32, BrainInstance>> = RefCell::new(BTreeMap::new());
 }
 
-fn with_instance<R>(id: u32, f: impl FnOnce(&mut BrainInstance) -> Result<R, String>) -> Result<R, JsValue> {
+fn with_instance<R>(
+    id: u32,
+    f: impl FnOnce(&mut BrainInstance) -> Result<R, String>,
+) -> Result<R, JsValue> {
     INSTANCES.with(|cell| {
         let mut map = cell.borrow_mut();
         let inst = map
@@ -414,7 +418,9 @@ fn with_instance<R>(id: u32, f: impl FnOnce(&mut BrainInstance) -> Result<R, Str
 }
 
 fn json_value<T: serde::Serialize>(value: &T) -> Result<JsValue, String> {
-    serde_json::to_string(value).map(|s| JsValue::from_str(&s)).map_err(|e| e.to_string())
+    serde_json::to_string(value)
+        .map(|s| JsValue::from_str(&s))
+        .map_err(|e| e.to_string())
 }
 
 /// What this build is: engine name and version, brain package formats it reads,
@@ -437,7 +443,8 @@ pub fn growformer_instance_create() -> Result<u32, JsValue> {
     #[cfg(feature = "wasm-bindgen")]
     console_error_panic_hook::set_once();
     let inst = BrainInstance::empty().map_err(|e| JsValue::from_str(&e))?;
-    let id = u32::try_from(inst.id()).map_err(|_| JsValue::from_str("too many growformer instances"))?;
+    let id =
+        u32::try_from(inst.id()).map_err(|_| JsValue::from_str("too many growformer instances"))?;
     INSTANCES.with(|cell| cell.borrow_mut().insert(id, inst));
     Ok(id)
 }
@@ -445,7 +452,9 @@ pub fn growformer_instance_create() -> Result<u32, JsValue> {
 /// Free an instance. Returns false when it did not exist.
 #[wasm_bindgen]
 pub fn growformer_instance_destroy(id: u32) -> bool {
-    INSTANCES.with(|cell| cell.borrow_mut().remove(&id)).is_some()
+    INSTANCES
+        .with(|cell| cell.borrow_mut().remove(&id))
+        .is_some()
 }
 
 /// JSON array of live ids, including 0 (the single-brain API).
@@ -472,8 +481,14 @@ pub fn growformer_load_inference_toml_i(id: u32, toml_str: &str) -> Result<(), J
 }
 
 #[wasm_bindgen]
-pub fn growformer_load_topic_graph_i(id: u32, base_toml: &str, overlay_toml: Option<String>) -> Result<(), JsValue> {
-    with_instance(id, |i| i.load_topic_graph(base_toml, overlay_toml.as_deref()))
+pub fn growformer_load_topic_graph_i(
+    id: u32,
+    base_toml: &str,
+    overlay_toml: Option<String>,
+) -> Result<(), JsValue> {
+    with_instance(id, |i| {
+        i.load_topic_graph(base_toml, overlay_toml.as_deref())
+    })
 }
 
 #[wasm_bindgen]
@@ -491,12 +506,16 @@ pub fn growformer_load_grounding_graph_i(id: u32, toml_str: &str) -> Result<(), 
 
 #[wasm_bindgen]
 pub fn growformer_load_fragments_jsonl_i(id: u32, jsonl: &str) -> Result<usize, JsValue> {
-    with_instance(id, |i| Ok(i.with(|rt| rt.svc.load_fragments_from_str(jsonl))))
+    with_instance(id, |i| {
+        Ok(i.with(|rt| rt.svc.load_fragments_from_str(jsonl)))
+    })
 }
 
 #[wasm_bindgen]
 pub fn growformer_set_agent_state_i(id: u32, state_json: &str) -> Result<(), JsValue> {
-    with_instance(id, |i| i.with(|rt| rt.set_agent_state_from_json(state_json)))
+    with_instance(id, |i| {
+        i.with(|rt| rt.set_agent_state_from_json(state_json))
+    })
 }
 
 #[wasm_bindgen]
@@ -514,17 +533,23 @@ pub fn growformer_brain_info_i(id: u32) -> Result<JsValue, JsValue> {
 
 #[wasm_bindgen]
 pub fn growformer_generation_i(id: u32, text: &str) -> Result<JsValue, JsValue> {
-    with_instance(id, |i| i.with(|rt| rt.prompt(text)).and_then(|r| json_value(&r)))
+    with_instance(id, |i| {
+        i.with(|rt| rt.prompt(text)).and_then(|r| json_value(&r))
+    })
 }
 
 #[wasm_bindgen]
 pub fn growformer_converse_i(id: u32, text: &str) -> Result<JsValue, JsValue> {
-    with_instance(id, |i| i.with(|rt| rt.converse(text)).and_then(|r| json_value(&r)))
+    with_instance(id, |i| {
+        i.with(|rt| rt.converse(text)).and_then(|r| json_value(&r))
+    })
 }
 
 #[wasm_bindgen]
 pub fn growformer_codegen_i(id: u32, text: &str) -> Result<JsValue, JsValue> {
-    with_instance(id, |i| i.with(|rt| rt.codegen(text)).and_then(|r| json_value(&r)))
+    with_instance(id, |i| {
+        i.with(|rt| rt.codegen(text)).and_then(|r| json_value(&r))
+    })
 }
 
 #[wasm_bindgen]

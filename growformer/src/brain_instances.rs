@@ -138,7 +138,11 @@ impl BrainInstance {
             n.set(id + 1);
             id
         });
-        Ok(Self { id, runtime, config })
+        Ok(Self {
+            id,
+            runtime,
+            config,
+        })
     }
 
     pub fn id(&self) -> u64 {
@@ -163,7 +167,10 @@ impl BrainInstance {
     }
 
     /// Run `f`, then save any configuration change it made as this brain's.
-    fn reconfigure<R>(&mut self, f: impl FnOnce(&mut Runtime) -> Result<R, String>) -> Result<R, String> {
+    fn reconfigure<R>(
+        &mut self,
+        f: impl FnOnce(&mut Runtime) -> Result<R, String>,
+    ) -> Result<R, String> {
         let out = self.with(f);
         self.config = BrainConfig::capture();
         out
@@ -184,11 +191,17 @@ impl BrainInstance {
     }
 
     /// Topic routing graph, with an optional overlay merged on top.
-    pub fn load_topic_graph(&mut self, base_toml: &str, overlay_toml: Option<&str>) -> Result<(), String> {
-        let base = TopicGraph::from_toml(base_toml).map_err(|e| format!("topic graph base: {}", e))?;
+    pub fn load_topic_graph(
+        &mut self,
+        base_toml: &str,
+        overlay_toml: Option<&str>,
+    ) -> Result<(), String> {
+        let base =
+            TopicGraph::from_toml(base_toml).map_err(|e| format!("topic graph base: {}", e))?;
         let graph = match overlay_toml {
             Some(o) => base.merge_overlay(
-                TopicGraph::from_toml_quiet(o).map_err(|e| format!("topic graph overlay: {}", e))?,
+                TopicGraph::from_toml_quiet(o)
+                    .map_err(|e| format!("topic graph overlay: {}", e))?,
             ),
             None => base,
         };
