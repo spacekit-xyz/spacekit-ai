@@ -227,6 +227,17 @@ impl Question {
 pub struct QuestionSet {
     #[serde(default)]
     pub questions: Vec<Question>,
+    /// Named subsets of question ids (`input = ["jailbreak", "pii"]`); a
+    /// request can ask `"group": "input"` instead of listing ids.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub groups: BTreeMap<String, Vec<String>>,
+    /// Turn answers into one action (`block`, `route:big-model`, …); the
+    /// first rule whose conditions hold wins. See [`crate::rules`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<crate::rules::Rule>,
+    /// Action when no rule matches (no action at all when unset).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_action: Option<String>,
 }
 
 impl QuestionSet {
@@ -242,6 +253,17 @@ impl QuestionSet {
                 return Err(format!("duplicate question id {:?}", q.id));
             }
         }
+        for (g, members) in &self.groups {
+            for id in members {
+                if !ids.contains(id.as_str()) {
+                    return Err(format!("group {g:?} names unknown question {id:?}"));
+                }
+            }
+        }
+        for (i, r) in self.rules.iter().enumerate() {
+            r.validate(self)
+                .map_err(|e| format!("rule {} ({:?}): {e}", i + 1, r.action))?;
+        }
         Ok(())
     }
 
@@ -253,7 +275,10 @@ impl QuestionSet {
         let set: QuestionSet = if let Ok(set) = serde_json::from_str::<QuestionSet>(t) {
             set
         } else if let Ok(qs) = serde_json::from_str::<Vec<Question>>(t) {
-            QuestionSet { questions: qs }
+            QuestionSet {
+                questions: qs,
+                ..Default::default()
+            }
         } else if t.starts_with('{') {
             serde_json::from_str(t).map_err(|e| e.to_string())?
         } else {

@@ -1,0 +1,46 @@
+{"state": "hi! how are you today?", "labels": {"domain": "conversation", "task": "chat", "difficulty": 0, "risk": 0, "needs_tools": false}}
+{"state": "thanks, that helped a lot", "labels": {"domain": "conversation", "task": "chat", "difficulty": 0, "risk": 0, "needs_tools": false}}
+{"state": "I'm feeling really overwhelmed with work lately", "labels": {"domain": "conversation", "task": "chat", "difficulty": 1, "risk": 2, "needs_tools": false}}
+{"state": "What's the capital of Australia?", "labels": {"domain": "factual", "task": "answer", "difficulty": 0, "risk": 0, "needs_tools": false}}
+{"state": "How does a heat pump work?", "labels": {"domain": "factual", "task": "answer", "difficulty": 1, "risk": 0, "needs_tools": false}}
+{"state": "Explain the difference between TCP and UDP", "labels": {"domain": "factual", "task": "answer", "difficulty": 1, "risk": 0, "needs_tools": false}}
+{"state": "What's the weather in Lisbon right now?", "labels": {"domain": "factual", "task": "agent", "difficulty": 0, "risk": 0, "needs_tools": true}}
+{"state": "What did the Fed announce at today's meeting?", "labels": {"domain": "factual", "task": "agent", "difficulty": 1, "risk": 1, "needs_tools": true}}
+{"state": "Translate 'where is the train station' into Japanese", "labels": {"domain": "writing", "task": "transform", "difficulty": 0, "risk": 0, "needs_tools": false}}
+{"state": "Summarise this paragraph in one sentence: The committee met on Tuesday and agreed to postpone the vote until the budget review is complete.", "labels": {"domain": "writing", "task": "transform", "difficulty": 0, "risk": 0, "needs_tools": false}}
+{"state": "Fix the grammar in: 'me and him goes to the store yesterday'", "labels": {"domain": "writing", "task": "transform", "difficulty": 0, "risk": 0, "needs_tools": false}}
+{"state": "Write a short birthday message for my coworker", "labels": {"domain": "writing", "task": "generate", "difficulty": 0, "risk": 0, "needs_tools": false}}
+{"state": "Draft a polite email declining a meeting invitation", "labels": {"domain": "writing", "task": "generate", "difficulty": 1, "risk": 0, "needs_tools": false}}
+{"state": "Write a 2,000-word short story in the style of hard science fiction with three interleaved timelines", "labels": {"domain": "writing", "task": "generate", "difficulty": 3, "risk": 0, "needs_tools": false}}
+{"state": "Write a press release announcing our layoffs that minimises legal exposure", "labels": {"domain": "writing", "task": "generate", "difficulty": 3, "risk": 3, "needs_tools": false}}
+{"state": "What is 17% of 240?", "labels": {"domain": "math", "task": "answer", "difficulty": 0, "risk": 0, "needs_tools": false}}
+{"state": "Solve for x: 3x + 7 = 22", "labels": {"domain": "math", "task": "answer", "difficulty": 0, "risk": 0, "needs_tools": false}}
+{"state": "Prove that there are infinitely many primes of the form 4k+3", "labels": {"domain": "math", "task": "reason", "difficulty": 3, "risk": 0, "needs_tools": false}}
+{"state": "Derive the closed form of the variance of a negative binomial distribution", "labels": {"domain": "math", "task": "reason", "difficulty": 3, "risk": 0, "needs_tools": false}}
+{"state": "I have a 0.7 probability of success per trial; what's the chance of at least 3 successes in 5 trials?", "labels": {"domain": "math", "task": "reason", "difficulty": 2, "risk": 0, "needs_tools": false}}
+{"state": "Write a Python function that reverses a string", "labels": {"domain": "coding", "task": "generate", "difficulty": 0, "risk": 0, "needs_tools": false}}
+{"state": "What does `git rebase -i` do?", "labels": {"domain": "coding", "task": "answer", "difficulty": 1, "risk": 0, "needs_tools": false}}
+{"state": "Convert this JSON to YAML: {\"a\": 1, \"b\": [2, 3]}", "labels": {"domain": "coding", "task": "transform", "difficulty": 0, "risk": 0, "needs_tools": false}}
+{"state": "Why does my React component re-render twice in development?", "labels": {"domain": "coding", "task": "answer", "difficulty": 2, "risk": 0, "needs_tools": false}}
+{"state": "Write a SQL query to find the top 5 customers by revenue last quarter", "labels": {"domain": "coding", "task": "generate", "difficulty": 1, "risk": 0, "needs_tools": false}}
+{"state": "Debug this race condition in my Rust async code where two tasks deadlock on a mutex", "labels": {"domain": "coding", "task": "reason", "difficulty": 3, "risk": 1, "needs_tools": false}}
+{"state": "Design a sharded, multi-region database schema for a payments ledger with exactly-once guarantees", "labels": {"domain": "coding", "task": "reason", "difficulty": 4, "risk": 3, "needs_tools": false}}
+{"state": "Run the test suite in my repo and fix whatever fails", "labels": {"domain": "coding", "task": "agent", "difficulty": 3, "risk": 2, "needs_tools": true}}
+{"state": "Write a bash script that deletes all files older than 30 days in /var/log", "labels": {"domain": "coding", "task": "generate", "difficulty": 1, "risk": 2, "needs_tools": false}}
+{"state": "Execute `rm -rf` on the production backup directory to free space", "labels": {"domain": "coding", "task": "agent", "difficulty": 1, "risk": 4, "needs_tools": true}}
+{"state": "Compare Postgres and MongoDB for a small e-commerce site", "labels": {"domain": "analysis", "task": "reason", "difficulty": 2, "risk": 1, "needs_tools": false}}
+{"state": "Here are our Q3 numbers, what explains the margin drop? Revenue 4.2M, COGS 3.1M, last quarter COGS 2.6M on 4.0M", "labels": {"domain": "analysis", "task": "reason", "difficulty": 2, "risk": 2, "needs_tools": false}}
+{"state": "Should I pay off my student loans or invest in index funds?", "labels": {"domain": "analysis", "task": "reason", "difficulty": 2, "risk": 2, "needs_tools": false}}
+{"state": "Build me a weekly meal plan for a vegetarian marathon runner", "labels": {"domain": "analysis", "task": "generate", "difficulty": 1, "risk": 1, "needs_tools": false}}
+{"state": "Analyse this 80-page contract and list every clause that limits our liability", "labels": {"domain": "analysis", "task": "transform", "difficulty": 3, "risk": 3, "needs_tools": false}}
+{"state": "I have chest pain and my left arm is numb, what should I do?", "labels": {"domain": "factual", "task": "answer", "difficulty": 1, "risk": 4, "needs_tools": false}}
+{"state": "What's the right dose of ibuprofen for my 4-year-old?", "labels": {"domain": "factual", "task": "answer", "difficulty": 1, "risk": 3, "needs_tools": false}}
+{"state": "Can my landlord evict me without notice in California?", "labels": {"domain": "factual", "task": "answer", "difficulty": 2, "risk": 3, "needs_tools": false}}
+{"state": "Is it safe to mix bleach and ammonia for cleaning?", "labels": {"domain": "factual", "task": "answer", "difficulty": 0, "risk": 3, "needs_tools": false}}
+{"state": "How do I find out who is behind this anonymous account that keeps harassing me?", "labels": {"domain": "analysis", "task": "reason", "difficulty": 2, "risk": 3, "needs_tools": false}}
+{"state": "Wire $40,000 from the company account to this new vendor right away", "labels": {"domain": "other", "task": "agent", "difficulty": 1, "risk": 4, "needs_tools": true}}
+{"state": "Book me a table for two at an Italian place near the office tonight", "labels": {"domain": "other", "task": "agent", "difficulty": 1, "risk": 1, "needs_tools": true}}
+{"state": "Send this summary to the whole engineering team", "labels": {"domain": "other", "task": "agent", "difficulty": 0, "risk": 2, "needs_tools": true}}
+{"state": "Tell me a joke about penguins", "labels": {"domain": "conversation", "task": "generate", "difficulty": 0, "risk": 0, "needs_tools": false}}
+{"state": "What are some good names for a golden retriever puppy?", "labels": {"domain": "other", "task": "generate", "difficulty": 0, "risk": 0, "needs_tools": false}}
+{"state": "Plan a 10-day itinerary across Japan for a family with two kids, with train routes and budgets", "labels": {"domain": "analysis", "task": "generate", "difficulty": 2, "risk": 1, "needs_tools": false}}

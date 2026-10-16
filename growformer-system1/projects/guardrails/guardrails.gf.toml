@@ -1,0 +1,11 @@
+# Guardrails System 1 brain: semantic checks on LLM inputs, outputs and tool calls.
+# See ../README.md for the workflow.
+
+[project]
+name = "guardrails"
+description = "Check LLM inputs, outputs and tool calls: jailbreaks, prompt injection, policy violations, sensitive data, tool-call errors and response quality."
+
+[system1]
+questions = "system1/questions.toml"
+data = ["data"]
+brain_output = "agent/guardrails.s1.json.gz"

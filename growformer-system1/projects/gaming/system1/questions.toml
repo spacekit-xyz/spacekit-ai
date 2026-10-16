@@ -1,0 +1,117 @@
+# Gaming questions. States are text or JSON, e.g.
+#   {"channel": "chat", "text": "gg ez, uninstall"}
+#   {"channel": "support", "player_tier": "premium", "text": "I was charged twice"}
+# Ask a group per channel: "group": "chat" | "report" | "review" | "support".
+
+default_action = "allow"
+
+[groups]
+chat = ["toxicity", "abuse_type", "suspicious"]
+report = ["abuse_type", "toxicity", "suspicious"]
+review = ["frustration", "engagement", "churn_risk"]
+support = ["support_route", "frustration", "churn_risk"]
+
+[[questions]]
+id = "toxicity"
+text = "How toxic is this message toward other players?"
+type = "score"
+min = 0
+max = 4
+labels = ["not toxic", "mild trash talk", "insulting", "harassing or hateful", "threatening"]
+min_confidence = 0.5
+
+[[questions]]
+id = "abuse_type"
+text = "What kind of abuse, if any, does this contain?"
+type = "choice"
+options = ["none", "insult", "harassment", "hate_speech", "threat", "sexual", "spam_scam", "self_harm_concern"]
+min_confidence = 0.5
+[questions.definitions]
+none = "no abuse: normal game talk, friendly banter, or complaints about the game itself"
+insult = "name-calling or put-downs aimed at another player"
+harassment = "targeted or repeated hostility, telling someone to quit or die, following them around"
+hate_speech = "attacks on identity such as race, religion, gender, sexuality or disability"
+threat = "threats of real-world harm, doxxing or swatting"
+sexual = "unwanted sexual comments or advances"
+spam_scam = "ads, phishing links, gold or account selling, fake giveaways"
+self_harm_concern = "the writer suggests they may hurt themselves"
+
+[[questions]]
+id = "suspicious"
+text = "Does this suggest cheating, botting, account selling or a scam?"
+type = "noul"
+
+[[questions]]
+id = "frustration"
+text = "How frustrated is the player?"
+type = "score"
+min = 0
+max = 4
+labels = ["calm", "slightly annoyed", "frustrated", "very frustrated", "furious"]
+
+[[questions]]
+id = "engagement"
+text = "How engaged with the game is the player?"
+type = "score"
+min = 0
+max = 4
+labels = ["disengaged", "low", "moderate", "high", "very high"]
+
+[[questions]]
+id = "churn_risk"
+text = "Is the player signalling they may stop playing, cancel or ask for a refund?"
+type = "noul"
+
+[[questions]]
+id = "support_route"
+text = "Which support team should handle this?"
+type = "choice"
+options = ["none", "billing", "technical", "account_security", "gameplay_bug", "player_report", "feedback"]
+[questions.definitions]
+none = "not a support request"
+billing = "charges, refunds, purchases, subscriptions, missing currency"
+technical = "crashes, login problems, performance, connection, installation"
+account_security = "hacked or stolen account, unknown logins, lost access, phishing"
+gameplay_bug = "a game mechanic, quest, item or matchmaking not working as designed"
+player_report = "reporting another player's behaviour or cheating"
+feedback = "suggestions, balance opinions, praise or general complaints"
+
+# Rules: first match wins.
+
+[[rules]]
+action = "crisis_support"
+reason = "possible self-harm: show support resources and alert a moderator"
+when = [{ id = "abuse_type", is = ["self_harm_concern"] }]
+
+[[rules]]
+action = "block_and_escalate"
+reason = "threat or hate speech"
+when = [{ id = "abuse_type", is = ["threat", "hate_speech"] }]
+
+[[rules]]
+action = "mute"
+reason = "harassment, sexual content or high toxicity"
+any = true
+when = [{ id = "abuse_type", is = ["harassment", "sexual"] }, { id = "toxicity", min = 2.5 }]
+
+[[rules]]
+action = "remove_message"
+when = [{ id = "abuse_type", is = ["spam_scam"] }]
+
+[[rules]]
+action = "investigate"
+reason = "likely cheating, botting or account selling"
+when = [{ id = "suspicious", min = 0.7 }]
+
+[[rules]]
+action = "priority_support"
+when = [{ id = "support_route", is = ["account_security"] }]
+
+[[rules]]
+action = "retention_offer"
+when = [{ id = "churn_risk", min = 0.7 }]
+
+[[rules]]
+action = "human_review"
+reason = "the brain is unsure about abuse"
+when = [{ id = "abuse_type", abstain = true }]

@@ -1,0 +1,11 @@
+# Model-routing System 1 brain: choose which LLM gets each prompt.
+# See ../README.md for the workflow.
+
+[project]
+name = "model-routing"
+description = "Classify a prompt's domain, task, difficulty and risk, and route it to the right model."
+
+[system1]
+questions = "system1/questions.toml"
+data = ["data"]
+brain_output = "agent/model-routing.s1.json.gz"

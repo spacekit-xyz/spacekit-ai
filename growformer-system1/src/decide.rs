@@ -52,13 +52,16 @@ pub enum Backend {
     Lm,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DecideRequest {
     /// Text, JSON object or array.
     pub state: Value,
-    /// Empty = every question in the brain's schema.
+    /// Empty = every question in the brain's schema (or the `group`).
     #[serde(default)]
     pub questions: Vec<QuestionRef>,
+    /// A named question group from the brain's schema (`[groups]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     /// Default abstain threshold for questions without their own `min_confidence`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_confidence: Option<f32>,
@@ -103,6 +106,9 @@ pub struct Answer {
 pub struct DecideResponse {
     pub brain: String,
     pub answers: Vec<Answer>,
+    /// What the brain's `[[rules]]` say to do with these answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<crate::rules::ActionResult>,
     pub latency_ms: f64,
 }
 
@@ -236,7 +242,32 @@ pub fn probe_probs(brain: &System1Brain, x_std: &[f32], qid: &str) -> Option<Vec
     brain.probe.as_ref()?.probs(qid, x_std)
 }
 
-fn resolve(brain: &System1Brain, refs: &[QuestionRef]) -> Result<Vec<Question>, String> {
+fn resolve(
+    brain: &System1Brain,
+    refs: &[QuestionRef],
+    group: Option<&str>,
+) -> Result<Vec<Question>, String> {
+    if let Some(g) = group {
+        if !refs.is_empty() {
+            return Err("pass `questions` or `group`, not both".into());
+        }
+        let ids = brain.questions.groups.get(g).ok_or_else(|| {
+            format!(
+                "unknown group {g:?} (groups: {})",
+                brain
+                    .questions
+                    .groups
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+        return Ok(ids
+            .iter()
+            .filter_map(|id| brain.questions.get(id).cloned())
+            .collect());
+    }
     if refs.is_empty() {
         return Ok(brain.questions.questions.clone());
     }
@@ -267,7 +298,7 @@ pub fn decide_with(
     let has_scorer = scorer.is_some();
     let key = scorer.as_ref().map(|s| s.model_key());
     let t0 = Instant::now();
-    let questions = resolve(brain, &req.questions)?;
+    let questions = resolve(brain, &req.questions, req.group.as_deref())?;
     let state_text = state_to_text(&req.state);
     let feats = brain
         .featurizer
@@ -390,12 +421,14 @@ pub fn decide_with(
         }
     }
 
+    let answers: Vec<Answer> = answers
+        .into_iter()
+        .map(|a| a.expect("every question answered"))
+        .collect();
     Ok(DecideResponse {
         brain: brain.name.clone(),
-        answers: answers
-            .into_iter()
-            .map(|a| a.expect("every question answered"))
-            .collect(),
+        action: crate::rules::apply(&brain.questions, &answers),
+        answers,
         latency_ms: t0.elapsed().as_secs_f64() * 1000.0,
     })
 }
@@ -633,6 +666,7 @@ pub(crate) mod tests {
                 questions: vec![QuestionRef::Id("route".into())],
                 min_confidence: None,
                 force: None,
+                group: None,
             })
             .unwrap();
         assert_eq!(out.answers[0].source, "probe");
@@ -647,6 +681,7 @@ pub(crate) mod tests {
                 questions: vec![QuestionRef::Id("route".into())],
                 min_confidence: None,
                 force: None,
+                group: None,
             })
             .unwrap();
         assert_eq!(out.answers[0].source, "lm");

@@ -318,6 +318,7 @@ pub fn distill(
                         .collect(),
                     min_confidence: None,
                     force: None,
+                    group: None,
                 })?;
                 qs.iter()
                     .zip(resp.answers)

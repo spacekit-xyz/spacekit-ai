@@ -1,0 +1,85 @@
+# Model routing. The state is the user's prompt (text), or JSON such as
+#   {"prompt": "...", "conversation_summary": "...", "user_tier": "free"}
+# The response's `action` is the route; rename the routes to your models.
+
+default_action = "route:mid"
+
+[[questions]]
+id = "domain"
+text = "What is this request about?"
+type = "choice"
+options = ["coding", "math", "writing", "analysis", "factual", "conversation", "other"]
+[questions.definitions]
+coding = "writing, reading, debugging or explaining code, shell commands or queries"
+math = "calculations, proofs, statistics or quantitative puzzles"
+writing = "drafting or editing prose: emails, stories, posts, documents"
+analysis = "comparing options, interpreting data or documents, planning, giving advice"
+factual = "looking up or explaining facts, definitions or how something works"
+conversation = "greetings, small talk, opinions, emotional support"
+other = "anything else"
+
+[[questions]]
+id = "task"
+text = "What does the user want done?"
+type = "choice"
+options = ["answer", "generate", "transform", "reason", "chat", "agent"]
+[questions.definitions]
+answer = "a direct answer or explanation"
+generate = "new content: code, text, ideas, plans"
+transform = "rewrite, summarise, translate, reformat or extract from given text"
+reason = "multi-step reasoning, derivation, debugging or a decision with trade-offs"
+chat = "conversation with no concrete task"
+agent = "actions in the world: browse, run code, read files, call APIs, send messages"
+
+[[questions]]
+id = "difficulty"
+text = "How hard is this for a capable assistant to do well?"
+type = "score"
+min = 0
+max = 4
+labels = ["trivial", "easy", "moderate", "hard", "expert-level"]
+min_confidence = 0.4
+
+[[questions]]
+id = "risk"
+text = "How costly would a wrong or careless answer be?"
+type = "score"
+min = 0
+max = 4
+labels = ["harmless", "low", "moderate: money, personal decisions", "high: medical, legal, security", "critical: safety or irreversible actions"]
+
+[[questions]]
+id = "needs_tools"
+text = "Does a good answer need tools such as web search, code execution, files or external APIs?"
+type = "noul"
+
+# Routes: first match wins. Order matters: risk before cost.
+
+[[rules]]
+action = "escalate:human"
+reason = "critical risk"
+when = [{ id = "risk", min = 3.5 }]
+
+[[rules]]
+action = "route:frontier"
+reason = "hard or high-risk"
+any = true
+when = [{ id = "difficulty", min = 3 }, { id = "risk", min = 2.5 }]
+
+[[rules]]
+action = "route:frontier"
+reason = "difficulty is uncertain; prefer the stronger model"
+when = [{ id = "difficulty", abstain = true }]
+
+[[rules]]
+action = "route:agent"
+when = [{ id = "needs_tools", min = 0.6 }]
+
+[[rules]]
+action = "route:code"
+when = [{ id = "domain", is = ["coding"] }]
+
+[[rules]]
+action = "route:small"
+reason = "easy and low-risk"
+when = [{ id = "difficulty", max = 1.5 }, { id = "risk", max = 1.5 }]

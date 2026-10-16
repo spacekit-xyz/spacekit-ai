@@ -343,6 +343,73 @@ impl Loader {
     }
 }
 
+/// Append-only JSONL decision log: one line per answered request with every
+/// answer's value, confidence, source and full probability distribution, plus
+/// the action and latency. States are logged as a fingerprint unless
+/// `include_state` (they may hold personal data).
+pub struct JsonlLog {
+    file: std::sync::Mutex<std::io::BufWriter<std::fs::File>>,
+    include_state: bool,
+}
+
+impl JsonlLog {
+    pub fn open(path: &Path, include_state: bool) -> Result<Self, String> {
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|e| format!("open {}: {e}", path.display()))?;
+        Ok(Self {
+            file: std::sync::Mutex::new(std::io::BufWriter::new(f)),
+            include_state,
+        })
+    }
+}
+
+impl crate::multi::DecisionSink for JsonlLog {
+    fn record(&self, brain: &str, state: &serde_json::Value, r: &crate::decide::DecideResponse) {
+        use std::io::Write;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let text = crate::state::state_to_text(state);
+        let answers: serde_json::Map<String, serde_json::Value> = r
+            .answers
+            .iter()
+            .map(|a| {
+                let p: serde_json::Map<String, serde_json::Value> = a
+                    .distribution
+                    .iter()
+                    .map(|o| (o.outcome.clone(), serde_json::json!(o.p)))
+                    .collect();
+                (
+                    a.id.clone(),
+                    serde_json::json!({
+                        "value": a.value, "confidence": a.confidence, "abstain": a.abstain,
+                        "source": a.source, "p": p, "error": a.error,
+                    }),
+                )
+            })
+            .collect();
+        let mut line = serde_json::json!({
+            "ts_ms": ts,
+            "brain": brain,
+            "state_fp": format!("{:016x}", crate::brain::row_fingerprint(&text)),
+            "answers": answers,
+            "action": r.action,
+            "latency_ms": (r.latency_ms * 1000.0).round() / 1000.0,
+        });
+        if self.include_state {
+            line["state"] = state.clone();
+        }
+        if let Ok(mut f) = self.file.lock() {
+            let _ = writeln!(f, "{line}");
+            let _ = f.flush();
+        }
+    }
+}
+
 /// On-disk cache of probe features, keyed by state fingerprint. A cache made
 /// with a different model/layer (`key`) is ignored. Format: `S1EMB1`, key
 /// length (u32 LE) + key bytes, dim (u32 LE), then `(u64 fingerprint, dim × f32)`
@@ -523,6 +590,35 @@ brain_output = "agent/demo.s1.json.gz"
         let out = d.decide_json(r#"{"state":"great gains"}"#).unwrap();
         assert!(out.contains("\"value\":true"), "{out}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn decisions_are_logged_with_probabilities_and_action() {
+        use crate::multi::{BrainEntry, Registry};
+        let (mut qs, rows) = crate::brain::tests::toy_rows();
+        qs.default_action = Some("allow".into());
+        let mut b = System1Brain::new("toy", qs).unwrap();
+        b.train_heads(&rows, &crate::brain::TrainConfig::default())
+            .unwrap();
+        let reg = Registry::new();
+        reg.insert(BrainEntry {
+            name: "toy".into(),
+            brain: std::sync::Arc::new(b),
+            pool: None,
+            source: None,
+        });
+        let p = std::env::temp_dir().join(format!("gf-s1-log-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        reg.set_sink(std::sync::Arc::new(JsonlLog::open(&p, false).unwrap()));
+        reg.decide_json(r#"{"state":"card declined, my email is a@b.com"}"#)
+            .unwrap();
+        let line = std::fs::read_to_string(&p).unwrap();
+        let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(v["brain"], "toy");
+        assert_eq!(v["action"]["action"], "allow");
+        assert!(v["answers"]["route"]["p"]["Billing"].is_number());
+        assert!(v.get("state").is_none(), "states are not logged by default");
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]

@@ -1,0 +1,11 @@
+# Gaming System 1 brain: chat moderation, player reports, reviews and support routing.
+# See ../README.md for the workflow (zero-shot with an open model first, then train on your data).
+
+[project]
+name = "gaming"
+description = "Moderate chat, triage player reports, score frustration / engagement / churn and route support requests."
+
+[system1]
+questions = "system1/questions.toml"
+data = ["data"]
+brain_output = "agent/gaming.s1.json.gz"

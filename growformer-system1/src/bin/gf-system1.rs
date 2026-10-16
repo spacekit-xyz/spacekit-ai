@@ -14,7 +14,7 @@ use growformer_system1::eval::{distill, evaluate, DistillSource, EvalOptions, Ev
 use growformer_system1::multi::{MultiRequest, Registry};
 use growformer_system1::project::{
     label_counts, load_decider, read_project, read_questions, read_rows, relative_to, EmbCache,
-    Loader,
+    JsonlLog, Loader,
 };
 use growformer_system1::prompt::TemplatePreset;
 
@@ -99,6 +99,37 @@ enum Cmd {
         /// Let this (loaded) routing brain pick which brain answers.
         #[arg(long)]
         route: Option<String>,
+        /// Ask a named question group from the brain's schema.
+        #[arg(long)]
+        group: Option<String>,
+        /// Append the decision to this JSONL log.
+        #[arg(long)]
+        log: Option<PathBuf>,
+        /// Include the raw state in the log (default: a fingerprint only).
+        #[arg(long)]
+        log_state: bool,
+    },
+    /// Create a brain from a question schema with no trained heads: every
+    /// question goes to the open model (attach one with `attach-lm`). Useful
+    /// before you have labelled data.
+    Init {
+        #[arg(long)]
+        project: Option<PathBuf>,
+        #[arg(long)]
+        questions: Option<PathBuf>,
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Replace a brain's rules, default action and question groups from a
+    /// question file, keeping its heads, probes and calibration. The
+    /// questions themselves must be unchanged.
+    UpdateRules {
+        #[arg(long)]
+        brain: PathBuf,
+        #[arg(long)]
+        questions: PathBuf,
     },
     /// Accuracy, Brier, calibration error and latency on labelled rows.
     Eval {
@@ -211,6 +242,12 @@ enum Cmd {
         /// Recent states whose probe features are kept (0 = off).
         #[arg(long, default_value_t = 1024)]
         feature_cache: usize,
+        /// Append every decision (answers, probabilities, action, latency) to this JSONL file.
+        #[arg(long)]
+        log: Option<PathBuf>,
+        /// Include raw states in the log (default: a fingerprint only).
+        #[arg(long)]
+        log_state: bool,
     },
 }
 
@@ -511,6 +548,69 @@ fn run(cli: Cli) -> Result<(), String> {
                 b.featurizer.as_ref().map(|f| f.dim()).unwrap_or(0)
             );
         }
+        Cmd::Init {
+            project,
+            questions,
+            out,
+            name,
+        } => {
+            let proj = project.as_deref().map(read_project).transpose()?;
+            let qpath = questions
+                .or(proj.as_ref().map(|p| p.questions.clone()))
+                .ok_or("pass --questions or --project")?;
+            let out = out
+                .or(proj.as_ref().map(|p| p.brain_output.clone()))
+                .ok_or("pass --out or --project")?;
+            let qs = read_questions(&qpath)?;
+            let name = name
+                .or(proj.as_ref().map(|p| p.name.clone()))
+                .unwrap_or_else(|| {
+                    growformer_system1::multi::brain_name_from_path(&out.to_string_lossy())
+                });
+            let mut b = System1Brain::new(name, qs)?;
+            if let Some(p) = &proj {
+                if let Some(mut lm) = p.lm.clone() {
+                    let dir = out.parent().unwrap_or(Path::new("."));
+                    lm.model = relative_to(Path::new(&lm.model), dir);
+                    lm.tokenizer = relative_to(Path::new(&lm.tokenizer), dir);
+                    b.lm = Some(lm);
+                }
+            }
+            if let Some(dir) = out.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            }
+            b.save(&out)?;
+            println!(
+                "created {} ({} questions, {} rules, no heads yet)",
+                out.display(),
+                b.questions.questions.len(),
+                b.questions.rules.len()
+            );
+            if b.lm.is_none() {
+                println!("next: gf-system1 attach-lm --brain {} --arch qwen3 --model <model.gguf> --tokenizer <tokenizer.json>", out.display());
+            }
+        }
+        Cmd::UpdateRules { brain, questions } => {
+            let mut b = System1Brain::load(&brain)?;
+            let qs = read_questions(&questions)?;
+            if qs.questions != b.questions.questions {
+                return Err(
+                    "the questions differ from the brain's; retrain (`train` / `init`) instead"
+                        .into(),
+                );
+            }
+            b.questions.rules = qs.rules;
+            b.questions.default_action = qs.default_action;
+            b.questions.groups = qs.groups;
+            b.save(&brain)?;
+            println!(
+                "updated {}: {} rules, default action {:?}, {} groups",
+                brain.display(),
+                b.questions.rules.len(),
+                b.questions.default_action,
+                b.questions.groups.len()
+            );
+        }
         Cmd::AttachLm {
             brain,
             arch,
@@ -556,12 +656,18 @@ fn run(cli: Cli) -> Result<(), String> {
             force,
             no_lm,
             route,
+            group,
+            log,
+            log_state,
         } => {
             let loader = Loader::new(!no_lm, 1);
             let reg = Registry::new();
             for spec in &brain {
                 let (name, path) = parse_brain_spec(spec);
                 reg.insert(loader.load(name, &path)?);
+            }
+            if let Some(p) = &log {
+                reg.set_sink(std::sync::Arc::new(JsonlLog::open(p, log_state)?));
             }
             let req: DecideRequest = if let Some(r) = request {
                 let raw = std::fs::read_to_string(&r).map_err(|e| e.to_string())?;
@@ -578,6 +684,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 DecideRequest {
                     state,
                     questions: questions.into_iter().map(QuestionRef::Id).collect(),
+                    group,
                     min_confidence,
                     force: match force.as_deref() {
                         None => None,
@@ -653,7 +760,10 @@ Hold some rows out: split the data (e.g. `gf-llm jsonl-split`), `train` on one p
             if limit > 0 && rows.len() > limit {
                 rows.truncate(limit);
             }
-            let optimistic = d.brain.train_rows.is_empty() || (include_train_rows && overlap > 0);
+            // Without stored training rows we can't tell whether the heads saw
+            // these rows (brains trained before fingerprints existed).
+            let optimistic = (!d.brain.heads.is_empty() && d.brain.train_rows.is_empty())
+                || (include_train_rows && overlap > 0);
             let fitting = fit_lm_temperature || tune_router;
             let mut router_notes: Vec<String> = Vec::new();
             let report = if fitting {
@@ -973,9 +1083,19 @@ Hold some rows out: split the data (e.g. `gf-llm jsonl-split`), `train` on one p
             no_lm,
             workers,
             feature_cache,
+            log,
+            log_state,
         } => {
             let loader = Loader::new(!no_lm, workers).feature_cache(feature_cache);
             let reg = Registry::new();
+            if let Some(p) = &log {
+                reg.set_sink(std::sync::Arc::new(JsonlLog::open(p, log_state)?));
+                eprintln!(
+                    "[gf-system1] logging decisions to {}{}",
+                    p.display(),
+                    if log_state { " (with states)" } else { "" }
+                );
+            }
             for p in &project {
                 let proj = read_project(p)?;
                 let mut e = loader.load(None, &proj.brain_output)?;

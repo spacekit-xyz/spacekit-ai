@@ -35,6 +35,7 @@ pub mod multi;
 pub mod probe;
 #[cfg(feature = "candle")]
 pub mod qwen3;
+pub mod rules;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod project;

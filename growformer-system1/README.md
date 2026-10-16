@@ -180,6 +180,15 @@ const res = JSON.parse(s1.system1_decide(JSON.stringify({ brain: "crypto", state
 
 `system1_load_brain(bytes)` still works for a single brain (loaded as `default`, so requests need no `brain`). `system1_brains()` lists what's loaded and `system1_unload(name)` removes a brain.
 
+## Actions, groups and logs
+
+- **Rules** turn answers into one action. In the question file, `[[rules]]` like `action = "mute"` with `when = [{ id = "toxicity", min = 2.5 }]` fire in order, and `default_action` applies otherwise. Responses then carry `"action": {"action": "mute", "rule": 3, "reason": "…"}`. `update-rules` swaps rules on a trained brain without retraining.
+- **Groups** (`[groups] chat = ["toxicity", "abuse_type"]`) let a request ask `"group": "chat"` instead of listing ids.
+- **Decision logs**: `serve --log decisions.jsonl` (or `decide --log`) appends one line per answer set with every value, confidence, source and probability distribution, the action and the latency. States are fingerprinted unless `--log-state`.
+- **No data yet?** `init` creates a brain from the questions alone; the open model answers everything until you train heads.
+
+Worked examples for chat moderation and LLM routing: [`projects/`](projects/README.md).
+
 ## Many brains, one model
 
 A brain's heads, probes and router are a few MB; the open model is GBs. Serve as many brains as you like from one process: brains that name the same GGUF share one loaded copy, and each request uses a worker copy of the model that shares those weights but has its own cache.

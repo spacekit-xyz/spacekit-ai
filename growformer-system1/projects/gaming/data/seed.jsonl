@@ -1,0 +1,55 @@
+{"state": {"channel": "chat", "text": "gg wp everyone, that last round was close"}, "labels": {"toxicity": 0, "abuse_type": "none", "suspicious": false}}
+{"state": {"channel": "chat", "text": "nice shot! can you cover mid next round?"}, "labels": {"toxicity": 0, "abuse_type": "none", "suspicious": false}}
+{"state": {"channel": "chat", "text": "lol we got destroyed, rematch?"}, "labels": {"toxicity": 0, "abuse_type": "none", "suspicious": false}}
+{"state": {"channel": "chat", "text": "ez clap, too easy"}, "labels": {"toxicity": 1, "abuse_type": "none", "suspicious": false}}
+{"state": {"channel": "chat", "text": "our jungler is asleep again haha"}, "labels": {"toxicity": 1, "abuse_type": "none", "suspicious": false}}
+{"state": {"channel": "chat", "text": "this matchmaking is garbage, why am I against diamonds"}, "labels": {"toxicity": 1, "abuse_type": "none", "suspicious": false}}
+{"state": {"channel": "chat", "text": "you are the worst healer I have ever seen, actual bot"}, "labels": {"toxicity": 2, "abuse_type": "insult", "suspicious": false}}
+{"state": {"channel": "chat", "text": "stop feeding you clown, uninstall"}, "labels": {"toxicity": 2, "abuse_type": "insult", "suspicious": false}}
+{"state": {"channel": "chat", "text": "idiot team, every single one of you is braindead"}, "labels": {"toxicity": 2, "abuse_type": "insult", "suspicious": false}}
+{"state": {"channel": "chat", "text": "I'm going to follow you into every lobby until you quit this game"}, "labels": {"toxicity": 3, "abuse_type": "harassment", "suspicious": false}}
+{"state": {"channel": "chat", "text": "kys nobody wants you here"}, "labels": {"toxicity": 3, "abuse_type": "harassment", "suspicious": false}}
+{"state": {"channel": "chat", "text": "go back to your country, people like you ruin this game"}, "labels": {"toxicity": 3, "abuse_type": "hate_speech", "suspicious": false}}
+{"state": {"channel": "chat", "text": "girls shouldn't be allowed to play ranked"}, "labels": {"toxicity": 3, "abuse_type": "hate_speech", "suspicious": false}}
+{"state": {"channel": "chat", "text": "I know where you live, I'll show up at your house"}, "labels": {"toxicity": 4, "abuse_type": "threat", "suspicious": false}}
+{"state": {"channel": "chat", "text": "going to swat you tonight, enjoy"}, "labels": {"toxicity": 4, "abuse_type": "threat", "suspicious": false}}
+{"state": {"channel": "chat", "text": "send pics or I'll report you"}, "labels": {"toxicity": 3, "abuse_type": "sexual", "suspicious": false}}
+{"state": {"channel": "chat", "text": "cheap gold and boosting at g0ld-shop dot net, 50% off today"}, "labels": {"toxicity": 0, "abuse_type": "spam_scam", "suspicious": true}}
+{"state": {"channel": "chat", "text": "free skins giveaway!! just log in at skins-free-gift dot com"}, "labels": {"toxicity": 0, "abuse_type": "spam_scam", "suspicious": true}}
+{"state": {"channel": "chat", "text": "selling my level 80 account with all skins, DM me"}, "labels": {"toxicity": 0, "abuse_type": "spam_scam", "suspicious": true}}
+{"state": {"channel": "chat", "text": "honestly I don't see the point of anything anymore, might just end it"}, "labels": {"toxicity": 0, "abuse_type": "self_harm_concern", "suspicious": false}}
+{"state": {"channel": "chat", "text": "how is he hitting every headshot through smoke, that's not legit"}, "labels": {"toxicity": 1, "abuse_type": "none", "suspicious": true}}
+{"state": {"channel": "chat", "text": "bro my teammate has been farming in the same spot for 6 hours without moving the camera"}, "labels": {"toxicity": 0, "abuse_type": "none", "suspicious": true}}
+{"state": {"channel": "chat", "text": "anyone want to duo queue? I play support"}, "labels": {"toxicity": 0, "abuse_type": "none", "suspicious": false}}
+{"state": {"channel": "chat", "text": "rip my internet, sorry for the lag guys"}, "labels": {"toxicity": 0, "abuse_type": "none", "suspicious": false}}
+{"state": {"channel": "report", "text": "Player xXSniperXx is using an aimbot, snaps to heads instantly every round, watch the replay at 12:40"}, "labels": {"toxicity": 0, "abuse_type": "none", "suspicious": true}}
+{"state": {"channel": "report", "text": "This player kept spamming slurs at me in voice chat for the whole match"}, "labels": {"toxicity": 3, "abuse_type": "hate_speech", "suspicious": false}}
+{"state": {"channel": "report", "text": "Someone in my guild is threatening to post my address online"}, "labels": {"toxicity": 4, "abuse_type": "threat", "suspicious": false}}
+{"state": {"channel": "report", "text": "Reporting a user who sends me private messages every day telling me I'm worthless after I left their guild"}, "labels": {"toxicity": 3, "abuse_type": "harassment", "suspicious": false}}
+{"state": {"channel": "report", "text": "Teammate went AFK at the start of every match today"}, "labels": {"toxicity": 0, "abuse_type": "none", "suspicious": false}}
+{"state": {"channel": "report", "text": "A bot account keeps posting phishing links in global chat"}, "labels": {"toxicity": 0, "abuse_type": "spam_scam", "suspicious": true}}
+{"state": {"channel": "report", "text": "Player was speed hacking in the last match, moved across the map in two seconds"}, "labels": {"toxicity": 0, "abuse_type": "none", "suspicious": true}}
+{"state": {"channel": "report", "text": "My friend said in chat he wants to hurt himself, I'm worried about him"}, "labels": {"toxicity": 0, "abuse_type": "self_harm_concern", "suspicious": false}}
+{"state": {"channel": "review", "text": "Best update in years. The new raid is incredible and I've played every night this week."}, "labels": {"frustration": 0, "engagement": 4, "churn_risk": false}}
+{"state": {"channel": "review", "text": "Fun game but the grind for the battle pass is getting long. Still playing daily."}, "labels": {"frustration": 1, "engagement": 3, "churn_risk": false}}
+{"state": {"channel": "review", "text": "Matchmaking has been broken for a month. I keep getting stomped and nothing gets fixed."}, "labels": {"frustration": 3, "engagement": 2, "churn_risk": false}}
+{"state": {"channel": "review", "text": "I've spent hundreds of dollars and the new patch nerfed everything I bought. I'm done, uninstalling."}, "labels": {"frustration": 4, "engagement": 1, "churn_risk": true}}
+{"state": {"channel": "review", "text": "Haven't logged in for weeks, there's nothing new to do. Probably won't come back."}, "labels": {"frustration": 1, "engagement": 0, "churn_risk": true}}
+{"state": {"channel": "review", "text": "Servers crash every evening. Considering asking for a refund."}, "labels": {"frustration": 3, "engagement": 1, "churn_risk": true}}
+{"state": {"channel": "review", "text": "Solid game, nice art, a bit repetitive after the campaign."}, "labels": {"frustration": 1, "engagement": 2, "churn_risk": false}}
+{"state": {"channel": "review", "text": "Love the community events, my clan plays together every weekend."}, "labels": {"frustration": 0, "engagement": 4, "churn_risk": false}}
+{"state": {"channel": "review", "text": "Pay to win garbage. Cancelled my subscription today."}, "labels": {"frustration": 4, "engagement": 0, "churn_risk": true}}
+{"state": {"channel": "review", "text": "Ranked is frustrating but I can't stop playing, one more match every time."}, "labels": {"frustration": 2, "engagement": 4, "churn_risk": false}}
+{"state": {"channel": "support", "text": "I was charged twice for the season pass this morning, please refund one of them"}, "labels": {"support_route": "billing", "frustration": 2, "churn_risk": false}}
+{"state": {"channel": "support", "text": "My gems from yesterday's purchase never arrived"}, "labels": {"support_route": "billing", "frustration": 2, "churn_risk": false}}
+{"state": {"channel": "support", "text": "If I don't get my money back for this broken bundle I'm cancelling my subscription", "player_tier": "premium"}, "labels": {"support_route": "billing", "frustration": 3, "churn_risk": true}}
+{"state": {"channel": "support", "text": "Game crashes on launch since the last update, I've reinstalled twice"}, "labels": {"support_route": "technical", "frustration": 3, "churn_risk": false}}
+{"state": {"channel": "support", "text": "Can't log in, it says server unavailable for an hour now"}, "labels": {"support_route": "technical", "frustration": 2, "churn_risk": false}}
+{"state": {"channel": "support", "text": "Someone changed my email and I can't get into my account, there are logins from another country"}, "labels": {"support_route": "account_security", "frustration": 4, "churn_risk": false}}
+{"state": {"channel": "support", "text": "I clicked a link from a 'moderator' and now my items are gone"}, "labels": {"support_route": "account_security", "frustration": 3, "churn_risk": false}}
+{"state": {"channel": "support", "text": "The final boss quest won't complete even after I kill him"}, "labels": {"support_route": "gameplay_bug", "frustration": 2, "churn_risk": false}}
+{"state": {"channel": "support", "text": "Matchmaking puts me in lobbies with players 50 levels higher every time"}, "labels": {"support_route": "gameplay_bug", "frustration": 3, "churn_risk": false}}
+{"state": {"channel": "support", "text": "I want to report a cheater I keep meeting in ranked"}, "labels": {"support_route": "player_report", "frustration": 2, "churn_risk": false}}
+{"state": {"channel": "support", "text": "It would be great if you added a colorblind mode"}, "labels": {"support_route": "feedback", "frustration": 0, "churn_risk": false}}
+{"state": {"channel": "support", "text": "Honestly the last three patches made the game worse, I'm about to quit for good"}, "labels": {"support_route": "feedback", "frustration": 3, "churn_risk": true}}
+{"state": {"channel": "support", "text": "Thanks for fixing the inventory bug so fast!"}, "labels": {"support_route": "none", "frustration": 0, "churn_risk": false}}

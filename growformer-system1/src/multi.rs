@@ -250,16 +250,41 @@ pub enum RegistryResponse {
     Many(MultiResponse),
 }
 
+/// Receives every answered request (e.g. a JSONL decision log).
+pub trait DecisionSink: Send + Sync {
+    fn record(&self, brain: &str, state: &Value, response: &DecideResponse);
+}
+
 /// Brains by name. Reads never block each other; loading or replacing a
 /// brain swaps an `Arc`, so in-flight requests finish on the old one.
 #[derive(Default)]
 pub struct Registry {
     brains: RwLock<BTreeMap<String, Arc<BrainEntry>>>,
+    sink: RwLock<Option<Arc<dyn DecisionSink>>>,
 }
 
 impl Registry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record every answered request with `sink`.
+    pub fn set_sink(&self, sink: Arc<dyn DecisionSink>) {
+        if let Ok(mut s) = self.sink.write() {
+            *s = Some(sink);
+        }
+    }
+
+    fn log(&self, name: &str, req: &DecideRequest, resp: &DecideResponse) {
+        if let Some(s) = self.sink.read().ok().and_then(|s| s.clone()) {
+            s.record(name, &req.state, resp);
+        }
+    }
+
+    fn decide_one(&self, e: &BrainEntry, req: &DecideRequest) -> Result<DecideResponse, String> {
+        let r = e.decide(req)?;
+        self.log(&e.name, req, &r);
+        Ok(r)
     }
 
     /// Add or replace a brain.
@@ -329,14 +354,14 @@ impl Registry {
         }
         if req.brains.is_empty() {
             let e = self.resolve(req.brain.as_deref())?;
-            return e.decide(&req.request).map(RegistryResponse::One);
+            return self.decide_one(&e, &req.request).map(RegistryResponse::One);
         }
         let t0 = Instant::now();
         let mut results = BTreeMap::new();
         for name in &req.brains {
             let r = self
                 .resolve(Some(name))
-                .and_then(|e| e.decide(&req.request));
+                .and_then(|e| self.decide_one(&e, &req.request));
             results.insert(
                 name.clone(),
                 match r {
@@ -378,8 +403,9 @@ impl Registry {
             questions: vec![crate::decide::QuestionRef::Id(q.id.clone())],
             min_confidence: req.request.min_confidence,
             force: None,
+            group: None,
         };
-        let routed = r.decide(&route_req)?;
+        let routed = self.decide_one(&r, &route_req)?;
         let ans = &routed.answers[0];
         // Best option that names a loaded brain (the top option may not).
         let mut opts = ans.distribution.clone();
@@ -393,7 +419,7 @@ impl Registry {
         results.insert(router.to_string(), BrainResult::Ok(routed.clone()));
         let out = self
             .resolve(Some(&chosen))
-            .and_then(|e| e.decide(&req.request));
+            .and_then(|e| self.decide_one(&e, &req.request));
         results.insert(
             chosen.clone(),
             match out {
@@ -566,6 +592,7 @@ mod tests {
                             questions: vec![QuestionRef::Id("route".into())],
                             min_confidence: None,
                             force: None,
+                            group: None,
                         },
                     };
                     match reg.decide(&req).unwrap() {
