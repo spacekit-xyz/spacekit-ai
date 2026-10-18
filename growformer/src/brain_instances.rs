@@ -111,15 +111,22 @@ impl BrainInstance {
     /// Load a brain (`.bin` bytes). The brain may carry its own inference rules;
     /// they apply to this instance only.
     pub fn from_brain_bytes(data: &[u8]) -> Result<Self, String> {
-        Self::create(|| Runtime::from_brain_bytes(data))
+        Self::build(|| Runtime::from_brain_bytes(data))
     }
 
     /// An instance with no brain (tests, or a brain loaded later with [`Self::load_brain`]).
     pub fn empty() -> Result<Self, String> {
-        Self::create(Runtime::empty)
+        Self::build(Runtime::empty)
     }
 
-    fn create(make: impl FnOnce() -> Result<Runtime, String>) -> Result<Self, String> {
+    /// Build an instance from a runtime that `make` creates. `make` runs with a fresh
+    /// configuration active (the built-in defaults), and whatever it installs — rules,
+    /// topic graph, grounding graph — becomes this instance's configuration. The brain
+    /// that was active before stays intact.
+    ///
+    /// Use this when building a brain takes more than loading bytes, e.g. applying a
+    /// project's inference files, then loading, then reloading rules from disk.
+    pub fn build(make: impl FnOnce() -> Result<Runtime, String>) -> Result<Self, String> {
         // Whatever was active stays intact: save it, build this brain from the
         // built-in defaults, then capture what the brain installed.
         let previous_slot = active();
@@ -155,6 +162,12 @@ impl BrainInstance {
 
     /// Make this brain's configuration active and run `f` on its runtime.
     pub fn with<R>(&mut self, f: impl FnOnce(&mut Runtime) -> R) -> R {
+        self.activate();
+        f(&mut self.runtime)
+    }
+
+    /// Make this brain's configuration the active one.
+    fn activate(&self) {
         if active() != self.id {
             if active() == DEFAULT_SLOT {
                 // Keep the legacy slot's latest state before replacing it.
@@ -163,7 +176,21 @@ impl BrainInstance {
             self.config.install();
             set_active(self.id);
         }
-        f(&mut self.runtime)
+    }
+
+    /// Like [`Self::with`], for calls that only read the runtime.
+    pub fn with_ref<R>(&self, f: impl FnOnce(&Runtime) -> R) -> R {
+        self.activate();
+        f(&self.runtime)
+    }
+
+    /// Run `f` with this brain active, then save any configuration change it made as
+    /// this brain's (e.g. loading inference rules or graphs from disk).
+    pub fn configure<R>(
+        &mut self,
+        f: impl FnOnce(&mut Runtime) -> Result<R, String>,
+    ) -> Result<R, String> {
+        self.reconfigure(f)
     }
 
     /// Run `f`, then save any configuration change it made as this brain's.
@@ -302,6 +329,30 @@ any = ["alpha"]
         assert!(!world_grounding::grounding_snapshot().is_loaded());
 
         creating_an_instance_leaves_the_active_one_alone();
+        build_keeps_what_make_installs();
+    }
+
+    // Part of the test above: what `build`'s closure installs belongs to the new instance.
+    fn build_keeps_what_make_installs() {
+        let mut a = BrainInstance::empty().expect("a");
+        a.with(|_| ());
+        assert!(!world_grounding::grounding_snapshot().is_loaded());
+        let b = BrainInstance::build(|| {
+            world_grounding::load_grounding_graph_from_str("")?;
+            Runtime::empty()
+        })
+        .expect("b");
+        assert!(b.config().has_grounding());
+        assert!(
+            !world_grounding::grounding_snapshot().is_loaded(),
+            "a still active, unchanged"
+        );
+        b.with_ref(|_| assert!(world_grounding::grounding_snapshot().is_loaded()));
+        a.with(|_| assert!(!world_grounding::grounding_snapshot().is_loaded()));
+        let mut c = BrainInstance::empty().expect("c");
+        c.configure(|_| world_grounding::load_grounding_graph_from_str(""))
+            .expect("configure");
+        assert!(c.config().has_grounding());
     }
 
     // Part of the test above: the configuration is process-wide on native, so the

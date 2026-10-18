@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use growformer::brain_instances::BrainInstance;
 use growformer::dimension::group_gen::RawLatticeDiagnosticReport;
 use growformer::runtime::{BrainInfo, Runtime};
 
@@ -136,25 +137,33 @@ pub struct BrainMemoryQuery {
 }
 
 /// Loaded growformer brain checkpoint (`GWFBRPKG` or legacy JSON).
+///
+/// Each one is a [`BrainInstance`]: it keeps its own inference rules, topic graph and
+/// grounding graph, so several brain memories can be loaded at once (on one thread)
+/// without one's project files changing another's answers.
 pub struct BrainMemoryRuntime {
-    runtime: Runtime,
+    brain: BrainInstance,
 }
 
 impl BrainMemoryRuntime {
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
         Ok(Self {
-            runtime: Runtime::from_brain_bytes(data)?,
+            brain: BrainInstance::from_brain_bytes(data)?,
         })
     }
 
     /// Load brain bytes after applying project / inference TOML bootstrap (`BrainInferConfig::apply`).
+    /// The project's rules, topic graph and grounding graph belong to this brain only.
     pub fn from_bytes_with_config(data: &[u8], cfg: &BrainInferConfig) -> Result<Self, String> {
-        cfg.apply()?;
-        let rt = Self::from_bytes(data)?;
-        // `load_brain` replaces disk inference rules with brain-embedded `[rules]`; restore
-        // project / `--inference-toml` paths (same as growformer CLI after `--train-brain`).
-        growformer::inference::inference_toml::force_native_inference_rebuild_from_disk();
-        Ok(rt)
+        let brain = BrainInstance::build(|| {
+            cfg.apply()?;
+            let rt = Runtime::from_brain_bytes(data)?;
+            // `load_brain` replaces disk inference rules with brain-embedded `[rules]`; restore
+            // project / `--inference-toml` paths (same as growformer CLI after `--train-brain`).
+            growformer::inference::inference_toml::force_native_inference_rebuild_from_disk();
+            Ok(rt)
+        })?;
+        Ok(Self { brain })
     }
 
     pub fn from_path(path: &Path) -> Result<Self, String> {
@@ -168,7 +177,7 @@ impl BrainMemoryRuntime {
     }
 
     pub fn brain_info(&self) -> BrainInfo {
-        self.runtime.brain_info()
+        self.brain.with_ref(|rt| rt.brain_info())
     }
 
     /// HYBRID retrieval: prefer raw lattice top-1 when rubric passes; else full generation path.
@@ -281,18 +290,16 @@ impl BrainMemoryRuntime {
 
     /// Route + retrieve a lattice memory unit for `text` (full generation path: metacog + gates).
     pub fn query(&mut self, text: &str) -> Result<BrainMemoryQuery, String> {
-        let bridged = self
-            .runtime
-            .svc
-            .active_dm()
-            .language_runtime
-            .bridge_text_stateless(text)?;
-        let route = self
-            .runtime
-            .svc
-            .active_dm_mut()
-            .route_text_stateless(text)?;
-        let (action, resp) = self.runtime.svc.generation(text)?;
+        let (bridged, route, (action, resp)) = self.brain.with(|rt| {
+            let bridged = rt
+                .svc
+                .active_dm()
+                .language_runtime
+                .bridge_text_stateless(text)?;
+            let route = rt.svc.active_dm_mut().route_text_stateless(text)?;
+            let generated = rt.svc.generation(text)?;
+            Ok::<_, String>((bridged, route, generated))
+        })?;
         Ok(BrainMemoryQuery {
             bridge_vector: bridged.routed_vector,
             bridge_confidence: bridged.confidence,
@@ -315,7 +322,7 @@ impl BrainMemoryRuntime {
         text: &str,
         top_k: usize,
     ) -> Result<RawLatticeDiagnosticReport, String> {
-        self.runtime.raw_lattice_diagnostic(text, top_k)
+        self.brain.with(|rt| rt.raw_lattice_diagnostic(text, top_k))
     }
 
     pub fn raw_lattice_diagnostic_with_force_topic(
@@ -324,8 +331,8 @@ impl BrainMemoryRuntime {
         top_k: usize,
         force_topic: Option<&str>,
     ) -> Result<RawLatticeDiagnosticReport, String> {
-        self.runtime
-            .raw_lattice_diagnostic_with_force_topic(text, top_k, force_topic)
+        self.brain
+            .with(|rt| rt.raw_lattice_diagnostic_with_force_topic(text, top_k, force_topic))
     }
 }
 
