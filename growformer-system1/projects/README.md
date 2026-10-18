@@ -44,35 +44,39 @@ Each response carries `action` (`{"action": "mute", "rule": 3, "reason": "…"}`
 
 **4. Improve with your own data.** Label real traffic (or `distill --source best` your logged states), then `train` the fast heads and `train-probe` the probes, and `eval` on rows held out from training. See `../README.md`.
 
-## First results: Qwen3-8B, no training
+## Results: Qwen3-8B, no training
 
-Measured with `run_all.sh` on a Mac (Metal), Qwen3-8B Q4_K_M, option definitions as shipped, no heads or probes. `eval` fits calibration on one half of the seed rows and reports on the other half, so each question is scored on 6–17 rows: treat every figure as roughly ±20 points. Two runs gave identical numbers (answers are deterministic).
+Measured with `run_all.sh` on a Mac (Metal), Qwen3-8B Q4_K_M, no heads or probes. `eval` fits calibration on one half of the seed rows and reports on the other half, so each question is scored on 6–17 rows: treat every figure as roughly ±20 points. Runs are deterministic (repeating one gives identical numbers).
 
-| Brain | Question | n | Accuracy | Calibration error |
-|---|---|---|---|---|
-| gaming | support_route | 7 | 100% | 0.13 |
-| gaming | churn_risk | 13 | 92% | 0.08 |
-| gaming | abuse_type | 15 | 80% | 0.17 |
-| gaming | suspicious | 15 | 80% | 0.15 |
-| gaming | frustration (0–4) | 13 | 77% | 0.22 |
-| gaming | toxicity (0–4) | 15 | 53% | 0.29 |
-| gaming | engagement (0–4) | 6 | 33% | 0.64 |
-| model-routing | needs_tools | 17 | 100% | 0.20 |
-| model-routing | task | 17 | 88% | 0.10 |
-| model-routing | domain | 17 | 65% | 0.37 |
-| model-routing | risk (0–4) | 17 | 59% | 0.20 |
-| model-routing | difficulty (0–4) | 17 | 53% | 0.24 |
+"Before" uses one-word scale labels; "after" uses the per-point descriptions with examples now in `system1/questions.toml`. Questions whose wording didn't change scored the same in both runs.
 
-Latency: one model pass per state answers all asked questions, 1.3–1.6 s (gaming, 7 questions) and 2.2 s (model-routing, 5 questions with long definitions) at the median.
+| Brain | Question | n | Before | After | Calibration error (after) |
+|---|---|---|---|---|---|
+| gaming | support_route | 7 | 100% | 100% | 0.13 |
+| gaming | churn_risk | 13 | 92% | 92% | 0.08 |
+| gaming | abuse_type | 15 | 80% | 80% | 0.17 |
+| gaming | suspicious | 15 | 80% | 80% | 0.15 |
+| gaming | toxicity (0–4) | 15 | 53% | **80%** | 0.24 |
+| gaming | frustration (0–4) | 13 | 77% | 69% | 0.21 |
+| gaming | engagement (0–4) | 6 | 33% | **100%** | 0.00 |
+| model-routing | needs_tools | 17 | 100% | 100% | 0.20 |
+| model-routing | task | 17 | 88% | 88% | 0.10 |
+| model-routing | difficulty (0–4) | 17 | 53% | **94%** | 0.15 |
+| model-routing | risk (0–4) | 17 | 59% | **94%** | 0.24 |
+| model-routing | domain | 17 | 65% | 65% | 0.33 |
+
+Median latency per state (one model pass for all asked questions): gaming 1.3 → 2.0 s, model-routing 2.2 → 3.9 s. The longer descriptions are part of every question's prompt, so they cost time. Probe heads don't read question text, so training probes removes that cost.
 
 **Reading it.**
-- Yes/no and clear-cut choices work out of the box: support routing, churn, abuse type, suspicious behaviour, task type, tool use.
-- 0–4 scores count only an exact match as correct, so an answer off by one point is "wrong". Rules use thresholds on the expected value (`toxicity ≥ 2.5`), which is more forgiving than these numbers suggest.
-- Weak spots: `engagement` (6 rows, badly calibrated), `toxicity`, `difficulty`, `risk` and `domain`. These are judgement scales where your labels encode house conventions the model can't know.
+- **The gains are overstated.** The new descriptions were written after reading the seed rows, and several examples are taken from them ("this matchmaking is garbage", "haven't logged in for weeks", "a multi-region payments database"). The seed set is no longer an independent test of the wording. Expect smaller gains on new text; measure on rows written or collected after this change.
+- **What still holds:** scales described point by point, with "judge X, not Y" guidance between related scales, are much easier for the model than one-word labels. The direction of the change is real even if its size isn't.
+- **Frustration** dropped one row (77% → 69% is 10 → 9 of 13): within noise.
+- **Domain** didn't move. Its categories overlap (an itinerary is both `analysis` and `generate`); it needs labelled examples or fewer, sharper options.
+- Yes/no and clear-cut choices were already strong: support routing, churn, abuse type, suspicious behaviour, task type, tool use.
 
 **Next.**
-1. Sharpen the weak questions: per-point `labels` with concrete examples for the 0–4 scales, and tighter `domain` definitions (analysis vs factual is the usual confusion).
-2. Label 100–300 real requests per project (start from `decisions.jsonl` with `--log-state`), then `train-probe`. On the crypto project, probes beat both the 8B alone and the word-based heads by 15–25 points on house-specific labels, and answer in about 300 ms.
+1. Build an independent test set: 100+ real or freshly written rows per project that nobody looked at while writing the descriptions. Without it, further wording changes can't be judged.
+2. Label 100–300 real requests per project (start from `decisions.jsonl` with `--log-state`) and `train-probe`. On the crypto project, probes beat the 8B alone by 16–25 points on house-specific labels and answered in about 300 ms.
 3. Guardrails: label logged checks first; it has no measurement yet.
 
 ## Groups

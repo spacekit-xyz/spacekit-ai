@@ -14,10 +14,17 @@ support = ["support_route", "frustration", "churn_risk"]
 [[questions]]
 id = "toxicity"
 text = "How toxic is this message toward other players?"
+description = "Judge the worst part of the message. Complaints about the game itself are at most 1."
 type = "score"
 min = 0
 max = 4
-labels = ["not toxic", "mild trash talk", "insulting", "harassing or hateful", "threatening"]
+labels = [
+  "not toxic: normal play talk, friendly banter, 'gg wp', ads or spam with no hostility",
+  "mild: trash talk, teasing or venting without insults, e.g. 'ez', 'our jungler is asleep', 'this matchmaking is garbage', accusing someone of cheating",
+  "insulting a player: name-calling or put-downs, e.g. 'you're trash', 'uninstall', 'idiot team'",
+  "harassing or hateful: telling someone to quit or die, following them around, attacking identity, unwanted sexual demands",
+  "threatening real-world harm: threats to hurt someone, doxxing, swatting",
+]
 min_confidence = 0.5
 
 [[questions]]
@@ -47,15 +54,28 @@ text = "How frustrated is the player?"
 type = "score"
 min = 0
 max = 4
-labels = ["calm", "slightly annoyed", "frustrated", "very frustrated", "furious"]
+labels = [
+  "calm: neutral, happy or thankful",
+  "slightly annoyed: a small gripe while still enjoying the game",
+  "frustrated: a clear problem they want fixed, e.g. a bug, a missing purchase, a crash",
+  "very frustrated: repeated or long-running problems, 'nothing gets fixed', considering a refund",
+  "furious: angry and fed up, 'I'm done', 'garbage', money lost, quitting in anger",
+]
 
 [[questions]]
 id = "engagement"
 text = "How engaged with the game is the player?"
+description = "How much they play and care right now, regardless of whether they are happy."
 type = "score"
 min = 0
 max = 4
-labels = ["disengaged", "low", "moderate", "high", "very high"]
+labels = [
+  "disengaged: has stopped playing or cancelled, e.g. 'haven't logged in for weeks'",
+  "low: plays rarely or is about to stop, e.g. 'considering a refund', 'I'm done'",
+  "moderate: still plays but lukewarm or repetitive, e.g. 'solid but repetitive'",
+  "high: plays regularly, even daily, and cares about the game",
+  "very high: can't stop playing, plays every night, part of a guild, clan or community",
+]
 
 [[questions]]
 id = "churn_risk"

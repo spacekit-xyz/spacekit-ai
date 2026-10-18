@@ -37,9 +37,12 @@ for p in gaming model-routing guardrails; do
   B="${D}/agent/${p}.s1.json.gz"
   if [[ "${FRESH:-0}" == "1" || ! -f "${B}" ]]; then
     "${S1}" init --project "${D}/${p}.gf.toml"
-  else
-    # Keep trained heads / probes; just refresh rules and groups.
-    "${S1}" update-rules --brain "${B}" --questions "${D}/system1/questions.toml"
+  elif ! "${S1}" update-rules --brain "${B}" --questions "${D}/system1/questions.toml" 2>/dev/null; then
+    # The questions themselves changed (wording, options, scale labels): the old
+    # brain's calibration no longer applies, so start it again. Trained heads or
+    # probes are dropped too; re-run train / train-probe afterwards.
+    echo "[s1] ${p}: questions changed since the brain was built; recreating it"
+    "${S1}" init --project "${D}/${p}.gf.toml"
   fi
   "${S1}" attach-lm --brain "${B}" --arch qwen3 --template chatml-nothink \
     --model "${MODEL}" --tokenizer "${TOKENIZER}"

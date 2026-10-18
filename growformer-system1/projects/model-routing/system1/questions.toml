@@ -13,8 +13,8 @@ options = ["coding", "math", "writing", "analysis", "factual", "conversation", "
 coding = "writing, reading, debugging or explaining code, shell commands or queries"
 math = "calculations, proofs, statistics or quantitative puzzles"
 writing = "drafting or editing prose: emails, stories, posts, documents"
-analysis = "comparing options, interpreting data or documents, planning, giving advice"
-factual = "looking up or explaining facts, definitions or how something works"
+analysis = "judgement about the user's own situation, data or documents: compare options, recommend, plan, interpret numbers, review a contract"
+factual = "a fact or explanation with a generally accepted answer: what, who, when, how something works, or what to do in a standard situation (first aid, a dose, a legal rule, a safety question)"
 conversation = "greetings, small talk, opinions, emotional support"
 other = "anything else"
 
@@ -34,19 +34,33 @@ agent = "actions in the world: browse, run code, read files, call APIs, send mes
 [[questions]]
 id = "difficulty"
 text = "How hard is this for a capable assistant to do well?"
+description = "Judge the work needed for a good answer, not how risky the topic is."
 type = "score"
 min = 0
 max = 4
-labels = ["trivial", "easy", "moderate", "hard", "expert-level"]
+labels = [
+  "trivial: a greeting, a single fact, simple arithmetic, a one-line rewrite or translation",
+  "easy: a short explanation, email, list or code snippet; one obvious step, or a simple command to run",
+  "moderate: several steps or some judgement, e.g. compare two options, a probability problem, explain a framework quirk, a multi-day plan",
+  "hard: expert reasoning or long careful output, e.g. proofs, debugging concurrency, long documents, reviewing a long contract, fixing a failing test suite",
+  "expert-level: open design problems with strict guarantees, e.g. a multi-region payments database with exactly-once semantics",
+]
 min_confidence = 0.4
 
 [[questions]]
 id = "risk"
 text = "How costly would a wrong or careless answer be?"
+description = "Judge the harm of a bad answer, not how hard the task is."
 type = "score"
 min = 0
 max = 4
-labels = ["harmless", "low", "moderate: money, personal decisions", "high: medical, legal, security", "critical: safety or irreversible actions"]
+labels = [
+  "harmless: jokes, trivia, small talk, creative writing for fun, general explanations",
+  "low: everyday tasks where a mistake is easy to notice, e.g. recipes, travel plans, comparing tools, simple code",
+  "moderate: money, personal or work decisions, emotional topics, messages sent to others, scripts that delete or change files",
+  "high: health, legal or security questions, or another person's privacy",
+  "critical: immediate danger to life, or irreversible actions such as moving money or destroying production data",
+]
 
 [[questions]]
 id = "needs_tools"
